@@ -1,0 +1,29 @@
+{
+  "started_utc": "2026-10-21T18:07:48.040814+00:00",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--release",
+    "-p",
+    "shell",
+    "-p",
+    "pager",
+    "-p",
+    "pager-pty-harness",
+    "--features",
+    "shell/test-support",
+    "--test",
+    "test_subagent_orphan_reconcile",
+    "--no-run",
+    "--message-format=json"
+  ],
+  "purpose": "Test-only existing load wrapper stderr diagnostics; no new helper or production changes",
+  "source_hashes": {
+    "crates/codegen/test-support/src/acp_client.rs": "5cbc0f6db37ddc1e6efcd8378948af0b62129d1ac802826b3a273ef1b2fc23ee",
+    "crates/codegen/shell/tests/test_subagent_orphan_reconcile.rs": "981d05648f0d5de3a5aff8653b364682f9d75bf2c1f777f0c4f5d13e3c83df45"
+  },
+  "exit": 0,
+  "completed_utc": "2026-10-21T18:07:57.575618+00:00"
+}

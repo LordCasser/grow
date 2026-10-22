@@ -1,0 +1,66 @@
+{
+  "artifact_record": "openspec/changes/unify-timeline-history-storage/after-build-11.jsonl",
+  "profile_test": true,
+  "executables": {
+    "session_fork_replay_memory": "target/resume-release/release/deps/session_fork_replay_memory-c9d92b4b92d9182a",
+    "test_session_load_memory": "target/resume-release/release/deps/test_session_load_memory-07eca10fc649a67c",
+    "testkit_synth_roundtrip": "target/resume-release/release/deps/testkit_synth_roundtrip-464c879bc1bba9cf"
+  },
+  "results": {
+    "session_fork_replay_memory": {
+      "selection": "all normal tests",
+      "passed": 0,
+      "failed": 1,
+      "ignored": 0,
+      "failure": "streaming peak exceeded existing <2x on-disk threshold",
+      "measurements": {
+        "on_disk_mb": 0.43326,
+        "old_parse_all_peak_mb": 1.388972,
+        "old_ratio": 3.2058625305820985,
+        "new_stream_peak_mb": 1.004802,
+        "new_ratio": 2.3191663204542308,
+        "reduction_x": 1.3823340319784396,
+        "count": 300
+      },
+      "log": "openspec/changes/unify-timeline-history-storage/final-11-fork.log"
+    },
+    "test_session_load_memory_normal": {
+      "selection": "all normal tests",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 2,
+      "log": "openspec/changes/unify-timeline-history-storage/final-11-test_session_load_memory.log"
+    },
+    "session_load_peak_rss_under_budget": {
+      "selection": "--ignored --exact rss::session_load_peak_rss_under_budget --nocapture",
+      "passed": 1,
+      "failed": 0,
+      "measurements": {
+        "on_disk_timeline_bytes": 1091100,
+        "on_disk_timeline_mb": 1.0405540466308594,
+        "baseline_rss_mb": 49.296875,
+        "peak_rss_mb": 49.734375,
+        "peak_rss_growth_mb": 0.4375,
+        "budget_mb": 1024,
+        "rss_measurable": true,
+        "replayed_lines": 540,
+        "expected_typed_history_updates": 540
+      },
+      "log": "openspec/changes/unify-timeline-history-storage/final-11-test_session_load_memory-session_load_peak_rss_under_budget.log"
+    },
+    "session_load_e2e_peak_rss": {
+      "selection": "--ignored --exact rss::session_load_e2e_peak_rss --nocapture",
+      "passed": 0,
+      "failed": 1,
+      "failure": "session/load failed before memory measurement: persisted Timeline has no stable System head",
+      "log": "openspec/changes/unify-timeline-history-storage/final-11-test_session_load_memory-session_load_e2e_peak_rss.log"
+    },
+    "testkit_synth_roundtrip": {
+      "selection": "all normal tests",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "log": "openspec/changes/unify-timeline-history-storage/final-11-roundtrip.log"
+    }
+  }
+}

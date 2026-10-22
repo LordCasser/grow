@@ -1,0 +1,68 @@
+['/Users/lordcasser/workspace/projects/grow/target/debug/deps/session_load_perf-c1951fcebb27b71d', 'full_session_load_e2e', '--exact', '--nocapture', '--test-threads=1', '--ignored']
+Exact enumeration=1
+
+running 1 test
+test full_session_load_e2e ... [testkit] admitted history: turns=512 admissions=512 missing_projections=0 updates=19284122B timeline=17751619B rewind=5482B total=37041223B
+
+[perf] e2e session: updates=19.3 MB rewind=0.0 MB
+
+[perf] e2e: updates.jsonl composition (19.3 MB total):
+  sessionUpdate kind                  count         MB       %
+  response_replay_projection            512       17.0   88.1%
+  available_commands_update            1024        2.0   10.4%
+  agent_message_chunk                   512        0.2    1.0%
+  user_message_chunk                    512        0.1    0.6%
+
+[perf] ===== END-TO-END session/load (what the pager waits on) =====
+  total session/load round-trip :    4067.5 ms
+  notifications replayed         :      1028
+  available_commands_update      :         1 replayed / 1024 on disk
+  live catalog reached          :      true
+  time-to-first notification     :    3345.6 ms
+  time-to-last notification      :    4067.5 ms
+  first historical text          :    3345.6 ms
+  last historical text           :    3698.4 ms
+  historical text chunks / bytes : 1024 / 16797586
+  ---- shell-side nested/inclusive timers (not additive) ----
+  session.load_session                                4061.2 ms count=1
+  session.load_session_replay                         1739.5 ms count=1
+  session.replay.read_and_reconcile                   1117.7 ms count=1
+  session.load_light                                  1077.2 ms count=1
+  session.replay.response_reconcile                   1039.5 ms count=1
+  session.projection.raw_canonical                     694.0 ms count=1
+  session.load.response_projection_plan                687.8 ms count=1
+  session.projection.typed_canonical                   682.3 ms count=1
+  session.load.model_route_reconcile                   626.3 ms count=1
+  session.load.model_route_append                      625.9 ms count=1
+  session.spawn_and_register_session                   484.9 ms count=1
+  session.spawn_and_register                           480.9 ms count=1
+  session.replay.forward_updates                       391.1 ms count=1
+  session.spawn.install_coordination_backend           296.7 ms count=1
+  session.load.timeline_read_decode                    240.8 ms count=1
+  session.replay.drain_completions                     223.9 ms count=1
+  session.spawn_actor_call                             175.1 ms count=1
+  session.load.physical_updates_decode                 138.2 ms count=1
+  session.reconcile_stale_tasks                         50.6 ms count=1
+  skill_discovery                                       22.3 ms count=2
+  session.spawn.prepare                                  8.2 ms count=1
+  session.replay.read_snapshot                           6.5 ms count=1
+  session.load.timeline_fold                             3.7 ms count=1
+  session.load.timeline_evidence                         2.4 ms count=1
+  session.load.state_projections                         1.1 ms count=1
+  plugin_discovery                                       0.7 ms count=2
+  session.spawn.publish_coordination                     0.6 ms count=1
+  session.load.projection_metadata                       0.4 ms count=1
+  mcp_merge                                              0.1 ms count=1
+  session.load.open_session                              0.1 ms count=1
+  session.replay.communication_restore                   0.1 ms count=1
+  session.load.response_projection_appends               0.0 ms count=1
+  session.delta_flush_replay                             0.0 ms count=1
+  session.stale_tasks_drain_completions                  0.0 ms count=1
+  session.delta_drain_completions                        0.0 ms count=1
+================================================================
+
+PERF_RESUME {"format":"modern","turns":512,"missing_every":"0","route_seeded":false,"timeline_bytes":17751619,"updates_bytes":19284122,"load_ms":4067.516042,"first_notification_ms":3345.647042,"first_history_ms":3345.647042,"last_history_ms":3698.429709,"max_history_gap_ms":110.7845,"history_count":1024,"history_bytes":16797586,"phases":[{"name":"session.load_session","count":1,"ms":4061.218},{"name":"session.load_session_replay","count":1,"ms":1739.515},{"name":"session.replay.read_and_reconcile","count":1,"ms":1117.718},{"name":"session.load_light","count":1,"ms":1077.241},{"name":"session.replay.response_reconcile","count":1,"ms":1039.479},{"name":"session.projection.raw_canonical","count":1,"ms":694.026},{"name":"session.load.response_projection_plan","count":1,"ms":687.772},{"name":"session.projection.typed_canonical","count":1,"ms":682.34},{"name":"session.load.model_route_reconcile","count":1,"ms":626.283},{"name":"session.load.model_route_append","count":1,"ms":625.873},{"name":"session.spawn_and_register_session","count":1,"ms":484.861},{"name":"session.spawn_and_register","count":1,"ms":480.879},{"name":"session.replay.forward_updates","count":1,"ms":391.14},{"name":"session.spawn.install_coordination_backend","count":1,"ms":296.651},{"name":"session.load.timeline_read_decode","count":1,"ms":240.759},{"name":"session.replay.drain_completions","count":1,"ms":223.901},{"name":"session.spawn_actor_call","count":1,"ms":175.07},{"name":"session.load.physical_updates_decode","count":1,"ms":138.209},{"name":"session.reconcile_stale_tasks","count":1,"ms":50.583},{"name":"skill_discovery","count":2,"ms":22.265},{"name":"session.spawn.prepare","count":1,"ms":8.208},{"name":"session.replay.read_snapshot","count":1,"ms":6.525},{"name":"session.load.timeline_fold","count":1,"ms":3.688},{"name":"session.load.timeline_evidence","count":1,"ms":2.407},{"name":"session.load.state_projections","count":1,"ms":1.124},{"name":"plugin_discovery","count":2,"ms":0.737},{"name":"session.spawn.publish_coordination","count":1,"ms":0.563},{"name":"session.load.projection_metadata","count":1,"ms":0.353},{"name":"mcp_merge","count":1,"ms":0.143},{"name":"session.load.open_session","count":1,"ms":0.093},{"name":"session.replay.communication_restore","count":1,"ms":0.064},{"name":"session.load.response_projection_appends","count":1,"ms":0.017},{"name":"session.delta_flush_replay","count":1,"ms":0.002},{"name":"session.stale_tasks_drain_completions","count":1,"ms":0.001},{"name":"session.delta_drain_completions","count":1,"ms":0.0}]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 7.13s
+

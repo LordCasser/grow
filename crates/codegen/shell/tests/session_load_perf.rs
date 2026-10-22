@@ -1,10 +1,11 @@
 //! End-to-end measurement of why resuming a large session is slow: the time
-//! spent before the client can render anything.
+//! spent before historical text arrives and before the load response.
 //!
-//! The pager resumes via `session/load` and blocks on the response. The shell
+//! The pager resumes via `session/load`; streamed history can render before
+//! the response enables normal input. The shell
 //! answers by (1) `load_light` (Timeline Surface; rewind points now load lazily) and
-//! (2) `replay_session_updates`, which reads `updates.jsonl`, filters it, typed
-//! parses every line, and forwards each as a `session/update`. All of that
+//! (2) `replay_session_updates`, which derives ordered notifications from the
+//! same verified journal cut and forwards each as a `session/update`. All of that
 //! happens while the client waits; both tests drive the real production code.
 //!
 //! * [`phase_breakdown_real_functions`] drives the exact load-path functions
@@ -13,13 +14,17 @@
 //!   then prints a per-`sessionUpdate`-kind byte breakdown of `updates.jsonl`.
 //! * [`full_session_load_e2e`] stands up a real `MvpAgent` over in-process ACP
 //!   pipes (via [`load_session_via_agent`]); times `session/load` end-to-end,
-//!   counts replayed notifications, and dumps the shell's own per-phase
+//!   counts replayed notifications and historical bytes, and dumps load-window
 //!   `instrumentation_timer!` events.
 //!
 //! Session data (both tests): a synthetic session from the shared
 //! [`synth`](shell::session::testkit::synth) generator (redundant
 //! `available_commands_update` + big rewind snapshots; size knobs via
 //! `GROW_PERF_*`), or a real session dir via `GROW_PERF_SESSION_SRC=<session-dir>`.
+//! `GROW_PERF_SESSION_FORMAT=modern` upgrades the synthetic fixture with real
+//! response admission and payload-free candidate anchors. The legacy comparison
+//! binary uses `GROW_PERF_MISSING_PROJECTION_EVERY=16` for projection gaps; the new
+//! journal has no projection cache to omit or repair.
 //!
 //! Run (needs the `test-support` feature; on by default under Bazel):
 //!   cargo test -p shell --features test-support --test session_load_perf -- --nocapture
@@ -38,6 +43,67 @@ use shell::session::info::Info;
 use shell::session::storage::{JsonlStorageAdapter, StorageAdapter, load_updates_for_replay_at};
 use shell::session::testkit::e2e::load_session_via_agent;
 use shell::session::testkit::synth::{self, SessionSpec};
+
+/// Capture the pre-storage-change wire DTOs separately from the end-to-end
+/// history oracle. These are presentation payloads, not executable facts.
+#[test]
+#[ignore = "explicit capture/verification of the storage-change wire fixture"]
+fn history_wire_golden() {
+    let fixture_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let input: Vec<serde_json::Value> = serde_json::from_slice(
+        &std::fs::read(fixture_directory.join("history-wire-input.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        input.len(),
+        46,
+        "review the family coverage when changing the fixture"
+    );
+    let mut output = Vec::with_capacity(input.len());
+    for case in input {
+        let notification = case["notification"].clone();
+        let normalized = match case["channel"].as_str().unwrap() {
+            "grow" => serde_json::to_value(
+                serde_json::from_value::<shell::extensions::notification::SessionNotification>(
+                    notification.clone(),
+                )
+                .unwrap_or_else(|error| panic!("{}: {error}", case["family"])),
+            )
+            .unwrap(),
+            "acp" => serde_json::to_value(
+                serde_json::from_value::<acp::SessionNotification>(notification.clone())
+                    .unwrap_or_else(|error| panic!("{}: {error}", case["family"])),
+            )
+            .unwrap(),
+            channel => panic!("unknown fixture channel: {channel}"),
+        };
+        assert_eq!(
+            normalized, notification,
+            "{}: fixture must use the actual canonical wire shape without dropped fields",
+            case["family"],
+        );
+        output.push(serde_json::json!({
+            "family": case["family"],
+            "channel": case["channel"],
+            "notification": normalized,
+        }));
+    }
+    let golden = fixture_directory.join("history-wire-golden.json");
+    if std::env::var_os("GROW_HISTORY_WIRE_CAPTURE").is_some() {
+        std::fs::write(
+            &golden,
+            serde_json::to_string_pretty(&output).unwrap() + "\n",
+        )
+        .unwrap();
+    } else {
+        let expected: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&golden).unwrap()).unwrap();
+        assert_eq!(
+            output, expected,
+            "historical presentation wire payload changed"
+        );
+    }
+}
 
 // ───────────────────────── session spec ─────────────────────────
 
@@ -59,6 +125,17 @@ fn perf_spec() -> SessionSpec {
             file_content_len: 512,
         },
     )
+}
+
+fn modern_history() -> bool {
+    match std::env::var("GROW_PERF_SESSION_FORMAT")
+        .as_deref()
+        .unwrap_or("legacy")
+    {
+        "legacy" => false,
+        "modern" => true,
+        value => panic!("unsupported GROW_PERF_SESSION_FORMAT: {value}"),
+    }
 }
 
 // ───────────────────────── session setup ─────────────────────────
@@ -96,12 +173,21 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
                 + spec.agent_chunks_per_turn as u128 * (spec.agent_chunk_len as u128 + 1024));
         let rewind = spec.rewind_points as u128
             * (1024 + spec.files_per_rewind as u128 * (spec.file_content_len as u128 * 2 + 2048));
-        let timeline = spec.turns as u128 * (spec.agent_chunk_len as u128 + 8192) + 8192;
+        let response_bytes = if modern_history() {
+            spec.agent_chunks_per_turn as u128 * spec.agent_chunk_len as u128
+        } else {
+            spec.agent_chunk_len as u128
+        };
+        let timeline = spec.turns as u128 * (response_bytes + 12288) + 8192;
         assert!(
             updates + rewind + timeline <= BUDGET,
             "synthetic fixture exceeds 256 MiB budget"
         );
-        let result = synth::prepare_session(root, cwd, spec).await;
+        let result = if modern_history() {
+            synth::replay::prepare_legacy_session(root, cwd, spec).await
+        } else {
+            synth::prepare_session(root, cwd, spec).await
+        };
         JsonlStorageAdapter::with_root(root.to_path_buf())
             .update_current_model_and_agent(
                 &result.0,
@@ -111,7 +197,36 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
             )
             .await
             .expect("set explicit fixture model");
-        append_perf_timeline(root, &result.0, spec).await;
+        if modern_history() {
+            let missing_every = std::env::var("GROW_PERF_MISSING_PROJECTION_EVERY")
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .expect("valid missing projection interval")
+                })
+                .unwrap_or(0);
+            let route = std::env::var("GROW_INFERENCE_BASE_URL").ok().map(|url| {
+                sampling_types::model_image_input_key_from_parts(
+                    "test-model",
+                    &sampling_types::ApiBackend::ChatCompletions,
+                    &url,
+                    &Default::default(),
+                )
+            });
+            synth::write_admitted_history(
+                &result.0,
+                &result.1,
+                spec,
+                "test/test-model",
+                missing_every,
+                route
+                    .as_ref()
+                    .filter(|_| std::env::var_os("GROW_PERF_OMIT_ROUTE_BASELINE").is_none())
+                    .map(|route| ("test-model", route)),
+            );
+        } else {
+            append_perf_timeline(root, &result.0, spec).await;
+        }
         return result;
     };
 
@@ -126,7 +241,7 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
         .await
         .expect("init_session");
     let dir = synth::locate_session_dir(root, &id);
-    for name in ["timeline.jsonl", "updates.jsonl", "rewind_points.jsonl"] {
+    for name in ["timeline.jsonl", "rewind_points.jsonl"] {
         let from = Path::new(&src).join(name);
         if from.exists() {
             std::fs::copy(&from, dir.join(name)).unwrap();
@@ -235,9 +350,9 @@ fn generate_or_restore_rewind(path: &Path, spec: &SessionSpec) {
     synth::write_rewind_jsonl(path, spec);
 }
 
-// ───────────────────────── updates.jsonl stats ─────────────────────────
+// ───────────────────────── physical journal stats ─────────────────────────
 
-/// Per-kind statistics for the generated/loaded updates file.
+/// Per-kind statistics for the generated/loaded physical Timeline journal.
 #[derive(Default)]
 struct KindStats {
     count: BTreeMap<String, u64>,
@@ -260,29 +375,32 @@ fn file_fingerprint(path: &Path) -> (u64, u64) {
     (bytes.len() as u64, hasher.finish())
 }
 
-/// Per-`sessionUpdate`-kind byte + count breakdown of an `updates.jsonl`.
-fn updates_kind_breakdown(path: &Path) -> KindStats {
+/// Counts physical bytes once. This is an outside-timing diagnostic; replay
+/// correctness uses the production projector and full ACP content equality.
+fn timeline_kind_breakdown(path: &Path) -> KindStats {
     let mut stats = KindStats::default();
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return stats;
-    };
+    let contents = std::fs::read_to_string(path).expect("read physical Timeline fixture");
+    shell::session::testkit::decode_timeline_fixture(&contents)
+        .expect("the statistics describe a checksummed, valid Timeline journal");
     for line in contents.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let len = line.len() as u64 + 1;
-        let kind = serde_json::from_str::<serde_json::Value>(line)
-            .ok()
-            .and_then(|v| {
-                v.get("params")
-                    .and_then(|p| p.get("update"))
-                    .and_then(|u| u.get("sessionUpdate"))
-                    .and_then(|s| s.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or_else(|| "<unparsed>".to_string());
+        let record: serde_json::Value = serde_json::from_str(line).unwrap();
+        let fact = &record["fact"];
+        let kind = match fact["kind"].as_str().unwrap() {
+            "domain" => format!("domain/{}", fact["event"]["type"].as_str().unwrap()),
+            "presentation" => {
+                let content = &fact["event"]["content"];
+                match content["kind"].as_str().unwrap() {
+                    "grow" => format!(
+                        "presentation/{}",
+                        content["data"]["sessionUpdate"].as_str().unwrap()
+                    ),
+                    kind => format!("presentation/{kind}"),
+                }
+            }
+            _ => unreachable!("the production codec rejected unknown physical facts"),
+        };
         *stats.count.entry(kind.clone()).or_default() += 1;
-        *stats.bytes.entry(kind).or_default() += len;
+        *stats.bytes.entry(kind).or_default() += line.len() as u64 + 1;
     }
     stats
 }
@@ -290,12 +408,12 @@ fn updates_kind_breakdown(path: &Path) -> KindStats {
 fn print_kind_breakdown(label: &str, stats: &KindStats) {
     let total: u64 = stats.bytes.values().sum();
     eprintln!(
-        "\n[perf] {label}: updates.jsonl composition ({:.1} MB total):",
+        "\n[perf] {label}: Timeline journal composition ({:.1} MB total):",
         total as f64 / 1e6
     );
     eprintln!(
         "  {:<32} {:>8} {:>10} {:>7}",
-        "sessionUpdate kind", "count", "MB", "%"
+        "physical fact kind", "count", "MB", "%"
     );
     let mut rows: Vec<(&String, &u64)> = stats.bytes.iter().collect();
     rows.sort_by(|a, b| b.1.cmp(a.1));
@@ -333,12 +451,12 @@ async fn phase_breakdown_real_functions() {
 
     let (info, dir) = prepare_session(root.path(), cwd.path(), &spec).await;
 
-    let updates_path = dir.join("updates.jsonl");
+    let timeline_path = dir.join("timeline.jsonl");
     let rewind_path = dir.join("rewind_points.jsonl");
     eprintln!(
-        "\n[perf] session dir: {}\n[perf]   updates.jsonl       = {:.1} MB\n[perf]   rewind_points.jsonl = {:.1} MB",
+        "\n[perf] session dir: {}\n[perf]   timeline.jsonl      = {:.1} MB\n[perf]   rewind_points.jsonl = {:.1} MB",
         dir.display(),
-        file_size_mb(&updates_path),
+        file_size_mb(&timeline_path),
         file_size_mb(&rewind_path),
     );
 
@@ -407,7 +525,7 @@ async fn phase_breakdown_real_functions() {
         .unwrap_or_default();
     let updates_parse = t.elapsed();
 
-    let stats = updates_kind_breakdown(&updates_path);
+    let stats = timeline_kind_breakdown(&timeline_path);
     print_kind_breakdown("phase_breakdown", &stats);
 
     eprintln!("\n[perf] ===== PRE-RENDER LOAD PHASE BREAKDOWN (real production fns) =====");
@@ -446,7 +564,10 @@ async fn phase_breakdown_real_functions() {
     );
     eprintln!("================================================================\n");
 
-    assert!(!stats.bytes.is_empty(), "expected a non-empty updates file");
+    assert!(
+        !stats.bytes.is_empty(),
+        "expected a non-empty Timeline journal"
+    );
 }
 
 // ───────────────────────── TEST 2: true e2e ─────────────────────────
@@ -461,6 +582,11 @@ struct LoadCounters {
     acu_count: u64,
     first_at: Option<Instant>,
     last_at: Option<Instant>,
+    first_history_at: Option<Instant>,
+    last_history_at: Option<Instant>,
+    history_count: u64,
+    history_bytes: usize,
+    max_history_gap: Duration,
     /// Optional correctness run, disabled for timing comparisons.
     history: Option<Vec<acp::SessionUpdate>>,
 }
@@ -496,6 +622,23 @@ impl acp_transport::AcpClientHandler for CountingClient {
         }
         c.first_at.get_or_insert(now);
         c.last_at = Some(now);
+        if let acp::SessionUpdate::UserMessageChunk(chunk)
+        | acp::SessionUpdate::AgentMessageChunk(chunk) = &args.update
+            && let acp::ContentBlock::Text(text) = &chunk.content
+            && !text.text.is_empty()
+        {
+            if c.first_history_at.is_none() {
+                tracing::info!(target: shell::instrumentation::TARGET,
+                    event = "resume_first_history_received");
+            }
+            c.first_history_at.get_or_insert(now);
+            if let Some(last) = c.last_history_at {
+                c.max_history_gap = c.max_history_gap.max(now.duration_since(last));
+            }
+            c.last_history_at = Some(now);
+            c.history_count += 1;
+            c.history_bytes += text.text.len();
+        }
         if let Some(history) = &mut c.history {
             if matches!(
                 args.update,
@@ -508,17 +651,47 @@ impl acp_transport::AcpClientHandler for CountingClient {
     }
 }
 
+/// Count the complete physical session footprint, excluding symlink targets.
+/// Runs outside the measured RPC, like fixture generation and the history oracle.
+fn session_directory_stats(directory: &Path) -> (u64, u64) {
+    let mut pending = vec![directory.to_path_buf()];
+    let (mut bytes, mut files) = (0, 0);
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).expect("read fixture directory") {
+            let entry = entry.expect("read fixture entry");
+            let metadata = entry.path().symlink_metadata().expect("stat fixture entry");
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                bytes += metadata.len();
+                files += 1;
+            }
+        }
+    }
+    (bytes, files)
+}
+
 /// Parse the production instrumentation JSON log into `(name -> elapsed_ms)`.
-fn parse_instrumentation_log(path: &Path) -> Vec<(String, f64)> {
+fn parse_instrumentation_log(path: &Path) -> Vec<(String, usize, f64)> {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let mut out = BTreeMap::<String, f64>::new();
+    let mut out = BTreeMap::<String, (usize, f64)>::new();
+    let mut in_load = false;
     for line in contents.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         let fields = v.get("fields").unwrap_or(&v);
+        match fields.get("event").and_then(|e| e.as_str()) {
+            Some("resume_load_start") => {
+                in_load = true;
+                continue;
+            }
+            Some("resume_load_end") => break,
+            _ if !in_load => continue,
+            _ => {}
+        }
         if fields.get("event").and_then(|e| e.as_str()) != Some("timing") {
             continue;
         }
@@ -535,9 +708,39 @@ fn parse_instrumentation_log(path: &Path) -> Vec<(String, f64)> {
                     .map(|m| m * 1000)
             })
             .unwrap_or(0);
-        *out.entry(name.to_string()).or_default() += us as f64 / 1000.0;
+        let (count, ms) = out.entry(name.to_string()).or_default();
+        *count += 1;
+        *ms += us as f64 / 1000.0;
     }
-    out.into_iter().collect()
+    out.into_iter()
+        .map(|(name, (count, ms))| (name, count, ms))
+        .collect()
+}
+
+#[test]
+fn instrumentation_summary_excludes_fixture_and_post_load_work() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let rows = [
+        serde_json::json!({"event":"timing", "name":"phase", "elapsed_us":100000}),
+        serde_json::json!({"event":"resume_load_start"}),
+        serde_json::json!({"fields":{"event":"timing", "name":"phase", "elapsed_us":2000}}),
+        serde_json::json!({"fields":{"event":"timing", "name":"phase", "elapsed_us":3000}}),
+        serde_json::json!({"event":"timing", "name":"parent", "elapsed_us":10000}),
+        serde_json::json!({"event":"resume_load_end"}),
+        serde_json::json!({"event":"timing", "name":"phase", "elapsed_us":200000}),
+    ];
+    std::fs::write(
+        file.path(),
+        rows.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        parse_instrumentation_log(file.path()),
+        vec![("parent".into(), 1, 10.0), ("phase".into(), 2, 5.0)]
+    );
 }
 
 /// True end-to-end: real `MvpAgent` over real ACP pipes. Times `session/load`
@@ -579,13 +782,17 @@ async fn full_session_load_e2e() {
 
     let (info, dir) = prepare_session(grow_home.path(), cwd.path(), &spec).await;
     let updates_path = dir.join("updates.jsonl");
+    let timeline_path = dir.join("timeline.jsonl");
     let rewind_path = dir.join("rewind_points.jsonl");
+    let timeline_bytes = std::fs::metadata(&timeline_path).unwrap().len();
+    let updates_bytes = std::fs::metadata(&updates_path).map_or(0, |metadata| metadata.len());
+    let (directory_bytes, directory_files) = session_directory_stats(&dir);
     eprintln!(
-        "\n[perf] e2e session: updates={:.1} MB rewind={:.1} MB",
-        file_size_mb(&updates_path),
+        "\n[perf] e2e session: timeline={:.1} MB rewind={:.1} MB",
+        file_size_mb(&timeline_path),
         file_size_mb(&rewind_path)
     );
-    let stats = updates_kind_breakdown(&updates_path);
+    let stats = timeline_kind_breakdown(&timeline_path);
     print_kind_breakdown("e2e", &stats);
 
     // Zero-data-loss guard: a pure load must never rewrite rewind_points.jsonl
@@ -631,13 +838,24 @@ async fn full_session_load_e2e() {
             if let Some(expected) = &expected_history {
                 assert_eq!(counters.borrow().history.as_ref().unwrap(), expected,
                     "all historical text must arrive once and in order before the load response");
+                if modern_history() {
+                    let history = counters.borrow();
+                    let markers = history.history.as_ref().unwrap().iter().filter_map(|update| match update {
+                        acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                            acp::ContentBlock::Text(text) => Some(text.text.lines().filter(|line| line.starts_with("GROW_SEQ_")).map(str::to_owned).collect::<Vec<_>>()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }).flatten().collect::<Vec<_>>();
+                    assert_eq!(markers, (1..=spec.turns).map(|turn| format!("GROW_SEQ_{turn:06}")).collect::<Vec<_>>(), "independent fixture sequence oracle rejects missing, duplicated or reordered canonical answers");
+                }
             }
             // Keep the connection alive for asynchronous live advertisements.
             let _client_conn = loaded.client_conn;
 
             // Snapshot at the response barrier. Counts include administrative
             // notifications; a live catalog may already have arrived here.
-            let (replay_count, acu_replayed, ttfn, ttln) = {
+            let (replay_count, acu_replayed, ttfn, ttln, first_history_ms, last_history_ms, history_count, history_bytes, max_history_gap_ms) = {
                 let c = counters.borrow();
                 (
                     c.count,
@@ -648,6 +866,11 @@ async fn full_session_load_e2e() {
                     c.last_at
                         .map(|t| t.duration_since(load_started).as_secs_f64() * 1e3)
                         .unwrap_or(0.0),
+                    c.first_history_at.map(|t| t.duration_since(load_started).as_secs_f64() * 1e3).unwrap_or(0.0),
+                    c.last_history_at.map(|t| t.duration_since(load_started).as_secs_f64() * 1e3).unwrap_or(0.0),
+                    c.history_count,
+                    c.history_bytes,
+                    c.max_history_gap.as_secs_f64() * 1e3,
                 )
             };
 
@@ -664,8 +887,21 @@ async fn full_session_load_e2e() {
             // Flush the instrumentation writer and read the per-phase log.
             let _ = shell::instrumentation::finalize();
             std::thread::sleep(Duration::from_millis(150));
+            if let Some(trace_path) = std::env::var_os("GROW_PERF_TRACE_PATH") {
+                std::fs::copy(&instr_log, trace_path).expect("save complete instrumentation trace");
+            }
             let mut phases = parse_instrumentation_log(&instr_log);
-            phases.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            phases.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            assert!(!phases.is_empty(), "load-window instrumentation must be captured");
+            if modern_history() && std::env::var_os("GROW_PERF_OMIT_ROUTE_BASELINE").is_none() {
+                assert!(!phases.iter().any(|(name, _, _)| name == "session.load.model_route_append"), "fixture route must match the selected runtime route");
+            }
+            if modern_history() {
+                let count = |name: &str| phases.iter().filter(|phase| phase.0 == name).map(|phase| phase.1).sum::<usize>();
+                assert_eq!(count("session.projection.typed_canonical"), 0, "there is no persisted canonical projection to construct");
+                assert_eq!(count("session.projection.raw_canonical"), 0, "there is no second projection body to reconcile");
+                assert_eq!(count("session.load.history_projection"), 1, "one complete history projection per load; actor receipts reuse the validated cut");
+            }
 
             // Replay-skip guard: the historical available_commands_update copies
             // (3197 in the pathological real session, hundreds synthetic) must
@@ -679,15 +915,39 @@ async fn full_session_load_e2e() {
             eprintln!("  live catalog reached          : {readvertised:>9}");
             eprintln!("  time-to-first notification     : {ttfn:>9.1} ms");
             eprintln!("  time-to-last notification      : {ttln:>9.1} ms");
-            eprintln!("  ---- shell-side per-phase instrumentation (elapsed) ----");
+            eprintln!("  first historical text          : {first_history_ms:>9.1} ms");
+            eprintln!("  last historical text           : {last_history_ms:>9.1} ms");
+            eprintln!("  historical text chunks / bytes : {history_count} / {history_bytes}");
+            eprintln!("  ---- shell-side nested/inclusive timers (not additive) ----");
             if phases.is_empty() {
                 eprintln!("  (no instrumentation events captured)");
             } else {
-                for (name, ms) in &phases {
-                    eprintln!("  {name:<40} {ms:>9.1} ms");
+                for (name, count, ms) in &phases {
+                    eprintln!("  {name:<48} {ms:>9.1} ms count={count}");
                 }
             }
             eprintln!("================================================================\n");
+            eprintln!("PERF_RESUME {}", serde_json::json!({
+                "format": if modern_history() { "modern" } else { "presentation" },
+                "turns": spec.turns,
+                "missing_every": std::env::var("GROW_PERF_MISSING_PROJECTION_EVERY").unwrap_or_else(|_| "0".into()),
+                "route_seeded": modern_history() && std::env::var_os("GROW_PERF_OMIT_ROUTE_BASELINE").is_none(),
+                "timeline_bytes": timeline_bytes, "updates_bytes": updates_bytes,
+                "directory_bytes": directory_bytes, "directory_files": directory_files,
+                "directory_after_load": session_directory_stats(&dir),
+                "load_ms": load_elapsed.as_secs_f64()*1e3, "first_notification_ms": ttfn,
+                "first_history_ms": first_history_ms, "last_history_ms": last_history_ms,
+                "max_history_gap_ms": max_history_gap_ms,
+                "history_count": history_count, "history_bytes": history_bytes,
+                "phases": phases.iter().map(|(name, count, ms)| serde_json::json!({"name":name,"count":count,"ms":ms})).collect::<Vec<_>>()
+            }));
+            if modern_history() {
+                assert_eq!(history_count, (spec.turns * 2) as u64, "one user and one canonical answer per turn");
+                assert!(!updates_path.exists(), "a load must not create an obsolete updates cache");
+                let verified = JsonlStorageAdapter::with_root(grow_home.path().to_path_buf())
+                    .load_session_without_updates(&info).await.expect("post-load journal remains fully valid");
+                assert_eq!(verified.timeline.admitted_response_views().len(), spec.turns, "all canonical admissions survive load without duplicate facts");
+            }
 
             assert!(replay_count > 0, "expected replayed notifications during load");
             // The lazy rewind file must be byte-for-byte unchanged by a load.

@@ -881,6 +881,7 @@ pub(crate) struct OrphanedTask {
 /// immediately after the last complete record. A concurrent append may leave
 /// a partial UTF-8/JSON tail; delta replay must restart at that record's first
 /// byte after the writer flushes, rather than seek into its middle and lose it.
+#[cfg(test)]
 fn read_complete_jsonl_snapshot_from_file(
     file: std::fs::File,
     label: std::path::PathBuf,
@@ -935,6 +936,20 @@ fn read_complete_jsonl_snapshot(path: &std::path::Path) -> std::io::Result<(Stri
     Ok((contents, end))
 }
 
+fn trace_first_history_send(session: &acp::SessionId, meta: Option<&acp::Meta>) {
+    if crate::instrumentation::current_mode()
+        != crate::instrumentation::InstrumentationMode::Disabled
+        && let Some(cursor) = meta.and_then(|meta| meta.get("grow/historyCursor")).and_then(serde_json::Value::as_str)
+    {
+        let mut timer = crate::instrumentation_timer!("session.replay.first_send");
+        timer.with_field("session_id", session.0.as_ref());
+        timer.with_field("cursor", cursor);
+        // The completion API deliberately hides queue acceptance. Pair this
+        // send-attempt boundary with first_applied before claiming delivery.
+        timer.with_field("boundary", "forward_attempt");
+    }
+}
+
 impl MvpAgent {
     /// Forward one raw JSONL replay line and collect its completion receiver.
     ///
@@ -947,6 +962,7 @@ impl MvpAgent {
     /// `_meta.isReplay: true` so the client knows it's historical data.
     /// Cursor-based reconnects set this to false for events after the cursor
     /// so the client processes them as live updates.
+    #[cfg(test)]
     fn forward_raw_replay_line(
         &self,
         line: &str,
@@ -978,19 +994,9 @@ impl MvpAgent {
                 return;
             };
             for notification in projection.into_notifications() {
-                let Ok(line) = serde_json::to_string(&serde_json::json!({
-                    "method": "session/update",
-                    "params": notification,
-                })) else {
-                    continue;
-                };
-                self.forward_raw_replay_line(
-                    &line,
-                    persist_data,
-                    target_client_id,
-                    completions,
-                    mark_replay,
-                    pending_tool_calls,
+                self.forward_replay_notification(
+                    notification, persist_data, target_client_id, completions,
+                    mark_replay, pending_tool_calls,
                 );
             }
             return;
@@ -1056,313 +1062,150 @@ impl MvpAgent {
                 }
             }
         } else {
-            let Ok(mut notification) = serde_json::from_str::<
+            let Ok(notification) = serde_json::from_str::<
                 acp::SessionNotification,
             >(raw_params.get()) else {
                 tracing::debug!("replay: skipping ACP update with unparseable params");
                 return;
             };
-            match &mut notification.update {
-                acp::SessionUpdate::ToolCall(tc) => {
-                    let is_pre_completed = matches!(
-                        tc.status,
-                        acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
-                    );
-                    if is_pre_completed {} else {
-                        pending_tool_calls.insert(tc.tool_call_id.clone(), tc.clone());
-                        return;
-                    }
-                }
-                acp::SessionUpdate::ToolCallUpdate(u) => {
-                    match u.fields.status {
-                        Some(acp::ToolCallStatus::Completed)
-                        | Some(acp::ToolCallStatus::Failed) => {
-                            if let Some(mut base) = pending_tool_calls
-                                .remove(&u.tool_call_id)
-                            {
-                                base.update(std::mem::take(&mut u.fields));
-                                notification.update = acp::SessionUpdate::ToolCall(base);
-                            }
-                        }
-                        None => {
-                            if let Some(base) = pending_tool_calls
-                                .get_mut(&u.tool_call_id)
-                            {
-                                base.update(std::mem::take(&mut u.fields));
-                            }
-                            return;
-                        }
-                        _ => return,
-                    }
-                }
-                _ => {}
-            }
-            if mark_replay {
-                mark_as_replay(&mut notification.meta, persist_data);
-            }
-            if let Some(tid) = target_client_id {
-                stamp_meta_value(&mut notification.meta, "grow/leaderClientId", tid);
-            }
-            completions.push(self.gateway.forward_with_completion(notification));
+            self.forward_replay_notification(
+                notification, persist_data, target_client_id, completions,
+                mark_replay, pending_tool_calls,
+            );
         }
     }
-    /// Replay updates from disk and drain completions. Returns the captured end
-    /// offset plus UI-cache coverage for canonical subagent facts.
+
+    /// Shared final ACP replay path for typed projections and ordinary records.
+    fn forward_replay_notification(
+        &self,
+        mut notification: acp::SessionNotification,
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+        completions: &mut Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>>,
+        mark_replay: bool,
+        pending_tool_calls: &mut std::collections::HashMap<acp::ToolCallId, acp::ToolCall>,
+    ) {
+        match &mut notification.update {
+            acp::SessionUpdate::ToolCall(tc) => {
+                let is_pre_completed = matches!(
+                    tc.status,
+                    acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+                );
+                if is_pre_completed {} else {
+                    pending_tool_calls.insert(tc.tool_call_id.clone(), tc.clone());
+                    return;
+                }
+            }
+            acp::SessionUpdate::ToolCallUpdate(u) => {
+                match u.fields.status {
+                    Some(acp::ToolCallStatus::Completed)
+                    | Some(acp::ToolCallStatus::Failed) => {
+                        if let Some(mut base) = pending_tool_calls
+                            .remove(&u.tool_call_id)
+                        {
+                            base.update(std::mem::take(&mut u.fields));
+                            notification.update = acp::SessionUpdate::ToolCall(base);
+                        }
+                    }
+                    None => {
+                        if let Some(base) = pending_tool_calls
+                            .get_mut(&u.tool_call_id)
+                        {
+                            base.update(std::mem::take(&mut u.fields));
+                        }
+                        return;
+                    }
+                    _ => return,
+                }
+            }
+            _ => {}
+        }
+        if mark_replay {
+            mark_as_replay(&mut notification.meta, persist_data);
+        }
+        if let Some(tid) = target_client_id {
+            stamp_meta_value(&mut notification.meta, "grow/leaderClientId", tid);
+        }
+        if completions.is_empty() {
+            trace_first_history_send(&notification.session_id, notification.meta.as_ref());
+        }
+        completions.push(self.gateway.forward_with_completion(notification));
+    }
     pub(super) async fn replay_session_updates(
         &self,
         session_id: &acp::SessionId,
         cwd: &AbsPathBuf,
-        session_directory: &crate::session::storage::ContainedDirectory,
-        // Replay the already validated/pinned Timeline snapshot; do not reread ambient storage.
+        _session_directory: &crate::session::storage::ContainedDirectory,
         timeline: &chat_state::Timeline,
-        resident: bool,
+        history: &crate::session::history::HistorySnapshot,
+        _resident: bool,
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
     ) -> Result<(u64, bool, crate::session::storage::SubagentProjectionState), acp::Error> {
-        let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
-        replay_timer.with_field("session_id", session_id.0.as_ref());
-        replay_timer.with_field("cwd", cwd.as_str());
-        let updates_file = match session_directory.open_regular(
-            std::ffi::OsStr::new("updates.jsonl"),
-            "session updates ledger",
-        ) {
-            Ok(file) => Some(file),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(crate::session::persistence::io_error_to_acp(&error)),
-        };
-        let (raw_contents, end_offset, file_size) = {
-            let _timer = crate::instrumentation_timer!("session.replay.read_snapshot");
-            match updates_file {
-                Some(file) => read_complete_jsonl_snapshot_from_file(
-                    file,
-                    session_directory.display_path().join("updates.jsonl"),
-                    resident.then(|| timeline.events().last().map_or(0, |event| event.seq.get())),
-                )
-                .unwrap_or_default(),
-                None => (String::new(), 0, 0),
-            }
-        };
-        let mut prepared = {
-            let _timer = crate::instrumentation_timer!("session.replay.read_and_reconcile");
-            crate::session::storage::prepare_reconciled_replay_lines(
-                session_id,
-                timeline,
-                &raw_contents,
-                cursor,
-                |event| crate::session::storage::communication_history::read_notice(session_directory, event),
-            )
-            .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
-        };
-        let subagent_projections = std::mem::take(&mut prepared.subagent_projections);
-        if cursor.is_some() {
-            let sending = prepared.lines.len();
-            if prepared.mark_replay {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "replay: cursor not found, falling back to full replay"
-                );
-            } else {
-                tracing::info!(
-                    session_id = %session_id.0,
-                    skipped = prepared.total_live - sending,
-                    remaining = sending,
-                    "replay: cursor found, skipping events"
-                );
+        let mut timer = crate::instrumentation_timer!("session.load_session_replay");
+        timer.with_field("session_id", session_id.0.as_ref());
+        timer.with_field("cwd", cwd.as_str());
+        let prepared = history.prepare(session_id, timeline, cursor).map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+        let mut coverage = crate::session::storage::SubagentProjectionState::default();
+        let mut pending_tools = std::collections::HashMap::new();
+        let mut completions = Vec::with_capacity(prepared.updates.len());
+        timer.with_field("updates_count", prepared.updates.len());
+        for update in prepared.updates {
+            match update {
+                crate::session::storage::SessionUpdate::Acp(notification) => self.forward_replay_notification(*notification, persist_data, target_client_id, &mut completions, prepared.mark_replay, &mut pending_tools),
+                crate::session::storage::SessionUpdate::Grow(mut notification) => {
+                    use crate::extensions::notification::SessionUpdate as Update;
+                    match &notification.update {
+                        Update::SubagentSpawned { subagent_id, .. } => { coverage.spawned.insert(subagent_id.clone()); },
+                        Update::SubagentFinished { subagent_id, .. } => { coverage.finished.insert(subagent_id.clone()); },
+                        _ => {},
+                    }
+                    let meta = notification.meta.get_or_insert_with(|| serde_json::json!({})).as_object_mut().expect("validated history metadata");
+                    if prepared.mark_replay { meta.insert("isReplay".into(), true.into()); }
+                    if let Some(value) = persist_data { meta.insert("grow/persist".into(), value.clone()); }
+                    if let Some(value) = target_client_id { meta.insert("grow/leaderClientId".into(), value.clone()); }
+                    let raw = serde_json::value::to_raw_value(&notification).map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+                    if completions.is_empty() {
+                        trace_first_history_send(&notification.session_id, notification.meta.as_ref().and_then(serde_json::Value::as_object));
+                    }
+                    completions.push(self.gateway.forward_with_completion(acp::ExtNotification::new("grow/session/update", std::sync::Arc::from(raw))));
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                _ => unreachable!("no persisted response projections"),
             }
         }
-        let mark_replay = prepared.mark_replay;
-        if let Some(max_seq) = prepared.max_event_seq {
-            crate::util::event_id::ensure_event_counter_at_least(max_seq + 1);
-        }
-        let lines_to_send = prepared.lines;
-        let updates_count = lines_to_send.len() as u64;
-        let mut completions = Vec::with_capacity(lines_to_send.len());
-        {
-            let _timer = crate::instrumentation_timer!("session.replay.forward_updates");
-            let mut pending_tool_calls = std::collections::HashMap::new();
-            for line in &lines_to_send {
-                self.forward_raw_replay_line(
-                    line.as_str(),
-                    persist_data,
-                    target_client_id,
-                    &mut completions,
-                    mark_replay,
-                    &mut pending_tool_calls,
-                );
-            }
-        }
-        if updates_count > 0 && completions.is_empty() {
-            tracing::warn!(
-                updates_count,
-                "Replay sent updates but collected 0 completions — \
-                 forward_raw_replay_line must use gateway.forward_with_completion(). \
-                 See: session/load notification ordering bug."
-            );
-        }
-        {
-            let _timer = crate::instrumentation_timer!("session.replay.drain_completions");
-            for rx in completions {
-                let _ = rx.await;
-            }
-        }
-        tracing::info!(
-            session_id = %session_id.0,
-            updates_count,
-            end_offset,
-            file_size,
-            "replay: completed"
-        );
-        replay_timer.with_field("updates_count", updates_count);
-        Ok((end_offset, mark_replay, subagent_projections))
-    }
-    /// Enqueue replay notifications for updates appended after `from_offset`.
-    /// Returns completion receivers; callers open the gate then drain.
-    /// Intentionally sync (not async) so no prompt-task progress before gate flip.
-    ///
-    /// When `mark_replay` is false (cursor-based reconnect), delta events are
-    /// forwarded without `_meta.isReplay` since they are truly new events the
-    /// client has not seen.
-    pub(super) fn replay_session_updates_from_offset_enqueue(
-        &self,
-        session_id: &acp::SessionId,
-        session_directory: &crate::session::storage::ContainedDirectory,
-        from_offset: u64,
-        timeline: &chat_state::Timeline,
-        persist_data: Option<&serde_json::Value>,
-        target_client_id: Option<&serde_json::Value>,
-        mark_replay: bool,
-    ) -> Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>> {
-        let file = match session_directory.open_regular(
-            std::ffi::OsStr::new("updates.jsonl"),
-            "session updates ledger",
-        ) {
-            Ok(file) => file,
-            Err(_) => return Vec::new(),
-        };
-        let reader = match crate::session::storage::CommittedJsonlLines::from_open_file_at(
-            file,
-            session_directory.display_path().join("updates.jsonl"),
-            "session updates ledger",
-            from_offset,
-        ) {
-            Ok(reader) => reader,
-            Err(_) => return Vec::new(),
-        };
-        let mut lines = Vec::new();
-        for line in reader {
-            let line = match line.and_then(|line| {
-                String::from_utf8(line)
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-            }) {
-                Ok(line) if !line.trim().is_empty() => line,
-                Ok(_) => continue,
-                Err(_) => return Vec::new(),
-            };
-            lines.push(line);
-        }
-        if lines.is_empty() {
-            return Vec::new();
-        }
-        let live_lines = match crate::session::storage::prepare_reconciled_delta_lines(
-            session_id,
-            timeline,
-            lines.iter().map(String::as_str).collect(),
-        ) {
-            Ok(lines) => lines,
-            Err(error) => {
-                tracing::warn!(?error, "Delta replay reconciliation failed; skipping delta replay");
-                return Vec::new();
-            }
-        };
-        let delta_count = live_lines.len();
-        let mut completions = Vec::with_capacity(live_lines.len());
-        let mut pending_tool_calls = std::collections::HashMap::new();
-        for line in &live_lines {
-            self.forward_raw_replay_line(
-                line.as_str(),
-                persist_data,
-                target_client_id,
-                &mut completions,
-                mark_replay,
-                &mut pending_tool_calls,
-            );
-        }
-        if delta_count > 0 && completions.is_empty() {
-            tracing::warn!(
-                delta_count,
-                "Delta replay sent updates but collected 0 completions — \
-                 forward_raw_replay_line must use gateway.forward_with_completion(). \
-                 See: session/load notification ordering bug."
-            );
-        }
-        if delta_count > 0 {
-            tracing::info!(
-                session_id = %session_id.0,
-                delta_count,
-                from_offset,
-                "Delta replay enqueued updates (drain pending)"
-            );
-        }
-        completions
+        for completion in completions { let _ = completion.await; }
+        Ok((history.bytes, prepared.mark_replay, coverage))
     }
     /// Find replay rows that would leave a cold client's background-task UI in
     /// a false "Running" state. This projection never restores task runtime
     /// ownership; the process registry remains authoritative.
     pub(super) fn find_stale_background_task_projections(
-        session_directory: &crate::session::storage::ContainedDirectory,
+        session_id: &acp::SessionId,
+        history: &crate::session::history::HistorySnapshot,
     ) -> Vec<OrphanedTask> {
-        use crate::session::wire_tags::{TASK_BACKGROUNDED, TASK_COMPLETED};
-        let file = match session_directory.open_regular(
-            std::ffi::OsStr::new("updates.jsonl"),
-            "session updates ledger",
-        ) {
-            Ok(file) => file,
-            Err(_) => return Vec::new(),
-        };
-        let lines = match crate::session::storage::read_committed_jsonl_text_lines_from_file(
-            file,
-            session_directory.display_path().join("updates.jsonl"),
-            "session updates ledger",
-        ) {
-            Ok(lines) => lines,
-            Err(_) => return Vec::new(),
-        };
-        let live_lines = crate::session::storage::filter_rewind_lines(
-            lines.iter().map(String::as_str).collect(),
-        );
-        let mut pending = std::collections::HashMap::<String, OrphanedTask>::new();
-        for line in live_lines {
-            if !line.contains(&*TASK_BACKGROUNDED) && !line.contains(&*TASK_COMPLETED) {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
+        use crate::session::history::{GrowHistoryFact, HistoryContent, HistorySource};
+        // Only task state and prompt/rewind boundaries affect this projection.
+        // Reuse the validated cut; do not decode canonical response bodies again.
+        let updates = history.sources.iter().filter_map(|source| {
+            let HistorySource::Presentation { fact, .. } = source else { return None };
+            let retain = match &fact.content {
+                HistoryContent::User(_) => true,
+                HistoryContent::Grow(value) => matches!(value.as_ref(), GrowHistoryFact::TaskBackgrounded { .. } | GrowHistoryFact::TaskCompleted { .. } | GrowHistoryFact::RewindMarker { .. }),
+                _ => false,
             };
-            let update = &v["params"]["update"];
-            match update["sessionUpdate"].as_str() {
-                Some(tag) if tag == *TASK_BACKGROUNDED => {
-                    if let Some(id) = update["task_id"].as_str() {
-                        pending
-                            .insert(
-                                id.to_string(),
-                                OrphanedTask {
-                                    task_id: id.to_string(),
-                                    command: update["command"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    cwd: update["cwd"].as_str().unwrap_or_default().to_string(),
-                                },
-                            );
-                    }
-                }
-                Some(tag) if tag == *TASK_COMPLETED => {
-                    if let Some(id) = update["task_snapshot"]["task_id"].as_str() {
-                        pending.remove(id);
-                    }
-                }
-                _ => {}
+            if !retain { return None; }
+            fact.clone().into_update(session_id).ok().flatten()
+        }).collect();
+        let updates = crate::session::storage::filter_rewind_updates(updates);
+        let mut pending = std::collections::HashMap::<String, OrphanedTask>::new();
+        for update in updates {
+            let crate::session::storage::SessionUpdate::Grow(notification) = update else { continue };
+            match notification.update {
+                crate::extensions::notification::SessionUpdate::TaskBackgrounded { task_id, command, cwd, .. } => { pending.insert(task_id.clone(), OrphanedTask { task_id, command, cwd }); },
+                crate::extensions::notification::SessionUpdate::TaskCompleted { task_snapshot, .. } => { pending.remove(&task_snapshot.task_id); },
+                _ => {},
             }
         }
         pending.into_values().collect()
@@ -1374,9 +1217,9 @@ impl MvpAgent {
     pub(super) fn repair_stale_background_task_projections(
         &self,
         session_id: &acp::SessionId,
-        session_directory: &crate::session::storage::ContainedDirectory,
+        history: &crate::session::history::HistorySnapshot,
     ) -> Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>> {
-        let orphaned = Self::find_stale_background_task_projections(session_directory);
+        let orphaned = Self::find_stale_background_task_projections(session_id, history);
         if orphaned.is_empty() {
             return Vec::new();
         }

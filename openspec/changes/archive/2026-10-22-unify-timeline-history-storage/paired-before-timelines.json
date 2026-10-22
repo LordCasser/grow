@@ -1,0 +1,1137 @@
+{
+  "modern-128": {
+    "source": "paired-before-2-modern-128-1.trace.jsonl",
+    "load_ms": 92.70079100000001,
+    "first_history_ms": 37.3895,
+    "intervals": [
+      {
+        "name": "plugin_discovery",
+        "start_ms": 0.3259977111816406,
+        "end_ms": 0.5249977111816406,
+        "duration_ms": 0.199
+      },
+      {
+        "name": "mcp_merge",
+        "start_ms": 0.5359154663085938,
+        "end_ms": 0.6399154663085938,
+        "duration_ms": 0.104
+      },
+      {
+        "name": "session.load_session",
+        "start_ms": 0.7590245056152298,
+        "end_ms": 92.50402450561523,
+        "duration_ms": 91.745
+      },
+      {
+        "name": "session.load_light",
+        "start_ms": 0.8120169677734381,
+        "end_ms": 20.483016967773438,
+        "duration_ms": 19.671
+      },
+      {
+        "name": "session.load.open_session",
+        "start_ms": 0.9089071502685547,
+        "end_ms": 0.9849071502685547,
+        "duration_ms": 0.076
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "start_ms": 1.0739126281738285,
+        "end_ms": 6.290912628173828,
+        "duration_ms": 5.217
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "start_ms": 6.298011306762695,
+        "end_ms": 6.469011306762695,
+        "duration_ms": 0.171
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "start_ms": 6.474004959106446,
+        "end_ms": 6.675004959106445,
+        "duration_ms": 0.201
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "start_ms": 6.6860972595214845,
+        "end_ms": 10.816097259521484,
+        "duration_ms": 4.13
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "start_ms": 10.825992233276367,
+        "end_ms": 10.843992233276367,
+        "duration_ms": 0.018
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "start_ms": 10.85893701171875,
+        "end_ms": 20.07293701171875,
+        "duration_ms": 9.214
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "start_ms": 10.85895573425293,
+        "end_ms": 19.84095573425293,
+        "duration_ms": 8.982
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "start_ms": 20.07694380187988,
+        "end_ms": 20.077943801879883,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.load.state_projections",
+        "start_ms": 20.07994062805176,
+        "end_ms": 20.180940628051758,
+        "duration_ms": 0.101
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "start_ms": 20.51297184753418,
+        "end_ms": 20.51997184753418,
+        "duration_ms": 0.007
+      },
+      {
+        "name": "session.load_session_replay",
+        "start_ms": 20.53094270324707,
+        "end_ms": 30.32994270324707,
+        "duration_ms": 9.799
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "start_ms": 20.54802685546875,
+        "end_ms": 21.96502685546875,
+        "duration_ms": 1.417
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "start_ms": 21.96905905151367,
+        "end_ms": 27.080059051513672,
+        "duration_ms": 5.111
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "start_ms": 24.729100112915038,
+        "end_ms": 26.72410011291504,
+        "duration_ms": 1.995
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "start_ms": 26.73192839050293,
+        "end_ms": 26.73792839050293,
+        "duration_ms": 0.006
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "start_ms": 27.08307014465332,
+        "end_ms": 28.59807014465332,
+        "duration_ms": 1.515
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "start_ms": 28.602028564453125,
+        "end_ms": 30.323028564453125,
+        "duration_ms": 1.721
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "start_ms": 30.338956283569335,
+        "end_ms": 30.339956283569336,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "start_ms": 30.34210205078125,
+        "end_ms": 30.34210205078125,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "start_ms": 30.34494451904297,
+        "end_ms": 33.35094451904297,
+        "duration_ms": 3.006
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "start_ms": 33.3559513092041,
+        "end_ms": 33.3559513092041,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "start_ms": 33.46890960693359,
+        "end_ms": 65.7339096069336,
+        "duration_ms": 32.265
+      },
+      {
+        "name": "session.spawn_and_register",
+        "start_ms": 33.52790281677246,
+        "end_ms": 65.72890281677246,
+        "duration_ms": 32.201
+      },
+      {
+        "name": "session.spawn.prepare",
+        "start_ms": 33.52795701599121,
+        "end_ms": 33.92195701599121,
+        "duration_ms": 0.394
+      },
+      {
+        "name": "plugin_discovery",
+        "start_ms": 33.785953399658204,
+        "end_ms": 33.8139533996582,
+        "duration_ms": 0.028
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "start_ms": 33.9258987121582,
+        "end_ms": 63.2328987121582,
+        "duration_ms": 29.307
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 36.76991473388672,
+        "end_ms": 43.93291473388672,
+        "duration_ms": 7.163
+      },
+      {
+        "name": "resume_first_history_received",
+        "start_ms": 37.38999366760254,
+        "end_ms": 37.38999366760254
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "start_ms": 63.25497662353516,
+        "end_ms": 65.36197662353516,
+        "duration_ms": 2.107
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "start_ms": 65.42013444519043,
+        "end_ms": 65.72413444519043,
+        "duration_ms": 0.304
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 71.29692671203614,
+        "end_ms": 77.12292671203613,
+        "duration_ms": 5.826
+      },
+      {
+        "name": "resume_load_end",
+        "start_ms": 92.70191192626953,
+        "end_ms": 92.70191192626953
+      }
+    ]
+  },
+  "modern-512": {
+    "source": "paired-before-1-modern-512-1.trace.jsonl",
+    "load_ms": 207.87449999999998,
+    "first_history_ms": 116.633542,
+    "intervals": [
+      {
+        "name": "plugin_discovery",
+        "start_ms": 0.44584877014160157,
+        "end_ms": 0.6258487701416016,
+        "duration_ms": 0.18
+      },
+      {
+        "name": "mcp_merge",
+        "start_ms": 0.6409709930419922,
+        "end_ms": 0.7159709930419922,
+        "duration_ms": 0.075
+      },
+      {
+        "name": "session.load_session",
+        "start_ms": 0.8129554138183721,
+        "end_ms": 207.72695541381836,
+        "duration_ms": 206.914
+      },
+      {
+        "name": "session.load_light",
+        "start_ms": 0.8549722747802804,
+        "end_ms": 77.29697227478027,
+        "duration_ms": 76.442
+      },
+      {
+        "name": "session.load.open_session",
+        "start_ms": 0.9408879852294922,
+        "end_ms": 1.0058879852294922,
+        "duration_ms": 0.065
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "start_ms": 1.0908942260742194,
+        "end_ms": 21.76189422607422,
+        "duration_ms": 20.671
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "start_ms": 21.770928741455077,
+        "end_ms": 22.594928741455078,
+        "duration_ms": 0.824
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "start_ms": 22.599950119018555,
+        "end_ms": 23.628950119018555,
+        "duration_ms": 1.029
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "start_ms": 23.638858474731446,
+        "end_ms": 40.274858474731445,
+        "duration_ms": 16.636
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "start_ms": 40.28298628234863,
+        "end_ms": 40.33398628234863,
+        "duration_ms": 0.051
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "start_ms": 40.352882675170896,
+        "end_ms": 76.5988826751709,
+        "duration_ms": 36.246
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "start_ms": 40.35300312805176,
+        "end_ms": 75.84500312805176,
+        "duration_ms": 35.492
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "start_ms": 76.60384313964843,
+        "end_ms": 76.60484313964844,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.load.state_projections",
+        "start_ms": 76.60688629150391,
+        "end_ms": 76.7068862915039,
+        "duration_ms": 0.1
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "start_ms": 77.32683450317383,
+        "end_ms": 77.33583450317383,
+        "duration_ms": 0.009
+      },
+      {
+        "name": "session.load_session_replay",
+        "start_ms": 77.34500337219238,
+        "end_ms": 123.91400337219238,
+        "duration_ms": 46.569
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "start_ms": 77.36486967468262,
+        "end_ms": 83.33086967468262,
+        "duration_ms": 5.966
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "start_ms": 83.33692681884766,
+        "end_ms": 103.03592681884766,
+        "duration_ms": 19.699
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "start_ms": 93.94688298034669,
+        "end_ms": 101.52888298034668,
+        "duration_ms": 7.582
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "start_ms": 101.53596325683594,
+        "end_ms": 101.55296325683594,
+        "duration_ms": 0.017
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "start_ms": 103.0399979095459,
+        "end_ms": 108.9169979095459,
+        "duration_ms": 5.877
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "start_ms": 108.92389714050293,
+        "end_ms": 123.90589714050293,
+        "duration_ms": 14.982
+      },
+      {
+        "name": "resume_first_history_received",
+        "start_ms": 116.63293838500977,
+        "end_ms": 116.63293838500977
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "start_ms": 123.91987118530274,
+        "end_ms": 123.92187118530273,
+        "duration_ms": 0.002
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "start_ms": 123.92397062683105,
+        "end_ms": 123.92497062683105,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "start_ms": 123.93004281616211,
+        "end_ms": 135.1790428161621,
+        "duration_ms": 11.249
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "start_ms": 135.18595695495605,
+        "end_ms": 135.18595695495605,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "start_ms": 135.30491464233398,
+        "end_ms": 180.20391464233398,
+        "duration_ms": 44.899
+      },
+      {
+        "name": "session.spawn.prepare",
+        "start_ms": 135.36791075134278,
+        "end_ms": 135.78391075134277,
+        "duration_ms": 0.416
+      },
+      {
+        "name": "session.spawn_and_register",
+        "start_ms": 135.36886152648924,
+        "end_ms": 180.19986152648926,
+        "duration_ms": 44.831
+      },
+      {
+        "name": "plugin_discovery",
+        "start_ms": 135.6509602508545,
+        "end_ms": 135.6799602508545,
+        "duration_ms": 0.029
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "start_ms": 135.78787385559082,
+        "end_ms": 177.99687385559082,
+        "duration_ms": 42.209
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 145.62987133789062,
+        "end_ms": 152.01187133789062,
+        "duration_ms": 6.382
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "start_ms": 178.01786743164064,
+        "end_ms": 179.78286743164062,
+        "duration_ms": 1.765
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "start_ms": 179.8588547363281,
+        "end_ms": 180.19485473632812,
+        "duration_ms": 0.336
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 185.94201849365234,
+        "end_ms": 192.00801849365234,
+        "duration_ms": 6.066
+      },
+      {
+        "name": "resume_load_end",
+        "start_ms": 207.87382125854492,
+        "end_ms": 207.87382125854492
+      }
+    ]
+  },
+  "modern-2048": {
+    "source": "paired-before-3-modern-2048-1.trace.jsonl",
+    "load_ms": 695.377791,
+    "first_history_ms": 452.91837499999997,
+    "intervals": [
+      {
+        "name": "plugin_discovery",
+        "start_ms": 0.33983836364746095,
+        "end_ms": 0.5128383636474609,
+        "duration_ms": 0.173
+      },
+      {
+        "name": "mcp_merge",
+        "start_ms": 0.520835189819336,
+        "end_ms": 0.6158351898193359,
+        "duration_ms": 0.095
+      },
+      {
+        "name": "session.load_session",
+        "start_ms": 0.7319133148192805,
+        "end_ms": 695.1959133148193,
+        "duration_ms": 694.464
+      },
+      {
+        "name": "session.load_light",
+        "start_ms": 0.7739917297363377,
+        "end_ms": 315.0219917297363,
+        "duration_ms": 314.248
+      },
+      {
+        "name": "session.load.open_session",
+        "start_ms": 0.8609782257080079,
+        "end_ms": 0.9319782257080078,
+        "duration_ms": 0.071
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "start_ms": 1.0060296783447313,
+        "end_ms": 88.50502967834473,
+        "duration_ms": 87.499
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "start_ms": 88.51494157409668,
+        "end_ms": 91.21394157409668,
+        "duration_ms": 2.699
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "start_ms": 91.21995512390137,
+        "end_ms": 94.98095512390137,
+        "duration_ms": 3.761
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "start_ms": 94.99699351501465,
+        "end_ms": 165.54999351501465,
+        "duration_ms": 70.553
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "start_ms": 165.6808486328125,
+        "end_ms": 165.9698486328125,
+        "duration_ms": 0.289
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "start_ms": 166.00806079101562,
+        "end_ms": 312.9310607910156,
+        "duration_ms": 146.923
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "start_ms": 166.0089695739746,
+        "end_ms": 308.2289695739746,
+        "duration_ms": 142.22
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "start_ms": 312.9388822784424,
+        "end_ms": 312.9398822784424,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.load.state_projections",
+        "start_ms": 312.94285556030275,
+        "end_ms": 313.13085556030273,
+        "duration_ms": 0.188
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "start_ms": 315.07184158325197,
+        "end_ms": 315.08684158325195,
+        "duration_ms": 0.015
+      },
+      {
+        "name": "session.load_session_replay",
+        "start_ms": 315.1018889312744,
+        "end_ms": 509.5388889312744,
+        "duration_ms": 194.437
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "start_ms": 315.116045791626,
+        "end_ms": 339.184045791626,
+        "duration_ms": 24.068
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "start_ms": 339.1928928833008,
+        "end_ms": 421.4448928833008,
+        "duration_ms": 82.252
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "start_ms": 383.0249528503418,
+        "end_ms": 413.9399528503418,
+        "duration_ms": 30.915
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "start_ms": 413.9489225158691,
+        "end_ms": 414.02292251586914,
+        "duration_ms": 0.074
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "start_ms": 421.4559931488037,
+        "end_ms": 445.0089931488037,
+        "duration_ms": 23.553
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "start_ms": 445.0269612121582,
+        "end_ms": 509.5219612121582,
+        "duration_ms": 64.495
+      },
+      {
+        "name": "resume_first_history_received",
+        "start_ms": 452.92091369628906,
+        "end_ms": 452.92091369628906
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "start_ms": 509.55195562744143,
+        "end_ms": 509.5529556274414,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "start_ms": 509.55505506896975,
+        "end_ms": 509.5560550689697,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "start_ms": 509.55886154174806,
+        "end_ms": 561.133861541748,
+        "duration_ms": 51.575
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "start_ms": 561.1460208892822,
+        "end_ms": 561.1460208892822,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "start_ms": 561.2949616394043,
+        "end_ms": 660.0489616394043,
+        "duration_ms": 98.754
+      },
+      {
+        "name": "session.spawn.prepare",
+        "start_ms": 561.3738640747071,
+        "end_ms": 561.802864074707,
+        "duration_ms": 0.429
+      },
+      {
+        "name": "session.spawn_and_register",
+        "start_ms": 561.3750011749268,
+        "end_ms": 660.0430011749268,
+        "duration_ms": 98.668
+      },
+      {
+        "name": "plugin_discovery",
+        "start_ms": 561.6599926452636,
+        "end_ms": 561.6869926452637,
+        "duration_ms": 0.027
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "start_ms": 561.8080174407959,
+        "end_ms": 657.5620174407959,
+        "duration_ms": 95.754
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 608.1668405456543,
+        "end_ms": 614.6998405456543,
+        "duration_ms": 6.533
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "start_ms": 657.5909459686279,
+        "end_ms": 659.5809459686279,
+        "duration_ms": 1.99
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "start_ms": 659.6490407104492,
+        "end_ms": 660.0370407104492,
+        "duration_ms": 0.388
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 666.1298925628662,
+        "end_ms": 671.8308925628662,
+        "duration_ms": 5.701
+      },
+      {
+        "name": "resume_load_end",
+        "start_ms": 695.3799724578857,
+        "end_ms": 695.3799724578857
+      }
+    ]
+  },
+  "modern-repair-512": {
+    "source": "paired-before-3-modern-repair-512-1.trace.jsonl",
+    "load_ms": 384.164792,
+    "first_history_ms": 293.878292,
+    "intervals": [
+      {
+        "name": "plugin_discovery",
+        "start_ms": 0.28186869812011717,
+        "end_ms": 0.4298686981201172,
+        "duration_ms": 0.148
+      },
+      {
+        "name": "mcp_merge",
+        "start_ms": 0.43793101501464843,
+        "end_ms": 0.5109310150146484,
+        "duration_ms": 0.073
+      },
+      {
+        "name": "session.load_session",
+        "start_ms": 0.6069443359374986,
+        "end_ms": 384.0179443359375,
+        "duration_ms": 383.411
+      },
+      {
+        "name": "session.load_light",
+        "start_ms": 0.6458572998046748,
+        "end_ms": 255.2318572998047,
+        "duration_ms": 254.586
+      },
+      {
+        "name": "session.load.open_session",
+        "start_ms": 0.7669881896972657,
+        "end_ms": 0.8339881896972656,
+        "duration_ms": 0.067
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "start_ms": 0.9118047485351575,
+        "end_ms": 21.660804748535156,
+        "duration_ms": 20.749
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "start_ms": 21.669832473754884,
+        "end_ms": 22.488832473754883,
+        "duration_ms": 0.819
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "start_ms": 22.492911346435548,
+        "end_ms": 23.459911346435547,
+        "duration_ms": 0.967
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "start_ms": 23.470916610717772,
+        "end_ms": 39.43991661071777,
+        "duration_ms": 15.969
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "start_ms": 39.4480048828125,
+        "end_ms": 39.5050048828125,
+        "duration_ms": 0.057
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "start_ms": 39.52484498596191,
+        "end_ms": 75.86884498596191,
+        "duration_ms": 36.344
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "start_ms": 39.524858001708985,
+        "end_ms": 75.07085800170898,
+        "duration_ms": 35.546
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "start_ms": 75.87583560180664,
+        "end_ms": 254.58383560180664,
+        "duration_ms": 178.708
+      },
+      {
+        "name": "session.load.state_projections",
+        "start_ms": 254.59601094055176,
+        "end_ms": 254.67801094055176,
+        "duration_ms": 0.082
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "start_ms": 255.26601106262208,
+        "end_ms": 255.27501106262207,
+        "duration_ms": 0.009
+      },
+      {
+        "name": "session.load_session_replay",
+        "start_ms": 255.28491290283205,
+        "end_ms": 300.60291290283203,
+        "duration_ms": 45.318
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "start_ms": 255.29791163635255,
+        "end_ms": 261.20591163635254,
+        "duration_ms": 5.908
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "start_ms": 261.2117778930664,
+        "end_ms": 280.9457778930664,
+        "duration_ms": 19.734
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "start_ms": 272.0218359069824,
+        "end_ms": 279.5138359069824,
+        "duration_ms": 7.492
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "start_ms": 279.52081674194335,
+        "end_ms": 279.53481674194336,
+        "duration_ms": 0.014
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "start_ms": 280.9508166809082,
+        "end_ms": 287.0488166809082,
+        "duration_ms": 6.098
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "start_ms": 287.05480667114256,
+        "end_ms": 300.5948066711426,
+        "duration_ms": 13.54
+      },
+      {
+        "name": "resume_first_history_received",
+        "start_ms": 293.8799858093262,
+        "end_ms": 293.8799858093262
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "start_ms": 300.6119264831543,
+        "end_ms": 300.6129264831543,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "start_ms": 300.6148338317871,
+        "end_ms": 300.6148338317871,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "start_ms": 300.6189138183594,
+        "end_ms": 312.8929138183594,
+        "duration_ms": 12.274
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "start_ms": 312.90197372436523,
+        "end_ms": 312.90197372436523,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "start_ms": 313.03684899902345,
+        "end_ms": 355.26084899902344,
+        "duration_ms": 42.224
+      },
+      {
+        "name": "session.spawn_and_register",
+        "start_ms": 313.1028885345459,
+        "end_ms": 355.2548885345459,
+        "duration_ms": 42.152
+      },
+      {
+        "name": "session.spawn.prepare",
+        "start_ms": 313.1030010070801,
+        "end_ms": 313.5190010070801,
+        "duration_ms": 0.416
+      },
+      {
+        "name": "plugin_discovery",
+        "start_ms": 313.3858120880127,
+        "end_ms": 313.4148120880127,
+        "duration_ms": 0.029
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "start_ms": 313.5238145599365,
+        "end_ms": 352.8478145599365,
+        "duration_ms": 39.324
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 323.3548330230713,
+        "end_ms": 329.8628330230713,
+        "duration_ms": 6.508
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "start_ms": 352.86888885498047,
+        "end_ms": 354.86888885498047,
+        "duration_ms": 2.0
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "start_ms": 354.93488174438477,
+        "end_ms": 355.24988174438477,
+        "duration_ms": 0.315
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 361.29200958251954,
+        "end_ms": 367.17700958251953,
+        "duration_ms": 5.885
+      },
+      {
+        "name": "resume_load_end",
+        "start_ms": 384.16600227355957,
+        "end_ms": 384.16600227355957
+      }
+    ]
+  },
+  "modern-short-512": {
+    "source": "paired-before-1-modern-short-512-1.trace.jsonl",
+    "load_ms": 110.569666,
+    "first_history_ms": 42.212166,
+    "intervals": [
+      {
+        "name": "plugin_discovery",
+        "start_ms": 0.24694097900390624,
+        "end_ms": 0.41294097900390625,
+        "duration_ms": 0.166
+      },
+      {
+        "name": "mcp_merge",
+        "start_ms": 0.4211027374267578,
+        "end_ms": 0.4971027374267578,
+        "duration_ms": 0.076
+      },
+      {
+        "name": "session.load_session",
+        "start_ms": 0.6279027709960872,
+        "end_ms": 110.4269027709961,
+        "duration_ms": 109.799
+      },
+      {
+        "name": "session.load_light",
+        "start_ms": 0.6969003448486326,
+        "end_ms": 26.295900344848633,
+        "duration_ms": 25.599
+      },
+      {
+        "name": "session.load.open_session",
+        "start_ms": 0.8299973907470704,
+        "end_ms": 0.9109973907470703,
+        "duration_ms": 0.081
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "start_ms": 1.0201169433593744,
+        "end_ms": 9.426116943359375,
+        "duration_ms": 8.406
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "start_ms": 9.431994079589844,
+        "end_ms": 10.107994079589844,
+        "duration_ms": 0.676
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "start_ms": 10.113099548339843,
+        "end_ms": 10.291099548339844,
+        "duration_ms": 0.178
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "start_ms": 10.299003707885742,
+        "end_ms": 20.087003707885742,
+        "duration_ms": 9.788
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "start_ms": 20.09407160949707,
+        "end_ms": 20.13707160949707,
+        "duration_ms": 0.043
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "start_ms": 20.155967239379883,
+        "end_ms": 25.326967239379883,
+        "duration_ms": 5.171
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "start_ms": 20.156043579101564,
+        "end_ms": 25.629043579101562,
+        "duration_ms": 5.473
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "start_ms": 25.63109669494629,
+        "end_ms": 25.63309669494629,
+        "duration_ms": 0.002
+      },
+      {
+        "name": "session.load.state_projections",
+        "start_ms": 25.6370799407959,
+        "end_ms": 25.7260799407959,
+        "duration_ms": 0.089
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "start_ms": 26.328954666137694,
+        "end_ms": 26.335954666137695,
+        "duration_ms": 0.007
+      },
+      {
+        "name": "session.load_session_replay",
+        "start_ms": 26.459000961303712,
+        "end_ms": 45.71700096130371,
+        "duration_ms": 19.258
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "start_ms": 26.47494551086426,
+        "end_ms": 28.435945510864258,
+        "duration_ms": 1.961
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "start_ms": 28.43989454650879,
+        "end_ms": 37.00089454650879,
+        "duration_ms": 8.561
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "start_ms": 32.554034164428714,
+        "end_ms": 36.22603416442871,
+        "duration_ms": 3.672
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "start_ms": 36.23400820922851,
+        "end_ms": 36.242008209228516,
+        "duration_ms": 0.008
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "start_ms": 37.00395722961426,
+        "end_ms": 38.87295722961426,
+        "duration_ms": 1.869
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "start_ms": 38.87608682250976,
+        "end_ms": 45.710086822509766,
+        "duration_ms": 6.834
+      },
+      {
+        "name": "resume_first_history_received",
+        "start_ms": 42.21200942993164,
+        "end_ms": 42.21200942993164
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "start_ms": 45.724107192993166,
+        "end_ms": 45.725107192993164,
+        "duration_ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "start_ms": 45.72796821594238,
+        "end_ms": 45.72796821594238,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "start_ms": 45.72996139526367,
+        "end_ms": 49.47996139526367,
+        "duration_ms": 3.75
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "start_ms": 49.488067626953125,
+        "end_ms": 49.488067626953125,
+        "duration_ms": 0.0
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "start_ms": 49.59695726013184,
+        "end_ms": 81.99095726013184,
+        "duration_ms": 32.394
+      },
+      {
+        "name": "session.spawn_and_register",
+        "start_ms": 49.66390414428711,
+        "end_ms": 81.98690414428711,
+        "duration_ms": 32.323
+      },
+      {
+        "name": "session.spawn.prepare",
+        "start_ms": 49.66402700805664,
+        "end_ms": 50.05502700805664,
+        "duration_ms": 0.391
+      },
+      {
+        "name": "plugin_discovery",
+        "start_ms": 49.92693753051758,
+        "end_ms": 49.95393753051758,
+        "duration_ms": 0.027
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "start_ms": 50.0609288482666,
+        "end_ms": 79.7579288482666,
+        "duration_ms": 29.697
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 54.2371134185791,
+        "end_ms": 60.5471134185791,
+        "duration_ms": 6.31
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "start_ms": 79.78500511169433,
+        "end_ms": 81.64000511169434,
+        "duration_ms": 1.855
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "start_ms": 81.69389735412598,
+        "end_ms": 81.98189735412598,
+        "duration_ms": 0.288
+      },
+      {
+        "name": "skill_discovery",
+        "start_ms": 87.69499156188965,
+        "end_ms": 93.49799156188965,
+        "duration_ms": 5.803
+      },
+      {
+        "name": "resume_load_end",
+        "start_ms": 110.56995391845703,
+        "end_ms": 110.56995391845703
+      }
+    ]
+  }
+}

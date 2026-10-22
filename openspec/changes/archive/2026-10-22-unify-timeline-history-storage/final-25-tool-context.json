@@ -1,0 +1,41 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--release",
+    "-p",
+    "shell",
+    "-p",
+    "pager",
+    "-p",
+    "pager-pty-harness",
+    "--features",
+    "shell/test-support",
+    "--test",
+    "test_tool_dispatch_duration_smoke",
+    "--no-run",
+    "--message-format=json"
+  ],
+  "source_sha256": "c75a21525ed2fc49cc5e0b4a03b9563cda96326892f7344870a87bc00c196949",
+  "started": 1792609824.616648,
+  "prior": "final-24-tool-context.json",
+  "correction": "Use persisted Summary.info.cwd for ACP load, validating it resolves to the test workspace; headless OS cwd uses canonical /private/var while sandbox path uses /var. Test-only addressing correction; same physical history and assertions.",
+  "binary": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/test_tool_dispatch_duration_smoke-8a9eba687b03ea7f",
+  "binary_sha256": "c613d52ceec603604f44bd806d3f4e52fd7a2dacc8dbd4178b9c4fcf7b8166d3",
+  "profile": {
+    "opt_level": "3",
+    "debuginfo": 0,
+    "debug_assertions": false,
+    "overflow_checks": false,
+    "test": true
+  },
+  "cli": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/grow",
+    "sha256": "f4f432dce245cb2d585e21817a1a8a79e382e5d417839a125327173de74d34cf"
+  },
+  "build_exit": 0,
+  "test_exit": 0,
+  "ended": 1792609835.5490181
+}

@@ -1,0 +1,7 @@
+{
+  "binary": "/Users/lordcasser/workspace/projects/grow/target/resume-release/before/session_load_perf",
+  "sha256": "b898339791d7ce3535faffff0a4f9583ace2aa1e2ff3f030e34fe2d81a76e923",
+  "profile": "release",
+  "fixture": "cold process; warm page cache; setup outside RPC",
+  "rss_scope": "whole test process including fixture, not isolated load peak"
+}

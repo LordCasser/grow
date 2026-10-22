@@ -1872,10 +1872,7 @@ mod tests {
         let mut timeline = Timeline::default();
         record_search_turn(&mut timeline, 1, 0, "hello", "world", vec![]);
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        for event in timeline.events() {
-            serde_json::to_writer(&mut file, event).unwrap();
-            writeln!(file).unwrap();
-        }
+        file.write_all(&encode_timeline(&timeline)).unwrap();
         file.flush().unwrap();
         let file_size = std::fs::metadata(file.path()).unwrap().len();
 
@@ -1906,10 +1903,7 @@ mod tests {
             vec![],
         );
         let mut file = std::fs::File::create(&path).unwrap();
-        for event in original.events() {
-            serde_json::to_writer(&mut file, event).unwrap();
-            writeln!(file).unwrap();
-        }
+        file.write_all(&encode_timeline(&original)).unwrap();
         file.sync_all().unwrap();
 
         let reader =
@@ -1920,15 +1914,47 @@ mod tests {
         let mut decoy = Timeline::default();
         record_search_turn(&mut decoy, 2, 0, "decoy prompt", "decoy answer", vec![]);
         let mut replacement = std::fs::File::create(&path).unwrap();
-        for event in decoy.events() {
-            serde_json::to_writer(&mut replacement, event).unwrap();
-            writeln!(replacement).unwrap();
-        }
+        replacement.write_all(&encode_timeline(&decoy)).unwrap();
         replacement.sync_all().unwrap();
 
         let (content, _) = collect_timeline_indexable_content(reader).unwrap();
         assert!(content.contains("original prompt"));
         assert!(!content.contains("decoy prompt"));
+    }
+
+    #[test]
+    fn timeline_collector_does_not_adopt_appends_after_capture() {
+        use std::io::Write as _;
+        let mut timeline = Timeline::default();
+        record_search_turn(
+            &mut timeline,
+            1,
+            0,
+            "original prompt",
+            "original answer",
+            vec![],
+        );
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = encode_timeline(&timeline);
+        file.write_all(&bytes).unwrap();
+        file.flush().unwrap();
+        let reader =
+            TimelineLedgerReader::from_file(file.reopen().unwrap(), file.path().to_path_buf())
+                .unwrap();
+        timeline
+            .append(
+                ConversationItem::assistant("later unique tail"),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        let appended = encode_timeline(&timeline);
+        assert!(appended.starts_with(&bytes));
+        file.write_all(&appended[bytes.len()..]).unwrap();
+        file.flush().unwrap();
+        let (content, bytes_read) = collect_timeline_indexable_content(reader).unwrap();
+        assert!(content.contains("original prompt"));
+        assert!(!content.contains("later unique tail"));
+        assert_eq!(bytes_read, bytes.len() as u64);
     }
 
     // ── bootstrap_once eager flag tests ────────────────────────────────────
@@ -2044,14 +2070,7 @@ mod tests {
     }
 
     fn encode_timeline(timeline: &Timeline) -> Vec<u8> {
-        use std::io::Write as _;
-
-        let mut bytes = Vec::new();
-        for event in timeline.events() {
-            serde_json::to_writer(&mut bytes, event).unwrap();
-            bytes.write_all(b"\n").unwrap();
-        }
-        bytes
+        super::super::JsonlStorageAdapter::encode_journal(timeline.events(), &[]).unwrap()
     }
 
     #[serial_test::serial]

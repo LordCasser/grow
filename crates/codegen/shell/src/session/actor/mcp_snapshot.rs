@@ -104,7 +104,8 @@ impl SessionActor {
             .tools
             .clone();
         if tools.is_empty() {
-            self.refresh_mcp_snapshot_under_publication(publication).await;
+            self.refresh_mcp_snapshot_under_publication(publication)
+                .await;
             return;
         }
         let mut all_ui_tools: std::collections::HashMap<
@@ -140,7 +141,8 @@ impl SessionActor {
             )
             .await;
         }
-        self.refresh_mcp_snapshot_under_publication(publication).await;
+        self.refresh_mcp_snapshot_under_publication(publication)
+            .await;
         self.emit_mcp_catalog_updates(all_ui_tools);
     }
 }

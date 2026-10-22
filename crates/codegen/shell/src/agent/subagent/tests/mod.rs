@@ -518,6 +518,7 @@ async fn usage_ack_precedes_terminal_presentation() {
                     ..
                 },
                 forward_to_gateway: true,
+                restored: false,
             })
         ));
 }
@@ -573,11 +574,13 @@ async fn emit_subagent_notification_sends_one_metadata_only_parent_command() {
             output: Some("large child answer".into()),
         },
         Some(&cmd_tx),
+        false,
     );
     match cmd_rx.try_recv().expect("parent command must fire") {
         SessionCommand::GrowSessionNotification {
             notification,
             forward_to_gateway: true,
+            restored: false,
         } => {
             assert!(matches!(
                 notification.update,
@@ -604,6 +607,7 @@ async fn emit_subagent_notification_sends_one_metadata_only_parent_command() {
             output: Some("large child answer".into()),
         },
         None,
+        false,
     );
     let acp_transport::AcpClientMessage::ExtNotification(message) =
         gateway_rx.try_recv().expect("direct fallback must forward")
@@ -1236,9 +1240,14 @@ fn write_recovery_child(
             },
         ))
         .unwrap();
-    crate::session::storage::write_jsonl_atomic(
-        &dir.join(crate::session::storage::TIMELINE_FILE),
+    let journal = crate::session::storage::JsonlStorageAdapter::encode_journal(
         child.events(),
+        &[],
+    )
+    .unwrap();
+    crate::session::storage::write_bytes_atomic(
+        &dir.join(crate::session::storage::TIMELINE_FILE),
+        &journal,
     )
     .unwrap();
     crate::session::storage::write_bytes_atomic(
@@ -1420,9 +1429,14 @@ async fn recovery_parent(
             chat_state::SubagentEvent::Spawned(spawn.clone()),
         ))
         .unwrap();
-    crate::session::storage::write_jsonl_atomic(
-        &session_dir.join(crate::session::storage::TIMELINE_FILE),
+    let journal = crate::session::storage::JsonlStorageAdapter::encode_journal(
         timeline.events(),
+        &[],
+    )
+    .unwrap();
+    crate::session::storage::write_bytes_atomic(
+        &session_dir.join(crate::session::storage::TIMELINE_FILE),
+        &journal,
     )
     .unwrap();
     let (persistence, receiver) = chat_state::MockTimelinePersistence::new();
@@ -2057,6 +2071,34 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
     else {
         panic!("expected acknowledged recovery receipt");
     };
+    let occurrence_id = format!("independent-notification-hook-{}", uuid::Uuid::now_v7());
+    let hook_event = parent
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Hook(
+            chat_state::HookEvent::Triggered {
+                occurrence_id: occurrence_id.clone(),
+                event: chat_state::HookEventType::Notification,
+                gate: chat_state::HookGateKind::Observe,
+                cause: chat_state::HookCause::Notification {
+                    notification_id: occurrence_id.clone(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            },
+        ))
+        .await
+        .expect("persist an independent notification hook before receipt ACK");
+    let hook_seq = hook_event.seq;
+    assert!(matches!(
+        hook_event.kind,
+        chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+            occurrence_id: ref persisted,
+            event: chat_state::HookEventType::Notification,
+            gate: chat_state::HookGateKind::Observe,
+            cause: chat_state::HookCause::Notification { notification_id: ref cause },
+            ref handlers,
+            ..
+        }) if persisted == &occurrence_id && cause == &occurrence_id && handlers.is_empty()
+    ));
     assert!(matches!(
         &source,
         chat_state::NotificationSource::SubagentCompleted {
@@ -2076,6 +2118,7 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
         )
         .await
         .unwrap();
+    let receipt_seq = receipt.seq;
     let receipt_id = match receipt.kind {
         chat_state::TimelineEventKind::Notification(
             chat_state::NotificationEvent::Received { id, .. },
@@ -2084,6 +2127,29 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
     };
     respond_to.send(Ok(receipt_id.clone())).unwrap();
     task.await.unwrap();
+    assert!(
+        hook_seq < receipt_seq,
+        "the independent hook must precede the recovery receipt in the durable Timeline"
+    );
+    let parent_events = parent.timeline_events().await.unwrap();
+    assert!(parent_events.iter().any(|event| matches!(
+        &event.kind,
+        chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+            occurrence_id: persisted,
+            event: chat_state::HookEventType::Notification,
+            gate: chat_state::HookGateKind::Observe,
+            cause: chat_state::HookCause::Notification { notification_id },
+            handlers,
+            ..
+        }) if persisted == &occurrence_id && notification_id == &occurrence_id && handlers.is_empty()
+    )));
+    assert!(!parent_events.iter().any(|event| matches!(
+        &event.kind,
+        chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Completed {
+            occurrence_id: completed,
+            ..
+        }) if completed == &occurrence_id
+    )), "recovery must not complete a hook that was admitted independently before its receipt ACK");
     assert_eq!(
         parent
             .received_notification_id(source, source_version)
@@ -3161,6 +3227,7 @@ async fn committed_cancelled_completion_presents_one_finish() {
                         ..
                     },
                     forward_to_gateway: true,
+                    restored: false,
                 } if status == "cancelled"
             ) {
             persisted += 1;

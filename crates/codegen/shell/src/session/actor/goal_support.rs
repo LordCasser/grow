@@ -1017,7 +1017,6 @@ impl SessionActor {
             self.notifications.persistence_tx.clone(),
             self.notifications.preview_gateway_budget.clone(),
             self.sampling_preview.clone(),
-            self.chat_state_handle.clone(),
             self.control_revision
                 .load(std::sync::atomic::Ordering::Acquire),
         )

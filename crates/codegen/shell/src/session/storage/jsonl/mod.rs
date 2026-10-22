@@ -1,6 +1,7 @@
+#[cfg(test)]
+use super::SessionUpdateEnvelope;
 use super::{
-    PersistedData, SESSION_SEARCH_INDEX_FILE, SessionUpdateEnvelope, StorageAdapter,
-    updates_truncate_for_prompt,
+    PersistedData, SESSION_SEARCH_INDEX_FILE, StorageAdapter, updates_truncate_for_prompt,
 };
 use crate::sampling::{
     ConversationItem, conversation_truncate_for_prompt, transform_conversation_cwd,
@@ -14,6 +15,8 @@ use fs2::FileExt;
 use std::io::{self, BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use workspace::session::file_state::RewindPoint;
+
+mod ledger;
 
 /// Hard limits for diagnostic and maintenance validation. Normal session
 /// loading keeps its existing semantics; bounded callers use this aggregate
@@ -84,8 +87,10 @@ struct LedgerPrefix {
     /// unchanged writer epoch, so normal append never rereads the historical
     /// ledger. A foreign write changes the stamp and forces a full hash check.
     hasher: blake3::Hasher,
+    state: crate::session::history::AppendState,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RawExactStatus {
     Missing,
@@ -187,6 +192,7 @@ pub(crate) struct OpenedSession {
 /// model-visible Surface, resume state, or copies must start here so Timeline,
 /// prompt blobs, and Sideband provenance cannot be validated independently.
 pub(crate) struct ValidatedTimeline {
+    pub(crate) history: crate::session::history::HistorySnapshot,
     pub(crate) timeline: chat_state::Timeline,
     pub(crate) sidebands: super::SidebandLedgers,
 }
@@ -227,40 +233,39 @@ impl OpenedSession {
         })
     }
 
-    /// Read the exact committed `updates.jsonl` envelopes. Unlike replay,
-    /// entity export is strict: a corrupt committed record makes the export
-    /// fail instead of silently producing an incomplete mirror.
-    pub(crate) fn update_envelopes(&self) -> io::Result<Vec<serde_json::Value>> {
-        let path = self.directory.display_path().join(super::UPDATES_FILE);
-        let file = match self.directory.open_regular(
-            std::ffi::OsStr::new(super::UPDATES_FILE),
-            "session updates ledger",
-        ) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-        let lines =
-            super::CommittedJsonlLines::from_open_file_at(file, path, "session updates ledger", 0)?;
-        let mut updates = Vec::new();
-        for (index, line) in lines.enumerate() {
-            let line = line?;
-            let value: serde_json::Value =
-                serde_json::from_slice(line.trim_ascii()).map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid committed update {index}: {error}"),
-                    )
-                })?;
-            super::SessionUpdateEnvelope::from_value(value.clone()).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid committed update {index}: {error}"),
-                )
-            })?;
-            updates.push(value);
+    /// Preserve exact bytes: converting checksum-bearing facts through Value
+    /// would change object field order before an import.
+    pub(crate) fn journal_records(
+        &self,
+        snapshot: &crate::session::history::HistorySnapshot,
+    ) -> io::Result<Vec<String>> {
+        let file = self.directory.open_regular(
+            std::ffi::OsStr::new(super::TIMELINE_FILE),
+            "Timeline journal",
+        )?;
+        let lines = super::CommittedJsonlLines::from_open_file_bounded(
+            file,
+            self.directory.display_path().join(super::TIMELINE_FILE),
+            "Timeline journal",
+            snapshot.bytes,
+        )?;
+        let mut hash = blake3::Hasher::new();
+        let records = lines
+            .map(|line| {
+                let line = line?;
+                hash.update(&line);
+                hash.update(b"\n");
+                String::from_utf8(line)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        if hash.finalize().to_hex().as_str() != snapshot.prefix_hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "exported Timeline prefix changed during capture",
+            ));
         }
-        Ok(updates)
+        Ok(records)
     }
 
     pub(crate) fn sideband_ledgers(
@@ -276,14 +281,35 @@ impl OpenedSession {
     }
 
     pub(crate) fn validated_timeline(&self, timeline_id: &str) -> io::Result<ValidatedTimeline> {
-        let timeline = Timeline::from_events(self.timeline_events()?)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let events = {
+            let _timer = crate::instrumentation_timer!("session.load.timeline_read_decode");
+            JsonlStorageAdapter::read_journal_from_directory(&self.directory)?
+        };
+        let history = events.history;
+        let timeline = {
+            let _timer = crate::instrumentation_timer!("session.load.timeline_fold");
+            Timeline::from_events(events.events)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        };
+        self.validate_timeline_evidence(timeline_id, timeline, history)
+    }
+
+    fn validate_timeline_evidence(
+        &self,
+        timeline_id: &str,
+        timeline: Timeline,
+        mut history: crate::session::history::HistorySnapshot,
+    ) -> io::Result<ValidatedTimeline> {
+        history.validate(&timeline)?;
+        history.load_notices(&self.directory, &timeline, timeline_id)?;
+        let _timer = crate::instrumentation_timer!("session.load.timeline_evidence");
         crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
             &self.directory,
             &timeline,
         )?;
         let sidebands = self.sideband_ledgers(timeline_id, &timeline)?;
         Ok(ValidatedTimeline {
+            history,
             timeline,
             sidebands,
         })
@@ -298,24 +324,27 @@ impl OpenedSession {
     ) -> io::Result<ValidatedTimeline> {
         let mut remaining_bytes = BOUNDED_VALIDATION_MAX_BYTES;
         let mut remaining_events = BOUNDED_VALIDATION_MAX_EVENTS;
-        let timeline_events = JsonlStorageAdapter::read_timeline_bounded_from_directory(
-            &self.directory,
-            &mut remaining_bytes,
-            &mut remaining_events,
-        )
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "mandatory Timeline ledger is missing",
-                )
-            } else {
-                error
-            }
-        })?;
+        let (timeline_events, mut history) =
+            JsonlStorageAdapter::read_timeline_bounded_from_directory(
+                &self.directory,
+                &mut remaining_bytes,
+                &mut remaining_events,
+            )
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "mandatory Timeline ledger is missing",
+                    )
+                } else {
+                    error
+                }
+            })?;
         let timeline = Timeline::from_events(timeline_events)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
+        history.validate(&timeline)?;
+        history.load_notices(&self.directory, &timeline, timeline_id)?;
         let sideband_ids = Self::bounded_sideband_ids(&timeline)?;
         let mut sidebands = super::SidebandLedgers::new();
         for sideband_id in &sideband_ids {
@@ -377,6 +406,7 @@ impl OpenedSession {
         crate::session::sampling_evidence::verify(&self.directory, &timeline)?;
 
         Ok(ValidatedTimeline {
+            history,
             timeline,
             sidebands,
         })
@@ -595,32 +625,24 @@ impl JsonlStorageAdapter {
         restore_for_write: bool,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
-        let opened = if restore_for_write {
-            self.open_session(info)?
-        } else {
-            self.open_session_for_observation(info)?
+        let opened = {
+            let _timer = crate::instrumentation_timer!("session.load.open_session");
+            if restore_for_write {
+                self.open_session(info)?
+            } else {
+                self.open_session_for_observation(info)?
+            }
         };
         let summary = opened.summary().clone();
-        let validated = opened.validated_timeline(&info.id.to_string())?;
-        let timeline = validated.timeline;
-        // Keep the already parsed complete physical snapshot alive through
-        // load reconciliation. Its ids remain occupied even when client
-        // replay later hides rows by cursor or rewind.
-        let physical_updates = if restore_for_write {
-            Some(Self::read_updates_from_directory(opened.directory())?)
+        let (validated, prefix) = if restore_for_write {
+            self.load_validated_writer_timeline(&opened, info)?
         } else {
-            None
+            (opened.validated_timeline(&info.id.to_string())?, None)
         };
-        let max_event_id_suffix = physical_updates
-            .as_deref()
-            .and_then(super::max_event_id_suffix);
+        let history = validated.history;
+        let timeline = validated.timeline;
         if restore_for_write {
-            // Reconcile helpers may append durable facts during load, so seed
-            // before they can emit any new event identity.
-            super::reseed_event_counter_from_projection_expectations(&timeline);
-            if let Some(max_suffix) = max_event_id_suffix {
-                crate::util::event_id::ensure_event_counter_at_least(max_suffix.saturating_add(1));
-            }
+            history.reseed_event_counter();
         }
         // Only the explicit new-writer load owns crash reconciliation. Merely
         // reading a live Session cannot end its still-running sidebands.
@@ -634,36 +656,7 @@ impl JsonlStorageAdapter {
         let summary = self
             .reconcile_model_projection(info, summary, &timeline, restore_for_write)
             .await?;
-        if restore_for_write {
-            let existing = physical_updates
-                .as_ref()
-                .expect("writer load captured physical updates");
-            let reconciled = crate::session::response_projection::reconcile_response_projections(
-                &info.id,
-                &timeline,
-                existing.clone(),
-            )?;
-            for update in reconciled {
-                let super::SessionUpdate::ResponseReplayProjection(projection) = update else {
-                    continue;
-                };
-                let already_present = existing.iter().any(|update| {
-                    matches!(
-                        update,
-                        super::SessionUpdate::ResponseReplayProjection(current)
-                            if current.exact_match(&projection)
-                    )
-                });
-                if !already_present {
-                    self.append_update_to_file(
-                        info,
-                        &super::SessionUpdate::ResponseReplayProjection(projection),
-                        AppendDurability::Durable,
-                    )
-                    .await?;
-                }
-            }
-        }
+        let _timer = crate::instrumentation_timer!("session.load.state_projections");
         let control_snapshot =
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
                 timeline.events(),
@@ -675,7 +668,15 @@ impl JsonlStorageAdapter {
                 timeline.events(),
             )?;
         let workflow_runs = self.load_workflow_runs_sync(info, &timeline, opened.directory())?;
+        // Publish only after every required load validation has succeeded. No
+        // parent Timeline write occurs in the reconciliation steps above.
+        if let Some(prefix) = prefix {
+            self.install_validated_writer_prefix(&opened, info, prefix)?;
+        }
+        let mut summary = summary;
+        summary.num_messages = history.display_record_count();
         let result = super::PersistedDataLight {
+            history,
             summary,
             timeline,
             control_snapshot,
@@ -691,6 +692,92 @@ impl JsonlStorageAdapter {
             "Session data loaded (without updates, rewind points deferred) from JSONL"
         );
         Ok(result)
+    }
+
+    fn load_validated_writer_timeline(
+        &self,
+        opened: &OpenedSession,
+        info: &Info,
+    ) -> io::Result<(ValidatedTimeline, Option<LedgerPrefix>)> {
+        // Unix stamps carry device/inode/change time. Other platforms retain
+        // the original full writer verification rather than borrowing a
+        // prefix without equivalent file identity evidence.
+        #[cfg(not(unix))]
+        return Ok((opened.validated_timeline(&info.id.to_string())?, None));
+        #[cfg(unix)]
+        {
+            let directory = opened.directory();
+            let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+            let path = directory.display_path().join(name);
+            let _lock = Self::lock_append_contained(directory, name, &path)?;
+            let mut file = directory
+                .open_regular(name, "mandatory Timeline ledger")
+                .map_err(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "mandatory Timeline ledger is missing",
+                        )
+                    } else {
+                        error
+                    }
+                })?;
+            let (events, history, prefix) = {
+                let _timer = crate::instrumentation_timer!("session.load.timeline_read_decode");
+                let (complete_len, _) = Self::read_timeline_tail(&mut file)?;
+                Self::read_timeline_prefix(&mut file, complete_len, &path)?
+            };
+            let timeline = {
+                let _timer = crate::instrumentation_timer!("session.load.timeline_fold");
+                Timeline::from_events(events)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            };
+            let validated =
+                opened.validate_timeline_evidence(&info.id.to_string(), timeline, history)?;
+            Ok((validated, Some(prefix)))
+        }
+    }
+
+    fn install_validated_writer_prefix(
+        &self,
+        opened: &OpenedSession,
+        info: &Info,
+        prefix: LedgerPrefix,
+    ) -> io::Result<()> {
+        let directory = opened.directory();
+        let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+        let path = directory.display_path().join(name);
+        #[cfg(any(unix, windows))]
+        let _lock = Self::lock_append_contained(directory, name, &path)?;
+        let file = directory.open_regular(name, "mandatory Timeline ledger")?;
+        Self::check_timeline_prefix_stamp(&file, &prefix.stamp)?;
+        let state = self.timeline_prefix_state(info)?;
+        let mut expected = state
+            .lock()
+            .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?;
+        if let Some(previous) = expected.as_ref()
+            && (previous.len != prefix.len || previous.hash != prefix.hash)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Timeline committed prefix changed during repeated writer load",
+            ));
+        }
+        *expected = Some(prefix);
+        Ok(())
+    }
+
+    fn check_timeline_prefix_stamp(
+        file: &std::fs::File,
+        expected: &LedgerFileStamp,
+    ) -> io::Result<()> {
+        if LedgerFileStamp::from_metadata(&file.metadata()?) != *expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Timeline changed while its committed prefix was being validated",
+            ));
+        }
+        Ok(())
     }
 
     pub fn new() -> Self {
@@ -828,14 +915,13 @@ impl JsonlStorageAdapter {
         self.open_session(info)?.timeline_events()
     }
 
-    /// Size of the currently pinned updates ledger. This exposes projection
-    /// metadata without leaking an authoritative session path.
-    pub fn updates_snapshot_len(&self, info: &Info) -> io::Result<u64> {
+    /// Size of the pinned physical history journal.
+    pub fn history_snapshot_len(&self, info: &Info) -> io::Result<u64> {
         self.open_session(info)?
             .directory()
             .open_regular(
-                std::ffi::OsStr::new(super::UPDATES_FILE),
-                "session updates ledger",
+                std::ffi::OsStr::new(super::TIMELINE_FILE),
+                "Timeline journal",
             )?
             .metadata()
             .map(|metadata| metadata.len())
@@ -891,12 +977,7 @@ impl JsonlStorageAdapter {
         if queries.is_empty() {
             return Ok(Vec::new());
         }
-        let events = super::read_committed_jsonl_from_directory::<chat_state::TimelineEvent>(
-            session,
-            std::ffi::OsStr::new(super::TIMELINE_FILE),
-            "session Timeline ledger",
-            super::MAX_JSONL_ENTRY_BYTES,
-        )?;
+        let events = Self::read_timeline_from_directory(session)?;
         let parent = Timeline::from_events(events)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let ledgers =
@@ -1274,9 +1355,6 @@ impl JsonlStorageAdapter {
         self.session_directory(info, true)
             .map(|directory| directory.display_path().to_path_buf())
     }
-    pub(super) fn updates_file(&self, info: &Info) -> PathBuf {
-        self.session_dir(info).join(super::UPDATES_FILE)
-    }
     fn timeline_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::TIMELINE_FILE)
     }
@@ -1574,25 +1652,18 @@ impl JsonlStorageAdapter {
         event: &chat_state::TimelineEvent,
         durability: AppendDurability,
     ) -> io::Result<()> {
-        let path = directory.display_path().join(super::TIMELINE_FILE);
-        let event_seq = event.seq.get();
-        let mut line = serde_json::to_vec(event)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        line.push(b'\n');
+        let event = event.clone();
         tokio::task::spawn_blocking(move || {
-            let _writer_owner = writer_owner;
-            #[cfg(test)]
-            let sync_probe = _writer_owner.timeline_sync_probe.as_deref();
-            Self::append_timeline_line_in_directory_sync_with_probe(
+            let _owner = writer_owner;
+            Self::append_journal_fact_sync(
                 &directory,
                 &prefix_state,
-                &path,
-                line,
-                event_seq,
+                ledger::AppendFact::Domain(event),
                 durability,
                 #[cfg(test)]
-                sync_probe,
+                _owner.timeline_sync_probe.as_deref(),
             )
+            .map(|_| ())
         })
         .await
         .map_err(io::Error::other)?
@@ -1642,7 +1713,7 @@ impl JsonlStorageAdapter {
         Self::append_timeline_event_with_durability(
             self.clone(),
             directory,
-            prefix_state,
+            prefix_state.clone(),
             event,
             durability,
         )
@@ -1652,6 +1723,12 @@ impl JsonlStorageAdapter {
             chat_state::TimelineEventKind::Messages(messages) => {
                 patch.record_activity = true;
                 patch.session_format_version = Some(SESSION_FORMAT_VERSION);
+                if messages.response_admission.is_some() {
+                    let count = prefix_state.lock().ok().and_then(|prefix| {
+                        prefix.as_ref().map(|prefix| prefix.state.display_records)
+                    });
+                    patch.messages = count.map(super::summary_write::CounterOp::Set);
+                }
                 patch.cwd_switch_bookkeeping_generation = messages
                     .items
                     .iter()
@@ -1726,207 +1803,56 @@ impl JsonlStorageAdapter {
         durability: AppendDurability,
         #[cfg(test)] sync_probe: Option<&TimelineSyncProbe>,
     ) -> io::Result<()> {
-        debug_assert!(line.ends_with(b"\n"));
-        Self::validate_jsonl_line_size(&line, "Timeline event")?;
-        let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = (directory, name, line, event_seq, durability);
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "handle-relative Timeline storage is unsupported on this platform",
-            ));
-        }
-        #[cfg(any(unix, windows))]
-        let lock = Self::lock_append_contained(directory, name, path)?;
-        #[cfg(any(unix, windows))]
-        let result = (|| {
-            let mut file = directory.open_read_write_create(name)?;
-            let (complete_len, last_line) = Self::read_timeline_tail(&mut file)?;
-            let original_len = file.metadata()?.len();
-            if complete_len != original_len {
-                tracing::warn!(
-                    path = %path.display(),
-                    discarded_bytes = original_len - complete_len,
-                    "discarding incomplete Timeline tail before append"
-                );
-                file.set_len(complete_len)?;
-            }
-            let current_stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
-
-            let mut expected = prefix_state
-                .lock()
-                .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?;
-            let mut prefix_hasher = match expected.as_ref() {
-                Some(prefix) if prefix.len == complete_len && prefix.stamp == current_stamp => {
-                    prefix.hasher.clone()
-                }
-                Some(prefix) if prefix.len == complete_len => {
-                    let actual = Self::load_timeline_prefix(&mut file, complete_len)?;
-                    if actual.hash != prefix.hash {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "Timeline committed prefix changed: expected {} bytes/{}, found {} bytes/{}",
-                                prefix.len,
-                                prefix.hash.to_hex(),
-                                actual.len,
-                                actual.hash.to_hex(),
-                            ),
-                        ));
-                    }
-                    let hasher = actual.hasher.clone();
-                    *expected = Some(actual);
-                    hasher
-                }
-                Some(prefix) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Timeline committed prefix length changed: expected {} bytes/{}, found {} bytes",
-                            prefix.len,
-                            prefix.hash.to_hex(),
-                            complete_len,
-                        ),
-                    ));
-                }
-                None => {
-                    let prefix = Self::load_timeline_prefix(&mut file, complete_len)?;
-                    let hasher = prefix.hasher.clone();
-                    *expected = Some(prefix);
-                    hasher
-                }
-            };
-
-            match last_line.as_deref() {
-                Some(last_line) => {
-                    let last: chat_state::TimelineEvent = serde_json::from_slice(last_line)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                    if last.seq.get() == event_seq {
-                        if last_line != &line[..line.len() - 1] {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("Timeline seq {event_seq} conflicts with persisted tail"),
-                            ));
-                        }
-                        if matches!(durability, AppendDurability::Durable) {
-                            Self::sync_file_durable(&file)?;
-                            #[cfg(test)]
-                            if let Some(probe) = sync_probe {
-                                probe(TimelineSyncPoint::File)?;
-                            }
-                            drop(file);
-                            directory.sync()?;
-                            #[cfg(test)]
-                            if let Some(probe) = sync_probe {
-                                probe(TimelineSyncPoint::Directory)?;
-                            }
-                        }
-                        return Ok(());
-                    }
-                    let expected = last.seq.get().checked_add(1).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "Timeline sequence overflow")
-                    })?;
-                    if event_seq != expected {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "Timeline append expected seq {expected}, received {event_seq}"
-                            ),
-                        ));
-                    }
-                }
-                None if event_seq != 0 => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("empty Timeline requires seq 0, received {event_seq}"),
-                    ));
-                }
-                None => {}
-            }
-
-            file.seek(io::SeekFrom::End(0))?;
-            file.write_all(&line)?;
-            file.flush()?;
-            prefix_hasher.update(&line);
-            let hash = prefix_hasher.finalize();
-            *expected = Some(LedgerPrefix {
-                len: complete_len.saturating_add(line.len() as u64),
-                hash,
-                stamp: LedgerFileStamp::from_metadata(&file.metadata()?),
-                hasher: prefix_hasher,
-            });
-            if matches!(durability, AppendDurability::Durable) {
-                Self::sync_file_durable(&file)?;
-                #[cfg(test)]
-                if let Some(probe) = sync_probe {
-                    probe(TimelineSyncPoint::File)?;
-                }
-                drop(file);
-                directory.sync()?;
-                #[cfg(test)]
-                if let Some(probe) = sync_probe {
-                    probe(TimelineSyncPoint::Directory)?;
-                }
-            }
-            Ok(())
-        })();
-        #[cfg(any(unix, windows))]
-        {
-            let _ = lock.unlock();
-            result
-        }
+        let _ = (path, event_seq);
+        let event: chat_state::TimelineEvent = serde_json::from_slice(line.trim_ascii())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Self::append_journal_fact_sync(
+            directory,
+            prefix_state,
+            ledger::AppendFact::Domain(event),
+            durability,
+            #[cfg(test)]
+            sync_probe,
+        )
+        .map(|_| ())
     }
 
     fn load_timeline_prefix(
         file: &mut std::fs::File,
         complete_len: u64,
     ) -> io::Result<LedgerPrefix> {
-        file.seek(io::SeekFrom::Start(0))?;
-        let mut hasher = blake3::Hasher::new();
-        let mut timeline = chat_state::Timeline::default();
-        let mut consumed = 0u64;
-        // Reuse one bounded record buffer. The fold retains canonical events,
-        // but validation never allocates a second copy of the whole JSONL file.
-        let mut record = Vec::new();
-        {
-            let mut reader = io::BufReader::new((&mut *file).take(complete_len));
-            loop {
-                record.clear();
-                let read = (&mut reader)
-                    .take(super::MAX_JSONL_ENTRY_BYTES.saturating_add(1))
-                    .read_until(b'\n', &mut record)?;
-                if read == 0 {
-                    break;
-                }
-                Self::validate_jsonl_line_size(&record, "Timeline event")?;
-                consumed += read as u64;
-                let json = record.strip_suffix(b"\n").ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Timeline committed prefix contains an incomplete record",
-                    )
-                })?;
-                let event = serde_json::from_slice::<chat_state::TimelineEvent>(json)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                timeline
-                    .accept(event)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                hasher.update(&record);
-            }
-        }
-        if consumed != complete_len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Timeline changed while its committed prefix was being validated",
-            ));
-        }
-        Ok(LedgerPrefix {
-            len: complete_len,
-            hash: hasher.finalize(),
-            stamp: LedgerFileStamp::from_metadata(&file.metadata()?),
-            hasher,
-        })
+        let _timer = crate::instrumentation_timer!("session.load.writer_prefix");
+        let (events, history, prefix) =
+            Self::read_timeline_prefix(file, complete_len, Path::new(super::TIMELINE_FILE))?;
+        let timeline = Timeline::from_events(events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        history.validate(&timeline)?;
+        Ok(prefix)
+    }
+
+    fn read_timeline_prefix(
+        file: &mut std::fs::File,
+        complete_len: u64,
+        path: &Path,
+    ) -> io::Result<(
+        Vec<chat_state::TimelineEvent>,
+        crate::session::history::HistorySnapshot,
+        LedgerPrefix,
+    )> {
+        let stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
+        let (data, hasher) = Self::read_journal_prefix_data(file, complete_len, path, None, None)?;
+        Self::check_timeline_prefix_stamp(file, &stamp)?;
+        Ok((
+            data.events,
+            data.history,
+            LedgerPrefix {
+                len: complete_len,
+                hash: hasher.finalize(),
+                stamp,
+                hasher,
+                state: data.state,
+            },
+        ))
     }
 
     fn append_sideband_line_sync(
@@ -2132,6 +2058,25 @@ impl JsonlStorageAdapter {
         directory: &super::ContainedDirectory,
         name: &std::ffi::OsStr,
         path: &Path,
+        line: Vec<u8>,
+        durability: AppendDurability,
+        #[cfg(test)] sync_probe: Option<&UpdateSyncProbe>,
+    ) -> io::Result<()> {
+        Self::append_jsonl_line_in_directory_sync_inner(
+            directory,
+            name,
+            path,
+            line,
+            durability,
+            #[cfg(test)]
+            sync_probe,
+        )
+    }
+
+    fn append_jsonl_line_in_directory_sync_inner(
+        directory: &super::ContainedDirectory,
+        name: &std::ffi::OsStr,
+        path: &Path,
         mut line: Vec<u8>,
         durability: AppendDurability,
         #[cfg(test)] sync_probe: Option<&UpdateSyncProbe>,
@@ -2174,6 +2119,8 @@ impl JsonlStorageAdapter {
                     sync_probe(UpdateSyncPoint::File)?;
                 }
                 Self::sync_file_durable(&file)?;
+            }
+            if matches!(durability, AppendDurability::Durable) {
                 drop(file);
                 #[cfg(test)]
                 if let Some(sync_probe) = sync_probe {
@@ -2518,6 +2465,46 @@ impl JsonlStorageAdapter {
         )
     }
 
+    /// Probe only the schema header. Unknown payload fields must be skipped
+    /// here so an incompatible version is reported before its future schema.
+    fn validate_record_version(
+        bytes: &[u8],
+        path: &Path,
+        line: usize,
+        component: &str,
+        current_version: u64,
+    ) -> io::Result<()> {
+        #[derive(serde::Deserialize)]
+        struct VersionProbe {
+            #[serde(default)]
+            version: Option<serde_json::Value>,
+        }
+        let probe: VersionProbe = serde_json::from_slice(bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}:{line}: {error}", path.display()),
+            )
+        })?;
+        let persisted_version = probe
+            .version
+            .as_ref()
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{line} has no valid schema version", path.display()),
+                )
+            })?;
+        if persisted_version != current_version {
+            return Err(crate::session::persistence::session_version_mismatch(
+                component,
+                persisted_version,
+                current_version,
+            ));
+        }
+        Ok(())
+    }
+
     fn read_versioned_jsonl_from_directory<T: serde::de::DeserializeOwned>(
         directory: &super::ContainedDirectory,
         name: &std::ffi::OsStr,
@@ -2536,32 +2523,13 @@ impl JsonlStorageAdapter {
         .into_iter()
         .enumerate()
         .map(|(index, raw)| {
-            let value: serde_json::Value = serde_json::from_str(raw.get()).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{}:{}: {error}", path.display(), index + 1),
-                )
-            })?;
-            let persisted_version = value
-                .get("version")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "{}:{} has no valid schema version",
-                            path.display(),
-                            index + 1,
-                        ),
-                    )
-                })?;
-            if persisted_version != current_version {
-                return Err(crate::session::persistence::session_version_mismatch(
-                    component,
-                    persisted_version,
-                    current_version,
-                ));
-            }
+            Self::validate_record_version(
+                raw.get().as_bytes(),
+                &path,
+                index + 1,
+                component,
+                current_version,
+            )?;
             serde_json::from_str(raw.get()).map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -2576,17 +2544,21 @@ impl JsonlStorageAdapter {
         directory: &super::ContainedDirectory,
         remaining_bytes: &mut u64,
         remaining_events: &mut usize,
-    ) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        Self::read_versioned_jsonl_bounded_from_directory(
-            directory,
+    ) -> io::Result<(
+        Vec<chat_state::TimelineEvent>,
+        crate::session::history::HistorySnapshot,
+    )> {
+        let file = directory.open_regular(
             std::ffi::OsStr::new(super::TIMELINE_FILE),
             "mandatory Timeline ledger",
-            super::MAX_JSONL_ENTRY_BYTES,
-            "Timeline schema",
-            u64::from(chat_state::TIMELINE_SCHEMA_VERSION),
-            remaining_bytes,
-            remaining_events,
+        )?;
+        Self::read_journal_file(
+            file,
+            directory.display_path().join(super::TIMELINE_FILE),
+            Some(remaining_bytes),
+            Some(remaining_events),
         )
+        .map(|data| (data.events, data.history))
     }
 
     fn read_versioned_jsonl_bounded_from_directory<T: serde::de::DeserializeOwned>(
@@ -2640,33 +2612,14 @@ impl JsonlStorageAdapter {
             if complete_records >= *remaining_events {
                 return Err(bounded_read_exhausted(description));
             }
-            let value: serde_json::Value = serde_json::from_slice(&line).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{}:{}: {error}", path.display(), complete_records + 1),
-                )
-            })?;
-            let persisted_version = value
-                .get("version")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "{}:{} has no valid schema version",
-                            path.display(),
-                            complete_records + 1
-                        ),
-                    )
-                })?;
-            if persisted_version != current_version {
-                return Err(crate::session::persistence::session_version_mismatch(
-                    component,
-                    persisted_version,
-                    current_version,
-                ));
-            }
-            items.push(serde_json::from_value(value).map_err(|error| {
+            Self::validate_record_version(
+                &line,
+                &path,
+                complete_records + 1,
+                component,
+                current_version,
+            )?;
+            items.push(serde_json::from_slice(&line).map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("{}:{}: {error}", path.display(), complete_records + 1),
@@ -2716,57 +2669,42 @@ impl JsonlStorageAdapter {
     pub(crate) fn read_timeline_from_directory(
         directory: &super::ContainedDirectory,
     ) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        Self::read_versioned_jsonl_from_directory(
-            directory,
-            std::ffi::OsStr::new(super::TIMELINE_FILE),
-            "mandatory Timeline ledger",
-            super::MAX_JSONL_ENTRY_BYTES,
-            "Timeline schema",
-            u64::from(chat_state::TIMELINE_SCHEMA_VERSION),
-        )
+        Ok(Self::read_journal_from_directory(directory)?.events)
     }
-    /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
+
+    /// Persist a finite presentation fact in the same physical Timeline.
     pub(super) async fn append_update_to_file(
         &self,
         info: &Info,
         update: &super::SessionUpdate,
         durability: AppendDurability,
-    ) -> io::Result<()> {
-        #[cfg(test)]
-        if let Some(append_probe) = &self.update_append_probe {
-            append_probe(durability)?;
-        }
-        let envelope = SessionUpdateEnvelope::from_update(update)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let mut line = serde_json::to_vec(&envelope)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        line.push(b'\n');
-        let directory = self.bound_session_directory(info)?;
-        let path = directory.display_path().join(super::UPDATES_FILE);
-        #[cfg(test)]
-        let sync_probe = self.update_sync_probe.clone();
-        tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            if let Some(sync_probe) = sync_probe {
-                return Self::append_jsonl_line_in_directory_sync_with_probe(
-                    &directory,
-                    std::ffi::OsStr::new(super::UPDATES_FILE),
-                    &path,
-                    line,
-                    durability,
-                    Some(sync_probe.as_ref()),
-                );
+    ) -> io::Result<bool> {
+        let actual_session = match update {
+            super::SessionUpdate::Acp(value) => &value.session_id,
+            super::SessionUpdate::Grow(value) => &value.session_id,
+            #[cfg(any(test, feature = "test-support"))]
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "derived projections cannot be persisted",
+                ));
             }
-            Self::append_jsonl_line_in_directory_sync(
-                &directory,
-                std::ffi::OsStr::new(super::UPDATES_FILE),
-                &path,
-                line,
-                durability,
-            )
-        })
-        .await
-        .map_err(io::Error::other)?
+        };
+        if actual_session != &info.id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "presentation session identity differs from journal owner",
+            ));
+        }
+        let Some(fact) = crate::session::history::HistoryFact::from_update(update)? else {
+            return Ok(false);
+        };
+        #[cfg(test)]
+        if let Some(probe) = &self.update_append_probe {
+            probe(durability)?;
+        }
+        self.append_journal_fact(info, ledger::AppendFact::Presentation(fact), durability)
+            .await
     }
     async fn append_update_with_bookkeeping(
         &self,
@@ -2776,17 +2714,14 @@ impl JsonlStorageAdapter {
     ) -> Result<(), super::AppendUpdateError> {
         self.ensure_writer_lease(info)
             .map_err(super::AppendUpdateError::NotCommitted)?;
-        self.append_update_to_file(info, update, durability)
+        let appended = self
+            .append_update_to_file(info, update, durability)
             .await
             .map_err(super::AppendUpdateError::NotCommitted)?;
-        let payload_free_anchor = matches!(update,
-            super::SessionUpdate::Acp(notification)
-                if notification.meta.as_ref().is_some_and(|meta| {
-                    meta.contains_key("samplingRequestId") && meta.contains_key("samplingAttempt")
-                })
-                && matches!(&notification.update,
-                    acp::SessionUpdate::AgentMessageChunk(chunk)
-                        if matches!(&chunk.content, acp::ContentBlock::Text(text) if text.text.is_empty())));
+        if !appended {
+            return Ok(());
+        }
+        let payload_free_anchor = matches!(update, super::SessionUpdate::Acp(notification) if crate::session::persistence::sampling_attempt_key(notification).is_some());
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
@@ -2799,178 +2734,6 @@ impl JsonlStorageAdapter {
         .await
         .map_err(super::AppendUpdateError::Committed)
     }
-    /// Read canonical envelopes from an `updates.jsonl` file.
-    ///
-    /// Uses direct string-to-typed deserialization (via `SessionUpdateEnvelope::from_str`)
-    /// with a borrowing envelope and `&RawValue` to avoid intermediate `Value` allocation.
-    ///
-    /// Updates are display/replay data appended non-atomically, so a torn line (crashed or
-    /// racing append) is skipped with a warning instead of failing the caller
-    /// (session load, fork copy). The live replay path is already lenient;
-    /// this keeps the fork path from bricking on the same corruption.
-    fn read_updates_jsonl(&self, path: PathBuf) -> io::Result<Vec<super::SessionUpdate>> {
-        let Some(iterator) = super::UpdatesIterator::open(&path)? else {
-            return Ok(Vec::new());
-        };
-        Self::collect_updates(iterator, &path)
-    }
-
-    fn read_updates_from_directory(
-        directory: &super::ContainedDirectory,
-    ) -> io::Result<Vec<super::SessionUpdate>> {
-        let path = directory.display_path().join(super::UPDATES_FILE);
-        let file = match directory.open_regular(
-            std::ffi::OsStr::new(super::UPDATES_FILE),
-            "session updates ledger",
-        ) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-        Self::collect_updates(super::UpdatesIterator::from_file(file, path.clone()), &path)
-    }
-
-    fn collect_updates(
-        iterator: super::UpdatesIterator,
-        path: &Path,
-    ) -> io::Result<Vec<super::SessionUpdate>> {
-        let mut skipped_lines: usize = 0;
-        let mut updates = Vec::new();
-        for parsed in iterator {
-            match parsed {
-                Ok(update) => updates.push(update),
-                Err(error) => {
-                    skipped_lines += 1;
-                    if skipped_lines == 1 {
-                        tracing::warn!(
-                            error = %error,
-                            path = %path.display(),
-                            "skipping unparseable updates.jsonl line (torn append?)"
-                        );
-                    }
-                }
-            }
-        }
-        if skipped_lines > 0 {
-            tracing::warn!(
-                skipped = skipped_lines,
-                loaded = updates.len(),
-                path = %path.display(),
-                "skipped unparseable session update lines"
-            );
-        }
-        Ok(updates)
-    }
-
-    fn sync_updates_file_and_directory_sync(
-        directory: &super::ContainedDirectory,
-        #[cfg(test)] sync_probe: Option<&UpdateSyncProbe>,
-    ) -> io::Result<()> {
-        let file = directory.open_read_write_create(std::ffi::OsStr::new(super::UPDATES_FILE))?;
-        #[cfg(test)]
-        if let Some(sync_probe) = sync_probe {
-            sync_probe(UpdateSyncPoint::File)?;
-        }
-        Self::sync_file_durable(&file)?;
-        drop(file);
-        #[cfg(test)]
-        if let Some(sync_probe) = sync_probe {
-            sync_probe(UpdateSyncPoint::Directory)?;
-        }
-        directory.sync()?;
-        Ok(())
-    }
-
-    async fn sync_updates_file_and_directory(&self, info: &Info) -> io::Result<()> {
-        let directory = self.bound_session_directory(info)?;
-        #[cfg(test)]
-        let sync_probe = self.update_sync_probe.clone();
-        tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            {
-                Self::sync_updates_file_and_directory_sync(&directory, sync_probe.as_deref())
-            }
-            #[cfg(not(test))]
-            {
-                Self::sync_updates_file_and_directory_sync(&directory)
-            }
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
-
-    fn raw_acp_event_status(
-        &self,
-        info: &Info,
-        expected: &acp::SessionNotification,
-    ) -> io::Result<RawExactStatus> {
-        let event_id = expected
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("eventId"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "interleaved response update has no eventId",
-                )
-            })?;
-        let expected = serde_json::to_value(expected)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let directory = self.bound_session_directory(info)?;
-        let mut exact = false;
-        for update in Self::read_updates_from_directory(&directory)? {
-            let super::SessionUpdate::Acp(existing) = update else {
-                continue;
-            };
-            let existing_id = existing
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("eventId"))
-                .and_then(serde_json::Value::as_str);
-            if existing_id == Some(event_id) {
-                let actual = serde_json::to_value(&existing)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                if actual == expected {
-                    exact = true;
-                } else {
-                    return Ok(RawExactStatus::Conflict);
-                }
-            }
-        }
-        Ok(if exact {
-            RawExactStatus::Exact
-        } else {
-            RawExactStatus::Missing
-        })
-    }
-
-    fn raw_projection_status(
-        &self,
-        info: &Info,
-        expected: &crate::session::response_projection::ResponseReplayProjection,
-    ) -> io::Result<RawExactStatus> {
-        let directory = self.bound_session_directory(info)?;
-        let mut exact = false;
-        for update in Self::read_updates_from_directory(&directory)? {
-            let super::SessionUpdate::ResponseReplayProjection(existing) = update else {
-                continue;
-            };
-            if existing.request_id == expected.request_id && existing.attempt == expected.attempt {
-                if existing.exact_match(expected) {
-                    exact = true;
-                } else {
-                    return Ok(RawExactStatus::Conflict);
-                }
-            }
-        }
-        Ok(if exact {
-            RawExactStatus::Exact
-        } else {
-            RawExactStatus::Missing
-        })
-    }
-
     /// Write summary to disk atomically (sync version for `spawn_blocking`).
     ///
     /// A plain `std::fs::write` truncates before writing, so a concurrent reader
@@ -3298,10 +3061,7 @@ impl JsonlStorageAdapter {
         quarantined.remove_all_contents()?;
         parent.remove_empty_child(&quarantine_name, true)?;
         let key = format!("{}\0{}", info.id, info.cwd);
-        self.writer_leases
-            .lock()
-            .map_err(|_| io::Error::other("session writer lease cache poisoned"))?
-            .remove(&key);
+        self.release_writer_lease(&key)?;
         let lease_name = Self::writer_lease_name(&info.id);
         match parent.remove_file(std::ffi::OsStr::new(&lease_name), true) {
             Ok(()) => {}
@@ -3749,10 +3509,7 @@ impl JsonlStorageAdapter {
             Err(error) => return Err(error),
         }
         let key = format!("{}\0{}", info.id, info.cwd);
-        self.writer_leases
-            .lock()
-            .map_err(|_| io::Error::other("session writer lease cache poisoned"))?
-            .remove(&key);
+        self.release_writer_lease(&key)?;
         let lease_name = Self::writer_lease_name(&info.id);
         match parent.remove_file(std::ffi::OsStr::new(&lease_name), true) {
             Ok(()) => {}
@@ -4864,7 +4621,7 @@ impl JsonlStorageAdapter {
             }
             staging.write_atomic(
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
-                &super::to_jsonl_bytes(timeline.events())?,
+                &Self::encode_journal(timeline.events(), &[])?,
                 true,
                 false,
             )?;
@@ -4995,6 +4752,7 @@ fn transform_session_id_in_update(
             notification.session_id = new_id.clone();
             vec![super::SessionUpdate::Grow(notification)]
         }
+        #[cfg(any(test, feature = "test-support"))]
         super::SessionUpdate::ResponseReplayProjection(projection) => {
             projection
                 .into_notifications()
@@ -5122,26 +4880,11 @@ impl JsonlStorageAdapter {
         let source_session = self.open_session(source_info)?;
         self.build_publish_and_cache(target_info, &parent, |staging| {
             let source_summary = source_session.summary().clone();
-            let source_timeline = source_session
-                .validated_timeline(&source_info.id.to_string())?
-                .timeline;
+            let source = source_session.validated_timeline(&source_info.id.to_string())?;
+            let source_timeline = source.timeline;
             let mut surface_to_copy = source_timeline.surface().to_vec();
-            let mut updates_to_copy: Vec<super::SessionUpdate> =
-                Self::read_updates_from_directory(source_session.directory())?;
-            if !options.fork_filter {
-                // Reconcile against the validated parent Timeline before any
-                // fork truncation. This removes stale/candidate rows, dedups
-                // exact projections, and synthesizes a missing projection at
-                // its canonical parent position. The projection is expanded
-                // below into ordinary child history; no child admission fact
-                // is fabricated.
-                updates_to_copy =
-                    crate::session::response_projection::reconcile_response_projections(
-                        &source_info.id,
-                        &source_timeline,
-                        updates_to_copy,
-                    )?;
-            }
+            let mut inherited_ids = source_timeline.surface_ids().to_vec();
+            let mut updates_to_copy = if options.fork_filter { Vec::new() } else { source.history.prepare(&source_info.id, &source_timeline, None)?.updates };
             if let Some(target_idx) = options.target_prompt_index {
                 updates_to_copy = super::filter_rewind_updates(updates_to_copy);
                 updates_to_copy.truncate(updates_truncate_for_prompt(&updates_to_copy, target_idx));
@@ -5150,6 +4893,7 @@ impl JsonlStorageAdapter {
                     target_idx,
                 ));
             }
+            inherited_ids.truncate(surface_to_copy.len());
             if options.fork_filter {
                 fork_filter_surface(&mut surface_to_copy);
                 updates_to_copy.clear();
@@ -5180,6 +4924,8 @@ impl JsonlStorageAdapter {
                 staging,
             )?;
             if options.strip_reasoning {
+                updates_to_copy.retain(|update| !matches!(update, super::SessionUpdate::Acp(notification) if matches!(notification.update, acp::SessionUpdate::AgentThoughtChunk(_))));
+                inherited_ids = inherited_ids.into_iter().zip(&surface_to_copy).filter_map(|(id, item)| (!matches!(item, ConversationItem::Reasoning(_))).then_some(id)).collect();
                 surface_to_copy =
                     chat_state::compaction_utils::strip_reasoning_blocks(surface_to_copy);
             }
@@ -5189,6 +4935,7 @@ impl JsonlStorageAdapter {
                 .filter_map(ConversationItem::working_directory_switch_generation)
                 .max()
                 .unwrap_or(0);
+            let inherited_positions = inherited_ids.iter().enumerate().map(|(index, id)| ((id.event.get(), id.item as usize), index)).collect::<std::collections::BTreeMap<_, _>>();
             let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
                 .into_iter()
                 .flat_map(|u| transform_session_id_in_update(u, &target_info.id))
@@ -5303,22 +5050,37 @@ impl JsonlStorageAdapter {
                     .record(announcement_state.timeline_kind()?)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
+            let mut facts = Vec::new();
+            for update in &transformed_updates {
+                let mut update = update.clone();
+                let source = if let super::SessionUpdate::Acp(notification) = &mut update {
+                    let meta = notification.meta.get_or_insert_with(Default::default);
+                    let source = meta.get("grow/historyMessageEvent").and_then(serde_json::Value::as_u64).zip(meta.get("grow/historyMessageItem").and_then(serde_json::Value::as_u64));
+                    for key in ["samplingRequestId", "samplingAttempt", "responseProjection"] { meta.remove(key); }
+                    source
+                } else { None };
+                if let Some(mut fact) = crate::session::history::HistoryFact::from_update(&update)? {
+                    if let Some((event, ordinal)) = source {
+                        if let Some(index) = inherited_positions.get(&(event, ordinal as usize)) {
+                            let reference = match &fact.content {
+                                crate::session::history::HistoryContent::Assistant(chunk) => Some((crate::session::history::TextChannel::Assistant, chunk.meta.clone())),
+                                crate::session::history::HistoryContent::Reasoning(chunk) if !options.strip_reasoning => Some((crate::session::history::TextChannel::Reasoning, chunk.meta.clone())),
+                                _ => None,
+                            };
+                            if let Some((channel, chunk_meta)) = reference { let source = fork_timeline.surface_ids().get(*index).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "fork seed source is absent"))?;
+                                fact.content = crate::session::history::HistoryContent::Message { event: source.event.get(), item: source.item as usize, channel, chunk_meta }; }
+                        }
+                    }
+                    // Forks own display identities and no parent source authority.
+                    if let Some(meta) = fact.meta.as_mut() {
+                        for key in ["grow/historyCursor", "samplingRequestId", "samplingAttempt", "responseProjection"] { meta.remove(key); }
+                    }
+                    facts.push(fact);
+                }
+            }
             staging.write_atomic(
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
-                &super::to_jsonl_bytes(fork_timeline.events())?,
-                true,
-                false,
-            )?;
-            let update_envelopes = transformed_updates
-                .iter()
-                .map(SessionUpdateEnvelope::from_update)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            staging.write_atomic(
-                std::ffi::OsStr::new(super::UPDATES_FILE),
-                &super::to_jsonl_bytes(&update_envelopes)?,
-                true,
-                false,
+                &Self::encode_journal(fork_timeline.events(), &facts)?, true, false,
             )?;
             Ok(super::CopySessionResult {
                 surface_items_copied,
@@ -5407,116 +5169,12 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         notification: &acp::SessionNotification,
     ) -> Result<(), super::AppendUpdateError> {
-        self.ensure_writer_lease(info)
-            .map_err(super::AppendUpdateError::NotCommitted)?;
-        let update = super::SessionUpdate::Acp(Box::new(notification.clone()));
-        match self
-            .raw_acp_event_status(info, notification)
-            .map_err(super::AppendUpdateError::NotCommitted)?
-        {
-            RawExactStatus::Exact => self
-                .sync_updates_file_and_directory(info)
-                .await
-                .map_err(super::AppendUpdateError::NotCommitted),
-            RawExactStatus::Conflict => {
-                Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "ACP eventId conflicts with persisted event",
-                )))
-            }
-            RawExactStatus::Missing => {
-                let append = self.append_update_durable_commit_aware(info, &update).await;
-                match append {
-                    Ok(()) => match self.raw_acp_event_status(info, notification) {
-                        Ok(RawExactStatus::Exact) => Ok(()),
-                        Ok(RawExactStatus::Conflict) => {
-                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "ACP eventId conflicts with persisted event",
-                            )))
-                        }
-                        Ok(RawExactStatus::Missing) => {
-                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "durable ACP event append is not physically present",
-                            )))
-                        }
-                        Err(error) => Err(super::AppendUpdateError::NotCommitted(error)),
-                    },
-                    Err(error) => match self.raw_acp_event_status(info, notification) {
-                        Ok(RawExactStatus::Exact) => self
-                            .sync_updates_file_and_directory(info)
-                            .await
-                            .map_err(super::AppendUpdateError::NotCommitted),
-                        Ok(RawExactStatus::Conflict) => {
-                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "ACP eventId conflicts with persisted event",
-                            )))
-                        }
-                        Ok(RawExactStatus::Missing) | Err(_) => Err(error),
-                    },
-                }
-            }
-        }
-    }
-    async fn commit_response_projection(
-        &self,
-        info: &Info,
-        projection: &crate::session::response_projection::ResponseReplayProjection,
-    ) -> Result<(), super::AppendUpdateError> {
-        self.ensure_writer_lease(info)
-            .map_err(super::AppendUpdateError::NotCommitted)?;
-        let update = super::SessionUpdate::ResponseReplayProjection(Box::new(projection.clone()));
-        match self
-            .raw_projection_status(info, projection)
-            .map_err(super::AppendUpdateError::NotCommitted)?
-        {
-            RawExactStatus::Exact => self
-                .sync_updates_file_and_directory(info)
-                .await
-                .map_err(super::AppendUpdateError::NotCommitted),
-            RawExactStatus::Conflict => {
-                Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "response projection identity conflicts with persisted projection",
-                )))
-            }
-            RawExactStatus::Missing => {
-                let append = self.append_update_durable_commit_aware(info, &update).await;
-                match append {
-                    Ok(()) => match self.raw_projection_status(info, projection) {
-                        Ok(RawExactStatus::Exact) => Ok(()),
-                        Ok(RawExactStatus::Conflict) => {
-                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "response projection identity conflicts with persisted projection",
-                            )))
-                        }
-                        Ok(RawExactStatus::Missing) => {
-                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "durable response projection append is not physically present",
-                            )))
-                        }
-                        Err(error) => Err(super::AppendUpdateError::NotCommitted(error)),
-                    },
-                    Err(error) => match self.raw_projection_status(info, projection) {
-                        Ok(RawExactStatus::Exact) => self
-                            .sync_updates_file_and_directory(info)
-                            .await
-                            .map_err(super::AppendUpdateError::NotCommitted),
-                        Ok(RawExactStatus::Conflict) => {
-                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "response projection identity conflicts with persisted projection",
-                            )))
-                        }
-                        Ok(RawExactStatus::Missing) | Err(_) => Err(error),
-                    },
-                }
-            }
-        }
+        self.append_update_with_bookkeeping(
+            info,
+            &super::SessionUpdate::Acp(Box::new(notification.clone())),
+            AppendDurability::Durable,
+        )
+        .await
     }
     async fn append_timeline_event(
         &self,
@@ -5640,10 +5298,10 @@ impl StorageAdapter for JsonlStorageAdapter {
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
                 timeline.events(),
             )?;
-        let updates = Self::read_updates_from_directory(opened.directory())?;
-        let updates = crate::session::response_projection::reconcile_response_projections(
-            &info.id, &timeline, updates,
-        )?;
+        let updates = validated
+            .history
+            .prepare(&info.id, &timeline, None)?
+            .updates;
         let signals =
             crate::session::signals::SessionSignals::latest_from_timeline(timeline.events())?;
         let announcement_state =
@@ -5865,4 +5523,6 @@ impl StorageAdapter for JsonlStorageAdapter {
 #[cfg(test)]
 mod durable_tests;
 #[cfg(test)]
-mod tests;
+mod response_commit_perf;
+#[cfg(test)]
+pub(crate) mod tests;

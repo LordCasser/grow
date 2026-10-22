@@ -685,12 +685,21 @@ impl ScrollbackState {
     /// replaced by an exact height). Hidden (group-truncated, height 0) and
     /// synthetic group-header rows render no markdown — their height is owned by
     /// group truncation, not measurement — so they are skipped.
-    fn measure_window_exact(&mut self, width: u16, start: usize, end: usize) -> bool {
+    fn measure_window_exact(
+        &mut self,
+        width: u16,
+        start: usize,
+        end: usize,
+    ) -> (bool, Vec<(usize, i32)>) {
+        if start > end {
+            return (false, Vec::new());
+        }
+
         // Cheap pre-scan: bail before building a Theme + layout when every in-window
         // entry is already measured or is a non-rendered (hidden / group-header) row.
         {
             let Some(cache) = self.layout_cache.as_ref() else {
-                return false;
+                return (false, Vec::new());
             };
             let needs_measure = (start..=end).any(|idx| {
                 cache.entries.get(idx).is_some_and(|info| {
@@ -698,7 +707,7 @@ impl ScrollbackState {
                 })
             });
             if !needs_measure {
-                return false;
+                return (false, Vec::new());
             }
         }
 
@@ -708,10 +717,11 @@ impl ScrollbackState {
         let inline_edit_height = self.inline_edit_height;
 
         let Some(cache) = self.layout_cache.as_mut() else {
-            return false;
+            return (false, Vec::new());
         };
 
         let mut measured_any = false;
+        let mut height_changes = Vec::new();
         for idx in start..=end {
             if idx >= cache.entries.len() {
                 break;
@@ -732,21 +742,45 @@ impl ScrollbackState {
             let renderer = EntryRenderer::new(entry, &theme)
                 .with_appearance_ref(&self.appearance)
                 .with_cwd(cwd);
-            cache.entries[idx].height = match inline_edit_height {
+            let old_height = info.height;
+            let new_height = match inline_edit_height {
                 Some((edit_id, h)) if edit_id == *entry_id => h,
                 _ => renderer.desired_height(entry_area_width),
             };
+            cache.entries[idx].height = new_height;
+            if old_height != new_height {
+                height_changes.push((idx, new_height as i32 - old_height as i32));
+            }
             // Truncated height only feeds prompt sticky-header min_height, so
             // only prompts pay for the extra Truncated-mode render; others keep
             // their seeded value (unused for non-prompts).
             if entry.block.is_user_prompt() {
-                cache.entry_truncated_heights[idx] =
-                    renderer.compute_truncated_height(entry_area_width);
+                let truncated_height = renderer.compute_truncated_height(entry_area_width);
+                cache.entry_truncated_heights[idx] = truncated_height;
+                if let Ok(prompt_idx) = cache
+                    .prompt_descriptors
+                    .binary_search_by_key(&idx, |prompt| prompt.entry_idx)
+                {
+                    cache.prompt_descriptors[prompt_idx].min_height =
+                        truncated_height.min(MAX_TRUNCATED_HEADER_HEIGHT);
+                }
             }
             cache.measured[idx] = true;
             measured_any = true;
         }
-        measured_any
+        (measured_any, height_changes)
+    }
+
+    /// Apply exact-height measurement deltas without rebuilding the entire
+    /// prefix. A pending structural change still owns a full gap/group rebuild.
+    fn apply_measured_height_changes(&mut self, changes: &[(usize, i32)]) {
+        if self.gaps_may_be_dirty {
+            self.rebuild_virtual_y_from_heights();
+            self.gaps_may_be_dirty = false;
+        } else if !changes.is_empty() {
+            self.patch_virtual_y_for_dirty(changes);
+        }
+        self.compute_total_height_from_cache();
     }
 
     /// Upgrade the on-screen entries from estimated to exact heights and re-anchor
@@ -764,14 +798,14 @@ impl ScrollbackState {
             let Some((start, end)) = self.measurement_window() else {
                 return;
             };
-            if !self.measure_window_exact(width, start, end) {
+            let (measured_any, changes) = self.measure_window_exact(width, start, end);
+            if !measured_any {
                 // Everything visible is exact: render will match the layout.
                 return;
             }
-            // Estimates became exact — rebuild offsets (cheap arithmetic, no
-            // markdown) and re-pin the viewport.
-            self.rebuild_virtual_y_from_heights();
-            self.compute_total_height_from_cache();
+            // Estimates became exact. Only entries after the changed heights
+            // move; gaps and group projection remain stable during measurement.
+            self.apply_measured_height_changes(&changes);
             if self.follow_mode {
                 // Bottom-anchored: re-pin to the (now exact) bottom.
                 self.follow_scroll_to_bottom();
@@ -854,7 +888,7 @@ impl ScrollbackState {
     }
 
     /// Measure exact heights for entries in `[start, end]` (clamped to the
-    /// visible range) and rebuild cached offsets if anything was newly measured.
+    /// visible range) and update cached offsets if anything was newly measured.
     fn measure_span_and_rebuild(&mut self, start: usize, end: usize, width: u16) {
         if self.viewport_height == 0 || self.layout_cache.is_none() {
             return;
@@ -868,9 +902,9 @@ impl ScrollbackState {
         if start > end {
             return;
         }
-        if self.measure_window_exact(width, start, end) {
-            self.rebuild_virtual_y_from_heights();
-            self.compute_total_height_from_cache();
+        let (measured_any, changes) = self.measure_window_exact(width, start, end);
+        if measured_any {
+            self.apply_measured_height_changes(&changes);
         }
     }
 
@@ -981,9 +1015,9 @@ impl ScrollbackState {
     /// Call after `ensure_layout_cache()` to derive total_height from cached entry heights.
     /// This replaces the old `precompute_total_height()` approach.
     ///
-    /// Only sums heights for entries in `visible_entry_range()`. In SingleTurn mode,
-    /// this means only the current turn's entries are counted, preventing scroll_down
-    /// from allowing scrolling past the end of the visible content.
+    /// Derives the total for `visible_entry_range()` from the cached virtual-Y
+    /// prefix. In SingleTurn mode, subtracting the range's first position keeps
+    /// prior turns out of the scrollable total.
     ///
     /// `total_height`/`scroll_offset` are `usize`, matching `virtual_y`
     /// (`Vec<usize>`), so the summed rows are never truncated. Capping the total
@@ -991,20 +1025,23 @@ impl ScrollbackState {
     /// once content exceeded 65 535 rows, `scroll_offset`/`max_offset`
     /// could not point past the cap and the last rows were unreachable.
     pub(super) fn compute_total_height_from_cache(&mut self) {
-        if let Some(ref cache) = self.layout_cache {
-            let range = self.visible_entry_range();
-            let layouts = &cache.entries[range.clone()];
-            // Sum entry heights + gap_after values in the visible range.
-            // Per-entry heights are u16; accumulate into usize so a long
-            // session (many entries / tall content) is not truncated.
-            let total: usize = layouts
-                .iter()
-                .map(|e| e.height as usize + e.gap_after as usize)
-                .sum();
-            // gap_after of the last entry acts as the trailing gap (always 1)
-            // for selection box bottom corner space, so total is correct as-is.
-            self.total_height = total;
+        let Some(cache) = self.layout_cache.as_ref() else {
+            return;
+        };
+        let range = self.visible_entry_range();
+        if range.is_empty() {
+            self.total_height = 0;
+            return;
         }
+
+        let start_y = cache.virtual_y[range.start];
+        let last_idx = range.end - 1;
+        let last_y = cache.virtual_y[last_idx];
+        let last = cache.entries[last_idx];
+        // virtual_y is a prefix over all entries, so subtracting the first
+        // visible position yields the local total while retaining the trailing
+        // gap after the last visible entry.
+        self.total_height = last_y + last.height as usize + last.gap_after as usize - start_y;
     }
 
     /// Update heights for dirty entries only.
@@ -1064,6 +1101,13 @@ impl ScrollbackState {
                 } else {
                     MAX_TRUNCATED_HEADER_HEIGHT
                 };
+                if let Ok(prompt_idx) = cache
+                    .prompt_descriptors
+                    .binary_search_by_key(&idx, |prompt| prompt.entry_idx)
+                {
+                    cache.prompt_descriptors[prompt_idx].min_height =
+                        cache.entry_truncated_heights[idx].min(MAX_TRUNCATED_HEADER_HEIGHT);
+                }
             }
 
             if new_height != old_height {
@@ -1133,16 +1177,16 @@ impl ScrollbackState {
     /// display_mode or structural changes), we can skip `recompute_gap_after`
     /// entirely and just shift the virtual_y entries after the earliest change.
     ///
-    /// `changes` is a list of `(entry_index, height_delta)` from
-    /// `update_dirty_entry_heights`. Returns the total height delta (sum of all
-    /// individual deltas), useful for O(1) total_height update.
-    pub(super) fn patch_virtual_y_for_dirty(&mut self, changes: &[(usize, i32)]) -> i32 {
+    /// `changes` is a list of `(entry_index, height_delta)` from a dirty update
+    /// or exact measurement. The same ordered deltas update prompt descriptors
+    /// in one pass, with each prompt receiving only preceding-entry changes.
+    pub(super) fn patch_virtual_y_for_dirty(&mut self, changes: &[(usize, i32)]) {
         if changes.is_empty() {
-            return 0;
+            return;
         }
 
         let Some(cache) = self.layout_cache.as_mut() else {
-            return 0;
+            return;
         };
 
         // Find the earliest changed index. All virtual_y entries after it
@@ -1150,73 +1194,53 @@ impl ScrollbackState {
         //
         // For the common streaming case (one entry at the end), this loop
         // touches zero virtual_y entries.
-        let earliest_idx = changes.iter().map(|&(idx, _)| idx).min().unwrap_or(0);
-
         // Build a cumulative delta: for each position from earliest_idx onward,
         // the delta is the sum of all changes at or before that position.
         // Sort changes by index to apply them in order.
         let mut sorted_changes = changes.to_vec();
         sorted_changes.sort_unstable_by_key(|&(idx, _)| idx);
+        let earliest_idx = sorted_changes[0].0;
 
-        let total_delta: i32 = sorted_changes.iter().map(|&(_, d)| d).sum();
-
-        // Apply deltas to virtual_y. Walk from earliest_idx+1 to the end,
-        // accumulating the delta as we pass each change point.
-        let mut change_iter = sorted_changes.iter().peekable();
-        let mut cumulative_delta: i64 = 0;
-
-        // Skip changes before earliest_idx (shouldn't happen, but defensive)
-        while change_iter
-            .peek()
-            .is_some_and(|&&(idx, _)| idx < earliest_idx)
-        {
-            let &(_, d) = change_iter.next().unwrap();
-            cumulative_delta += d as i64;
-        }
-
-        // Apply the delta at earliest_idx itself (affects entries after it)
-        if change_iter
-            .peek()
-            .is_some_and(|&&(idx, _)| idx == earliest_idx)
-        {
-            let &(_, d) = change_iter.next().unwrap();
-            cumulative_delta += d as i64;
-        }
-
-        // Now shift virtual_y[earliest_idx+1..] and update prompt_descriptors
+        // A change at index i shifts virtual_y only after i. Consume all
+        // changes at an index together before applying them to the next row.
+        let mut change_idx = sorted_changes.partition_point(|&(idx, _)| idx <= earliest_idx);
+        let mut cumulative_delta: i64 = sorted_changes[..change_idx]
+            .iter()
+            .map(|&(_, delta)| delta as i64)
+            .sum();
         for idx in (earliest_idx + 1)..cache.virtual_y.len() {
-            // Check if this index has its own height change
-            if change_iter.peek().is_some_and(|&&(cidx, _)| cidx == idx) {
-                let &(_, d) = change_iter.next().unwrap();
-                // Apply delta from earlier changes first, then add this one
-                cache.virtual_y[idx] = (cache.virtual_y[idx] as i64 + cumulative_delta) as usize;
-                cumulative_delta += d as i64;
-            } else {
-                cache.virtual_y[idx] = (cache.virtual_y[idx] as i64 + cumulative_delta) as usize;
+            cache.virtual_y[idx] = (cache.virtual_y[idx] as i64 + cumulative_delta) as usize;
+            while change_idx < sorted_changes.len() && sorted_changes[change_idx].0 == idx {
+                cumulative_delta += sorted_changes[change_idx].1 as i64;
+                change_idx += 1;
             }
         }
 
-        // Update prompt_descriptors y_virtual values for affected prompts
-        for pd in cache.prompt_descriptors.iter_mut() {
-            if pd.entry_idx > earliest_idx {
-                pd.y_virtual = (pd.y_virtual as i64 + total_delta as i64) as usize;
-            } else if pd.entry_idx == earliest_idx {
-                // The prompt itself didn't move, but its full_height may have changed
-                // (update from the cache which was already patched by update_dirty_entry_heights)
-                pd.full_height = cache.entries[pd.entry_idx].height;
+        // Prompt descriptors are already ordered by entry index. Merge them
+        // with the same sorted deltas, shifting each prompt only for changes
+        // before it and refreshing its own full height when it was dirty.
+        // Descriptors before the first changed entry cannot move, so begin at
+        // the first affected prompt; a tail update then visits an empty suffix.
+        let first_prompt_idx = cache
+            .prompt_descriptors
+            .partition_point(|prompt| prompt.entry_idx < earliest_idx);
+        let mut change_idx = 0;
+        let mut prior_delta = 0i64;
+        for prompt in &mut cache.prompt_descriptors[first_prompt_idx..] {
+            while change_idx < sorted_changes.len()
+                && sorted_changes[change_idx].0 < prompt.entry_idx
+            {
+                prior_delta += sorted_changes[change_idx].1 as i64;
+                change_idx += 1;
+            }
+            prompt.y_virtual = (prompt.y_virtual as i64 + prior_delta) as usize;
+            if change_idx < sorted_changes.len() && sorted_changes[change_idx].0 == prompt.entry_idx
+            {
+                prompt.full_height = cache.entries[prompt.entry_idx].height;
+                prompt.min_height = cache.entry_truncated_heights[prompt.entry_idx]
+                    .min(MAX_TRUNCATED_HEADER_HEIGHT);
             }
         }
-
-        // Also update full_height for any prompts at dirty indices
-        for &(idx, _) in changes {
-            for pd in cache.prompt_descriptors.iter_mut() {
-                if pd.entry_idx == idx {
-                    pd.full_height = cache.entries[idx].height;
-                }
-            }
-        }
-
-        total_delta
     }
 
     /// Try to extend an existing layout cache for a single newly appended entry.
@@ -1781,6 +1805,10 @@ pub fn compute_paint_window(
 
 #[cfg(test)]
 mod tests {
+    mod replay_tests {
+        include!("layout/replay_tests.rs");
+    }
+
     use super::super::test_util::*;
     use super::*;
     use crate::theme::cache::pin_theme;
@@ -2694,6 +2722,294 @@ mod tests {
         range
             .map(|i| exact_height(state, i, width) as u32 + cache.entries[i].gap_after as u32)
             .sum()
+    }
+
+    /// Build a long AllTurns transcript with a prompt every other entry so a
+    /// height change near the start exercises all later prompt descriptors.
+    fn layout_benchmark_state(entries: usize) -> ScrollbackState {
+        use crate::appearance::AppearanceConfig;
+
+        let mut state = ScrollbackState::new();
+        state.set_appearance(AppearanceConfig {
+            show_timestamps: false,
+            ..Default::default()
+        });
+        state.begin_batch();
+        for idx in 0..entries {
+            if idx % 2 == 0 {
+                state.push_block(RenderBlock::user_prompt(format!("prompt {idx}")));
+            } else {
+                state.push_block(RenderBlock::agent_message(format!(
+                    "response {idx} alpha beta gamma"
+                )));
+            }
+        }
+        state.end_batch();
+        state
+    }
+
+    /// Check the measured cache against independently rendered exact heights,
+    /// fixed fixture gaps, and the resulting prefix positions.
+    fn assert_exact_layout_oracle(state: &ScrollbackState, width: u16) {
+        let cache = state.layout_cache.as_ref().expect("prepared layout");
+        assert_eq!(state.visible_entry_range(), 0..state.len());
+        assert!(cache.measured.iter().all(|measured| *measured));
+
+        let mut expected_y = 0usize;
+        let mut expected_prompts = Vec::new();
+        for idx in 0..state.len() {
+            let exact = exact_height(state, idx, width);
+            let layout = cache.entries[idx];
+            assert_eq!(layout.height, exact, "entry {idx} exact height");
+            assert_eq!(layout.gap_after, 1, "fixture gap at entry {idx}");
+            assert_eq!(layout.group_header_count, 0, "fixture group at entry {idx}");
+            assert_eq!(cache.virtual_y[idx], expected_y, "entry {idx} virtual y");
+            if state.entry(idx).unwrap().block.is_user_prompt() {
+                expected_prompts.push((idx, expected_y, exact));
+            }
+            expected_y += exact as usize + 1;
+        }
+        assert_eq!(state.scroll_info().2, expected_y, "exact total height");
+
+        let actual_prompts = &cache.prompt_descriptors;
+        assert_eq!(actual_prompts.len(), expected_prompts.len());
+        for (actual, (idx, y, height)) in actual_prompts.iter().zip(expected_prompts) {
+            assert_eq!(actual.entry_idx, idx, "prompt descriptor entry");
+            assert_eq!(actual.y_virtual, y, "prompt descriptor virtual y");
+            assert_eq!(actual.full_height, height, "prompt descriptor height");
+        }
+    }
+
+    /// Manual baseline for clean-frame and height-only layout work as history
+    /// grows. Run explicitly with `--ignored --nocapture`; this is not a timing
+    /// assertion and all oracle checks happen outside measured intervals.
+    #[test]
+    #[ignore = "manual layout benchmark"]
+    fn manual_layout_prepare_clean_and_height_only_scales_with_history() {
+        use std::time::{Duration, Instant};
+
+        let _theme = pin_theme();
+        const CLEAN_FRAMES: usize = 64;
+        const HEIGHT_UPDATES: usize = 8;
+        const WIDTH: u16 = 80;
+
+        for entries in [128usize, 512, 2048] {
+            let mut state = layout_benchmark_state(entries);
+            // A full-height first layout measures every entry, so the exact
+            // renderer oracle remains independent of lazy estimates below.
+            state.prepare_layout(WIDTH, u16::MAX);
+            assert!(
+                state
+                    .layout_cache
+                    .as_ref()
+                    .unwrap()
+                    .measured
+                    .iter()
+                    .all(|m| *m)
+            );
+            state.prepare_layout(WIDTH, 40);
+            assert_exact_layout_oracle(&state, WIDTH);
+
+            let started = Instant::now();
+            for _ in 0..CLEAN_FRAMES {
+                state.prepare_layout(WIDTH, 40);
+            }
+            let clean_elapsed = started.elapsed();
+            assert_exact_layout_oracle(&state, WIDTH);
+
+            let agent_id = *state.entries.get_index(1).unwrap().0;
+            let mut height_elapsed = Duration::ZERO;
+            for update in 0..HEIGHT_UPDATES {
+                let old_height = state.get_cached_entry_height(1).unwrap();
+                assert!(state.push_chunk_to_agent(
+                    agent_id,
+                    &format!("\n{} {update}", "height-only update ".repeat(8)),
+                ));
+                assert!(!state.gaps_may_be_dirty, "streaming update preserves gaps");
+
+                let started = Instant::now();
+                state.prepare_layout(WIDTH, 40);
+                height_elapsed += started.elapsed();
+                assert!(
+                    state.get_cached_entry_height(1).unwrap() > old_height,
+                    "update {update} must change the selected entry height"
+                );
+                assert!(state.dirty_heights.is_empty());
+            }
+            assert_exact_layout_oracle(&state, WIDTH);
+
+            eprintln!(
+                "[layout-bench] entries={entries} prompts={} clean_frames={CLEAN_FRAMES} clean_total_ms={:.3} clean_avg_us={:.3} height_updates={HEIGHT_UPDATES} height_total_ms={:.3} height_avg_ms={:.3}",
+                entries.div_ceil(2),
+                clean_elapsed.as_secs_f64() * 1000.0,
+                clean_elapsed.as_secs_f64() * 1_000_000.0 / CLEAN_FRAMES as f64,
+                height_elapsed.as_secs_f64() * 1000.0,
+                height_elapsed.as_secs_f64() * 1000.0 / HEIGHT_UPDATES as f64,
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_dirty_height_changes_match_full_rebuild_prompt_positions() {
+        let _theme = pin_theme();
+        const WIDTH: u16 = 80;
+        const FULL_HEIGHT: u16 = u16::MAX;
+        const VIEW_HEIGHT: u16 = 20;
+        const MANUAL_SCROLL: usize = 50;
+        const DIRTY_INDICES: [usize; 3] = [1, 17, 33];
+        const APPENDED_TEXT: &str =
+            "\nexpanded output line alpha beta gamma delta epsilon zeta eta theta";
+
+        let mut incremental = layout_benchmark_state(48);
+        let mut reference = layout_benchmark_state(48);
+        incremental.prepare_layout(WIDTH, FULL_HEIGHT);
+        reference.prepare_layout(WIDTH, FULL_HEIGHT);
+        incremental.prepare_layout(WIDTH, VIEW_HEIGHT);
+        reference.prepare_layout(WIDTH, VIEW_HEIGHT);
+        incremental.set_scroll_offset(MANUAL_SCROLL);
+        reference.set_scroll_offset(MANUAL_SCROLL);
+        assert_exact_layout_oracle(&incremental, WIDTH);
+        assert_exact_layout_oracle(&reference, WIDTH);
+        let old_heights: Vec<_> = DIRTY_INDICES
+            .iter()
+            .map(|&idx| incremental.get_cached_entry_height(idx).unwrap())
+            .collect();
+
+        for idx in DIRTY_INDICES {
+            for state in [&mut incremental, &mut reference] {
+                let id = *state.entries.get_index(idx).unwrap().0;
+                assert!(state.push_chunk_to_agent(id, &APPENDED_TEXT.repeat(12)));
+            }
+        }
+
+        // The incremental path receives several unsorted HashSet entries in a
+        // single frame. The reference invalidates everything and rebuilds all
+        // offsets, exposing any prompt that received a later delta too early.
+        incremental.prepare_layout(WIDTH, VIEW_HEIGHT);
+        reference.invalidate_layout_cache();
+        // Rebuild every exact height with the viewport at the top, then restore
+        // the same manual offset before comparing the visible-range result.
+        reference.set_scroll_offset(0);
+        reference.prepare_layout(WIDTH, FULL_HEIGHT);
+        reference.prepare_layout(WIDTH, VIEW_HEIGHT);
+        reference.set_scroll_offset(MANUAL_SCROLL);
+        reference.prepare_layout(WIDTH, VIEW_HEIGHT);
+
+        let projection = |state: &ScrollbackState| {
+            let cache = state.layout_cache.as_ref().unwrap();
+            let rows = cache
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.height,
+                        entry.gap_after,
+                        entry.group_header_count,
+                        entry.group_collapse_header,
+                        entry.verb_group_header,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let prompts = cache
+                .prompt_descriptors
+                .iter()
+                .map(|prompt| {
+                    (
+                        prompt.entry_idx,
+                        prompt.y_virtual,
+                        prompt.full_height,
+                        prompt.min_height,
+                        prompt.sticky,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (
+                rows,
+                cache.virtual_y.clone(),
+                prompts,
+                state.total_height,
+                state.scroll_offset,
+                format!("{:?}", cache.groups),
+            )
+        };
+        assert_eq!(projection(&incremental), projection(&reference));
+        assert_exact_layout_oracle(&incremental, WIDTH);
+        assert_exact_layout_oracle(&reference, WIDTH);
+        for (idx, old_height) in DIRTY_INDICES.into_iter().zip(old_heights) {
+            assert!(
+                incremental.get_cached_entry_height(idx).unwrap() > old_height,
+                "dirty entry {idx} must have a changed exact height"
+            );
+        }
+    }
+
+    #[test]
+    fn tail_dirty_height_change_preserves_prompt_prefix() {
+        let _theme = pin_theme();
+        const WIDTH: u16 = 80;
+        const HEIGHT: u16 = u16::MAX;
+        const APPENDED_TEXT: &str = "\nexpanded final response line alpha beta gamma delta epsilon";
+
+        let mut state = layout_benchmark_state(48);
+        state.prepare_layout(WIDTH, HEIGHT);
+        let tail_idx = state.len() - 1;
+        let before: Vec<_> = state
+            .layout_cache
+            .as_ref()
+            .unwrap()
+            .prompt_descriptors
+            .iter()
+            .copied()
+            .filter(|prompt| prompt.entry_idx < tail_idx)
+            .collect();
+        let old_height = state.get_cached_entry_height(tail_idx).unwrap();
+        let id = *state.entries.get_index(tail_idx).unwrap().0;
+
+        assert!(state.push_chunk_to_agent(id, &APPENDED_TEXT.repeat(12)));
+        state.prepare_layout(WIDTH, HEIGHT);
+
+        let cache = state.layout_cache.as_ref().unwrap();
+        let after: Vec<_> = cache
+            .prompt_descriptors
+            .iter()
+            .copied()
+            .filter(|prompt| prompt.entry_idx < tail_idx)
+            .collect();
+        assert_eq!(
+            after, before,
+            "tail height changes leave prior prompts fixed"
+        );
+        assert!(cache.entries[tail_idx].height > old_height);
+        assert_exact_layout_oracle(&state, WIDTH);
+    }
+
+    #[test]
+    fn total_height_uses_visible_prefix_in_single_turn_mode() {
+        let _theme = pin_theme();
+        const WIDTH: u16 = 80;
+
+        let mut state = layout_benchmark_state(48);
+        state.prepare_layout(WIDTH, u16::MAX);
+        state.view_mode = ViewMode::SingleTurn;
+        state.current_turn = Some(10);
+        state.prepare_layout(WIDTH, 30);
+
+        let range = state.visible_entry_range();
+        assert!(
+            range.start > 0,
+            "selected turn must start after prior history"
+        );
+        assert_eq!(state.total_height as u32, exact_total_oracle(&state, WIDTH));
+        let cache = state.layout_cache.as_ref().unwrap();
+        let last_idx = range.end - 1;
+        assert_eq!(
+            state.total_height,
+            cache.virtual_y[last_idx]
+                + cache.entries[last_idx].height as usize
+                + cache.entries[last_idx].gap_after as usize
+                - cache.virtual_y[range.start],
+            "single-turn total is local to its prefix range"
+        );
     }
 
     #[test]

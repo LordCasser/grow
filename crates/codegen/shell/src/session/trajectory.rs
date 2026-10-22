@@ -111,6 +111,7 @@ struct SessionTrajectoryCache {
     tail_hash: Option<[u8; 32]>,
     source_stamp: Option<LedgerStamp>,
     timeline: chat_state::Timeline,
+    journal: super::history::AppendState,
     projector: chat_state::TrajectoryProjector,
     sidebands: BTreeMap<String, SidebandCache>,
     workflows: BTreeMap<String, WorkflowJournalCache>,
@@ -1845,6 +1846,11 @@ impl SessionTrajectoryCache {
         } else {
             std::mem::take(&mut self.projector)
         };
+        let mut journal = if rebuilding {
+            super::history::AppendState::default()
+        } else {
+            std::mem::take(&mut self.journal)
+        };
         let mut offset = if rebuilding { 0 } else { self.offset };
         let mut prefix_hasher = if rebuilding {
             None
@@ -1866,18 +1872,17 @@ impl SessionTrajectoryCache {
                     }
                     break;
                 }
-                for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if timeline.events().len() >= event_limit {
-                        anyhow::bail!("Trajectory exceeds the event limit");
-                    }
-                    let event = serde_json::from_slice::<chat_state::TimelineEvent>(line).map_err(
-                        |error| anyhow::anyhow!("{} at byte {offset}: {error}", path.display()),
-                    )?;
-                    timeline.accept(event.clone())?;
-                    projector.accept(&event);
+                for line in bytes[..complete_len].split_inclusive(|byte| *byte == b'\n') {
+                    accept_timeline_record(
+                        line.strip_suffix(b"\n").expect("committed record"),
+                        &mut timeline,
+                        &mut projector,
+                        &mut journal,
+                        event_limit,
+                    )
+                    .map_err(|error| {
+                        anyhow::anyhow!("{} at byte {offset}: {error}", path.display())
+                    })?;
                 }
                 prefix_hasher
                     .get_or_insert_with(blake3::Hasher::new)
@@ -1889,10 +1894,11 @@ impl SessionTrajectoryCache {
         })();
         if let Err(error) = ingestion {
             if !rebuilding {
-                let (restored_timeline, restored_projector) =
+                let (restored_timeline, restored_projector, restored_journal) =
                     replay_timeline_prefix(&mut file, old_offset, &path, event_limit)?;
                 self.timeline = restored_timeline;
                 self.projector = restored_projector;
+                self.journal = restored_journal;
             }
             return Err(error);
         }
@@ -1900,10 +1906,11 @@ impl SessionTrajectoryCache {
             Ok(hash) => hash,
             Err(error) => {
                 if !rebuilding {
-                    let (restored_timeline, restored_projector) =
+                    let (restored_timeline, restored_projector, restored_journal) =
                         replay_timeline_prefix(&mut file, old_offset, &path, event_limit)?;
                     self.timeline = restored_timeline;
                     self.projector = restored_projector;
+                    self.journal = restored_journal;
                 }
                 return Err(error);
             }
@@ -1919,6 +1926,7 @@ impl SessionTrajectoryCache {
             self.materialization_reset = replacing;
         }
         self.timeline = timeline;
+        self.journal = journal;
         self.projector = projector;
         self.offset = offset;
         self.prefix_hasher = prefix_hasher;
@@ -3223,16 +3231,40 @@ fn response_security_headers() -> HeaderMap {
     headers
 }
 
+fn accept_timeline_record(
+    line: &[u8],
+    timeline: &mut chat_state::Timeline,
+    projector: &mut chat_state::TrajectoryProjector,
+    journal: &mut super::history::AppendState,
+    event_limit: usize,
+) -> anyhow::Result<()> {
+    if journal.records >= event_limit as u64 {
+        anyhow::bail!("Trajectory exceeds the event limit");
+    }
+    let record = super::history::decode_record(line)?;
+    journal.accept(&record)?;
+    if let super::history::JournalFact::Domain { event, .. } = record.fact {
+        timeline.accept(event.clone())?;
+        projector.accept(&event);
+    }
+    Ok(())
+}
+
 fn replay_timeline_prefix(
     file: &mut std::fs::File,
     offset: u64,
     path: &Path,
     event_limit: usize,
-) -> anyhow::Result<(chat_state::Timeline, chat_state::TrajectoryProjector)> {
+) -> anyhow::Result<(
+    chat_state::Timeline,
+    chat_state::TrajectoryProjector,
+    super::history::AppendState,
+)> {
     file.seek(std::io::SeekFrom::Start(0))?;
     let mut reader = std::io::BufReader::new((&mut *file).take(offset));
     let mut timeline = chat_state::Timeline::default();
     let mut projector = chat_state::TrajectoryProjector::default();
+    let mut journal = super::history::AppendState::default();
     let mut line = Vec::new();
     let mut consumed = 0_u64;
     loop {
@@ -3246,15 +3278,13 @@ fn replay_timeline_prefix(
             anyhow::bail!("{} has an uncommitted cached prefix", path.display());
         }
         line.pop();
-        if line.is_empty() {
-            continue;
-        }
-        if timeline.events().len() >= event_limit {
-            anyhow::bail!("Trajectory exceeds the event limit");
-        }
-        let event = serde_json::from_slice::<chat_state::TimelineEvent>(&line)?;
-        timeline.accept(event.clone())?;
-        projector.accept(&event);
+        accept_timeline_record(
+            &line,
+            &mut timeline,
+            &mut projector,
+            &mut journal,
+            event_limit,
+        )?;
     }
     if consumed != offset {
         anyhow::bail!(
@@ -3262,7 +3292,7 @@ fn replay_timeline_prefix(
             path.display()
         );
     }
-    Ok((timeline, projector))
+    Ok((timeline, projector, journal))
 }
 
 fn replay_workflow_prefix(
@@ -3742,30 +3772,128 @@ mod tests {
     }
 
     fn write_timeline(path: &Path, timeline: &chat_state::Timeline) {
-        let body = timeline
-            .events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        std::fs::write(path, body).unwrap();
+        write_timeline_events(path, timeline.events());
     }
 
     fn write_timeline_with_start_time(path: &Path, timeline: &chat_state::Timeline, start_ms: i64) {
-        let body = timeline
+        let events = timeline
             .events()
             .iter()
             .cloned()
             .enumerate()
             .map(|(index, mut event)| {
                 event.at_ms = start_ms.saturating_add(index as i64);
-                serde_json::to_string(&event).unwrap()
+                event
             })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        std::fs::write(path, body).unwrap();
+            .collect::<Vec<_>>();
+        write_timeline_events(path, &events);
+    }
+
+    fn write_timeline_events(path: &Path, events: &[chat_state::TimelineEvent]) {
+        let bytes = super::super::storage::JsonlStorageAdapter::encode_journal(events, &[])
+            .expect("encode physical Timeline journal");
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn append_timeline_events(path: &Path, events: &[chat_state::TimelineEvent]) {
+        use std::io::Write as _;
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        let lines = contents.lines().map(str::to_owned).collect::<Vec<_>>();
+        let journal = super::super::storage::JsonlStorageAdapter::decode_journal_lines(&lines)
+            .expect("decode existing physical Timeline journal");
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        for (index, event) in events.iter().enumerate() {
+            let seq = journal.state.records + index as u64;
+            let raw = serde_json::value::to_raw_value(event).unwrap();
+            let anchor = event
+                .messages()
+                .and_then(|message| message.response_admission.as_ref())
+                .map(|_| crate::session::history::ResponseAnchor::Admission);
+            let encoded = crate::session::history::encode_domain(seq, &raw, anchor).unwrap();
+            file.write_all(&encoded).unwrap();
+        }
+        file.flush().unwrap();
+    }
+
+    fn append_raw_bytes(path: &Path, bytes: &[u8]) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.flush().unwrap();
+    }
+
+    #[test]
+    fn presentation_record_corruption_preserves_and_can_resume_cached_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let timeline = chat_state::Timeline::from_seed(vec![
+            sampling_types::ConversationItem::user("first domain event"),
+            sampling_types::ConversationItem::user("second domain event"),
+        ])
+        .unwrap();
+        assert_eq!(timeline.events().len(), 2);
+
+        let first = serde_json::value::to_raw_value(&timeline.events()[0]).unwrap();
+        let domain_zero = crate::session::history::encode_domain(0, &first, None).unwrap();
+        let presentation = crate::session::history::HistoryFact {
+            meta: None,
+            content: crate::session::history::HistoryContent::Assistant(
+                acp_transport::protocol::ContentChunk::new(
+                    acp_transport::protocol::ContentBlock::Text(
+                        acp_transport::protocol::TextContent::new("presentation marker"),
+                    ),
+                ),
+            ),
+        };
+        let presentation_raw = serde_json::value::to_raw_value(&presentation).unwrap();
+        let valid_presentation =
+            crate::session::history::encode_presentation(1, 1, &presentation_raw).unwrap();
+        let second = serde_json::value::to_raw_value(&timeline.events()[1]).unwrap();
+        let domain_one = crate::session::history::encode_domain(2, &second, None).unwrap();
+        let mut valid_prefix = Vec::new();
+        valid_prefix.extend_from_slice(&domain_zero);
+        valid_prefix.extend_from_slice(&valid_presentation);
+        valid_prefix.extend_from_slice(&domain_one);
+        std::fs::write(&path, &valid_prefix).unwrap();
+
+        let mut cache = SessionTrajectoryCache::default();
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.timeline.events().len(), 2);
+        assert_eq!(cache.journal.records, 3);
+        let cached_offset = cache.offset;
+
+        let mut damaged_presentation =
+            crate::session::history::encode_presentation(3, 3, &presentation_raw).unwrap();
+        let marker = b"presentation marker";
+        let marker_start = damaged_presentation
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("presentation payload is present");
+        damaged_presentation[marker_start + marker.len() - 1] = b'X';
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(
+                &damaged_presentation[..damaged_presentation.len() - 1]
+            )
+            .is_ok()
+        );
+        append_raw_bytes(&path, &damaged_presentation);
+        assert!(cache.refresh(&path).is_err(), "bad checksum is rejected");
+        assert_eq!(cache.offset, cached_offset);
+        assert_eq!(cache.timeline.events().len(), 2);
+        assert_eq!(cache.journal.records, 3);
+        assert_eq!(cache.projector.rows().len(), 2);
+
+        let mut repaired = valid_prefix;
+        repaired.extend_from_slice(
+            &crate::session::history::encode_presentation(3, 3, &presentation_raw).unwrap(),
+        );
+        std::fs::write(&path, repaired).unwrap();
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.offset, std::fs::metadata(&path).unwrap().len());
+        assert_eq!(cache.timeline.events().len(), 2);
+        assert_eq!(cache.journal.records, 4);
+        assert_eq!(cache.projector.rows().len(), 2);
     }
 
     fn write_child_session(
@@ -3864,20 +3992,13 @@ mod tests {
         let timeline =
             chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("hello")])
                 .unwrap();
-        let line = serde_json::to_string(&timeline.events()[0]).unwrap();
-        let mut bytes = format!("{line}\n{{\"version\":").into_bytes();
-        bytes.extend_from_slice(&[0xe2, 0x82]);
-        std::fs::write(&path, bytes).unwrap();
+        write_timeline_events(&path, &timeline.events()[..1]);
+        append_raw_bytes(&path, b"{\"version\":\xe2\x82");
         let mut cache = SessionTrajectoryCache::default();
         cache.refresh(&path).unwrap();
         assert_eq!(cache.timeline.events().len(), 1);
 
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        use std::io::Write;
-        file.write_all(b"}\n").unwrap();
+        append_raw_bytes(&path, b"}\n");
         assert!(
             cache.refresh(&path).is_err(),
             "completed malformed tail is rejected"
@@ -4040,14 +4161,7 @@ mod tests {
         let mut timeline =
             chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("one")])
                 .unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n",
-                serde_json::to_string(&timeline.events()[0]).unwrap()
-            ),
-        )
-        .unwrap();
+        write_timeline_events(&path, &timeline.events()[..1]);
         let mut cache = SessionTrajectoryCache::default();
         cache.refresh(&path).unwrap();
         let committed_offset = cache.offset;
@@ -4058,13 +4172,8 @@ mod tests {
                 chat_state::MessageCause::Assistant,
             )
             .unwrap();
-        use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-        writeln!(file, "{{not-json}}").unwrap();
+        append_timeline_events(&path, &[event]);
+        append_raw_bytes(&path, b"{not-json}\n");
 
         assert!(cache.refresh(&path).is_err());
         assert_eq!(cache.offset, committed_offset);
@@ -4089,14 +4198,8 @@ mod tests {
         cache.refresh(&path).unwrap();
         let committed_offset = cache.offset;
 
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{{not-json}}\n",
-                serde_json::to_string(&replacement.events()[0]).unwrap()
-            ),
-        )
-        .unwrap();
+        write_timeline_events(&path, &replacement.events()[..1]);
+        append_raw_bytes(&path, b"{not-json}\n");
         assert!(cache.refresh(&path).is_err());
         assert_eq!(cache.offset, committed_offset);
         assert_eq!(cache.timeline.surface()[0].text_content(), "first");
@@ -4496,14 +4599,7 @@ mod tests {
             sampling_types::ConversationItem::user("two"),
         ])
         .unwrap();
-        let body = timeline
-            .events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        std::fs::write(&path, body).unwrap();
+        write_timeline(&path, &timeline);
         let state = AppState {
             session_id: "session".into(),
             actor_ref: "main".into(),
@@ -4629,13 +4725,7 @@ mod tests {
         let (_, repairs) = timeline.repair_surface_history().unwrap();
         let repair_seq = repairs[0].seq.get();
         use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        for event in repairs {
-            writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-        }
+        append_timeline_events(&path, &repairs);
         let refreshed = query_cached(&state, TrajectoryQuery::default()).unwrap();
         assert_eq!(
             refreshed.schema_version,
@@ -4721,14 +4811,7 @@ mod tests {
             sampling_types::ConversationItem::assistant("second"),
         ])
         .unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n",
-                serde_json::to_string(&timeline.events()[0]).unwrap()
-            ),
-        )
-        .unwrap();
+        write_timeline_events(&path, &timeline.events()[..1]);
         let state = AppState {
             session_id: "session".into(),
             actor_ref: "main".into(),
@@ -4747,16 +4830,7 @@ mod tests {
             let cache = state.cache.lock().unwrap();
             assert_eq!(cache.full_materialization_count, 1);
         }
-        use std::io::Write as _;
-        writeln!(
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap(),
-            "{}",
-            serde_json::to_string(&timeline.events()[1]).unwrap()
-        )
-        .unwrap();
+        append_timeline_events(&path, &timeline.events()[1..]);
 
         let response = query_cached(&state, TrajectoryQuery::default()).unwrap();
         assert_eq!(response.event_count, 2);
@@ -4803,14 +4877,7 @@ mod tests {
             sampling_types::ConversationItem::user("two"),
         ])
         .unwrap();
-        let body = timeline
-            .events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        std::fs::write(&path, body).unwrap();
+        write_timeline(&path, &timeline);
         let state = AppState {
             session_id: "session".into(),
             actor_ref: "main".into(),
@@ -4898,16 +4965,7 @@ mod tests {
             )
             .unwrap();
         backdated.at_ms = timeline.events()[0].at_ms.saturating_sub(1);
-        use std::io::Write as _;
-        writeln!(
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap(),
-            "{}",
-            serde_json::to_string(&backdated).unwrap()
-        )
-        .unwrap();
+        append_timeline_events(&path, &[backdated]);
 
         let response = query_cached(
             &state,
@@ -5155,14 +5213,7 @@ mod tests {
             sampling_types::ConversationItem::assistant("answer"),
         ])
         .unwrap();
-        let body = timeline
-            .events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        std::fs::write(&path, body).unwrap();
+        write_timeline(&path, &timeline);
         let state = AppState {
             session_id: "child".into(),
             actor_ref: "subagent:child".into(),
@@ -5485,14 +5536,7 @@ mod tests {
                 },
             ))
             .unwrap();
-        let body = timeline
-            .events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        std::fs::write(&path, body).unwrap();
+        write_timeline(&path, &timeline);
 
         let sideband_path = dir
             .path()

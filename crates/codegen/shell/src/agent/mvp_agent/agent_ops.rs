@@ -1426,6 +1426,7 @@ impl MvpAgent {
             prompt_display_cwd,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
+        let preparation_timer = crate::instrumentation_timer!("session.spawn.prepare");
         let spawn_remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(
             cwd.as_path(),
@@ -1851,6 +1852,7 @@ impl MvpAgent {
             bash: Some(bash_params_json),
             ask_user_question: ask_user_question_params_json,
         };
+        drop(preparation_timer);
         let is_new_session = timeline_bootstrap.is_fresh();
         let (mut handle, session_thread) = {
             let _timer = crate::instrumentation_timer!("session.spawn_actor_call");
@@ -2042,6 +2044,7 @@ impl MvpAgent {
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
         self.push_roster_delta_upserted(&session_info.id);
+        let coordination_timer = crate::instrumentation_timer!("session.spawn.install_coordination_backend");
         let coordination_backend = self.coordination_backend_resource(handle.clone());
         let (coordination_ready, coordination_installed) = tokio::sync::oneshot::channel();
         handle
@@ -2058,6 +2061,7 @@ impl MvpAgent {
             acp::Error::internal_error()
                 .data("session closed while installing coordination backend")
         })?;
+        drop(coordination_timer);
         if let Err(error) = self.coordination.handle().require_ready() {
             let (respond_to, response) = tokio::sync::oneshot::channel();
             let _ = handle.cmd_tx.send(SessionCommand::RecordCoordinationNotice {
@@ -2093,6 +2097,7 @@ impl MvpAgent {
         {
             scope.kill_all();
         }
+        let _publish_timer = crate::instrumentation_timer!("session.spawn.publish_coordination");
         self.publish_coordination_snapshot().await;
         Ok(())
     }

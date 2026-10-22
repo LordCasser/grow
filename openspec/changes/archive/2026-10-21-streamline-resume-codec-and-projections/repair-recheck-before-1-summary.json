@@ -1,0 +1,86 @@
+[
+  {
+    "profile": "modern-repair-512",
+    "runs": 1,
+    "load_ms": 491.671292,
+    "load_ms_range": [
+      491.671292,
+      491.671292
+    ],
+    "first_history_ms": 354.324917,
+    "first_history_ms_range": [
+      354.324917,
+      354.324917
+    ],
+    "last_history_ms": 391.56504199999995,
+    "last_history_ms_range": [
+      391.56504199999995,
+      391.56504199999995
+    ],
+    "max_history_gap_ms": 15.072417,
+    "max_history_gap_ms_range": [
+      15.072417,
+      15.072417
+    ],
+    "process_peak_rss_bytes": 279150592,
+    "process_peak_rss_bytes_range": [
+      279150592,
+      279150592
+    ],
+    "timeline_bytes": 17752322,
+    "timeline_bytes_range": [
+      17752322,
+      17752322
+    ],
+    "updates_bytes": 18222273,
+    "updates_bytes_range": [
+      18222273,
+      18222273
+    ],
+    "directory_bytes": 35980484,
+    "directory_bytes_range": [
+      35980484,
+      35980484
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.121,
+      "plugin_discovery": 0.442,
+      "session.delta_drain_completions": 0.0,
+      "session.delta_flush_replay": 0.01,
+      "session.load.model_route_reconcile": 0.012,
+      "session.load.open_session": 0.086,
+      "session.load.physical_updates_decode": 15.96,
+      "session.load.projection_metadata": 0.05,
+      "session.load.response_projection_appends": 220.636,
+      "session.load.response_projection_plan": 35.125,
+      "session.load.state_projections": 0.054,
+      "session.load.timeline_evidence": 1.073,
+      "session.load.timeline_fold": 0.751,
+      "session.load.timeline_read_decode": 27.633,
+      "session.load_light": 302.888,
+      "session.load_session": 490.231,
+      "session.load_session_replay": 56.863,
+      "session.projection.typed_canonical": 34.166,
+      "session.reconcile_stale_tasks": 12.332,
+      "session.replay.communication_restore": 0.013,
+      "session.replay.drain_completions": 14.248,
+      "session.replay.forward_updates": 15.517,
+      "session.replay.read_and_reconcile": 20.451,
+      "session.replay.read_snapshot": 6.522,
+      "session.replay.response_reconcile": 8.141,
+      "session.spawn.install_coordination_backend": 3.514,
+      "session.spawn.prepare": 1.095,
+      "session.spawn.publish_coordination": 0.404,
+      "session.spawn_actor_call": 80.512,
+      "session.spawn_and_register": 85.7,
+      "session.spawn_and_register_session": 86.139,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 23.544999999999998
+    }
+  }
+]

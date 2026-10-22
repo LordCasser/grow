@@ -3,6 +3,9 @@ use super::*;
 use crate::extensions::notification::{
     SessionNotification as GrowNotification, SessionUpdate as GrowUpdate,
 };
+use crate::session::history::{
+    HistoryContent, HistoryFact, HistorySource, ResponseAnchor, ResponseKey,
+};
 use acp_transport::protocol as acp;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,11 +17,10 @@ fn session_dir(home: &Path, id: &str) -> PathBuf {
 }
 
 #[test]
-fn partial_display_cache_requires_exact_committed_prompt_identity_and_is_read_only() {
+fn typed_user_fact_requires_exact_committed_prompt_identity_and_is_read_only() {
     let home = tempfile::tempdir().unwrap();
     let timeline = committed_user_timeline(1);
     write_session(home.path(), "root", "/project", &timeline, false);
-    let updates_path = session_dir(home.path(), "root").join(UPDATES_FILE);
     let timeline_path = session_dir(home.path(), "root").join(TIMELINE_FILE);
     write_updates(
         home.path(),
@@ -28,12 +30,10 @@ fn partial_display_cache_requires_exact_committed_prompt_identity_and_is_read_on
             turn_completed("root", "prompt-0", "end_turn"),
         ],
     );
-    let updates_before = std::fs::read(&updates_path).unwrap();
     let timeline_before = std::fs::read(&timeline_path).unwrap();
 
     let error = read_session_at("root", home.path()).unwrap_err();
-    assert!(error.to_string().contains("promptIndex 0"));
-    assert_eq!(std::fs::read(&updates_path).unwrap(), updates_before);
+    assert!(error.to_string().contains("committed user echo"), "{error}");
     assert_eq!(std::fs::read(&timeline_path).unwrap(), timeline_before);
 
     write_updates(
@@ -49,7 +49,7 @@ fn partial_display_cache_requires_exact_committed_prompt_identity_and_is_read_on
 }
 
 #[test]
-fn partial_display_cache_uses_rewind_selected_branch() {
+fn typed_history_uses_rewind_selected_branch() {
     use chat_state::MessageCause;
 
     let home = tempfile::tempdir().unwrap();
@@ -64,7 +64,7 @@ fn partial_display_cache_uses_rewind_selected_branch() {
 }
 
 #[test]
-fn legacy_workflow_wire_row_without_timeline_identity_is_not_backfilled() {
+fn typed_workflow_fact_without_event_identity_is_not_backfilled() {
     let home = tempfile::tempdir().unwrap();
     let timeline = chat_state::Timeline::default();
     write_session(home.path(), "root", "/project", &timeline, false);
@@ -87,17 +87,10 @@ fn legacy_workflow_wire_row_without_timeline_identity_is_not_backfilled() {
         0,
         0,
     );
-    // Serialize through the same SessionUpdateEnvelope wire fixture used by
-    // updates.jsonl. Older rows have no event ID metadata or Timeline
-    // DisplayProjectionExpected fact from which one could be reconstructed.
-    write_updates(
-        home.path(),
-        "root",
-        &[grow_update("root", update)],
-    );
-    let updates_path = session_dir(home.path(), "root").join(UPDATES_FILE);
+    // The typed fact has no event identity; reading it must not invent one or
+    // rewrite the source journal.
+    write_updates(home.path(), "root", &[grow_update("root", update)]);
     let timeline_path = session_dir(home.path(), "root").join(TIMELINE_FILE);
-    let updates_before = std::fs::read(&updates_path).unwrap();
     let timeline_before = std::fs::read(&timeline_path).unwrap();
 
     let session = read_session_at("root", home.path()).unwrap();
@@ -109,31 +102,36 @@ fn legacy_workflow_wire_row_without_timeline_identity_is_not_backfilled() {
                 if run_id == "legacy-run")
     ));
     assert!(timeline.events().is_empty());
-    assert_eq!(std::fs::read(&updates_path).unwrap(), updates_before);
     assert_eq!(std::fs::read(&timeline_path).unwrap(), timeline_before);
 }
 
 #[test]
-fn captured_display_frontier_does_not_adopt_a_later_cache_append() {
+fn captured_history_frontier_does_not_adopt_a_later_fact_append() {
     let home = tempfile::tempdir().unwrap();
     let timeline = committed_user_timeline(1);
     write_session(home.path(), "root", "/project", &timeline, false);
     write_updates(
         home.path(),
         "root",
-        &[turn_completed("root", "prompt-0", "end_turn")],
+        &[
+            user_chunk("root", "prompt-0", 0),
+            turn_completed("root", "prompt-0", "end_turn"),
+        ],
     );
     let mut snapshot = capture_tree_at("root", home.path()).unwrap();
-    append_bytes(home.path(), "root", &{
-        let mut line = update_line(&user_chunk("root", "prompt-0", 0));
-        line.push(b'\n');
-        line
-    });
+    append_updates(
+        home.path(),
+        "root",
+        &[agent_chunk("root", "later assistant fact")],
+    );
 
-    let error = snapshot.read_session("root").unwrap_err();
-    assert!(error.to_string().contains("promptIndex 0"));
+    let captured = snapshot.read_session("root").unwrap();
+    assert_eq!(
+        displayed_messages(&captured),
+        ["user:prompt-0", "terminal:end_turn"]
+    );
     let fresh = read_session_at("root", home.path()).unwrap();
-    assert!(displayed_messages(&fresh).contains(&"user:prompt-0".to_owned()));
+    assert!(displayed_messages(&fresh).contains(&"assistant:later assistant fact".to_owned()));
 }
 
 fn committed_user_timeline(count: usize) -> chat_state::Timeline {
@@ -249,40 +247,27 @@ fn committed_user_timeline(count: usize) -> chat_state::Timeline {
     timeline
 }
 
-fn update_line(update: &SessionUpdate) -> Vec<u8> {
-    let envelope = SessionUpdateEnvelope::from_update(update).unwrap();
-    serde_json::to_vec(&envelope).unwrap()
-}
-
 fn write_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
     let mut updates = updates.to_vec();
     let mut prompt_ids = std::collections::BTreeSet::new();
     let mut completed_ids = std::collections::BTreeSet::new();
     for update in &updates {
-        let line = update_line(update);
-        let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let Some(update) = envelope.get("update") else {
-            continue;
-        };
-        match update
-            .get("sessionUpdate")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("user_message_chunk") => {
-                if let Some(message_id) = update
-                    .get("_meta")
-                    .and_then(|meta| meta.get("messageId"))
-                    .and_then(serde_json::Value::as_str)
-                {
-                    prompt_ids.insert(message_id.to_owned());
+        match update {
+            SessionUpdate::Acp(notification) => {
+                if let acp::SessionUpdate::UserMessageChunk(chunk) = &notification.update {
+                    if let Some(message_id) = chunk
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("messageId"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        prompt_ids.insert(message_id.to_owned());
+                    }
                 }
             }
-            Some("turn_completed") => {
-                if let Some(prompt_id) = update.get("prompt_id").and_then(serde_json::Value::as_str)
-                {
-                    completed_ids.insert(prompt_id.to_owned());
+            SessionUpdate::Grow(notification) => {
+                if let GrowUpdate::TurnCompleted { prompt_id, .. } = &notification.update {
+                    completed_ids.insert(prompt_id.clone());
                 }
             }
             _ => {}
@@ -291,21 +276,121 @@ fn write_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
     for prompt_id in prompt_ids.difference(&completed_ids) {
         updates.push(turn_completed(id, prompt_id, "end_turn"));
     }
-    let mut contents = Vec::new();
-    for update in &updates {
-        contents.extend(update_line(update));
-        contents.push(b'\n');
-    }
-    std::fs::write(session_dir(home, id).join(UPDATES_FILE), contents).unwrap();
+    rewrite_journal_history(home, id, &updates);
 }
 
 fn append_bytes(home: &Path, id: &str, bytes: &[u8]) {
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(session_dir(home, id).join(UPDATES_FILE))
+        .open(session_dir(home, id).join(TIMELINE_FILE))
         .unwrap();
     file.write_all(bytes).unwrap();
     file.flush().unwrap();
+}
+
+fn journal_data(home: &Path, id: &str) -> (Vec<chat_state::TimelineEvent>, u64, Vec<HistoryFact>) {
+    let bytes = std::fs::read(session_dir(home, id).join(TIMELINE_FILE)).unwrap();
+    let lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| String::from_utf8(line.to_vec()).unwrap())
+        .collect::<Vec<_>>();
+    let data = JsonlStorageAdapter::decode_journal_lines(&lines).unwrap();
+    let facts = data
+        .history
+        .sources
+        .iter()
+        .filter_map(|source| match source {
+            HistorySource::Presentation { fact, .. } => Some((**fact).clone()),
+            HistorySource::Domain { .. } => None,
+        })
+        .collect();
+    (data.events, data.state.records, facts)
+}
+
+fn rewrite_journal_history(home: &Path, id: &str, updates: &[SessionUpdate]) {
+    let (events, _, _) = journal_data(home, id);
+    let facts = updates
+        .iter()
+        .filter_map(|update| HistoryFact::from_update(update).unwrap())
+        .collect::<Vec<_>>();
+    let mut remaining = vec![true; facts.len()];
+    let mut bytes = Vec::new();
+    let mut physical = 0u64;
+    for event in &events {
+        let admission = event
+            .messages()
+            .and_then(|message| message.response_admission.as_ref());
+        let mut anchor = None;
+        if let Some(admission) = admission {
+            let key = ResponseKey {
+                request_id: admission.identity.request_id.clone(),
+                attempt: admission.identity.attempt,
+            };
+            for (index, fact) in facts.iter().enumerate() {
+                if matches!(&fact.content, HistoryContent::Candidate(candidate) if candidate == &key)
+                {
+                    let raw = serde_json::value::to_raw_value(fact).unwrap();
+                    bytes.extend(
+                        crate::session::history::encode_presentation(
+                            physical,
+                            chrono::Utc::now().timestamp_millis(),
+                            &raw,
+                        )
+                        .unwrap(),
+                    );
+                    anchor = Some(ResponseAnchor::Candidate { record: physical });
+                    physical += 1;
+                    remaining[index] = false;
+                }
+            }
+        }
+        let raw = serde_json::value::to_raw_value(event).unwrap();
+        let response_anchor = admission.map(|_| anchor.unwrap_or(ResponseAnchor::Admission));
+        bytes.extend(
+            crate::session::history::encode_domain(physical, &raw, response_anchor).unwrap(),
+        );
+        physical += 1;
+    }
+    for (_, fact) in facts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| remaining[*index])
+    {
+        let raw = serde_json::value::to_raw_value(fact).unwrap();
+        bytes.extend(
+            crate::session::history::encode_presentation(
+                physical,
+                chrono::Utc::now().timestamp_millis(),
+                &raw,
+            )
+            .unwrap(),
+        );
+        physical += 1;
+    }
+    std::fs::write(session_dir(home, id).join(TIMELINE_FILE), bytes).unwrap();
+}
+
+fn append_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
+    let (_, records, _) = journal_data(home, id);
+    let mut seq = records as u64;
+    let mut bytes = Vec::new();
+    for update in updates {
+        let Some(fact) = HistoryFact::from_update(update).unwrap() else {
+            continue;
+        };
+        let raw = serde_json::value::to_raw_value(&fact).unwrap();
+        bytes.extend(
+            crate::session::history::encode_presentation(
+                seq,
+                chrono::Utc::now().timestamp_millis(),
+                &raw,
+            )
+            .unwrap(),
+        );
+        seq += 1;
+    }
+    append_bytes(home, id, &bytes);
 }
 
 fn user_chunk(session_id: &str, text: &str, prompt_index: usize) -> SessionUpdate {
@@ -442,24 +527,52 @@ fn goal_updated(session_id: &str, goal: &crate::session::goal_tracker::GoalState
 
 fn update_control_event(home: &Path, id: &str, update: impl FnOnce(&mut serde_json::Value)) {
     let path = session_dir(home, id).join(TIMELINE_FILE);
-    let contents = std::fs::read_to_string(&path).unwrap();
-    let mut events = contents
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
+    let (events, _, facts) = journal_data(home, id);
+    let mut events = events
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let event = events
         .iter_mut()
         .find(|event| event.get("type").and_then(serde_json::Value::as_str) == Some("control"))
         .expect("fixture contains a Control event");
     update(event);
-    let contents = events
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .join("\n")
-        + "\n";
-    std::fs::write(path, contents).unwrap();
+    let events = events
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<chat_state::TimelineEvent>, _>>()
+        .unwrap();
+    std::fs::write(
+        path,
+        JsonlStorageAdapter::encode_journal(&events, &facts).unwrap(),
+    )
+    .unwrap();
+}
+
+fn reorder_history_before_domain(home: &Path, id: &str) {
+    let path = session_dir(home, id).join(TIMELINE_FILE);
+    let (events, _, facts) = journal_data(home, id);
+    let mut bytes = Vec::new();
+    let mut physical = 0;
+    for fact in &facts {
+        let raw = serde_json::value::to_raw_value(fact).unwrap();
+        bytes.extend(
+            crate::session::history::encode_presentation(
+                physical,
+                chrono::Utc::now().timestamp_millis(),
+                &raw,
+            )
+            .unwrap(),
+        );
+        physical += 1;
+    }
+    for event in &events {
+        let raw = serde_json::value::to_raw_value(event).unwrap();
+        bytes.extend(crate::session::history::encode_domain(physical, &raw, None).unwrap());
+        physical += 1;
+    }
+    std::fs::write(path, bytes).unwrap();
 }
 
 fn displayed_messages(session: &TranscriptSession) -> Vec<String> {
@@ -490,32 +603,25 @@ fn displayed_messages(session: &TranscriptSession) -> Vec<String> {
 }
 
 #[test]
-fn captured_updates_ignore_completed_torn_tail_and_later_rows() {
+fn captured_history_frontier_ignores_later_valid_and_torn_records() {
     let home = tempfile::tempdir().unwrap();
     write_session(home.path(), "root", "/project", &Timeline::default(), false);
 
-    let first = user_chunk("root", "A", 0);
-    let partial = update_line(&user_chunk("root", "not visible until completed", 1));
-    let mut initial = update_line(&first);
-    initial.push(b'\n');
-    initial.extend_from_slice(&partial[..partial.len() / 2]);
-    std::fs::write(session_dir(home.path(), "root").join(UPDATES_FILE), initial).unwrap();
+    write_updates(home.path(), "root", &[user_chunk("root", "A", 0)]);
 
     let mut snapshot = capture_tree_at("root", home.path()).unwrap();
-
-    let mut append = partial[partial.len() / 2..].to_vec();
-    append.push(b'\n');
-    append.extend(update_line(&user_chunk("root", "B", 2)));
-    append.push(b'\n');
-    append.extend_from_slice(b"{bad json}\n");
-    append_bytes(home.path(), "root", &append);
+    append_updates(home.path(), "root", &[user_chunk("root", "B", 2)]);
+    append_bytes(home.path(), "root", b"{\"version\":1");
 
     let session = snapshot.read_session("root").unwrap();
-    assert_eq!(displayed_messages(&session), ["user:A"]);
+    assert_eq!(
+        displayed_messages(&session),
+        ["user:A", "terminal:end_turn"]
+    );
 }
 
 #[test]
-fn captured_updates_fail_when_the_source_is_truncated() {
+fn captured_history_fails_when_the_source_is_truncated() {
     let home = tempfile::tempdir().unwrap();
     write_session(home.path(), "root", "/project", &Timeline::default(), false);
     write_updates(
@@ -523,7 +629,7 @@ fn captured_updates_fail_when_the_source_is_truncated() {
         "root",
         &[user_chunk("root", "A", 0), user_chunk("root", "B", 1)],
     );
-    let path = session_dir(home.path(), "root").join(UPDATES_FILE);
+    let path = session_dir(home.path(), "root").join(TIMELINE_FILE);
     let captured_len = std::fs::metadata(&path).unwrap().len();
     let mut snapshot = capture_tree_at("root", home.path()).unwrap();
 
@@ -539,7 +645,7 @@ fn captured_updates_fail_when_the_source_is_truncated() {
 }
 
 #[test]
-fn foreign_session_update_fails_even_when_rewind_would_drop_it() {
+fn invalid_typed_fact_fails_even_when_rewind_would_drop_it() {
     let home = tempfile::tempdir().unwrap();
     write_session(home.path(), "root", "/project", &Timeline::default(), false);
     write_updates(
@@ -548,18 +654,20 @@ fn foreign_session_update_fails_even_when_rewind_would_drop_it() {
         &[
             user_chunk("root", "first", 0),
             user_chunk("root", "dead branch", 1),
-            agent_chunk("other-session", "foreign complete update"),
             rewind_marker("root", 1),
         ],
     );
-    let mut snapshot = capture_tree_at("root", home.path()).unwrap();
-
-    let error = snapshot.read_session("root").unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("different or missing session identity")
-    );
+    // A physical journal record with a valid checksum but unsupported typed
+    // content must be rejected before rewind projection can hide it.
+    let bad: Box<serde_json::value::RawValue> = serde_json::value::RawValue::from_string(
+        r#"{"meta":null,"content":{"kind":"future_fact","data":{}}}"#.into(),
+    )
+    .unwrap();
+    let (_, records, _) = journal_data(home.path(), "root");
+    let bytes = crate::session::history::encode_presentation(records as u64, 0, &bad).unwrap();
+    append_bytes(home.path(), "root", &bytes);
+    let error = capture_tree_at("root", home.path()).err().unwrap();
+    assert!(error.to_string().contains("unknown variant `future_fact`"));
 }
 
 #[test]
@@ -591,6 +699,7 @@ fn rewind_after_cancel_preserves_the_current_continuation_branch() {
             "terminal:cancelled",
             "user:continued prompt",
             "assistant:continued response",
+            "terminal:end_turn",
         ]
     );
 }
@@ -652,15 +761,10 @@ fn captured_root_and_child_topology_does_not_gain_later_root_spawn() {
         ))))
         .unwrap();
     let late_event = expanded_timeline.events().last().unwrap();
-    let mut late_line = serde_json::to_vec(late_event).unwrap();
-    late_line.push(b'\n');
-    let timeline_path = session_dir(home.path(), "root").join(TIMELINE_FILE);
-    let mut timeline_file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(timeline_path)
-        .unwrap();
-    timeline_file.write_all(&late_line).unwrap();
-    timeline_file.flush().unwrap();
+    let (_, records, _) = journal_data(home.path(), "root");
+    let raw = serde_json::value::to_raw_value(late_event).unwrap();
+    let appended = crate::session::history::encode_domain(records as u64, &raw, None).unwrap();
+    append_bytes(home.path(), "root", &appended);
 
     assert_eq!(root_snapshot.nodes.len(), 2);
     assert_eq!(root_snapshot.nodes[0].children, ["child"]);
@@ -710,20 +814,23 @@ fn captured_timeline_fails_when_the_source_is_truncated() {
         .set_len(captured.len / 2)
         .unwrap();
 
-    let error = captured
-        .versioned::<chat_state::TimelineEvent>(
-            u64::from(chat_state::TIMELINE_SCHEMA_VERSION),
-            &mut budget,
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("truncated"), "{error}");
+    let mut remaining_records = usize::MAX;
+    let error = JsonlStorageAdapter::read_journal_at_frontier(
+        captured.file,
+        captured.path,
+        captured.len,
+        &mut remaining_records,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof, "{error}");
 }
 
 #[test]
-fn capture_rejects_sparse_oversized_updates_before_reading() {
+fn capture_rejects_sparse_oversized_timeline_before_reading() {
     let home = tempfile::tempdir().unwrap();
     write_session(home.path(), "root", "/project", &Timeline::default(), false);
-    std::fs::File::create(session_dir(home.path(), "root").join(UPDATES_FILE))
+    std::fs::File::create(session_dir(home.path(), "root").join(TIMELINE_FILE))
         .unwrap()
         .set_len(MAX_SOURCE_BYTES + 1)
         .unwrap();
@@ -757,13 +864,14 @@ fn captured_control_snapshot_repairs_stale_goal_projection_without_rewriting_sou
                 goal_updated(id, &active),
             ],
         );
-        let updates_path = session_dir(home.path(), id).join(UPDATES_FILE);
-        let source_before = std::fs::read(&updates_path).unwrap();
+        reorder_history_before_domain(home.path(), id);
+        let source_path = session_dir(home.path(), id).join(TIMELINE_FILE);
+        let source_before = std::fs::read(&source_path).unwrap();
 
         let session = read_session_at(id, home.path()).unwrap();
         assert_eq!(
             displayed_messages(&session),
-            ["user:question", "assistant:answer"]
+            ["user:question", "assistant:answer", "terminal:end_turn"]
         );
         let tail = &session.events[session.events.len() - 3..];
         let SessionUpdate::Acp(notification) = &tail[0].update else {
@@ -787,11 +895,17 @@ fn captured_control_snapshot_repairs_stale_goal_projection_without_rewriting_sou
             panic!("expected synthesized GoalUpdated");
         };
         assert_eq!(notification.update, expected_goal);
+        assert!(matches!(
+            &tail[2].update,
+            SessionUpdate::Grow(notification)
+                if matches!(&notification.update, GrowUpdate::UiNotice(notice)
+                    if notice.subject.as_deref() == Some("Captured state"))
+        ));
         for event in tail {
             assert_eq!(event.timestamp_ms, None);
             assert!(event.simulated_source);
         }
-        assert_eq!(std::fs::read(updates_path).unwrap(), source_before);
+        assert_eq!(std::fs::read(source_path).unwrap(), source_before);
     }
 }
 
@@ -908,6 +1022,33 @@ fn captured_control_timeline_rejects_invalid_snapshots() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn journal_rejects_semantic_json_edit_without_recomputed_checksum() {
+    use crate::session::behavior::BehaviorSnapshot;
+
+    let home = tempfile::tempdir().unwrap();
+    let timeline = control_timeline(3, BehaviorSnapshot::normal(), None);
+    write_session(home.path(), "root", "/project", &timeline, false);
+    let path = session_dir(home.path(), "root").join(TIMELINE_FILE);
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let mut record: serde_json::Value =
+        serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+    let original_at = record["fact"]["event"]["at_ms"].as_i64().unwrap();
+    record["fact"]["event"]["at_ms"] = (original_at + 1).into();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&record)
+            .unwrap()
+            .into_iter()
+            .chain([b'\n'])
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+
+    let error = read_session_at("root", home.path()).unwrap_err();
+    assert!(error.to_string().contains("checksum mismatch"), "{error}");
 }
 
 fn admitted_timeline(
@@ -1043,7 +1184,7 @@ fn canonical_response_retains_anchor_time_and_discards_other_attempt() {
 }
 
 #[test]
-fn empty_committed_display_does_not_hide_timeline_facts() {
+fn admitted_response_is_projected_without_a_presentation_fact() {
     let home = tempfile::tempdir().unwrap();
     let timeline = admitted_timeline(
         "accepted",
@@ -1053,12 +1194,8 @@ fn empty_committed_display_does_not_hide_timeline_facts() {
     );
     write_session(home.path(), "root", "/project", &timeline, false);
     write_updates(home.path(), "root", &[]);
-    assert!(
-        read_session_at("root", home.path())
-            .unwrap_err()
-            .to_string()
-            .contains("no committed display")
-    );
+    let session = read_session_at("root", home.path()).unwrap();
+    assert!(displayed_messages(&session).contains(&"assistant:body".to_owned()));
 }
 
 #[test]
@@ -1209,4 +1346,60 @@ fn interrupting_parent_receipt_is_restored_from_timeline_without_delivery() {
             std::fs::read(session_dir(home.path(), "root").join(TIMELINE_FILE)).unwrap()
         );
     }
+}
+
+#[test]
+fn foreign_receipt_owner_is_rejected_during_load_even_with_rewind_marker() {
+    use chat_state::*;
+
+    let home = tempfile::tempdir().unwrap();
+    let body = "valid payload owned by another session";
+    let hash = blake3::hash(body.as_bytes()).to_hex().to_string();
+    let source = NotificationSource::ParentMessage {
+        parent_session_id: "parent".into(),
+        message_id: "foreign-receipt".into(),
+        interrupt: false,
+    };
+    let source_version = NotificationSourceVersion::Ordinal {
+        value: PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let id = notification_id("foreign-owner", &source, &source_version).unwrap();
+    let mut timeline = committed_user_timeline(1);
+    timeline
+        .record(TimelineEventKind::Notification(
+            NotificationEvent::Received {
+                id,
+                owner_session_id: "foreign-owner".into(),
+                source,
+                source_version,
+                payload_ref: NotificationPayloadRef {
+                    blake3: hash.clone(),
+                    bytes: body.len() as u64,
+                },
+            },
+        ))
+        .unwrap();
+    write_session(home.path(), "root", "/project", &timeline, false);
+    write_updates(
+        home.path(),
+        "root",
+        &[
+            user_chunk("root", "prompt-0", 0),
+            turn_completed("root", "prompt-0", "end_turn"),
+            // Rewind may hide earlier display rows, but cannot bypass
+            // validation of the receipt's Domain owner.
+            rewind_marker("root", 0),
+        ],
+    );
+    let artifacts = session_dir(home.path(), "root").join("artifacts/notifications");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(artifacts.join(format!("{hash}.txt")), body).unwrap();
+
+    let error = read_session_at("root", home.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("foreign communication receipt in session history"),
+        "the otherwise valid, checksummed receipt must be rejected by current-session load: {error}"
+    );
 }

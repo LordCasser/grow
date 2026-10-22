@@ -494,6 +494,17 @@ impl StreamingMarkdownRenderer {
         self.output
     }
 
+    /// Complete normalized source without constructing derived presentation.
+    ///
+    /// Call `finish()` before reading a finalized render view. Keeping this
+    /// source boundary separate lets historical messages defer parsing until
+    /// their presentation is actually needed.
+    pub fn finish_source(&mut self) {
+        let flushed = self.normalizer.finish();
+        self.source.push_str(&flushed);
+        self.open_fence = None;
+    }
+
     /// Finalize streaming with a full re-render.
     ///
     /// This does a complete non-streaming render of the accumulated source,
@@ -511,11 +522,7 @@ impl StreamingMarkdownRenderer {
     ///
     /// Returns a view of the finalized output.
     pub fn finish(&mut self, syntect: Option<&Syntect>) -> MarkdownRenderView<'_> {
-        // Flush any bytes the normalizer held back at the last chunk boundary
-        // (e.g. a trailing partial delimiter) so the full re-render sees the
-        // complete, normalized source.
-        let flushed = self.normalizer.finish();
-        self.source.push_str(&flushed);
+        self.finish_source();
 
         // Do a full re-render of the entire source, preserving max_table_width.
         let mut buffers = MarkdownBuffers::new();

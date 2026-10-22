@@ -1,0 +1,16 @@
+{
+  "C3": "2026-10-22-unify-timeline-history-storage",
+  "analysis": "2026-10-22-profile-release-resume-first-history",
+  "spec_updates": {
+    "session-timeline": {
+      "added": 3,
+      "modified": 4
+    },
+    "client-surfaces": {
+      "modified": 10
+    }
+  },
+  "tasks_complete": true,
+  "existing_local_links_rebased": 11,
+  "warning": "Nonblocking: consider splitting changes with more than10 deltas. Coherent storage migration kept in one C3 change; C1/C2 archived independently."
+}

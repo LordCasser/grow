@@ -1,20 +1,18 @@
 // Per-test-case module for the `leader_pty_e2e` integration test crate.
 #[allow(unused_imports)]
 use super::common::*;
+use std::time::Instant;
 
 /// 25. **Leader reattach — cancellation round-trips through the durable log.**
-/// A turn driven on leader client A is Ctrl+C-cancelled mid-stream; the leader
-/// must persist a `turn_completed` terminal with `stop_reason == cancelled`
-/// (the producer fail-before). A FRESH client must replay the cancelled
-/// transcript through the same leader and land clean — running, no panic, and
-/// not stranded on the "Waiting"/"Cancelling" spinners — and must still hold
-/// that transcript after A (the original driver) exits. A keep-alive viewer
-/// holds the leader up across A's exit (the leader stops with its last client).
+/// After one admitted turn, a second turn driven on leader client A is
+/// Ctrl+C-cancelled mid-stream. The leader must persist a `turn_completed`
+/// terminal with `stop_reason == cancelled`; reconnect must replay the first
+/// admitted response but suppress the second turn's unadmitted candidate. A
+/// fresh client must land clean and remain attached after A exits.
 ///
 /// C attaches *before* A is dropped: `PtyHarness` Drop SIGKILLs the child, and
 /// under full-suite contention a cold `--resume` handshake racing that teardown
-/// flakes with an empty screen for the whole `LEADER_TIMEOUT` (the observed
-/// "C replayed the cancelled transcript" timeout). Replaying while A is still
+/// flakes with an empty screen for the whole `LEADER_TIMEOUT`. Replaying while A is still
 /// up, then proving C survives A's exit, covers the durable-log + multi-client
 /// survival invariants without that race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -23,11 +21,29 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
     let cluster = LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS)
         .await
         .expect("start leader cluster");
-    // Paced enough to cancel mid-stream, short enough that the heavy
-    // multi-client cancel drain does not dominate suite-wide contention.
+    git2::Repository::init(cluster.content().home()).expect("initialize isolated project");
+    // Establish canonical history before the cancellation case. The cancelled
+    // response below remains an unadmitted candidate and must not appear on
+    // reconnect.
+    cluster
+        .content()
+        .set_response(format!("{} admitted response.", turn_sentinel(1)));
+    let mut a = cluster.spawn_leader(&[]).expect("spawn leader client A");
+    a.wait_for_text(WELCOME_SCREEN_SENTINEL, LEADER_TIMEOUT)
+        .expect("A welcome");
+    submit_turn(&mut a, PROMPT, &turn_sentinel(1), STREAM_TIMEOUT);
+    let first_terminal = cluster
+        .wait_for_turn_completed(STREAM_TIMEOUT)
+        .expect("first turn_completed persisted");
+    assert_eq!(
+        first_terminal["stop_reason"], "end_turn",
+        "first turn must complete before cancellation, got {first_terminal}"
+    );
+
+    // Pace the second response enough to cancel while it streams.
     let long_response = format!(
         "{} {}",
-        turn_sentinel(1),
+        turn_sentinel(2),
         "more streamed filler to hold the turn open. ".repeat(40)
     );
     cluster.content().set_response(long_response);
@@ -35,15 +51,14 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
         .content()
         .set_chunk_delay(Some(Duration::from_millis(40)));
 
-    let mut a = cluster.spawn_leader(&[]).expect("spawn leader client A");
-    a.wait_for_text(WELCOME_SCREEN_SENTINEL, LEADER_TIMEOUT)
-        .expect("A welcome");
-    a.inject_keys(format!("{PROMPT}\r").as_bytes())
-        .expect("A submit turn");
     // Wait until the turn is clearly streaming (sentinel visible); this also
     // closes the leader's rewind window so cancel is not confused with rewind.
-    a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT)
-        .expect("A turn streaming");
+    submit_turn(
+        &mut a,
+        "cancel this response",
+        &turn_sentinel(2),
+        STREAM_TIMEOUT,
+    );
 
     // Ctrl+C on an empty prompt cancels while streaming.
     a.inject_keys(keys::CTRL_C).expect("A press ctrl+c");
@@ -56,19 +71,35 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
 
     // Producer fail-before: the cancel must have persisted a durable terminal
     // carrying the cancelled stop reason.
-    let rec = cluster
-        .wait_for_turn_completed(STREAM_TIMEOUT)
-        .expect("turn_completed persisted to updates.jsonl");
+    let deadline = Instant::now() + STREAM_TIMEOUT;
+    let rec = loop {
+        let updates = cluster.session_updates();
+        if let Some(record) = updates.iter().find(|record| {
+            record["sessionUpdate"] == "turn_completed" && record["stop_reason"] == "cancelled"
+        }) {
+            break record.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancelled turn_completed did not persist; updates: {updates:?}"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    };
     assert_eq!(
         rec["stop_reason"], "cancelled",
         "cancelled turn must record stop_reason=cancelled, got {rec}"
     );
 
     // Keep-alive viewer attaches AFTER the cancel so the leader survives A's
-    // exit; waiting for it to replay proves it is attached to the same session.
+    // exit; it should replay only the earlier admitted turn.
     let mut keep = cluster.attach(&[]).expect("spawn keep-alive viewer");
     keep.wait_for_text(&turn_sentinel(1), LEADER_TIMEOUT)
-        .expect("keep-alive replayed the cancelled transcript");
+        .expect("keep-alive replayed the admitted transcript");
+    assert!(
+        !keep.contains_text(&turn_sentinel(2)),
+        "cancelled candidate must not enter durable replay\nscreen:\n{}",
+        keep.screen_contents()
+    );
 
     // Reattach must replay from the durable log, not re-drive a turn: the mock
     // must see no new inference request while C catches up.
@@ -78,7 +109,12 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
     // original driver's exit does not take C (or the transcript) down.
     let mut c = cluster.attach(&[]).expect("spawn fresh reattach client C");
     c.wait_for_text(&turn_sentinel(1), LEADER_TIMEOUT)
-        .expect("C replayed the cancelled transcript");
+        .expect("C replayed the admitted transcript");
+    assert!(
+        !c.contains_text(&turn_sentinel(2)),
+        "C replayed an unadmitted cancelled candidate\nscreen:\n{}",
+        c.screen_contents()
+    );
 
     drop(a);
     // Leader processes A's disconnect; brief settle then re-check C still has
@@ -91,7 +127,18 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
     );
     assert!(
         c.contains_text(&turn_sentinel(1)),
-        "C lost the cancelled transcript after A quit\nscreen:\n{}",
+        "C lost the admitted transcript after A quit\nscreen:\n{}",
+        c.screen_contents()
+    );
+    assert_eq!(
+        c.screen_contents().matches(&turn_sentinel(1)).count(),
+        1,
+        "the admitted response must replay exactly once\nscreen:\n{}",
+        c.screen_contents()
+    );
+    assert!(
+        !c.contains_text(&turn_sentinel(2)),
+        "cancelled candidate appeared after A quit\nscreen:\n{}",
         c.screen_contents()
     );
 

@@ -670,6 +670,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             code_restored,
             restore_summary,
             foreground,
+            descendant_ownership,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -678,6 +679,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             code_restored,
             restore_summary,
             foreground,
+            descendant_ownership,
         ),
         TaskResult::SessionTitleFromDisk { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -700,6 +702,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_id,
             generation,
             result,
+            descendant_ownership,
         } => {
             let Some(agent) = app.agents.get_mut(&agent_id) else {
                 return vec![];
@@ -720,7 +723,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.show_toast(&format!("Session resync failed: {error}. Reload to retry."));
                 return vec![];
             }
-            crate::app::subagent::restore_descendant_state(app, agent_id);
+            crate::app::subagent::restore_descendant_state(app, agent_id, descendant_ownership);
             app.agents
                 .get_mut(&agent_id)
                 .map_or_else(Vec::new, |agent| maybe_drain_queue(agent).effects)
@@ -1365,6 +1368,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         }
                         send @ (Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }) => {
                             if let Some(agent) = app.agents.get_mut(&agent_id) {
+                                // The checkpoint gate never dispatched this send. Release
+                                // only its local placeholder, not an adopted running turn.
+                                if agent.session.state.is_turn_submitting()
+                                    && agent.session.current_prompt_id.as_deref()
+                                        == Some(prompt_id.as_str())
+                                {
+                                    agent.session.state = crate::app::session::AgentState::Idle;
+                                    agent.session.current_prompt_id = None;
+                                    agent.mark_turn_finished();
+                                }
                                 if let Some(draft) = agent
                                     .session
                                     .in_flight_prompt

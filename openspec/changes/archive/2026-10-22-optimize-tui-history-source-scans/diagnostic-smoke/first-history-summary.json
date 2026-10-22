@@ -1,0 +1,59 @@
+[
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 128,
+    "n": 1,
+    "metrics": {
+      "send_attempt_from_load_ms": {
+        "median_ms": 28.760009765625,
+        "range_ms": [
+          28.760009765625,
+          28.760009765625
+        ]
+      },
+      "applied_from_load_ms": {
+        "median_ms": 32.176025390625,
+        "range_ms": [
+          32.176025390625,
+          32.176025390625
+        ]
+      },
+      "frame_produced_from_load_ms": {
+        "median_ms": 117.613037109375,
+        "range_ms": [
+          117.613037109375,
+          117.613037109375
+        ]
+      },
+      "frame_delivered_from_load_ms": {
+        "median_ms": 117.72509765625,
+        "range_ms": [
+          117.72509765625,
+          117.72509765625
+        ]
+      },
+      "frame_ack_observed_from_load_ms": {
+        "median_ms": 118.43408203125,
+        "range_ms": [
+          118.43408203125,
+          118.43408203125
+        ]
+      },
+      "send_to_applied_ms": {
+        "median_ms": 3.416015625,
+        "range_ms": [
+          3.416015625,
+          3.416015625
+        ]
+      },
+      "applied_to_frame_produced_ms": {
+        "median_ms": 85.43701171875,
+        "range_ms": [
+          85.43701171875,
+          85.43701171875
+        ]
+      }
+    }
+  }
+]

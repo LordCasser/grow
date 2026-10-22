@@ -1,0 +1,44 @@
+/Users/lordcasser/workspace/projects/grow/target/debug/deps/session_load_perf-c1951fcebb27b71d
+turns=512 chunks=8 chunk_len=4096 assert_history=True
+
+RUN 1
+
+running 1 test
+test full_session_load_e2e ... 
+[perf] e2e session: updates=19.6 MB rewind=0.0 MB
+
+[perf] e2e: updates.jsonl composition (19.6 MB total):
+  sessionUpdate kind                  count         MB       %
+  agent_message_chunk                  4096       17.6   89.3%
+  available_commands_update            1024        2.0   10.1%
+  user_message_chunk                    512        0.1    0.6%
+
+[perf] ===== END-TO-END session/load (what the pager waits on) =====
+  total session/load round-trip :    1585.4 ms
+  notifications replayed         :      4612
+  available_commands_update      :         1 replayed / 1024 on disk
+  live catalog reached          :      true
+  time-to-first notification     :     727.9 ms
+  time-to-last notification      :    1585.4 ms
+  ---- shell-side per-phase instrumentation (elapsed) ----
+  session.load_session                        1583.6 ms
+  session.load_session_replay                  607.2 ms
+  session.spawn_and_register_session           451.9 ms
+  session.spawn_and_register                   451.7 ms
+  session.replay.drain_completions             319.1 ms
+  session.load_light                           244.1 ms
+  session.replay.read_and_reconcile            183.7 ms
+  session.spawn_actor_call                     136.1 ms
+  session.replay.forward_updates                95.9 ms
+  session.reconcile_stale_tasks                 52.5 ms
+  skill_discovery                               17.5 ms
+  session.replay.read_snapshot                   8.2 ms
+  plugin_discovery                               0.3 ms
+  mcp_merge                                      0.1 ms
+  session.delta_flush_replay                     0.0 ms
+================================================================
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 20.78s
+

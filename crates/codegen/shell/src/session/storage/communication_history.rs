@@ -6,7 +6,7 @@ use crate::extensions::notification::{AgentMessageNotice, SessionUpdate as GrowU
 use chat_state::{InputEvent, TimelineEvent, TimelineEventKind, ToolEvent};
 use std::collections::{HashMap, HashSet};
 
-fn notice_identity(notice: &UiNotice) -> (String, Option<String>, Option<String>) {
+pub(crate) fn notice_identity(notice: &UiNotice) -> (String, Option<String>, Option<String>) {
     let source = crate::coordination::IncomingInquiryAudit::from_notice(notice)
         .map(|audit| audit.source_session_id);
     (
@@ -14,6 +14,115 @@ fn notice_identity(notice: &UiNotice) -> (String, Option<String>, Option<String>
         notice.subject.clone(),
         source,
     )
+}
+
+/// Compact binding retained by the existing writer receipt index. A display
+/// reference may omit body bytes only after they match the domain source.
+#[derive(Debug, Clone)]
+pub(crate) struct ReceiptSource {
+    pub event: u64,
+    notice_digest: blake3::Hash,
+    payload: Option<chat_state::NotificationPayloadRef>,
+}
+
+impl ReceiptSource {
+    pub(crate) fn from_event(event: &TimelineEvent) -> io::Result<Self> {
+        let (notice, payload) = match &event.kind {
+            TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+                source,
+                payload_ref,
+                ..
+            }) if source.agent_message().is_some() => (
+                crate::session::notification_inbox::parent_message_notice(event, None)
+                    .expect("agent message source has a notice"),
+                Some(payload_ref.clone()),
+            ),
+            _ => (
+                crate::coordination::InquiryEvent::from_timeline(event)
+                    .map_err(io::Error::other)?
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "notice has no domain source")
+                    })?
+                    .notice(),
+                None,
+            ),
+        };
+        Ok(Self {
+            event: event.seq.get(),
+            notice_digest: Self::digest(&notice)?,
+            payload,
+        })
+    }
+
+    fn digest(notice: &UiNotice) -> io::Result<blake3::Hash> {
+        Ok(blake3::hash(
+            &serde_json::to_vec(notice).map_err(io::Error::other)?,
+        ))
+    }
+
+    pub(crate) fn validate_notice(&self, notice: &UiNotice) -> io::Result<()> {
+        use crate::extensions::notification::UiNoticeTone;
+        let mut normalized = notice.clone();
+        if let Some(payload) = &self.payload {
+            let mut details = AgentMessageNotice::from_notice(notice).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "notice source details are invalid",
+                )
+            })?;
+            let body = details.message.take().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "notice body is absent before publication",
+                )
+            })?;
+            if body.len() as u64 != payload.bytes
+                || blake3::hash(body.as_bytes()).to_hex().as_str() != payload.blake3
+                || notice.message != "Received"
+                || notice.tone != UiNoticeTone::Info
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "notice differs from its canonical receipt",
+                ));
+            }
+            normalized.message = "Message unavailable".into();
+            normalized.tone = UiNoticeTone::Warning;
+            normalized.details = Some(serde_json::to_string(&details).map_err(io::Error::other)?);
+        }
+        if Self::digest(&normalized)? != self.notice_digest {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "notice differs from its canonical receipt",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn receipt_identity(
+    event: &TimelineEvent,
+) -> io::Result<Option<(String, Option<String>, Option<String>)>> {
+    match &event.kind {
+        TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+            id,
+            source,
+            ..
+        }) if source.agent_message().is_some() => Ok(Some((
+            id.clone(),
+            Some(AgentMessageNotice::SUBJECT.into()),
+            None,
+        ))),
+        TimelineEventKind::Observation(observation)
+            if observation.scope == "coordination" && observation.name == "inquiry" =>
+        {
+            Ok(crate::coordination::InquiryEvent::from_timeline(event)
+                .map_err(io::Error::other)?
+                .filter(|fact| matches!(fact, crate::coordination::InquiryEvent::Incoming { .. }))
+                .map(|fact| notice_identity(&fact.notice())))
+        }
+        _ => Ok(None),
+    }
 }
 
 pub(crate) fn read_notice(
@@ -31,6 +140,7 @@ pub(crate) fn read_notice(
         .map(|fact| fact.notice()))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn restore<'a>(
     session_id: &acp::SessionId,
     timeline: &chat_state::Timeline,
@@ -238,12 +348,18 @@ pub(super) fn restore<'a>(
         Vec::with_capacity(history.lines.len() + insertions.values().map(Vec::len).sum::<usize>());
     for (index, line) in history.lines.into_iter().enumerate() {
         if let Some(rows) = insertions.remove(&index) {
-            result.extend(rows.into_iter().map(ReconciledReplayLine::Owned));
+            result.extend(
+                rows.into_iter()
+                    .map(|row| ReconciledReplayLine::Synthesized(row.into())),
+            );
         }
         result.push(line);
     }
     for rows in insertions.into_values() {
-        result.extend(rows.into_iter().map(ReconciledReplayLine::Owned));
+        result.extend(
+            rows.into_iter()
+                .map(|row| ReconciledReplayLine::Synthesized(row.into())),
+        );
     }
     history.lines = result;
     Ok(history)

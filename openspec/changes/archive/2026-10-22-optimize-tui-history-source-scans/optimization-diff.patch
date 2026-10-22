@@ -1,0 +1,129 @@
+--- before/crates/codegen/pager/src/scrollback/blocks/agent.rs
++++ after/crates/codegen/pager/src/scrollback/blocks/agent.rs
+@@ -169,11 +169,12 @@
+         }
+         self.filter_image_projection_prefix = false;
+         self.content.finish();
+-        let text = self.content.text();
+         {
+             let mut timer = diagnostics::instrumentation::timer("pager.message.image_refs");
+-            timer.with_field("source_bytes", text.len() as u64);
+-            self.image_refs = crate::prompt_images::extract_image_refs(&text);
++            self.image_refs = self.content.with_source(|text| {
++                timer.with_field("source_bytes", text.len() as u64);
++                crate::prompt_images::extract_image_refs(text)
++            });
+             timer.with_field("refs", self.image_refs.len() as u64);
+         }
+         // Detection runs once the render is final, after the renderer freezes —
+--- before/crates/codegen/pager/src/scrollback/blocks/markdown_content.rs
++++ after/crates/codegen/pager/src/scrollback/blocks/markdown_content.rs
+@@ -228,6 +228,12 @@
+         self.state.borrow().renderer.source().to_string()
+     }
+ 
++    /// Read normalized source without copying or materializing presentation.
++    pub(crate) fn with_source<R>(&self, f: impl FnOnce(&str) -> R) -> R {
++        let state = self.state.borrow();
++        f(state.renderer.source())
++    }
++
+     /// Whether the source markdown is empty (zero-alloc, unlike `text()`).
+     pub fn is_empty(&self) -> bool {
+         self.state.borrow().renderer.source().is_empty()
+@@ -313,11 +319,14 @@
+             // Actual diagrams still capture their skeleton at message finish.
+             // A conservative source check avoids parsing plain historical text.
+             let source = state.renderer.source();
++            // Match the previous ASCII fold without allocating the full body.
++            static MERMAID_CANDIDATE: std::sync::LazyLock<regex::bytes::Regex> =
++                std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"(?i-u:mermaid)").unwrap());
+             if state.final_render_pending
+                 // CommonMark can decode character references in fence info.
+                 // Keep those candidates eager rather than duplicate its parser.
+                 && !source.contains('&')
+-                && !source.to_ascii_lowercase().contains("mermaid")
++                && !MERMAID_CANDIDATE.is_match(source.as_bytes())
+             {
+                 return super::mermaid_content::MermaidContent::default();
+             }
+--- before/crates/codegen/pager-render/src/prompt_images.rs
++++ after/crates/codegen/pager-render/src/prompt_images.rs
+@@ -135,10 +135,6 @@
+     tools::util::image_validate::validate_image_bytes_unrestricted(bytes, false)
+         .ok()
+         .map(|(w, h, _)| (w, h))
+-}
+-
+-fn is_decodable_image(bytes: &[u8]) -> bool {
+-    decode_image_dimensions(bytes).is_some()
+ }
+ 
+ impl ImageViewerState {
+@@ -1287,13 +1283,10 @@
+             return None;
+         }
+         let bytes = std::fs::read(&path).ok()?;
+-        if !is_decodable_image(&bytes) {
+-            return None;
+-        }
+-        let dimensions = decode_image_dimensions(&bytes);
++        let dimensions = decode_image_dimensions(&bytes)?;
+         Some(Self {
+             path,
+-            dimensions,
++            dimensions: Some(dimensions),
+             alt_text,
+         })
+     }
+@@ -1356,28 +1349,32 @@
+     let mut refs = Vec::new();
+     let mut seen = std::collections::HashSet::new();
+ 
+-    for cap in MD_RE.captures_iter(text) {
+-        if let Some(m) = cap.get(2) {
+-            let path_str = m.as_str();
+-            let alt_text = cap
+-                .get(1)
+-                .map(|a| a.as_str().to_owned())
+-                .unwrap_or_default();
+-            if seen.insert(path_str.to_owned())
+-                && let Some(r) = ScrollbackImageRef::from_path_with_alt(path_str, alt_text)
+-            {
+-                refs.push(r);
++    if text.contains("![") {
++        for cap in MD_RE.captures_iter(text) {
++            if let Some(m) = cap.get(2) {
++                let path_str = m.as_str();
++                let alt_text = cap
++                    .get(1)
++                    .map(|a| a.as_str().to_owned())
++                    .unwrap_or_default();
++                if seen.insert(path_str.to_owned())
++                    && let Some(r) = ScrollbackImageRef::from_path_with_alt(path_str, alt_text)
++                {
++                    refs.push(r);
++                }
+             }
+         }
+     }
+ 
+-    for cap in PATH_RE.captures_iter(text) {
+-        if let Some(m) = cap.get(1) {
+-            let path_str = m.as_str();
+-            if seen.insert(path_str.to_owned())
+-                && let Some(r) = ScrollbackImageRef::from_path(path_str)
+-            {
+-                refs.push(r);
++    if text.contains('/') || text.contains('\\') {
++        for cap in PATH_RE.captures_iter(text) {
++            if let Some(m) = cap.get(1) {
++                let path_str = m.as_str();
++                if seen.insert(path_str.to_owned())
++                    && let Some(r) = ScrollbackImageRef::from_path(path_str)
++                {
++                    refs.push(r);
++                }
+             }
+         }
+     }

@@ -1955,7 +1955,7 @@ impl ScrollbackState {
     /// This is the ONE place where pre-render layout mutations happen:
     /// - Updates viewport dimensions
     /// - Recomputes layout cache if needed (heights, prompt descriptors)
-    /// - Computes total_height from cache
+    /// - Computes total_height from the cached virtual-Y prefix
     /// - Handles follow mode (auto-scroll to bottom)
     /// - Settles lazy viewport measurements (may further adjust heights/scroll)
     ///
@@ -2005,6 +2005,9 @@ impl ScrollbackState {
             // Full rebuild produces cheap height ESTIMATES for every entry.
             self.ensure_layout_cache(width);
             self.compute_total_height_from_cache();
+            // The full rebuild refreshed gaps and group projection; subsequent
+            // exact measurements can patch only their changed prefix suffixes.
+            self.gaps_may_be_dirty = false;
             // Re-pin the anchored content to the viewport top now that virtual_y
             // is rebuilt at the new width (before settle clamps / re-pins to it).
             if let Some(anchor) = scroll_anchor {
@@ -2051,14 +2054,10 @@ impl ScrollbackState {
                     self.fixup_hidden_selection();
                 } else {
                     // Fast path (streaming): only heights changed, gaps are stable.
-                    // Patch virtual_y in O(n-k) where k is the earliest dirty index.
-                    // For streaming (dirty entry at end), this is O(1).
-                    let total_delta = self.patch_virtual_y_for_dirty(&changes);
-                    // Apply delta directly instead of re-summing entire visible range.
-                    // Clamp at 0 to avoid underflow; no upper cap (total_height is
-                    // usize, so tall sessions are not truncated).
-                    let new_total = (self.total_height as i64 + total_delta as i64).max(0);
-                    self.total_height = new_total as usize;
+                    // Patch virtual_y from the earliest dirty entry and derive
+                    // the current view's total from its prefix endpoints.
+                    self.patch_virtual_y_for_dirty(&changes);
+                    self.compute_total_height_from_cache();
                 }
             } else if self.gaps_may_be_dirty {
                 // Heights didn't change, but structural state is dirty (e.g.,
@@ -2081,9 +2080,8 @@ impl ScrollbackState {
             return !changes.is_empty();
         }
 
-        // Case 3: Nothing structurally changed, but total_height still depends on
-        // visible_entry_range() which can change between renders (view mode switch,
-        // turn navigation). Recompute unconditionally — it's just summing a slice.
+        // Case 3: The visible range can change between renders (view mode switch,
+        // turn navigation), so re-derive its total from the cached prefix.
         self.compute_total_height_from_cache();
         // Handle follow mode even when nothing changed structurally.
         // Needed after fold_selected_impl clears dirty_heights — the fold leaves

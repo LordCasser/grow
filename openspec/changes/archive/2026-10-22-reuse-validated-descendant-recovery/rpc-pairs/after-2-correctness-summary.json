@@ -1,0 +1,148 @@
+[
+  {
+    "profile": "modern-128",
+    "runs": 1,
+    "load_ms": 77.53412499999999,
+    "load_ms_range": [
+      77.53412499999999,
+      77.53412499999999
+    ],
+    "first_history_ms": 19.846041,
+    "first_history_ms_range": [
+      19.846041,
+      19.846041
+    ],
+    "last_history_ms": 22.922541000000002,
+    "last_history_ms_range": [
+      22.922541000000002,
+      22.922541000000002
+    ],
+    "max_history_gap_ms": 1.212583,
+    "max_history_gap_ms_range": [
+      1.212583,
+      1.212583
+    ],
+    "process_peak_rss_bytes": 118472704,
+    "process_peak_rss_bytes_range": [
+      118472704,
+      118472704
+    ],
+    "timeline_bytes": 4673368,
+    "timeline_bytes_range": [
+      4673368,
+      4673368
+    ],
+    "updates_bytes": 0,
+    "updates_bytes_range": [
+      0,
+      0
+    ],
+    "directory_bytes": 4679257,
+    "directory_bytes_range": [
+      4679257,
+      4679257
+    ],
+    "directory_files": 4,
+    "directory_files_range": [
+      4,
+      4
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.083,
+      "plugin_discovery": 0.18,
+      "session.delta_drain_completions": 0.0,
+      "session.load.history_projection": 0.479,
+      "session.load.model_route_reconcile": 0.003,
+      "session.load.open_session": 0.072,
+      "session.load.state_projections": 0.049,
+      "session.load.timeline_evidence": 0.217,
+      "session.load.timeline_fold": 0.145,
+      "session.load.timeline_read_decode": 12.181,
+      "session.load_light": 12.995,
+      "session.load_session": 76.745,
+      "session.load_session_replay": 2.169,
+      "session.reconcile_stale_tasks": 0.027,
+      "session.spawn.install_coordination_backend": 7.735,
+      "session.spawn.prepare": 0.364,
+      "session.spawn.publish_coordination": 0.267,
+      "session.spawn_actor_call": 27.968,
+      "session.spawn_and_register": 36.421,
+      "session.spawn_and_register_session": 36.482,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 11.829
+    }
+  },
+  {
+    "profile": "modern-2048",
+    "runs": 1,
+    "load_ms": 378.275458,
+    "load_ms_range": [
+      378.275458,
+      378.275458
+    ],
+    "first_history_ms": 224.552125,
+    "first_history_ms_range": [
+      224.552125,
+      224.552125
+    ],
+    "last_history_ms": 363.87970800000005,
+    "last_history_ms_range": [
+      363.87970800000005,
+      363.87970800000005
+    ],
+    "max_history_gap_ms": 20.492791,
+    "max_history_gap_ms_range": [
+      20.492791,
+      20.492791
+    ],
+    "process_peak_rss_bytes": 725368832,
+    "process_peak_rss_bytes_range": [
+      725368832,
+      725368832
+    ],
+    "timeline_bytes": 74843515,
+    "timeline_bytes_range": [
+      74843515,
+      74843515
+    ],
+    "updates_bytes": 0,
+    "updates_bytes_range": [
+      0,
+      0
+    ],
+    "directory_bytes": 74849404,
+    "directory_bytes_range": [
+      74849404,
+      74849404
+    ],
+    "directory_files": 4,
+    "directory_files_range": [
+      4,
+      4
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.076,
+      "plugin_discovery": 0.191,
+      "session.delta_drain_completions": 0.0,
+      "session.load.history_projection": 11.171,
+      "session.load.model_route_reconcile": 0.013,
+      "session.load.open_session": 0.067,
+      "session.load.state_projections": 0.135,
+      "session.load.timeline_evidence": 3.894,
+      "session.load.timeline_fold": 2.776,
+      "session.load.timeline_read_decode": 195.769,
+      "session.load_light": 203.496,
+      "session.load_session": 377.452,
+      "session.load_session_replay": 72.485,
+      "session.reconcile_stale_tasks": 0.529,
+      "session.spawn.install_coordination_backend": 7.937,
+      "session.spawn.prepare": 0.378,
+      "session.spawn.publish_coordination": 4.211,
+      "session.spawn_actor_call": 53.76,
+      "session.spawn_and_register": 66.372,
+      "session.spawn_and_register_session": 66.433,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 11.46
+    }
+  }
+]

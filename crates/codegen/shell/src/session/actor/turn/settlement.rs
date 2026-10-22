@@ -337,13 +337,14 @@ impl SessionActor {
         // replay update as a rebuildable cache; it is no longer a second
         // authoritative terminal record.
         let update = crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone()));
-        let projected = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::Update(update))
-            .is_ok();
-        if !projected {
-            tracing::warn!("TurnCompleted replay projection was not queued");
+        if let Err(error) = crate::session::persistence::append_buffered_and_ack(
+            &self.notifications.persistence_tx,
+            update,
+        )
+        .await
+        {
+            tracing::warn!(%error, "TurnCompleted replay projection was not appended; suppressing live publication");
+            return;
         }
         self.forward_grow_notification(notification).await;
     }

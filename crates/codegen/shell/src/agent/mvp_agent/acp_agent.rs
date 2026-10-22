@@ -713,13 +713,18 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             .filter(|handle| !handle.cmd_tx.is_closed())
             .map(|handle| handle.cmd_tx.clone());
         let session_exists = resident_actor.is_some();
+        // Release order on cancellation matters: the mute is declared after
+        // the pause guards, so Drop reopens delivery before queued work resumes.
+        let mut actor_release = None;
+        if let Some(actor) = &resident_actor {
+            let (respond_to, ack) = tokio::sync::oneshot::channel();
+            let (release, resume) = tokio::sync::oneshot::channel();
+            actor.send(crate::session::SessionCommand::PauseForReplay { respond_to, release: resume }).map_err(|_| acp::Error::internal_error().data("resident actor stopped before replay"))?;
+            ack.await.map_err(|_| acp::Error::internal_error().data("resident replay acknowledgement lost"))?.map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            actor_release = Some(release);
+        }
         let mut reconnect_gateway_mute = resident_actor.as_ref().and_then(|expected| {
-            self.sessions.borrow().get(&session_id).and_then(|handle| {
-                handle
-                    .cmd_tx
-                    .same_channel(expected)
-                    .then(|| ReconnectGatewayMute::acquire(handle.gateway_enabled.clone()))
-            })
+            self.sessions.borrow().get(&session_id).and_then(|handle| handle.cmd_tx.same_channel(expected).then(|| ReconnectGatewayMute::acquire(handle.gateway_enabled.clone())))
         });
         if !session_exists {
             // A closed handle is not a writer candidate, but remove it before
@@ -739,22 +744,6 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 );
                 self.remove_session_terminal(&session_id, SessionLiveState::DeadFailed);
             }
-        }
-        if session_exists {
-            tracing::info!(
-                session_id = %session_id.0,
-                "Reconnect detected: flushing persistence buffer before replay"
-            );
-            let mut flush_timer = crate::instrumentation_timer!("session.reconnect_flush");
-            flush_timer.with_field("session_id", session_id.0.as_ref());
-            if let Err(reason) = self.flush_session(&session_id).await {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    reason,
-                    "Reconnect flush failed"
-                );
-            }
-            drop(flush_timer);
         }
         let origin_client = self.origin_client_info_from_meta(request_meta.as_ref());
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
@@ -786,6 +775,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         });
         let (persistence_info, persistence, spawn_new_actor) =
             if !claim_writer && !resident_still_open {
+                if let Some(mute) = reconnect_gateway_mute.as_mut() { mute.restore(); }
+                drop(actor_release.take());
                 drop(observed_persistence);
                 if let Some(expected) = resident_actor.as_ref() {
                     let is_expected = self
@@ -828,6 +819,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let crate::session::persistence::PersistedInfoLight {
             mut summary,
             mut timeline,
+            history,
             mut control_snapshot,
             session_directory,
             rewind_points_source,
@@ -838,7 +830,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         // Timeline is already validated by load_light. Seed before replay can
         // be skipped and before a fresh actor can emit startup projections;
         // rewind-discarded expectation IDs still occupy the global sequence.
-        crate::session::storage::reseed_event_counter_from_projection_expectations(&timeline);
+        history.reseed_event_counter();
         let persisted_control_revision = control_snapshot
             .as_ref()
             .map_or(0, |control| control.control_revision);
@@ -910,6 +902,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         );
         load_session_sampling.reasoning_effort = summary.reasoning_effort;
         if spawn_new_actor {
+            let _timer = crate::instrumentation_timer!("session.load.model_route_reconcile");
             let current_transport = sampling_types::model_image_input_key_from_parts(
                 &load_session_sampling.model,
                 &load_session_sampling.api_backend,
@@ -965,6 +958,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         acp::Error::internal_error()
                             .data(format!("could not record the cold model route: {error}"))
                     })?;
+                let _timer = crate::instrumentation_timer!("session.load.model_route_append");
                 persistence
                     .append_timeline_event_durably(event)
                     .await
@@ -1098,6 +1092,12 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 self.cfg.borrow().session.load_envrc.unwrap_or(true)
             }
         };
+        // Bound to the exact validated snapshot used below, before Timeline
+        // moves into actor bootstrap or child reconciliation appends new facts.
+        let descendant_ownership =
+            crate::session::storage::DescendantOwnership::from_validated(
+                session_id.0.as_ref(), &timeline, &history,
+            );
         let (delta_completions, subagent_projections) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
@@ -1112,48 +1112,35 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     &cwd,
                     &session_directory,
                     &timeline,
+                    &history,
                     !spawn_new_actor,
                     persist_data.as_ref(),
                     target_client_id.as_ref(),
                     cursor.as_deref(),
                 )
                 .await?;
-            let _timer = crate::instrumentation_timer!("session.delta_flush_replay");
-            let completions = match self.flush_session(&session_id).await {
-                Ok(()) => {
-                    self.replay_session_updates_from_offset_enqueue(
-                        &session_id,
-                        &session_directory,
-                        replay_end_offset,
-                        &timeline,
-                        persist_data.as_ref(),
-                        target_client_id.as_ref(),
-                        mark_replay,
-                    )
-                }
-                Err(reason) => {
-                    tracing::warn!(
-                        session_id = %session_id.0,
-                        reason,
-                        "Post-replay flush failed, skipping delta replay"
-                    );
-                    Vec::new()
-                }
-            };
-            (completions, subagent_projections)
+            let _ = (replay_end_offset, mark_replay);
+            (Vec::<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>>::new(), subagent_projections)
         };
         if let Some(mute) = reconnect_gateway_mute.as_mut() {
             mute.restore();
         }
-        for rx in delta_completions {
-            let _ = rx.await;
+        if let Some(release) = actor_release.take() { let _ = release.send(true); }
+        {
+            let _timer = crate::instrumentation_timer!("session.delta_drain_completions");
+            for rx in delta_completions {
+                let _ = rx.await;
+            }
         }
         let reconcile_completions = if runtime_recovery_gated { Vec::new() } else {
             let _timer = crate::instrumentation_timer!("session.reconcile_stale_tasks");
-            self.repair_stale_background_task_projections(&session_id, &session_directory)
+            self.repair_stale_background_task_projections(&session_id, &history)
         };
-        for rx in reconcile_completions {
-            let _ = rx.await;
+        {
+            let _timer = crate::instrumentation_timer!("session.stale_tasks_drain_completions");
+            for rx in reconcile_completions {
+                let _ = rx.await;
+            }
         }
         let preloaded_envrc = workspace::envrc::load_envrc_or_empty_when_trusted(
             cwd.as_path(),
@@ -1199,9 +1186,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         mcp_meta_config_map,
                         persistence,
                         session_title_route,
-                        timeline_bootstrap: crate::session::TimelineBootstrap::Existing(
-                            timeline,
-                        ),
+                        timeline_bootstrap: crate::session::TimelineBootstrap::Existing { timeline, history },
                         rewind_points_source,
                         origin_client: origin_client.clone(),
                         client_code_nav_enabled,
@@ -1348,6 +1333,12 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         // retain their live selection; reconnect is not a model-control request.
         drop(catalog_transaction);
         let mut response_meta_map = serde_json::Map::new();
+        if let Some(ownership_meta) = descendant_ownership.into_load_meta() {
+            response_meta_map.insert(
+                crate::session::storage::DESCENDANT_OWNERSHIP_META_KEY.to_owned(),
+                ownership_meta,
+            );
+        }
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
         if let Some(persist) = persist_data {
             response_meta_map.insert("grow/persist".to_string(), persist);
@@ -2409,6 +2400,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         .send(crate::session::SessionCommand::GrowSessionNotification {
                             notification,
                             forward_to_gateway: false,
+                            restored: false,
                         });
                 } else {
                     tracing::warn!(

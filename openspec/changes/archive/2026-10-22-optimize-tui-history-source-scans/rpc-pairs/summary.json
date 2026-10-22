@@ -1,0 +1,82 @@
+[
+  {
+    "profile": "modern-128",
+    "stage": "before",
+    "n": 3,
+    "load_ms": {
+      "median": 93.075041,
+      "min": 87.563792,
+      "max": 105.23616700000001
+    },
+    "first_history_ms": {
+      "median": 20.872542,
+      "min": 20.717833000000002,
+      "max": 22.18125
+    },
+    "last_history_ms": {
+      "median": 24.173375,
+      "min": 24.058625,
+      "max": 25.274334
+    }
+  },
+  {
+    "profile": "modern-128",
+    "stage": "after",
+    "n": 3,
+    "load_ms": {
+      "median": 95.37187499999999,
+      "min": 84.161458,
+      "max": 134.634291
+    },
+    "first_history_ms": {
+      "median": 22.147625,
+      "min": 19.870959,
+      "max": 26.973958
+    },
+    "last_history_ms": {
+      "median": 25.440208,
+      "min": 23.098834,
+      "max": 30.234208
+    }
+  },
+  {
+    "profile": "modern-2048",
+    "stage": "before",
+    "n": 3,
+    "load_ms": {
+      "median": 392.22112500000003,
+      "min": 387.68375,
+      "max": 394.014834
+    },
+    "first_history_ms": {
+      "median": 227.019792,
+      "min": 226.98874999999998,
+      "max": 227.342625
+    },
+    "last_history_ms": {
+      "median": 377.201209,
+      "min": 372.31399999999996,
+      "max": 378.850834
+    }
+  },
+  {
+    "profile": "modern-2048",
+    "stage": "after",
+    "n": 3,
+    "load_ms": {
+      "median": 384.65058400000004,
+      "min": 375.88025000000005,
+      "max": 388.006042
+    },
+    "first_history_ms": {
+      "median": 226.75975,
+      "min": 225.0465,
+      "max": 226.94916700000002
+    },
+    "last_history_ms": {
+      "median": 370.05787499999997,
+      "min": 362.22525,
+      "max": 370.26187500000003
+    }
+  }
+]

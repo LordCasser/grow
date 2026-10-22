@@ -1,0 +1,2897 @@
+[
+  {
+    "format": "modern",
+    "turns": 128,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 4437097,
+    "updates_bytes": 4820762,
+    "directory_bytes": 9263748,
+    "directory_files": 5,
+    "directory_after_load": [
+      9266123,
+      6
+    ],
+    "load_ms": 99.99341700000001,
+    "first_notification_ms": 39.590084,
+    "first_history_ms": 39.590084,
+    "last_history_ms": 43.240959000000004,
+    "max_history_gap_ms": 1.169166,
+    "history_count": 256,
+    "history_bytes": 4199314,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 98.942
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 37.99
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 37.579
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 33.937
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 20.078
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 15.224
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 9.914
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 9.057
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 8.824
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 5.599
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 5.18
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 4.132
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 3.075
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 2.04
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.993
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 1.792
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 1.468
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 1.44
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 1.185
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.354
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.296
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.216
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.15
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.097
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.091
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.067
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.023
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.017
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.005
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-128",
+    "run": 1,
+    "stage": "before",
+    "source": "paired-before-1-modern-128-1.txt",
+    "process_peak_rss_bytes": 113426432
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 17752322,
+    "updates_bytes": 19284122,
+    "directory_bytes": 37042333,
+    "directory_files": 5,
+    "directory_after_load": [
+      37044708,
+      6
+    ],
+    "load_ms": 207.87449999999998,
+    "first_notification_ms": 116.633542,
+    "first_history_ms": 116.633542,
+    "last_history_ms": 152.732959,
+    "max_history_gap_ms": 12.831291,
+    "history_count": 1024,
+    "history_bytes": 16797586,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 206.914
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 76.442
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 46.569
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 44.899
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 44.831
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 42.209
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 36.246
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 35.492
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 20.671
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 19.699
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 16.636
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 14.982
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.448
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 11.249
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 7.582
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 5.966
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 5.877
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.765
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 1.029
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.824
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.416
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.336
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.209
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.1
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.075
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.065
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.051
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.017
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.002
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-512",
+    "run": 1,
+    "stage": "before",
+    "source": "paired-before-1-modern-512-1.txt",
+    "process_peak_rss_bytes": 263225344
+  },
+  {
+    "format": "modern",
+    "turns": 2048,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 71032018,
+    "updates_bytes": 77140456,
+    "directory_bytes": 148178363,
+    "directory_files": 5,
+    "directory_after_load": [
+      148180742,
+      6
+    ],
+    "load_ms": 718.940042,
+    "first_notification_ms": 469.671084,
+    "first_history_ms": 469.671084,
+    "last_history_ms": 659.169667,
+    "max_history_gap_ms": 55.779,
+    "history_count": 4096,
+    "history_bytes": 67191722,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 718.121
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 323.946
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 200.367
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 155.293
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 149.737
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 101.714
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 101.639
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 98.711
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 88.149
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 86.176
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 71.038
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 63.147
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 53.276
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 35.453
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 27.91
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 23.065
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.959
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 4.046
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 2.66
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 2.086
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.432
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.325
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.281
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.203
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.187
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.091
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.09
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.082
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.015
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.002
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-2048",
+    "run": 1,
+    "stage": "before",
+    "source": "paired-before-1-modern-2048-1.txt",
+    "process_peak_rss_bytes": 836714496
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "16",
+    "route_seeded": true,
+    "timeline_bytes": 17752322,
+    "updates_bytes": 18222273,
+    "directory_bytes": 35980484,
+    "directory_files": 5,
+    "directory_after_load": [
+      37044708,
+      7
+    ],
+    "load_ms": 370.415084,
+    "first_notification_ms": 283.185834,
+    "first_history_ms": 283.185834,
+    "last_history_ms": 318.26875,
+    "max_history_gap_ms": 13.307333,
+    "history_count": 1024,
+    "history_bytes": 16797586,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 369.608
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 243.897
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 167.546
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 45.082
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 40.398
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 40.317
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 37.715
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 35.686
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 34.924
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 21.4
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 19.765
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 16.446
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 13.54
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.370000000000001
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 11.672
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 7.717
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 5.94
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 5.786
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.751
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 1.081
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.762
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.44
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.317
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.191
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.093
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.081
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.069
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.054
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.014
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.003
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-repair-512",
+    "run": 1,
+    "stage": "before",
+    "source": "paired-before-1-modern-repair-512-1.txt",
+    "process_peak_rss_bytes": 248332288
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 3072258,
+    "updates_bytes": 4604058,
+    "directory_bytes": 7682205,
+    "directory_files": 5,
+    "directory_after_load": [
+      7684580,
+      6
+    ],
+    "load_ms": 110.569666,
+    "first_notification_ms": 42.212166,
+    "first_history_ms": 42.212166,
+    "last_history_ms": 56.962582999999995,
+    "max_history_gap_ms": 5.424375,
+    "history_count": 1024,
+    "history_bytes": 2117522,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 109.799
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 32.394
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 32.323
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 29.697
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 25.599
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 19.258
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.113
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 9.788
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 8.561
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 8.406
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 6.834
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 5.473
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 5.171
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 3.75
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 3.672
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 1.961
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 1.869
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.855
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.676
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.391
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.288
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.193
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.178
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.089
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.081
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.076
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.043
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.008
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.007
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.002
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-short-512",
+    "run": 1,
+    "stage": "before",
+    "source": "paired-before-1-modern-short-512-1.txt",
+    "process_peak_rss_bytes": 132071424
+  },
+  {
+    "format": "modern",
+    "turns": 128,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 4437097,
+    "updates_bytes": 4820762,
+    "directory_bytes": 9263748,
+    "directory_files": 5,
+    "directory_after_load": [
+      9266123,
+      6
+    ],
+    "load_ms": 92.70079100000001,
+    "first_notification_ms": 37.3895,
+    "first_history_ms": 37.3895,
+    "last_history_ms": 40.914875,
+    "max_history_gap_ms": 1.1582910000000002,
+    "history_count": 256,
+    "history_bytes": 4199314,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 91.745
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 32.265
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 32.201
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 29.307
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 19.671
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.989
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 9.799
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 9.214
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 8.982
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 5.217
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 5.111
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 4.13
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 3.006
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 2.107
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 1.995
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 1.721
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 1.515
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 1.417
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.394
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.304
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.227
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.201
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.171
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.104
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.101
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.076
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.018
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.007
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.006
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-128",
+    "run": 2,
+    "stage": "before",
+    "source": "paired-before-2-modern-128-1.txt",
+    "process_peak_rss_bytes": 117063680
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 17752322,
+    "updates_bytes": 19284122,
+    "directory_bytes": 37042333,
+    "directory_files": 5,
+    "directory_after_load": [
+      37044708,
+      6
+    ],
+    "load_ms": 209.219375,
+    "first_notification_ms": 118.32225,
+    "first_history_ms": 118.32225,
+    "last_history_ms": 154.84166599999998,
+    "max_history_gap_ms": 13.715333,
+    "history_count": 1024,
+    "history_bytes": 16797586,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 208.338
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 77.582
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 46.79
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 42.65
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 42.567
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 39.829
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 36.16
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 35.334
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 20.787
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 20.579
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 17.795
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 14.23
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.710999999999999
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 12.142
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 7.896
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 5.88
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 5.847
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.92
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 1.024
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.916
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.427
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.3
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.195
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.115
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.089
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.075
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.063
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.017
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.002
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-512",
+    "run": 2,
+    "stage": "before",
+    "source": "paired-before-2-modern-512-1.txt",
+    "process_peak_rss_bytes": 270286848
+  },
+  {
+    "format": "modern",
+    "turns": 2048,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 71032018,
+    "updates_bytes": 77140456,
+    "directory_bytes": 148178363,
+    "directory_files": 5,
+    "directory_after_load": [
+      148180742,
+      6
+    ],
+    "load_ms": 676.9539159999999,
+    "first_notification_ms": 443.4485,
+    "first_history_ms": 443.4485,
+    "last_history_ms": 619.504208,
+    "max_history_gap_ms": 51.467,
+    "history_count": 4096,
+    "history_bytes": 67191722,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 676.131
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 306.397
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 191.92
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 146.36
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 141.809
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 91.08
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 90.997
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 88.145
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 84.401
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 81.146
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 66.364
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 63.517
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 48.87
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 30.695
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 23.838
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 23.358
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.48
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 3.824
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 2.644
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.997
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.428
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.34
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.331
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.186
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.175
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.09
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.08
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.076
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.016
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-2048",
+    "run": 2,
+    "stage": "before",
+    "source": "paired-before-2-modern-2048-1.txt",
+    "process_peak_rss_bytes": 672202752
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "16",
+    "route_seeded": true,
+    "timeline_bytes": 17752322,
+    "updates_bytes": 18222273,
+    "directory_bytes": 35980484,
+    "directory_files": 5,
+    "directory_after_load": [
+      37044708,
+      7
+    ],
+    "load_ms": 427.972333,
+    "first_notification_ms": 336.667541,
+    "first_history_ms": 336.667541,
+    "last_history_ms": 371.77900000000005,
+    "max_history_gap_ms": 13.431000000000001,
+    "history_count": 1024,
+    "history_bytes": 16797586,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 427.264
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 297.483
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 221.681
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 45.242
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 43.834
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 43.764
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 40.348
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 36.308
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 35.565
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 20.621
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 19.894
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 16.158
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 13.402
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.681000000000001
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 11.871
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 7.783
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 6.044
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 5.858
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 2.497
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.921
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.818
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.428
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.369
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.161
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.097
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.071
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.063
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.052
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.014
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.01
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-repair-512",
+    "run": 2,
+    "stage": "before",
+    "source": "paired-before-2-modern-repair-512-1.txt",
+    "process_peak_rss_bytes": 273432576
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 3072258,
+    "updates_bytes": 4604058,
+    "directory_bytes": 7682205,
+    "directory_files": 5,
+    "directory_after_load": [
+      7684580,
+      6
+    ],
+    "load_ms": 109.544375,
+    "first_notification_ms": 41.8605,
+    "first_history_ms": 41.8605,
+    "last_history_ms": 57.035375,
+    "max_history_gap_ms": 5.651542,
+    "history_count": 1024,
+    "history_bytes": 2117522,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 108.609
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 31.216
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 31.147
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 28.459
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 25.23
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 19.608
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.115
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 9.732
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 8.672
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 8.652
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 7.34
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 5.159
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 4.864
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 3.835
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 3.784
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.826
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 1.78
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 1.779
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.613
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.438
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.339
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.191
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.162
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.102
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.082
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.064
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.033
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.008
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.008
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.002
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-short-512",
+    "run": 2,
+    "stage": "before",
+    "source": "paired-before-2-modern-short-512-1.txt",
+    "process_peak_rss_bytes": 132186112
+  },
+  {
+    "format": "modern",
+    "turns": 128,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 4437097,
+    "updates_bytes": 4820762,
+    "directory_bytes": 9263748,
+    "directory_files": 5,
+    "directory_after_load": [
+      9266123,
+      6
+    ],
+    "load_ms": 88.864791,
+    "first_notification_ms": 37.360166,
+    "first_history_ms": 37.360166,
+    "last_history_ms": 40.706541,
+    "max_history_gap_ms": 1.105042,
+    "history_count": 256,
+    "history_bytes": 4199314,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 87.978
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 28.821
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 28.753
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 26.143
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 19.548
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.41
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 10.153
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 8.982
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 8.78
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 5.173
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 5.013
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 4.316
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 3.014
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 2.069
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 1.873
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.826
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 1.529
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 1.508
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.404
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.29
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.244
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.165
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.151
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.115
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.083
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.073
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.013
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.005
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.004
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-128",
+    "run": 3,
+    "stage": "before",
+    "source": "paired-before-3-modern-128-1.txt",
+    "process_peak_rss_bytes": 110559232
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 17752322,
+    "updates_bytes": 19284122,
+    "directory_bytes": 37042333,
+    "directory_files": 5,
+    "directory_after_load": [
+      37044708,
+      6
+    ],
+    "load_ms": 206.76879200000002,
+    "first_notification_ms": 117.21433400000001,
+    "first_history_ms": 117.21433400000001,
+    "last_history_ms": 154.031792,
+    "max_history_gap_ms": 13.599958,
+    "history_count": 1024,
+    "history_bytes": 16797586,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 205.768
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 76.771
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 46.946
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 40.335
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 40.265
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 37.682
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 36.393
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 35.597
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 20.97
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 20.177
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 16.566
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 15.093
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 13.003
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 11.983
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 7.665
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 5.968
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 5.648
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.746
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.968
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.778
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.411
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.329
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.161
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.11
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.072
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.07
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.057
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.018
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-512",
+    "run": 3,
+    "stage": "before",
+    "source": "paired-before-3-modern-512-1.txt",
+    "process_peak_rss_bytes": 261980160
+  },
+  {
+    "format": "modern",
+    "turns": 2048,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 71032018,
+    "updates_bytes": 77140456,
+    "directory_bytes": 148178363,
+    "directory_files": 5,
+    "directory_after_load": [
+      148180742,
+      6
+    ],
+    "load_ms": 695.377791,
+    "first_notification_ms": 452.91837499999997,
+    "first_history_ms": 452.91837499999997,
+    "last_history_ms": 641.375458,
+    "max_history_gap_ms": 54.097584,
+    "history_count": 4096,
+    "history_bytes": 67191722,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 694.464
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 314.248
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 194.437
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 146.923
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 142.22
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 98.754
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 98.668
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 95.754
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 87.499
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 82.252
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 70.553
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 64.495
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 51.575
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 30.915
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 24.068
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 23.553
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.234
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 3.761
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 2.699
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.99
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.429
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.388
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.289
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.19999999999999998
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.188
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.095
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.074
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.071
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.015
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-2048",
+    "run": 3,
+    "stage": "before",
+    "source": "paired-before-3-modern-2048-1.txt",
+    "process_peak_rss_bytes": 846315520
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "16",
+    "route_seeded": true,
+    "timeline_bytes": 17752322,
+    "updates_bytes": 18222273,
+    "directory_bytes": 35980484,
+    "directory_files": 5,
+    "directory_after_load": [
+      37044708,
+      7
+    ],
+    "load_ms": 384.164792,
+    "first_notification_ms": 293.878292,
+    "first_history_ms": 293.878292,
+    "last_history_ms": 329.48920799999996,
+    "max_history_gap_ms": 13.783375000000001,
+    "history_count": 1024,
+    "history_bytes": 16797586,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 383.411
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 254.586
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 178.708
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 45.318
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 42.224
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 42.152
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 39.324
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 36.344
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 35.546
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 20.749
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 19.734
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 15.969
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 13.54
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.393
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 12.274
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 7.492
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 6.098
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 5.908
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 2.0
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.967
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.819
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.416
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.315
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.177
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.082
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.073
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.067
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.057
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.014
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-repair-512",
+    "run": 3,
+    "stage": "before",
+    "source": "paired-before-3-modern-repair-512-1.txt",
+    "process_peak_rss_bytes": 260538368
+  },
+  {
+    "format": "modern",
+    "turns": 512,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 3072258,
+    "updates_bytes": 4604058,
+    "directory_bytes": 7682205,
+    "directory_files": 5,
+    "directory_after_load": [
+      7684580,
+      6
+    ],
+    "load_ms": 110.966292,
+    "first_notification_ms": 41.237167,
+    "first_history_ms": 41.237167,
+    "last_history_ms": 56.141458,
+    "max_history_gap_ms": 5.466958,
+    "history_count": 1024,
+    "history_bytes": 2117522,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 110.176
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 32.782
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 32.716
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 30.225
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 25.111
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 18.834
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.187000000000001
+      },
+      {
+        "name": "session.load.physical_updates_decode",
+        "count": 1,
+        "ms": 9.558
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 8.519
+      },
+      {
+        "name": "session.replay.read_and_reconcile",
+        "count": 1,
+        "ms": 8.357
+      },
+      {
+        "name": "session.replay.drain_completions",
+        "count": 1,
+        "ms": 6.702
+      },
+      {
+        "name": "session.load.response_projection_plan",
+        "count": 1,
+        "ms": 5.291
+      },
+      {
+        "name": "session.projection.typed_canonical",
+        "count": 1,
+        "ms": 4.968
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 3.769
+      },
+      {
+        "name": "session.replay.response_reconcile",
+        "count": 1,
+        "ms": 3.531
+      },
+      {
+        "name": "session.replay.read_snapshot",
+        "count": 1,
+        "ms": 1.878
+      },
+      {
+        "name": "session.replay.forward_updates",
+        "count": 1,
+        "ms": 1.86
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 1.726
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.643
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.404
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.281
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.192
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.171
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.09
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.082
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.069
+      },
+      {
+        "name": "session.load.projection_metadata",
+        "count": 1,
+        "ms": 0.04
+      },
+      {
+        "name": "session.replay.communication_restore",
+        "count": 1,
+        "ms": 0.009
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.007
+      },
+      {
+        "name": "session.delta_flush_replay",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.load.response_projection_appends",
+        "count": 1,
+        "ms": 0.001
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-short-512",
+    "run": 3,
+    "stage": "before",
+    "source": "paired-before-3-modern-short-512-1.txt",
+    "process_peak_rss_bytes": 132530176
+  }
+]

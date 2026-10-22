@@ -31,7 +31,7 @@ fn bench_fork_copy(c: &mut Criterion) {
     let source = synthesize_to_target_bytes(root.path(), target_mb * 1024 * 1024);
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
     let updates_len = adapter
-        .updates_snapshot_len(&source)
+        .history_snapshot_len(&source)
         .expect("updates ledger metadata");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

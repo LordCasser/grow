@@ -134,7 +134,6 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
                 sampler::PreviewEventBudget::default(),
                 std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 store.clone(),
-                actor.chat_state_handle.clone(),
             );
             let manager = WorkflowManager::new(
                 "workflow-launch-test".into(),

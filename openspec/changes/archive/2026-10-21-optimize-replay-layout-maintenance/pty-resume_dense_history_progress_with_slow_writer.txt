@@ -1,0 +1,18 @@
+/Users/lordcasser/workspace/projects/grow/target/debug/deps/pty_e2e_persistence-d87bfba196ee602c
+CLI /Users/lordcasser/workspace/projects/grow/target/debug/grow grow 2.4.3 (a1d1c296) shell/test-support
+resume_input_latency::resume_dense_history_progress_with_slow_writer exact enumeration=1
+
+running 1 test
+test resume_input_latency::resume_dense_history_progress_with_slow_writer ... [resume-progress] turns=512 dense_tools=true first_history_ms=1747.8 history_visible_ms=1942.3 advances=2 max_content_gap_ms=194.2
+[resume-phase] turns=512 name=pager.frame.diff count=41 sum_ms=30.2 max_ms=1.0
+[resume-phase] turns=512 name=pager.frame.queue count=40 sum_ms=0.3 max_ms=0.0
+[resume-phase] turns=512 name=pager.frame.render count=41 sum_ms=516.5 max_ms=189.1
+[resume-phase] turns=512 name=pager.frame.write count=40 sum_ms=2.2 max_ms=0.1
+[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.4 max_ms=0.4
+[resume-phase] turns=512 name=session.load_session count=1 sum_ms=1952.3 max_ms=1952.3
+[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=627.2 max_ms=627.2
+[resume-pty] turns=512 update_bytes=31179669 history_visible_ms=2471.6 ready_echo_p95_ms=52.8 ready_echo_max_ms=56.2 frames=40
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 26.44s
+

@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 /// Sideband ledgers remain part of the only supported architecture; older
 /// path-bearing prompts, Chat snapshots, and mutable subagent metadata are not
 /// loaded or rewritten in place.
-pub const SESSION_FORMAT_VERSION: u8 = 6;
+pub const SESSION_FORMAT_VERSION: u8 = 7;
 pub const REWIND_TRANSACTION_VERSION: u8 = 1;
 pub const REWIND_TRANSACTION_FILE: &str = "rewind-transaction.json";
 pub const MAX_REWIND_TRANSACTION_BYTES: u64 = 16 * 1024;
@@ -361,6 +361,7 @@ pub enum PersistenceMsg {
         notification: crate::extensions::notification::SessionNotification,
         permit: tokio::sync::OwnedSemaphorePermit,
         preview: Option<(String, u32)>,
+        delivery: Option<crate::session::notifications::CommittedGrowDelivery>,
         respond_to: Option<
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
         >,
@@ -412,10 +413,14 @@ pub enum PersistenceMsg {
         respond_to:
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
     },
-    CommitResponseProjection {
-        projection: crate::session::response_projection::ResponseReplayProjection,
+    AppendUpdateBufferedAndAck {
+        update: SessionUpdate,
         respond_to:
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
+    },
+    ReplayBarrier {
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+        release: tokio::sync::oneshot::Receiver<()>,
     },
     TimelineDurablyAndAck {
         event: chat_state::TimelineEvent,
@@ -1900,6 +1905,60 @@ enum PendingAppendOutcome {
     NotCommittedErr(acp::SessionNotification, io::Error),
 }
 
+#[must_use]
+pub(crate) struct ReplayBarrierGuard {
+    _release: tokio::sync::oneshot::Sender<()>,
+}
+
+/// The existing writer pauses between complete records, never while holding
+/// an OS append lock. Dropping the guard (including cancellation) resumes it.
+pub(crate) async fn replay_barrier(
+    tx: &mpsc::UnboundedSender<PersistenceMsg>,
+) -> io::Result<ReplayBarrierGuard> {
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    tx.send(PersistenceMsg::ReplayBarrier {
+        respond_to,
+        release: resume,
+    })
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "Timeline writer stopped before replay barrier",
+        )
+    })?;
+    response.await.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "Timeline replay barrier acknowledgement lost",
+        )
+    })??;
+    Ok(ReplayBarrierGuard { _release: release })
+}
+
+pub(crate) async fn append_buffered_and_ack(
+    tx: &mpsc::UnboundedSender<PersistenceMsg>,
+    update: SessionUpdate,
+) -> Result<(), DurableAppendError> {
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    tx.send(PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to })
+        .map_err(|_| {
+            DurableAppendError::NotCommitted(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Timeline writer stopped before display append",
+            ))
+        })?;
+    response
+        .await
+        .map_err(|_| {
+            DurableAppendError::AcknowledgementLost(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Timeline display append acknowledgement lost",
+            ))
+        })?
+        .map_err(Into::into)
+}
+
 struct SessionPersistence {
     info: Info,
     storage: Arc<dyn StorageAdapter>,
@@ -2060,9 +2119,13 @@ impl SessionPersistence {
                     self.terminal_sampling_attempt = Some((key, SamplingAttemptState::Discarded));
                 }
             }
-            // Public Accepted is notification-only; the projection commit owns durable closure.
             SamplingAttemptState::Accepted => {
                 self.flush_pending().await;
+                if self.sampling_attempt.as_ref() == Some(&key) {
+                    self.clear_sampling_anchor(&key);
+                    self.sampling_attempt = None;
+                    self.terminal_sampling_attempt = Some((key, SamplingAttemptState::Accepted));
+                }
             }
         }
     }
@@ -2180,70 +2243,6 @@ impl SessionPersistence {
             .await
     }
 
-    fn retryable_projection_error(error: &crate::session::storage::AppendUpdateError) -> bool {
-        let error = match error {
-            crate::session::storage::AppendUpdateError::NotCommitted(error)
-            | crate::session::storage::AppendUpdateError::Committed(error) => error,
-        };
-        !matches!(
-            error.kind(),
-            io::ErrorKind::InvalidData | io::ErrorKind::Unsupported
-        )
-    }
-
-    async fn commit_response_projection(
-        &mut self,
-        projection: crate::session::response_projection::ResponseReplayProjection,
-    ) -> Result<(), crate::session::storage::AppendUpdateError> {
-        self.drain_pending().await?;
-        let key = SamplingAttemptKey {
-            request_id: projection.request_id.clone(),
-            attempt: projection.attempt,
-        };
-        if let Some(window) = &self.sampling_anchor
-            && window.key == key
-            && let Some(error) = &window.write_error
-        {
-            return Err(crate::session::storage::AppendUpdateError::NotCommitted(
-                io::Error::other(format!(
-                    "sampling anchor or update was not confirmed: {error}"
-                )),
-            ));
-        }
-
-        for attempt in 0..2 {
-            let result = self
-                .storage
-                .commit_response_projection(&self.info, &projection)
-                .await;
-            match result {
-                Ok(()) => break,
-                Err(error) if attempt == 0 && Self::retryable_projection_error(&error) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        if self
-            .sampling_anchor
-            .as_ref()
-            .is_some_and(|window| window.key == key)
-        {
-            self.sampling_anchor = None;
-        }
-        let terminal = match projection.disposition {
-            crate::session::response_projection::ResponseReplayDisposition::Admitted => {
-                crate::extensions::notification::SamplingAttemptState::Accepted
-            }
-            crate::session::response_projection::ResponseReplayDisposition::Discarded => {
-                crate::extensions::notification::SamplingAttemptState::Discarded
-            }
-        };
-        self.terminal_sampling_attempt = Some((key.clone(), terminal));
-        if self.sampling_attempt.as_ref() == Some(&key) {
-            self.sampling_attempt = None;
-        }
-        Ok(())
-    }
-
     /// Flush any pending merged ACP notification to disk.
     async fn flush_pending(&mut self) {
         if let Err(error) = self.drain_pending().await {
@@ -2278,6 +2277,42 @@ impl SessionPersistence {
                 PersistenceMsg::FlushAndAck { respond_to } => {
                     self.flush_pending().await;
                     let _ = respond_to.send(());
+                }
+                PersistenceMsg::ReplayBarrier {
+                    respond_to,
+                    release,
+                } => {
+                    let result = self
+                        .drain_pending()
+                        .await
+                        .map_err(|error| error.into_io_error());
+                    let ready = result.is_ok();
+                    if respond_to.send(result).is_ok() && ready {
+                        let _ = release.await;
+                    }
+                }
+                PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to } => {
+                    let preview = self
+                        .sampling_anchor
+                        .as_ref()
+                        .map(|window| window.key.clone());
+                    let result = match self.drain_pending().await {
+                        Ok(()) if preview.is_some() => {
+                            self.storage
+                                .append_update_durable_commit_aware(&self.info, &update)
+                                .await
+                        }
+                        Ok(()) => self.write_update(&update).await,
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = &result {
+                        if let Some(window) = &mut self.sampling_anchor
+                            && preview.as_ref() == Some(&window.key)
+                        {
+                            window.write_error.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::Update(update) => {
                     match update {
@@ -2325,11 +2360,15 @@ impl SessionPersistence {
                                 }
                             }
                         }
-                        SessionUpdate::Grow(_) | SessionUpdate::ResponseReplayProjection(_) => {
+                        SessionUpdate::Grow(_) => {
                             // Non-ACP records are written directly without merging.
                             if let Err(error) = self.write_update(&update).await {
                                 tracing::warn!(%error, "failed to write update");
                             }
+                        }
+                        #[cfg(any(test, feature = "test-support"))]
+                        SessionUpdate::ResponseReplayProjection(_) => {
+                            tracing::warn!("legacy projection oracle cannot enter persistence");
                         }
                     }
                 }
@@ -2338,6 +2377,7 @@ impl SessionPersistence {
                     permit: _permit,
                     preview,
                     respond_to,
+                    delivery,
                 } => {
                     let result = self
                         .handle_durable_append(SessionUpdate::Grow(Box::new(notification)))
@@ -2352,6 +2392,13 @@ impl SessionPersistence {
                         {
                             window.write_error.get_or_insert_with(|| error.to_string());
                         }
+                    }
+                    if matches!(
+                        &result,
+                        Ok(()) | Err(crate::session::storage::AppendUpdateError::Committed(_))
+                    ) && let Some(delivery) = delivery
+                    {
+                        delivery.publish();
                     }
                     if let Some(respond_to) = respond_to {
                         let _ = respond_to.send(result);
@@ -2446,6 +2493,7 @@ impl SessionPersistence {
                                     )
                                     .await
                             }
+                            #[cfg(any(test, feature = "test-support"))]
                             SessionUpdate::ResponseReplayProjection(_) => {
                                 Err(crate::session::storage::AppendUpdateError::NotCommitted(
                                     io::Error::new(
@@ -2521,13 +2569,6 @@ impl SessionPersistence {
                     let result = self.handle_durable_append(update).await;
                     let _ = respond_to.send(result);
                 }
-                PersistenceMsg::CommitResponseProjection {
-                    projection,
-                    respond_to,
-                } => {
-                    let result = self.commit_response_projection(projection).await;
-                    let _ = respond_to.send(result);
-                }
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
                     let refreshes_session_index = matches!(
                         &event.kind,
@@ -2542,10 +2583,17 @@ impl SessionPersistence {
                             | chat_state::TimelineEventKind::Subagent(_)
                             | chat_state::TimelineEventKind::SubagentResult(_)
                     );
-                    let result = self
-                        .storage
-                        .append_timeline_event_durable(&self.info, &event)
-                        .await;
+                    // A domain commit also seals all earlier presentation
+                    // facts in this one file. In particular a consumed input
+                    // cannot outrun its original display echo.
+                    let result = match self.drain_pending().await {
+                        Ok(()) => {
+                            self.storage
+                                .append_timeline_event_durable(&self.info, &event)
+                                .await
+                        }
+                        Err(error) => Err(error.into_io_error()),
+                    };
                     if result.is_ok() && refreshes_session_index {
                         crate::session::storage::search::notify_session_updated(
                             &self.info.id.to_string(),
@@ -2947,6 +2995,7 @@ pub(crate) async fn new_child(
 
 /// Canonical resume payload. Client updates and rewind snapshots remain lazy.
 pub(crate) struct PersistedInfoLight {
+    pub(crate) history: crate::session::history::HistorySnapshot,
     pub summary: Summary,
     pub timeline: chat_state::Timeline,
     pub control_snapshot: Option<crate::session::control::SessionControlSnapshot>,
@@ -2999,6 +3048,7 @@ pub(crate) async fn load_light(
     };
 
     let persisted_info = PersistedInfoLight {
+        history: persisted.history,
         summary: persisted.summary,
         timeline: persisted.timeline,
         control_snapshot: persisted.control_snapshot,

@@ -23,6 +23,111 @@ fn malformed(known_usage: bool) -> ScriptedResponse {
     ])
 }
 
+#[tokio::test]
+async fn late_attempt_during_replay_pause_is_resynced_and_cancelled_release_unblocks_writer() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (actor, event_rx) =
+                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let actor = std::sync::Arc::new(actor);
+            let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (_chat_event_tx, chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let run_actor = actor.clone();
+            let run_task = tokio::task::spawn_local(async move {
+                super::super::run_loop::run_session(
+                    run_actor,
+                    cmd_rx,
+                    chat_event_rx,
+                    event_rx,
+                    None,
+                    std::sync::Arc::new(parking_lot::Mutex::new(
+                        workspace::file_system::CodebaseIndexManager::new(),
+                    )),
+                    std::env::temp_dir(),
+                    crate::session::fs_watch::FsWatchCapabilities::none(),
+                )
+                .await;
+            });
+
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            let (release, release_waiter) = tokio::sync::oneshot::channel();
+            cmd_tx
+                .send(SessionCommand::PauseForReplay {
+                    respond_to,
+                    release: release_waiter,
+                })
+                .expect("run loop is alive");
+            tokio::time::timeout(Duration::from_secs(5), response)
+                .await
+                .expect("pause should reach the replay barrier")
+                .expect("pause response sender remains alive")
+                .expect("replay barrier should succeed");
+
+            actor
+                .handle_sampling_event(sampler::SamplingEvent::AttemptStarted {
+                    request_id: sampler::RequestId::from("late-attempt"),
+                    attempt: 3,
+                })
+                .await;
+
+            let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+            actor
+                .notifications
+                .persistence_tx
+                .send(
+                    crate::session::persistence::PersistenceMsg::AppendUpdateDurablyAndAck {
+                        update: crate::session::storage::SessionUpdate::Acp(Box::new(
+                            acp::SessionNotification::new(
+                                actor.session_info.id.clone(),
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::Text(acp::TextContent::new(
+                                        "writer-after-cancel",
+                                    )),
+                                )),
+                            ),
+                        )),
+                        respond_to: ack_tx,
+                    },
+                )
+                .expect("writer inbox remains open while replay is paused");
+            assert!(
+                matches!(
+                    ack_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ),
+                "the replay barrier must hold later writer traffic"
+            );
+
+            drop(release); // cancellation after acknowledgement means resync.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if actor
+                        .replay_preview_resync
+                        .lock()
+                        .as_ref()
+                        .is_some_and(|key| key.request_id == "late-attempt" && key.attempt == 3)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("release cancellation should snapshot the late preview");
+            tokio::time::timeout(Duration::from_secs(5), ack_rx)
+                .await
+                .expect("writer must resume after release sender is dropped")
+                .expect("writer acknowledgement remains alive")
+                .expect("test persistence bridge acknowledges the append");
+
+            run_task.abort();
+            let _ = run_task.await;
+        })
+        .await;
+}
+
 fn queue_user(
     commands: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
     id: &str,
@@ -101,8 +206,19 @@ fn child_grant_survives_known_sampling_failure_but_closes_for_exhaustion_or_unkn
                     tokio::task::spawn_local(async move {
                         while let Some(message) = persisted.recv().await {
                             match message {
-                                PersistenceMsg::CommitResponseProjection { respond_to, .. } => {
+                                PersistenceMsg::AppendUpdateBufferedAndAck {
+                                    respond_to, ..
+                                } => {
                                     let _ = respond_to.send(Ok(()));
+                                }
+                                PersistenceMsg::ReplayBarrier {
+                                    respond_to,
+                                    release,
+                                } => {
+                                    let ready = respond_to.send(Ok(())).is_ok();
+                                    if ready {
+                                        let _ = release.await;
+                                    }
                                 }
                                 PersistenceMsg::FlushAndAck { respond_to } => {
                                     let _ = respond_to.send(());

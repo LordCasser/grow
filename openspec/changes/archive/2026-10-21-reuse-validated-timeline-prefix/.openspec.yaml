@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-21
+skip_specs: true
+reason: "在既有 writer lease 与 storage adapter 内复用同次完整读取的 LedgerPrefix，保留 append 锁、文件身份/内容变化核对、全事件校验及 durable ACK；不改变外部或持久契约。"

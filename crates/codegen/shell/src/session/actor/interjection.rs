@@ -381,6 +381,7 @@ impl SessionActor {
             );
         }
         if let Some(display_echo) = display_echo {
+            user_chunk_meta.insert("grow/consumedInputEcho".into(), true.into());
             user_chunk_meta.insert(
                 "messageId".into(),
                 serde_json::json!(display_echo.message_id),
@@ -392,14 +393,18 @@ impl SessionActor {
         }
         let user_chunk_meta = Some(user_chunk_meta);
 
-        // Persist to updates.jsonl: one UserMessageChunk per content block
+        // Persist typed history: one UserMessageChunk per content block
         // (text first, then any images — Image chunks already round-trip).
         let mut content_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
             text.to_string(),
         ))];
         content_blocks.extend(images.iter().cloned().map(acp::ContentBlock::Image));
-        let notification_meta = self.build_notification_meta();
-        for content_block in content_blocks {
+        for (index, content_block) in content_blocks.into_iter().enumerate() {
+            let notification_meta = if let Some(echo) = display_echo {
+                serde_json::json!({"eventId": format!("{}-echo-{}-{index}", self.session_info.id.0, echo.message_id)})
+            } else {
+                self.build_notification_meta()
+            };
             let update = acp::SessionUpdate::UserMessageChunk(
                 acp::ContentChunk::new(content_block).meta(user_chunk_meta.clone()),
             );
@@ -540,6 +545,19 @@ impl SessionActor {
                 let display_echo =
                     super::user_display_echo(message_id, prompt_index, &display_blocks);
 
+                // The consuming Domain event fsyncs this same journal prefix.
+                // An ambiguous/rejected consume leaves only an unreferenced
+                // typed echo; retry uses identical per-block identities.
+                self.publish_synthetic_user_message(
+                    &display_text,
+                    item.clone(),
+                    false,
+                    &images,
+                    false,
+                    Some(&display_echo),
+                )
+                .await;
+
                 let publication = if group.items.is_empty() {
                     self.consume_steer_inputs(
                         input_ids.to_vec(),
@@ -600,15 +618,6 @@ impl SessionActor {
                                 continue;
                             }
                         }
-                        self.publish_synthetic_user_message(
-                            &display_text,
-                            item,
-                            false,
-                            &images,
-                            false,
-                            Some(&display_echo),
-                        )
-                        .await;
                         injected = true;
                     }
                     Err((rejected, error)) => {

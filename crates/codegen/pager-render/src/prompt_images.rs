@@ -137,10 +137,6 @@ pub fn decode_image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .map(|(w, h, _)| (w, h))
 }
 
-fn is_decodable_image(bytes: &[u8]) -> bool {
-    decode_image_dimensions(bytes).is_some()
-}
-
 impl ImageViewerState {
     /// Capture a prompt image source without file reads or format conversion.
     pub fn open(image: &PastedImage) -> Option<Self> {
@@ -1277,6 +1273,7 @@ impl ScrollbackImageRef {
 
     /// Construct with alt text from the markdown `![alt](path)` syntax.
     pub fn from_path_with_alt(path: impl Into<PathBuf>, alt_text: String) -> Option<Self> {
+        let _timer = diagnostics::instrumentation::timer("pager.image.probe");
         let path = strip_verbatim_prefix(&path.into());
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
@@ -1286,13 +1283,10 @@ impl ScrollbackImageRef {
             return None;
         }
         let bytes = std::fs::read(&path).ok()?;
-        if !is_decodable_image(&bytes) {
-            return None;
-        }
-        let dimensions = decode_image_dimensions(&bytes);
+        let dimensions = decode_image_dimensions(&bytes)?;
         Some(Self {
             path,
-            dimensions,
+            dimensions: Some(dimensions),
             alt_text,
         })
     }
@@ -1355,28 +1349,32 @@ pub fn extract_image_refs(text: &str) -> Vec<ScrollbackImageRef> {
     let mut refs = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for cap in MD_RE.captures_iter(text) {
-        if let Some(m) = cap.get(2) {
-            let path_str = m.as_str();
-            let alt_text = cap
-                .get(1)
-                .map(|a| a.as_str().to_owned())
-                .unwrap_or_default();
-            if seen.insert(path_str.to_owned())
-                && let Some(r) = ScrollbackImageRef::from_path_with_alt(path_str, alt_text)
-            {
-                refs.push(r);
+    if text.contains("![") {
+        for cap in MD_RE.captures_iter(text) {
+            if let Some(m) = cap.get(2) {
+                let path_str = m.as_str();
+                let alt_text = cap
+                    .get(1)
+                    .map(|a| a.as_str().to_owned())
+                    .unwrap_or_default();
+                if seen.insert(path_str.to_owned())
+                    && let Some(r) = ScrollbackImageRef::from_path_with_alt(path_str, alt_text)
+                {
+                    refs.push(r);
+                }
             }
         }
     }
 
-    for cap in PATH_RE.captures_iter(text) {
-        if let Some(m) = cap.get(1) {
-            let path_str = m.as_str();
-            if seen.insert(path_str.to_owned())
-                && let Some(r) = ScrollbackImageRef::from_path(path_str)
-            {
-                refs.push(r);
+    if text.contains('/') || text.contains('\\') {
+        for cap in PATH_RE.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                let path_str = m.as_str();
+                if seen.insert(path_str.to_owned())
+                    && let Some(r) = ScrollbackImageRef::from_path(path_str)
+                {
+                    refs.push(r);
+                }
             }
         }
     }
@@ -3670,6 +3668,67 @@ mod tests {
         let text = "![img](/tmp/nonexistent_abc123.png)";
         let refs = extract_image_refs(text);
         assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn extract_preserves_markdown_first_alt_and_dedup_even_when_bare_path_is_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.png");
+        let second = dir.path().join("second.png");
+        for path in [&first, &second] {
+            image::RgbImage::new(3, 2).save(path).unwrap();
+        }
+        let text = format!(
+            "{}\n![雪 alt]({})\n{},",
+            first.display(),
+            first.display(),
+            second.display()
+        );
+        let refs = extract_image_refs(&text);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].path, first);
+        assert_eq!(refs[0].alt_text, "雪 alt");
+        assert_eq!(refs[1].path, second);
+        assert_eq!(refs[1].alt_text, "");
+        assert!(refs.iter().all(|image| image.dimensions == Some((3, 2))));
+    }
+
+    #[test]
+    fn extract_keeps_unicode_and_separator_only_false_candidates_empty() {
+        for seed in [
+            "",
+            "雪 🌱 ! [ ] plain text\n",
+            "src/a.rs \\\\host\\not-an-image\n",
+            "![not-closed relative.png\n",
+        ] {
+            assert!(extract_image_refs(&seed.repeat(512)).is_empty());
+        }
+    }
+
+    // Unix filenames can contain drive/UNC syntax. This exercises both regex
+    // candidates through a real readable file without mutating the process cwd.
+    #[cfg(unix)]
+    #[test]
+    fn extract_backslash_only_drive_and_unc_candidates_are_not_rejected() {
+        use std::io::Write;
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(3, 2)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        for prefix in ["C:\\grow-scan-", "\\\\host\\grow-scan-"] {
+            let mut file = tempfile::Builder::new()
+                .prefix(prefix)
+                .suffix(".png")
+                .tempfile_in(std::env::current_dir().unwrap())
+                .unwrap();
+            file.write_all(bytes.get_ref()).unwrap();
+            let name = file.path().file_name().unwrap().to_str().unwrap();
+            assert!(!name.contains('/'));
+            let refs = extract_image_refs(&format!("image: {name}"));
+            assert_eq!(refs.len(), 1, "candidate {name}");
+            assert_eq!(refs[0].path, PathBuf::from(name));
+            assert_eq!(refs[0].dimensions, Some((3, 2)));
+        }
     }
 
     // ----- open_from_path ----------------------------------------------------

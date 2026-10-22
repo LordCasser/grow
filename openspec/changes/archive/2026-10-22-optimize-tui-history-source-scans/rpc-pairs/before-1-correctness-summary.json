@@ -1,0 +1,150 @@
+[
+  {
+    "profile": "modern-128",
+    "runs": 1,
+    "load_ms": 105.23616700000001,
+    "load_ms_range": [
+      105.23616700000001,
+      105.23616700000001
+    ],
+    "first_history_ms": 22.18125,
+    "first_history_ms_range": [
+      22.18125,
+      22.18125
+    ],
+    "last_history_ms": 25.274334,
+    "last_history_ms_range": [
+      25.274334,
+      25.274334
+    ],
+    "max_history_gap_ms": 1.213917,
+    "max_history_gap_ms_range": [
+      1.213917,
+      1.213917
+    ],
+    "process_peak_rss_bytes": 114671616,
+    "process_peak_rss_bytes_range": [
+      114671616,
+      114671616
+    ],
+    "timeline_bytes": 4673368,
+    "timeline_bytes_range": [
+      4673368,
+      4673368
+    ],
+    "updates_bytes": 0,
+    "updates_bytes_range": [
+      0,
+      0
+    ],
+    "directory_bytes": 4679257,
+    "directory_bytes_range": [
+      4679257,
+      4679257
+    ],
+    "directory_files": 4,
+    "directory_files_range": [
+      4,
+      4
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.101,
+      "plugin_discovery": 0.43600000000000005,
+      "session.delta_drain_completions": 0.0,
+      "session.load.history_projection": 0.408,
+      "session.load.model_route_reconcile": 0.004,
+      "session.load.open_session": 0.071,
+      "session.load.state_projections": 0.084,
+      "session.load.timeline_evidence": 0.222,
+      "session.load.timeline_fold": 0.15,
+      "session.load.timeline_read_decode": 12.257,
+      "session.load_light": 13.226,
+      "session.load_session": 103.986,
+      "session.load_session_replay": 2.387,
+      "session.reconcile_stale_tasks": 0.031,
+      "session.replay.first_send": 0.0,
+      "session.spawn.install_coordination_backend": 3.11,
+      "session.spawn.prepare": 1.081,
+      "session.spawn.publish_coordination": 0.307,
+      "session.spawn_actor_call": 43.315,
+      "session.spawn_and_register": 47.922,
+      "session.spawn_and_register_session": 48.339,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 27.192
+    }
+  },
+  {
+    "profile": "modern-2048",
+    "runs": 1,
+    "load_ms": 387.68375,
+    "load_ms_range": [
+      387.68375,
+      387.68375
+    ],
+    "first_history_ms": 227.019792,
+    "first_history_ms_range": [
+      227.019792,
+      227.019792
+    ],
+    "last_history_ms": 372.31399999999996,
+    "last_history_ms_range": [
+      372.31399999999996,
+      372.31399999999996
+    ],
+    "max_history_gap_ms": 24.177208,
+    "max_history_gap_ms_range": [
+      24.177208,
+      24.177208
+    ],
+    "process_peak_rss_bytes": 889618432,
+    "process_peak_rss_bytes_range": [
+      889618432,
+      889618432
+    ],
+    "timeline_bytes": 74843515,
+    "timeline_bytes_range": [
+      74843515,
+      74843515
+    ],
+    "updates_bytes": 0,
+    "updates_bytes_range": [
+      0,
+      0
+    ],
+    "directory_bytes": 74849404,
+    "directory_bytes_range": [
+      74849404,
+      74849404
+    ],
+    "directory_files": 4,
+    "directory_files_range": [
+      4,
+      4
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.102,
+      "plugin_discovery": 0.238,
+      "session.delta_drain_completions": 0.0,
+      "session.load.history_projection": 11.343,
+      "session.load.model_route_reconcile": 0.013,
+      "session.load.open_session": 0.066,
+      "session.load.state_projections": 0.132,
+      "session.load.timeline_evidence": 3.92,
+      "session.load.timeline_fold": 2.922,
+      "session.load.timeline_read_decode": 197.717,
+      "session.load_light": 205.577,
+      "session.load_session": 386.686,
+      "session.load_session_replay": 73.496,
+      "session.reconcile_stale_tasks": 0.521,
+      "session.replay.first_send": 0.0,
+      "session.spawn.install_coordination_backend": 8.96,
+      "session.spawn.prepare": 0.403,
+      "session.spawn.publish_coordination": 3.175,
+      "session.spawn_actor_call": 60.146,
+      "session.spawn_and_register": 72.78,
+      "session.spawn_and_register_session": 72.843,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 12.242
+    }
+  }
+]

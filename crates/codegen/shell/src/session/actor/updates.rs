@@ -512,7 +512,7 @@ impl SessionActor {
             let source_revision = meta
                 .and_then(|meta| meta.get("grow/displayProjectionRevision"))
                 .and_then(serde_json::Value::as_u64);
-            let Some((event_id, source_id, source_revision)) = event_id
+            let Some((_event_id, _source_id, _source_revision)) = event_id
                 .zip(source_id)
                 .zip(source_revision)
                 .map(|((id, source), revision)| (id, source, revision))
@@ -520,26 +520,6 @@ impl SessionActor {
                 tracing::error!(session_id = %self.session_info.id, "CurrentModeUpdate lacks enqueue-time projection identity; suppressing publication");
                 return;
             };
-            let payload = match serde_json::to_value(&notification.update) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    tracing::error!(%error, "CurrentModeUpdate projection could not be serialized; suppressing publication");
-                    return;
-                }
-            };
-            if let Err(error) = crate::session::notifications::record_display_projection_payload(
-                &self.chat_state_handle,
-                event_id,
-                &payload,
-                chat_state::DisplayProjectionKind::CurrentModeUpdate,
-                source_id.to_owned(),
-                source_revision,
-            )
-            .await
-            {
-                tracing::error!(%error, "CurrentModeUpdate projection expectation was not committed; suppressing publication");
-                return;
-            }
         }
         self.log_outbound_notification(&notification);
         let active_preview = self
@@ -598,14 +578,18 @@ impl SessionActor {
                         attempt,
                         "independent preview update was not confirmed"
                     );
+                    return;
                 }
             } else {
-                let _ = self
-                    .notifications
-                    .persistence_tx
-                    .send(PersistenceMsg::Update(
-                        crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
-                    ));
+                if let Err(error) = crate::session::persistence::append_buffered_and_ack(
+                    &self.notifications.persistence_tx,
+                    crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
+                )
+                .await
+                {
+                    tracing::warn!(%error, "presentation append failed; withholding live update");
+                    return;
+                }
             }
         }
         if self
@@ -786,11 +770,13 @@ impl SessionActor {
     }
     /// Handle Grow session notifications - store them in persistence
     /// These are client-side events (like diff reviews) that should be part of session history.
-    /// Exception: `SubagentProgress` ticks are transient and return before the store.
+    /// Child progress snapshots are retained for historical child status;
+    /// per-chunk tool and sampling progress use the transient gateway path.
     pub(super) async fn handle_grow_session_notification(
         self: &std::sync::Arc<Self>,
         mut notification: GrowSessionNotification,
         forward_to_gateway: bool,
+        restored: bool,
     ) -> Result<(), chat_state::TimelineWriteError> {
         if !matches!(
             &notification.update,
@@ -798,26 +784,28 @@ impl SessionActor {
         ) {
             tracing::debug!("storing Grow session notification");
         }
-        if let GrowSessionUpdate::SubagentSpawned {
-            subagent_id,
-            subagent_type,
-            description,
-            ..
-        } = &notification.update
-        {
-            self.dispatch_observe_hook(
-                ::hooks::event::HookEventName::SubagentStart,
-                chat_state::HookCause::Subagent {
-                    subagent_id: subagent_id.clone(),
-                },
-                ::hooks::event::HookPayload::SubagentStart {
-                    subagent_id: subagent_id.clone(),
-                    subagent_type: subagent_type.clone(),
-                    description: Some(description.clone()),
-                },
-                None,
-            )
-            .await?;
+        if !restored {
+            if let GrowSessionUpdate::SubagentSpawned {
+                subagent_id,
+                subagent_type,
+                description,
+                ..
+            } = &notification.update
+            {
+                self.dispatch_observe_hook(
+                    ::hooks::event::HookEventName::SubagentStart,
+                    chat_state::HookCause::Subagent {
+                        subagent_id: subagent_id.clone(),
+                    },
+                    ::hooks::event::HookPayload::SubagentStart {
+                        subagent_id: subagent_id.clone(),
+                        subagent_type: subagent_type.clone(),
+                        description: Some(description.clone()),
+                    },
+                    None,
+                )
+                .await?;
+            }
         }
         {
             let mut meta_map = notification.meta.take().and_then(|v| match v {
@@ -827,7 +815,11 @@ impl SessionActor {
             crate::util::event_id::ensure_event_id_meta(&self.session_info.id.0, &mut meta_map);
             notification.meta = meta_map.map(serde_json::Value::Object);
         }
-        self.persist_grow_notification(&notification).await;
+        if !self.persist_grow_notification(&notification).await {
+            return Err(chat_state::TimelineWriteError::Persistence(
+                std::io::Error::other("Grow presentation append was not confirmed"),
+            ));
+        }
         if matches!(
             &notification.update,
             GrowSessionUpdate::SubagentProgress { .. }
@@ -1045,7 +1037,7 @@ impl SessionActor {
         durable_update: GrowSessionUpdate,
         live_update: GrowSessionUpdate,
     ) -> Result<(), crate::session::persistence::DurableAppendError> {
-        let durable_notification = self.build_grow_notification(durable_update, None);
+        let mut durable_notification = self.build_grow_notification(durable_update, None);
         if let GrowSessionUpdate::ControlStateUpdate(control) = &durable_notification.update
             && !control.snapshot
         {
@@ -1062,33 +1054,36 @@ impl SessionActor {
                         ),
                     )
                 })?;
-            let payload = serde_json::to_value(&durable_notification.update).map_err(|error| {
-                crate::session::persistence::DurableAppendError::NotCommitted(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    error,
-                ))
-            })?;
             let intent_identity = control
                 .intent
                 .as_ref()
                 .and_then(|intent| serde_json::to_vec(intent).ok())
                 .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
                 .unwrap_or_else(|| "none".to_owned());
-            crate::session::notifications::record_display_projection_payload(
-                &self.chat_state_handle,
-                event_id,
-                &payload,
-                chat_state::DisplayProjectionKind::ControlStateUpdate,
-                format!("{}:{:?}:{intent_identity}", control.epoch, control.domain),
-                control.revision,
-            )
-            .await
-            .map_err(|error| {
-                crate::session::persistence::DurableAppendError::NotCommitted(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    error,
-                ))
-            })?;
+            let source_id = format!("{}:{:?}:{intent_identity}", control.epoch, control.domain);
+            let source_revision = control.revision;
+            let Some(meta) = durable_notification
+                .meta
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Err(
+                    crate::session::persistence::DurableAppendError::NotCommitted(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "durable control projection has no metadata object",
+                        ),
+                    ),
+                );
+            };
+            meta.insert(
+                "grow/displayProjectionSource".to_owned(),
+                serde_json::Value::String(source_id),
+            );
+            meta.insert(
+                "grow/displayProjectionRevision".to_owned(),
+                serde_json::Value::from(source_revision),
+            );
         }
         // Both projections are one logical event. Reusing the stamped metadata
         // keeps the live reconnect cursor resolvable against the durable line.
@@ -1207,42 +1202,39 @@ impl SessionActor {
         extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
     ) {
         self.close_rewind_window().await;
-        let notification = self.build_grow_notification(update, extra_meta);
+        let mut notification = self.build_grow_notification(update, extra_meta);
         if let GrowSessionUpdate::GoalUpdated { goal_id, .. } = &notification.update {
-            let event_id = notification
+            let source_id = if goal_id.is_empty() {
+                "goal:cleared".to_owned()
+            } else {
+                format!("goal:{goal_id}")
+            };
+            let source_revision = self
+                .control_revision
+                .load(std::sync::atomic::Ordering::Acquire);
+            let Some(meta) = notification
                 .meta
-                .as_ref()
-                .and_then(|meta| meta.get("eventId"))
-                .and_then(serde_json::Value::as_str);
-            let payload = serde_json::to_value(&notification.update);
-            let (Some(event_id), Ok(payload)) = (event_id, payload) else {
-                tracing::error!(session_id = %self.session_info.id, "GoalUpdated lacks a durable projection identity; suppressing publication");
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                tracing::error!(session_id = %self.session_info.id, "GoalUpdated has no metadata object; suppressing publication");
                 return;
             };
-            if let Err(error) = crate::session::notifications::record_display_projection_payload(
-                &self.chat_state_handle,
-                event_id,
-                &payload,
-                chat_state::DisplayProjectionKind::GoalUpdated,
-                if goal_id.is_empty() {
-                    "goal:cleared".to_owned()
-                } else {
-                    format!("goal:{goal_id}")
-                },
-                self.control_revision
-                    .load(std::sync::atomic::Ordering::Acquire),
-            )
-            .await
-            {
-                tracing::error!(%error, "GoalUpdated projection expectation was not committed; suppressing publication");
-                return;
-            }
+            meta.insert(
+                "grow/displayProjectionSource".to_owned(),
+                serde_json::Value::String(source_id),
+            );
+            meta.insert(
+                "grow/displayProjectionRevision".to_owned(),
+                serde_json::Value::from(source_revision),
+            );
         }
-        self.persist_grow_notification(&notification).await;
-        self.forward_grow_notification(notification).await;
+        if self.persist_grow_notification(&notification).await {
+            self.forward_grow_notification(notification).await;
+        }
     }
 
-    async fn persist_grow_notification(&self, notification: &GrowSessionNotification) {
+    async fn persist_grow_notification(&self, notification: &GrowSessionNotification) -> bool {
         let preview = self
             .sampling_preview
             .lock()
@@ -1267,15 +1259,20 @@ impl SessionActor {
                     attempt,
                     "independent Grow update was not confirmed"
                 );
+                return false;
             }
         } else {
-            let _ = self
-                .notifications
-                .persistence_tx
-                .send(PersistenceMsg::Update(
-                    crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
-                ));
+            if let Err(error) = crate::session::persistence::append_buffered_and_ack(
+                &self.notifications.persistence_tx,
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
+            )
+            .await
+            {
+                tracing::warn!(%error, "Grow presentation append failed");
+                return false;
+            }
         }
+        true
     }
 
     pub(super) fn build_grow_notification(
@@ -1373,6 +1370,39 @@ fn acking_persistence_channel() -> (
                         respond_to: observed_reply,
                     });
                     let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to } => {
+                    let _ = observed_tx.send(PersistenceMsg::Update(update));
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::AuxiliaryGrow {
+                    notification,
+                    delivery,
+                    respond_to,
+                    ..
+                } => {
+                    if observed_tx
+                        .send(PersistenceMsg::Update(
+                            crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
+                        ))
+                        .is_ok()
+                    {
+                        if let Some(delivery) = delivery {
+                            delivery.publish();
+                        }
+                        if let Some(respond_to) = respond_to {
+                            let _ = respond_to.send(Ok(()));
+                        }
+                    } else if let Some(respond_to) = respond_to {
+                        let _ = respond_to.send(Err(
+                            crate::session::storage::AppendUpdateError::NotCommitted(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "test persistence observation channel closed",
+                                ),
+                            ),
+                        ));
+                    }
                 }
                 other => {
                     let _ = observed_tx.send(other);
@@ -1477,6 +1507,7 @@ mod grow_event_id_stamping_tests {
                             meta: None,
                         },
                         true,
+                        false,
                     )
                     .await
                     .unwrap();
@@ -1895,6 +1926,7 @@ mod grow_event_id_stamping_tests {
                             meta: None,
                         },
                         false,
+                        false,
                     )
                     .await
                     .unwrap();
@@ -1913,6 +1945,7 @@ mod grow_event_id_stamping_tests {
                             meta: Some(serde_json::json!({"eventId": "child-event-1"})),
                         },
                         true,
+                        false,
                     )
                     .await
                     .unwrap();
@@ -2257,6 +2290,7 @@ mod grow_event_id_stamping_tests {
                                 update: GrowSessionUpdate::MemoryFlushStarted,
                                 meta: None,
                             },
+                            false,
                             false,
                         )
                         .await

@@ -455,8 +455,13 @@ mod runtime_containment_tests {
 /// owns the shared manager, is consumed internally by the primary session's
 /// passive audit bridge.
 pub(crate) enum TimelineBootstrap {
-    Fresh { session_rules: Option<String> },
-    Existing(chat_state::Timeline),
+    Fresh {
+        session_rules: Option<String>,
+    },
+    Existing {
+        timeline: chat_state::Timeline,
+        history: crate::session::history::HistorySnapshot,
+    },
 }
 
 impl TimelineBootstrap {
@@ -467,7 +472,7 @@ impl TimelineBootstrap {
     fn label(&self) -> &'static str {
         match self {
             Self::Fresh { .. } => "fresh",
-            Self::Existing(_) => "existing",
+            Self::Existing { .. } => "existing",
         }
     }
 }
@@ -480,6 +485,88 @@ fn configure_session_sampler_retry(
         max_retries: max_retries.unwrap_or(5),
         rate_limit_retry_threshold: 2,
         output_delivery,
+    }
+}
+
+fn restored_control_presentations(
+    session_id: &acp::SessionId,
+    history: &crate::session::history::HistorySnapshot,
+) -> std::io::Result<Vec<crate::session::storage::SessionUpdate>> {
+    use crate::session::history::{GrowHistoryFact, HistoryContent, HistorySource};
+
+    let updates = history
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let HistorySource::Presentation { fact, .. } = source else {
+                return None;
+            };
+            let retain = match &fact.content {
+                HistoryContent::User(_) => true,
+                HistoryContent::Grow(value) => matches!(
+                    value.as_ref(),
+                    GrowHistoryFact::RewindMarker { .. } | GrowHistoryFact::ControlStateUpdate(_)
+                ),
+                _ => false,
+            };
+            retain.then(|| fact.clone())
+        })
+        .map(|fact| fact.into_update(session_id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(crate::session::storage::filter_rewind_updates(updates))
+}
+
+#[cfg(test)]
+mod restored_control_presentations_tests {
+    use super::restored_control_presentations;
+    use crate::extensions::notification::{
+        ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget, SessionNotification,
+        SessionUpdate as GrowUpdate,
+    };
+    use crate::session::history::{HistoryFact, HistorySnapshot, HistorySource};
+    use crate::session::storage::SessionUpdate;
+    use acp_transport::protocol as acp;
+
+    #[test]
+    fn uses_captured_typed_control_receipts_only() {
+        let session_id = acp::SessionId::new("session");
+        let update = SessionUpdate::Grow(Box::new(SessionNotification {
+            session_id: session_id.clone(),
+            update: GrowUpdate::ControlStateUpdate(ControlStateUpdate {
+                epoch: "epoch".into(),
+                domain: ControlDomain::Behavior,
+                revision: 1,
+                intent: None,
+                snapshot: false,
+                receipt_only: true,
+                phase: ControlPhase::Applied,
+                current: ControlTarget::Behavior {
+                    behavior_id: "normal".into(),
+                },
+                desired: None,
+                message: None,
+            }),
+            meta: None,
+        }));
+        let fact = HistoryFact::from_update(&update)
+            .unwrap()
+            .expect("control receipt is a durable typed fact");
+        let mut history = HistorySnapshot::default();
+        history.sources.push(HistorySource::Presentation {
+            at_ms: 0,
+            fact: Box::new(fact),
+        });
+
+        let restored = restored_control_presentations(&session_id, &history).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(matches!(
+            &restored[0],
+            SessionUpdate::Grow(notification)
+                if matches!(&notification.update, GrowUpdate::ControlStateUpdate(_))
+        ));
     }
 }
 
@@ -799,27 +886,33 @@ pub(crate) async fn spawn_session_actor(
             }
         }
     };
-    let (validated_timeline, mut conversation, fresh_session_rules, mut restored_control_intents) =
-        match timeline_bootstrap {
-            TimelineBootstrap::Fresh { session_rules } => (
-                None,
-                Vec::new(),
-                Some(session_rules),
-                std::collections::HashMap::new(),
-            ),
-            TimelineBootstrap::Existing(timeline) => {
-                let events = timeline.events();
-                crate::session::input_inbox::validate_submitted_payloads(
-                    session_directory.as_ref(),
-                    events,
-                )
-                .map_err(|error| {
-                    agent::AgentBuildError::InvalidConfig(format!(
-                        "invalid persisted input payload: {error}"
-                    ))
-                })?;
-                let mut receipts = std::collections::HashMap::new();
-                let durable_receipts =
+    let (
+        validated_timeline,
+        mut conversation,
+        fresh_session_rules,
+        mut restored_control_intents,
+        restored_history,
+    ) = match timeline_bootstrap {
+        TimelineBootstrap::Fresh { session_rules } => (
+            None,
+            Vec::new(),
+            Some(session_rules),
+            std::collections::HashMap::new(),
+            crate::session::history::HistorySnapshot::default(),
+        ),
+        TimelineBootstrap::Existing { timeline, history } => {
+            let events = timeline.events();
+            crate::session::input_inbox::validate_submitted_payloads(
+                session_directory.as_ref(),
+                events,
+            )
+            .map_err(|error| {
+                agent::AgentBuildError::InvalidConfig(format!(
+                    "invalid persisted input payload: {error}"
+                ))
+            })?;
+            let mut receipts = std::collections::HashMap::new();
+            let durable_receipts =
                 crate::session::control::SessionControlSnapshot::durable_receipts_from_timeline(
                     events,
                 )
@@ -834,24 +927,24 @@ pub(crate) async fn spawn_session_actor(
                         "invalid persisted control receipt: {error}"
                     ))
                 })?;
-                for receipt in durable_receipts {
-                    AdmissionState::restore_terminal_control_intent(
-                        &mut receipts,
-                        receipt.domain,
-                        &receipt.intent,
-                        ControlIntentTerminal {
-                            phase: crate::extensions::notification::ControlPhase::Applied,
-                            target: receipt.target,
-                            message: None,
-                            ui_terminal_durable: false,
-                        },
-                    )
-                    .map_err(|error| agent::AgentBuildError::InvalidConfig(error))?;
-                }
-                let surface = timeline.surface().to_vec();
-                (Some(timeline), surface, None, receipts)
+            for receipt in durable_receipts {
+                AdmissionState::restore_terminal_control_intent(
+                    &mut receipts,
+                    receipt.domain,
+                    &receipt.intent,
+                    ControlIntentTerminal {
+                        phase: crate::extensions::notification::ControlPhase::Applied,
+                        target: receipt.target,
+                        message: None,
+                        ui_terminal_durable: false,
+                    },
+                )
+                .map_err(|error| agent::AgentBuildError::InvalidConfig(error))?;
             }
-        };
+            let surface = timeline.surface().to_vec();
+            (Some(timeline), surface, None, receipts, history)
+        }
+    };
     let is_resumed = validated_timeline.is_some();
     // A non-Running runtime lifecycle is a startup admission barrier. Keep it
     // before the validated Timeline is moved into ChatState so recovery below
@@ -883,53 +976,53 @@ pub(crate) async fn spawn_session_actor(
             "persisted Hook config generation is exhausted".to_string(),
         )
     })?;
+    let restored_presentations =
+        restored_control_presentations(&session_info.id, &restored_history).map_err(|error| {
+            agent::AgentBuildError::InvalidConfig(format!(
+                "failed to restore durable control receipts: {error}"
+            ))
+        })?;
     let mut control_receipt_error = None;
-    let _ = crate::session::storage::stream_replay_grow_notifications_in(
-        session_directory.as_ref(),
-        |notification| {
-            let GrowSessionUpdate::ControlStateUpdate(update) = notification.update else {
-                return;
-            };
-            if !matches!(
-                update.phase,
-                crate::extensions::notification::ControlPhase::Applied
-                    | crate::extensions::notification::ControlPhase::Rejected
-                    | crate::extensions::notification::ControlPhase::Superseded
+    for presentation in restored_presentations {
+        let crate::session::storage::SessionUpdate::Grow(notification) = presentation else {
+            continue;
+        };
+        let GrowSessionUpdate::ControlStateUpdate(update) = notification.update else {
+            continue;
+        };
+        if !matches!(
+            update.phase,
+            crate::extensions::notification::ControlPhase::Applied
+                | crate::extensions::notification::ControlPhase::Rejected
+                | crate::extensions::notification::ControlPhase::Superseded
+        ) {
+            continue;
+        }
+        if let Some(intent) = update.intent.as_ref() {
+            let target = update
+                .desired
+                .clone()
+                .unwrap_or_else(|| update.current.clone());
+            if target.domain() != update.domain {
+                control_receipt_error =
+                    Some("persisted control terminal target does not match its domain".to_string());
+                continue;
+            }
+            if let Err(error) = AdmissionState::restore_terminal_control_intent(
+                &mut restored_control_intents,
+                update.domain,
+                intent,
+                ControlIntentTerminal {
+                    phase: update.phase,
+                    target,
+                    message: update.message.clone(),
+                    ui_terminal_durable: true,
+                },
             ) {
-                return;
+                control_receipt_error = Some(error);
             }
-            if let Some(intent) = update.intent.as_ref() {
-                let target = update
-                    .desired
-                    .clone()
-                    .unwrap_or_else(|| update.current.clone());
-                if target.domain() != update.domain {
-                    control_receipt_error = Some(
-                        "persisted control terminal target does not match its domain".to_string(),
-                    );
-                    return;
-                }
-                if let Err(error) = AdmissionState::restore_terminal_control_intent(
-                    &mut restored_control_intents,
-                    update.domain,
-                    intent,
-                    ControlIntentTerminal {
-                        phase: update.phase,
-                        target,
-                        message: update.message.clone(),
-                        ui_terminal_durable: true,
-                    },
-                ) {
-                    control_receipt_error = Some(error);
-                }
-            }
-        },
-    )
-    .map_err(|error| {
-        agent::AgentBuildError::InvalidConfig(format!(
-            "failed to restore durable control receipts: {error}"
-        ))
-    })?;
+        }
+    }
     if let Some(error) = control_receipt_error {
         return Err(agent::AgentBuildError::InvalidConfig(error));
     }
@@ -1790,7 +1883,6 @@ pub(crate) async fn spawn_session_actor(
         preview_gateway_budget.clone(),
         sampling_preview.clone(),
         workflow_store.clone(),
-        chat_state_handle.clone(),
     );
     let mut workflow_default_sampler = sampling_config.clone();
     workflow_default_sampler.idle_timeout_secs = Some(inference_idle_timeout_secs);
@@ -2668,6 +2760,7 @@ pub(crate) async fn spawn_session_actor(
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampling_preview: sampling_preview.clone(),
+        replay_preview_resync: parking_lot::Mutex::new(None),
         sampler_handle,
         sampler_owner: std::cell::RefCell::new(Some(sampler_owner)),
         sampler_event_drainer: TaskSlot::new(),

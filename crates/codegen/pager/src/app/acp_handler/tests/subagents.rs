@@ -337,39 +337,10 @@
                 "method": "_grow/session/update",
                 "params": serde_json::to_value(&nested).unwrap(),
             });
-            let control_line = |event_id: &str, update: GrowSessionUpdate| {
-                let notification = SessionNotification {
-                    session_id: acp::SessionId::new(child_sid),
-                    update,
-                    meta: Some(serde_json::json!({ "eventId": event_id })),
-                };
-                serde_json::json!({
-                    "timestamp": 1,
-                    "method": "_grow/session/update",
-                    "params": serde_json::to_value(notification).unwrap(),
-                })
-                .to_string()
-            };
-            write_child_updates_jsonl(
+            write_child_history_fixture(
                 home,
                 child_sid,
-                &[
-                    persisted.to_string(),
-                    control_line(
-                        &format!("{child_sid}-11"),
-                        GrowSessionUpdate::ModelChanged {
-                            model_id: "restored-model".into(),
-                            reasoning_effort: Some("high".into()),
-                        },
-                    ),
-                    control_line(
-                        &format!("{child_sid}-12"),
-                        GrowSessionUpdate::AgentChanged {
-                            agent_name: "quality:reviewer".into(),
-                        },
-                    ),
-                ]
-                .join("\n"),
+                &persisted.to_string(),
             );
 
             let mut app = make_app_with_agent(root_sid);
@@ -392,7 +363,68 @@
             }
             let before_restore = app.agents[&AgentId(0)].scrollback.len();
 
-            crate::app::subagent::restore_descendant_state(&mut app, AgentId(0));
+            crate::app::subagent::restore_descendant_state(&mut app, AgentId(0), None);
+            {
+                let child = &app.agents[&AgentId(0)].subagent_views[child_sid];
+                assert_eq!(
+                    child.session.last_applied_grow_event_seq,
+                    Some(10),
+                    "the durable child lifecycle must seed its source highwater"
+                );
+                let cursor_raw = child
+                    .session
+                    .last_seen_event_id
+                    .as_deref()
+                    .expect("restored child has a canonical history cursor");
+                let cursor: serde_json::Value =
+                    serde_json::from_str(cursor_raw).expect("history cursor is JSON");
+                assert_eq!(
+                    cursor["session"],
+                    child_sid,
+                    "the reconnect cursor belongs to the restored child"
+                );
+                assert_eq!(cursor["cut"], 1);
+                assert_eq!(cursor["record"], 0);
+                assert_eq!(cursor["part"], 0);
+                assert_eq!(cursor["complete"], true);
+                assert!(cursor["hash"].as_str().is_some_and(|hash| hash.len() == 64));
+            }
+
+            // Model and agent changes are live catalog/control state, not
+            // durable presentation facts. Inject them as live notifications
+            // after verifying the independently restored lifecycle highwater.
+            let live_control = |event_id: &str, update: GrowSessionUpdate| {
+                let notification = SessionNotification {
+                    session_id: acp::SessionId::new(child_sid),
+                    update,
+                    meta: Some(serde_json::json!({ "eventId": event_id })),
+                };
+                acp::ExtNotification::new(
+                    "grow/session_notification",
+                    std::sync::Arc::from(
+                        serde_json::value::to_raw_value(&notification).unwrap(),
+                    ),
+                )
+            };
+            assert!(handle_ext_notification(
+                &live_control(
+                    &format!("{child_sid}-11"),
+                    GrowSessionUpdate::ModelChanged {
+                        model_id: "restored-model".into(),
+                        reasoning_effort: Some("high".into()),
+                    },
+                ),
+                &mut app,
+            ));
+            assert!(handle_ext_notification(
+                &live_control(
+                    &format!("{child_sid}-12"),
+                    GrowSessionUpdate::AgentChanged {
+                        agent_name: "quality:reviewer".into(),
+                    },
+                ),
+                &mut app,
+            ));
 
             let root = &app.agents[&AgentId(0)];
             assert!(root.session.subagent_sessions.contains_key(grandchild_sid));
@@ -401,7 +433,7 @@
             assert_eq!(
                 root.subagent_views[child_sid].session.last_applied_grow_event_seq,
                 Some(12),
-                "the persisted child eventId must seed the child-source highwater"
+                "live control updates must advance the restored child-source highwater"
             );
             assert_eq!(
                 root.subagent_views[child_sid].session.agent_name(),
@@ -856,7 +888,7 @@
         );
     }
 
-    /// Regression: replay from `updates.jsonl` emits `grow/session/update` (not
+    /// Regression: replay from typed history emits `grow/session/update` (not
     /// `session_notification`). Subagent lifecycle events must still populate
     /// `subagent_sessions` and the parent scrollback `SubagentBlock`.
     #[test]
@@ -1052,14 +1084,14 @@
         assert!(matches!(sb.kind, SubagentBlockKind::Started));
     }
 
-    /// Regression: replayed SubagentSpawned (resumed_from unset) must load child
-    /// updates.jsonl so fullscreen scrollback is not prompt-only.
+    /// Regression: replayed SubagentSpawned (resumed_from unset) must load the
+    /// child's unified Timeline history so fullscreen scrollback is not prompt-only.
     #[test]
     fn subagent_spawned_replays_child_updates_without_resumed_from() {
         with_replay_disk_home(|home| {
             let child_sid = "child-with-updates";
             let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(
+            spawn_subagent_with_optional_history(
                 home,
                 &mut app,
                 child_sid,
@@ -1096,7 +1128,7 @@
                 .session
                 .loading_replay = true;
 
-            spawn_subagent_with_optional_updates(
+            spawn_subagent_with_optional_history(
                 home,
                 &mut app,
                 child_sid,
@@ -1176,7 +1208,7 @@
                 .unwrap()
                 .session
                 .loading_replay = false;
-            crate::app::subagent::restore_descendant_state(&mut app, AgentId(0));
+            crate::app::subagent::restore_descendant_state(&mut app, AgentId(0), None);
 
             assert_eq!(
                 app.agents[&AgentId(0)].session.subagent_sessions[child_sid]
@@ -1202,7 +1234,7 @@
                 .session
                 .loading_replay = true;
 
-            spawn_subagent_with_optional_updates(
+            spawn_subagent_with_optional_history(
                 home,
                 &mut app,
                 child_sid,
@@ -1281,7 +1313,7 @@
                 child_user_message_line(child_sid, task),
                 child_tool_line(child_sid)
             );
-            spawn_subagent_with_optional_updates(home, &mut app, child_sid, Some(&updates));
+            spawn_subagent_with_optional_history(home, &mut app, child_sid, Some(&updates));
 
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.open_subagent_fullscreen(child_sid.to_string());
@@ -1309,7 +1341,7 @@
                 child_user_message_line(child_sid, task),
                 child_tool_line(child_sid)
             );
-            spawn_subagent_with_optional_updates(home, &mut app, child_sid, Some(&updates));
+            spawn_subagent_with_optional_history(home, &mut app, child_sid, Some(&updates));
 
             let agent = app.agents.get(&AgentId(0)).unwrap();
             assert_eq!(
@@ -1322,11 +1354,11 @@
     }
 
     #[test]
-    fn subagent_spawn_without_updates_jsonl_is_noop() {
+    fn subagent_spawn_without_history_journal_is_noop() {
         with_replay_disk_home(|home| {
             let child_sid = "child-no-updates";
             let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(home, &mut app, child_sid, None);
+            spawn_subagent_with_optional_history(home, &mut app, child_sid, None);
 
             let agent = app.agents.get(&AgentId(0)).unwrap();
             assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 0);
@@ -1353,7 +1385,7 @@
         with_replay_disk_home(|home| {
             let child_sid = "child-idempotent";
             let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(
+            spawn_subagent_with_optional_history(
                 home,
                 &mut app,
                 child_sid,
@@ -1376,7 +1408,7 @@
         with_replay_disk_home(|home| {
             let child_sid = "child-open-replay";
             let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(
+            spawn_subagent_with_optional_history(
                 home,
                 &mut app,
                 child_sid,

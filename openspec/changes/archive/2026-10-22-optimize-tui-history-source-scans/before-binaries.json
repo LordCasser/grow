@@ -1,0 +1,26 @@
+{
+  "grow": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-grow",
+    "sha256": "5b9d92adf9a9386a4d0f2ea789512e490e9834f4012350dae927bb6335e233ad"
+  },
+  "pty_e2e_persistence": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-pty_e2e_persistence",
+    "sha256": "162d9bb92afdf8715a37256d940686c6b011f9598275dbea2e83bd4e67da463c"
+  },
+  "pager": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-pager",
+    "sha256": "1bd03875c0160df61f5896b97c289a3aaa819d2808a953c12fffc985a17e7c69"
+  },
+  "pager_render": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-pager_render",
+    "sha256": "57d6f1005a8b03b3cdd674caf12cb1e9ec5b826de4eab27fd29a258f75c6018b"
+  },
+  "session_load_perf": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-session_load_perf",
+    "sha256": "220f73b886676412e9953952947b9ed065731b58853fd87bdb84ab773821f837"
+  },
+  "shell": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-shell",
+    "sha256": "bdfa92495ee6bcd8e07e3bec8a1620475d72cef4afcc879b392243f8a77de8b5"
+  }
+}

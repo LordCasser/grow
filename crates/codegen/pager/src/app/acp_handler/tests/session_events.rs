@@ -30,6 +30,118 @@
     }
 
     #[test]
+    fn canonical_response_delta_keeps_every_role_and_part_in_order() {
+        let session_id = "canonical-delta";
+        let request_id = "cursor-request";
+        let prompt_id = "canonical-prompt";
+        let mut app = make_app_with_agent(session_id);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.attached_as_viewer = true;
+            agent.session.current_prompt_id = Some(prompt_id.into());
+            agent
+                .scrollback
+                .push_block(RenderBlock::notice("prefix neighbor"));
+        }
+
+        let canonical_part = |update: acp::SessionUpdate, part: usize| {
+            let cursor = serde_json::json!({
+                "version": 1,
+                "session": session_id,
+                "cut": 2,
+                "hash": "0123456789abcdef".repeat(4),
+                "record": 1,
+                "part": part,
+                "complete": part == 2,
+            })
+            .to_string();
+            let meta = serde_json::json!({
+                "isReplay": false,
+                "promptId": prompt_id,
+                "samplingRequestId": request_id,
+                "samplingAttempt": 3,
+                "responseProjection": true,
+                "grow/historyMessageEvent": 1,
+                "grow/historyMessageItem": part,
+                "grow/historyTimestampMs": 1234,
+                "grow/historyCursor": cursor,
+            });
+            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+            AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                request: acp::SessionNotification::new(
+                    acp::SessionId::new(session_id),
+                    update,
+                )
+                .meta(meta.as_object().cloned()),
+                response_tx,
+            })
+        };
+        let text_chunk = |text: &str| {
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))
+        };
+
+        assert!(handle(
+            canonical_part(
+                acp::SessionUpdate::AgentThoughtChunk(text_chunk("reasoning part")),
+                0,
+            ),
+            &mut app,
+        ));
+        assert!(handle(
+            canonical_part(
+                acp::SessionUpdate::AgentMessageChunk(text_chunk("assistant part one")),
+                1,
+            ),
+            &mut app,
+        ));
+        assert!(handle(
+            canonical_part(
+                acp::SessionUpdate::AgentMessageChunk(text_chunk("assistant part two")),
+                2,
+            ),
+            &mut app,
+        ));
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .scrollback
+            .push_block(RenderBlock::notice("suffix neighbor"));
+
+        let agent = &app.agents[&AgentId(0)];
+        let final_cursor = serde_json::json!({
+            "version": 1,
+            "session": session_id,
+            "cut": 2,
+            "hash": "0123456789abcdef".repeat(4),
+            "record": 1,
+            "part": 2,
+            "complete": true,
+        })
+        .to_string();
+        assert_eq!(
+            agent.session.last_seen_event_id.as_deref(),
+            Some(final_cursor.as_str()),
+            "the final canonical part advances the source cursor"
+        );
+        assert_eq!(
+            agent.session.last_applied_event_seq,
+            None,
+            "canonical parts have no preview eventId highwater"
+        );
+
+        let rendered = rendered_view(agent);
+        assert_eq!(
+            rendered.roles,
+            ["notice", "thinking", "agent", "notice"],
+            "canonical parts stay between their existing neighbors with distinct roles"
+        );
+        assert!(rendered.output_at_80[0].contains("prefix neighbor"));
+        assert!(rendered.output_at_80[1].contains("reasoning part"));
+        assert!(rendered.output_at_80[2].contains("assistant part oneassistant part two"));
+        assert!(rendered.output_at_80[3].contains("suffix neighbor"));
+    }
+
+    #[test]
     fn accepted_prompt_activity_clears_observation_and_invalidates_its_query() {
         let mut app = make_app_with_agent("s1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -1916,3 +2028,413 @@
             !matches!(&entry.block, RenderBlock::ImageRecovery(_))
         }));
     }
+
+fn golden_presentation_updates() -> Vec<shell::session::storage::SessionUpdate> {
+    #[derive(serde::Deserialize)]
+    struct GoldenCase {
+        family: String,
+        channel: String,
+        notification: serde_json::Value,
+    }
+
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../shell/tests/fixtures/history-wire-golden.json");
+    let cases: Vec<GoldenCase> = serde_json::from_slice(
+        &std::fs::read(fixture).expect("read shared history golden fixture"),
+    )
+    .expect("parse shared history golden fixture");
+    cases
+        .into_iter()
+        .filter(|case| !matches!(case.family.as_str(), "sampling_attempt" | "rewind_marker"))
+        .enumerate()
+        .map(|(index, case)| {
+            let mut notification = case.notification;
+            notification["sessionId"] = serde_json::Value::String("golden".into());
+            let meta = notification
+                .get_mut("_meta")
+                .and_then(serde_json::Value::as_object_mut)
+                .map(|meta| {
+                    meta.insert(
+                        "eventId".into(),
+                        serde_json::Value::String(format!("golden-{index}")),
+                    );
+                    meta.insert("isReplay".into(), serde_json::Value::Bool(true));
+                    meta.clone()
+                })
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "eventId": format!("golden-{index}"),
+                        "isReplay": true,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                });
+            notification["_meta"] = serde_json::Value::Object(meta);
+            match case.channel.as_str() {
+                "acp" => shell::session::storage::SessionUpdate::Acp(Box::new(
+                    serde_json::from_value(notification).expect("ACP fixture parses"),
+                )),
+                "grow" => shell::session::storage::SessionUpdate::Grow(Box::new(
+                    serde_json::from_value(notification).expect("Grow fixture parses"),
+                )),
+                channel => panic!("unknown fixture channel {channel}"),
+            }
+        })
+        .collect()
+}
+
+fn submit_replayed_update(
+    app: &mut AppView,
+    update: shell::session::storage::SessionUpdate,
+) {
+    match update {
+        shell::session::storage::SessionUpdate::Acp(notification) => {
+            let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+            let request = acp::SessionNotification::new(
+                notification.session_id.clone(),
+                notification.update.clone(),
+            )
+            .meta(notification.meta.clone());
+            let _ = handle(
+                AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                    request,
+                    response_tx,
+                }),
+                app,
+            );
+            response_rx
+                .try_recv()
+                .expect("ACP notification ACK received")
+                .expect("ACP notification ACK succeeded");
+        }
+        shell::session::storage::SessionUpdate::Grow(notification) => {
+            let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+            let raw = serde_json::value::to_raw_value(notification.as_ref())
+                .expect("serialize Grow fixture notification");
+            let request = acp::ExtNotification::new("grow/session_notification", raw.into());
+            let _ = handle(
+                AcpClientMessage::ExtNotification(acp_transport::AcpArgs {
+                    request,
+                    response_tx,
+                }),
+                app,
+            );
+            response_rx
+                .try_recv()
+                .expect("Grow notification ACK received")
+                .expect("Grow notification ACK succeeded");
+        }
+        shell::session::storage::SessionUpdate::ResponseReplayProjection(_) => {
+            panic!("storage-only response projection is not a public notification")
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+struct RenderedView {
+    roles: Vec<String>,
+    output_at_80: Vec<String>,
+    output_at_120: Vec<String>,
+    tool_ids: Vec<(String, Option<String>)>,
+}
+
+fn block_role(block: &RenderBlock) -> &'static str {
+    match block {
+        RenderBlock::UserPrompt(_) => "user",
+        RenderBlock::AgentMessage(_) => "agent",
+        RenderBlock::Thinking(_) => "thinking",
+        RenderBlock::ToolCall(_) => "tool-call",
+        RenderBlock::Notice(_) => "notice",
+        RenderBlock::SessionEvent(_) => "session-event",
+        RenderBlock::ImageRecovery(_) => "image-recovery",
+        RenderBlock::BgTask(_) => "background-task",
+        RenderBlock::Subagent(_) => "subagent",
+        RenderBlock::SubagentPermission(_) => "subagent-permission",
+        RenderBlock::Workflow(_) => "workflow",
+        RenderBlock::Btw(_) => "btw",
+        RenderBlock::ContextInfo(_) => "context-info",
+        RenderBlock::Stub(_) => "stub",
+    }
+}
+
+fn rendered_view(view: &crate::app::agent_view::AgentView) -> RenderedView {
+    use crate::scrollback::block::BlockContent;
+    let appearance = crate::appearance::AppearanceConfig::default();
+    let mut roles = Vec::new();
+    let mut output_at_80 = Vec::new();
+    let mut output_at_120 = Vec::new();
+    for (_, entry) in view.scrollback.iter_entries() {
+        roles.push(block_role(&entry.block).to_owned());
+        for (width, output) in [(80, &mut output_at_80), (120, &mut output_at_120)] {
+            let mut context = entry.context(width, &appearance, None);
+            context.mode = crate::scrollback::types::DisplayMode::Expanded;
+            context.is_running = false;
+            let rendered = entry.block.output(&context);
+            output.push(
+                rendered
+                    .lines
+                    .iter()
+                    .map(|line| {
+                        line.content
+                            .spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+    }
+    RenderedView {
+        roles,
+        output_at_80,
+        output_at_120,
+        tool_ids: ["tool-golden"]
+            .into_iter()
+            .map(|tool_id| {
+                (
+                    tool_id.to_owned(),
+                    view.session
+                        .tracker
+                        .tool_entry_id(tool_id, &view.scrollback)
+                        .map(|entry_id| format!("{entry_id:?}")),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn view_tree(
+    name: String,
+    view: &crate::app::agent_view::AgentView,
+    output: &mut std::collections::BTreeMap<String, RenderedView>,
+) {
+    output.insert(name.clone(), rendered_view(view));
+    for (child_id, child) in &view.subagent_views {
+        view_tree(format!("{name}/{child_id}"), child, output);
+    }
+}
+
+fn stable_state(app: &AppView) -> serde_json::Value {
+    let root = &app.agents[&AgentId(0)];
+    let session = &root.session;
+    let goal = session.goal_state.as_ref().map(|goal| {
+        serde_json::json!({
+            "goal_id": goal.goal_id,
+            "objective": goal.objective,
+            "status": format!("{:?}", goal.status),
+            "token_budget": goal.token_budget,
+            "tokens_used": goal.tokens_used,
+            "usage_breakdown": format!("{:?}", goal.usage_breakdown),
+            "usage_incomplete": goal.usage_incomplete,
+            "elapsed_ms": goal.elapsed_ms,
+            "created_at": goal.created_at,
+            "updated_at": goal.updated_at,
+            "status_message": goal.status_message,
+            "elapsed_floor_ms": goal.elapsed_floor_ms,
+        })
+    });
+    let mut workflows = session
+        .workflow_runs
+        .iter()
+        .map(|run| {
+            serde_json::json!({
+                "run_id": run.run_id,
+                "definition_id": run.definition_id,
+                "definition_scope": run.definition_scope,
+                "definition_hash": run.definition_hash,
+                "name": run.name,
+                "objective": run.objective,
+                "status": run.status,
+                "management_available": run.management_available,
+                "phases": run.phases,
+                "current_phase": run.current_phase,
+                "agents": run.agents.iter().map(|agent| serde_json::json!({
+                    "agent_id": agent.agent_id,
+                    "label": agent.label,
+                    "phase": agent.phase,
+                    "model": agent.model,
+                    "state": agent.state,
+                    "tokens_used": agent.tokens_used,
+                    "duration_ms": agent.duration_ms,
+                })).collect::<Vec<_>>(),
+                "agent_budget": run.agent_budget,
+                "agents_used": run.agents_used,
+                "agents_remaining": run.agents_remaining,
+                "agent_usage_incomplete": run.agent_usage_incomplete,
+                "active_agents": run.active_agents,
+                "elapsed_ms": run.elapsed_ms,
+                "pause_message": run.pause_message,
+                "result_summary": run.result_summary,
+            })
+        })
+        .collect::<Vec<_>>();
+    workflows.sort_by_key(|run| run["run_id"].as_str().unwrap_or_default().to_owned());
+    let subagents = session
+        .subagent_sessions
+        .iter()
+        .map(|(child_id, info)| {
+            (
+                child_id.clone(),
+                serde_json::json!({
+                    "subagent_id": info.subagent_id,
+                    "child_session_id": info.child_session_id,
+                    "description": info.description,
+                    "subagent_type": info.subagent_type,
+                    "model": info.model,
+                    "reasoning_effort": format!("{:?}", info.reasoning_effort),
+                    "context_source": info.context_source,
+                    "resumed_from": info.resumed_from,
+                    "capability_mode": info.capability_mode,
+                    "permission_mode": info.permission_mode,
+                    "effective_permission_mode": info.effective_permission_mode,
+                    "workflow_run_id": info.workflow_run_id,
+                    "context_normalized": info.context_normalized,
+                    "parent_prompt_id": info.parent_prompt_id,
+                    "finished": info.finished,
+                    "status": info.status,
+                    "error": info.error,
+                    "duration_ms": info.duration_ms,
+                    "tool_calls": info.tool_calls,
+                    "turns": info.turns,
+                    "turn_count": info.turn_count,
+                    "tool_call_count": info.tool_call_count,
+                    "tokens_used": info.tokens_used,
+                    "context_window_tokens": info.context_window_tokens,
+                    "context_usage_pct": info.context_usage_pct,
+                    "tools_used": info.tools_used,
+                    "error_count": info.error_count,
+                    "activity_label": info.activity_label,
+                    "is_background": info.is_background,
+                    "pending_kill": info.pending_kill,
+                    "kill_requested": info.kill_requested_at.is_some(),
+                    "scrollback_entry_id": format!("{:?}", info.scrollback_entry_id),
+                    "prompt": info.prompt,
+                    "child_cwd": info.child_cwd,
+                    "worktree_path": info.worktree_path,
+                    "child_updates_replayed": info.child_updates_replayed,
+                }),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut views = std::collections::BTreeMap::new();
+    view_tree("root".into(), root, &mut views);
+    serde_json::json!({
+        "views": views,
+        "goal": goal,
+        "workflows": workflows,
+        "subagents": subagents,
+        "control": {
+            "current_model": session.models.current_model_id_str(),
+            "reasoning_effort": format!("{:?}", session.models.reasoning_effort),
+            "controls_pending": session.controls_pending(),
+        },
+    })
+}
+
+#[test]
+fn physical_history_projection_matches_direct_replay_at_every_prefix() {
+    let session_id = acp::SessionId::new("golden");
+    let direct = golden_presentation_updates();
+    let projected = shell::session::testkit::project_presentation_history(&session_id, &direct)
+        .expect("typed notifications round-trip through the physical history pipeline");
+    assert_eq!(projected.len(), direct.len());
+
+    let mut direct_app = make_app_with_agent("golden");
+    let mut projected_app = make_app_with_agent("golden");
+    direct_app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = true;
+    projected_app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = true;
+
+    for (index, (direct_update, projected_update)) in
+        direct.into_iter().zip(projected).enumerate()
+    {
+        submit_replayed_update(&mut direct_app, direct_update);
+        submit_replayed_update(&mut projected_app, projected_update);
+        assert_eq!(
+            stable_state(&direct_app),
+            stable_state(&projected_app),
+            "state differs after fixture prefix {index}"
+        );
+    }
+
+    let root = &direct_app.agents[&AgentId(0)];
+    let root_render = rendered_view(root);
+    for role in ["user", "agent", "thinking", "tool-call"] {
+        assert!(
+            root_render.roles.iter().any(|found| found == role),
+            "golden fixture did not render required {role} role; roles={:?}",
+            root_render.roles
+        );
+    }
+    let rendered_text = root_render
+        .output_at_80
+        .iter()
+        .chain(root_render.output_at_120.iter())
+        .cloned()
+        .collect::<String>();
+    for marker in [
+        "Please inspect this.",
+        "I will inspect it.",
+        "Need compare the paths.",
+        "src/main.rs",
+        "tool-golden",
+    ] {
+        assert!(
+            rendered_text.contains(marker)
+                || root_render
+                    .tool_ids
+                    .iter()
+                    .any(|(tool_id, _)| tool_id == marker),
+            "required fixture marker {marker:?} was lost in rendering/tracker"
+        );
+    }
+    assert!(root_render.tool_ids[0].1.is_some(), "tool-golden is tracked");
+    assert!(root.session.goal_state.is_some(), "goal snapshot fixture is applied");
+    assert!(root
+        .session
+        .workflow_runs
+        .iter()
+        .any(|run| run.run_id == "workflow-golden"), "workflow fixture is applied");
+    assert!(root
+        .session
+        .subagent_sessions
+        .contains_key("child-golden"), "subagent fixture is applied");
+
+    let child_session_id = acp::SessionId::new("child-golden");
+    direct_app.agents.get_mut(&AgentId(0)).unwrap().subagent_views
+        .get_mut("child-golden").expect("golden spawn creates a child view")
+        .session.loading_replay = true;
+    projected_app.agents.get_mut(&AgentId(0)).unwrap().subagent_views
+        .get_mut("child-golden").expect("golden spawn creates a child view")
+        .session.loading_replay = true;
+    let child_update = shell::session::storage::SessionUpdate::Acp(Box::new(
+        acp::SessionNotification::new(
+            child_session_id.clone(),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new(
+                    "child replay marker survives projection",
+                )),
+            )),
+        )
+        .meta(serde_json::json!({"eventId": "child-golden-0", "isReplay": true}).as_object().cloned()),
+    ));
+    let child_projected = shell::session::testkit::project_presentation_history(
+        &child_session_id,
+        std::slice::from_ref(&child_update),
+    )
+    .expect("valid child notification projects through its own journal");
+    submit_replayed_update(&mut direct_app, child_update);
+    for update in child_projected {
+        submit_replayed_update(&mut projected_app, update);
+    }
+    assert_eq!(stable_state(&direct_app), stable_state(&projected_app));
+    let child_view = &direct_app.agents[&AgentId(0)].subagent_views["child-golden"];
+    let child_render = rendered_view(child_view);
+    assert!(child_render.roles.iter().any(|role| role == "agent"));
+    assert!(child_render
+        .output_at_80
+        .iter()
+        .any(|text| text.contains("child replay marker survives projection")));
+}

@@ -1,0 +1,50 @@
+{
+  "pty_e2e_persistence": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pty_e2e_persistence-a3d8341929662456",
+    "sha256": "9536ff152ad9c886680bfec82458dbfd9f0aeb64d77e9fad1a475761575ae74d"
+  },
+  "testkit_synth_roundtrip": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/testkit_synth_roundtrip-464c879bc1bba9cf",
+    "sha256": "eb1a93bd48d958c848d0dc91009b6f9bf68b978de05836424dbb5f739ab945d2"
+  },
+  "leader_pty_e2e": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/leader_pty_e2e-0cf978ee5bed0153",
+    "sha256": "196cc174d6be53ab7ac1f30cad1e8ddf6071731440e9e4d305e78b6b341eb6d4"
+  },
+  "test_tool_dispatch_duration_smoke": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/test_tool_dispatch_duration_smoke-8a9eba687b03ea7f",
+    "sha256": "02d026d02d2f319cc7c724fa20db650f534d38e0cf29fb0cbc5be13f1aa16fc4"
+  },
+  "shell": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/shell-92ae284a12587859",
+    "sha256": "d171f335497b7a57f4c87774988828cfcbccc50067d4cdd6ae5d31190553eab6"
+  },
+  "pty_e2e_minimal": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pty_e2e_minimal-5948ad2be16beab0",
+    "sha256": "773c560afd3186f55654ced701f665da42a478cb75fe5adb190063ff4fac6dda"
+  },
+  "test_subagent_orphan_reconcile": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/test_subagent_orphan_reconcile-b84d731995f9ac20",
+    "sha256": "b1e749fb661e05148e919a45f531d542f3198f6bfb57493aa266b3f3d05f69d3"
+  },
+  "test_session_load_memory": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/test_session_load_memory-07eca10fc649a67c",
+    "sha256": "b80bdc29256d1ab8a2e2d9bbb8d8b6789d9056093d0266c75d3e14a4b93bb5e7"
+  },
+  "session_fork_replay_memory": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/session_fork_replay_memory-c9d92b4b92d9182a",
+    "sha256": "8f4362393cef041e01bc4613c59c46cd4e6eeb913256b0cd52bc50fa6760b479"
+  },
+  "pager_pty_harness": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pager_pty_harness-449ea990fd29fd5a",
+    "sha256": "9153933b9f7fb0a3322ee86ff1c6800be0712d3aa902375352f319144f110118"
+  },
+  "session_load_perf": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/session_load_perf-7e3695fd37f050d9",
+    "sha256": "97b230550cc43c579a0a88a116d2f34d20b00424df2612cd0f8e3d01b6d12b75"
+  },
+  "pager": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pager-8f8483c6dcd2ff0d",
+    "sha256": "16a09447d5aa59317804f220ccf5928635d767721988472dc5b96e4c4fb4f4f6"
+  }
+}

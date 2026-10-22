@@ -1,0 +1,1225 @@
+[
+  {
+    "family": "sampling_attempt",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "sampling_attempt",
+        "request_id": "req-golden",
+        "attempt": 2,
+        "state": "accepted"
+      },
+      "_meta": {
+        "eventId": "golden-100",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "image_recovery_operation",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "image_recovery_operation",
+        "operation_id": "image-op-golden",
+        "prompt_id": "prompt-golden",
+        "state": {
+          "state": "started",
+          "message": "Recovering image"
+        }
+      },
+      "_meta": {
+        "eventId": "golden-101",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "image_recovery_operation",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "image_recovery_operation",
+        "operation_id": "image-op-golden",
+        "prompt_id": "prompt-golden",
+        "state": {
+          "state": "vision",
+          "message": "Using vision"
+        }
+      },
+      "_meta": {
+        "eventId": "golden-102",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "image_recovery_operation",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "image_recovery_operation",
+        "operation_id": "image-op-golden",
+        "prompt_id": "prompt-golden",
+        "state": {
+          "state": "ocr",
+          "message": "Using OCR"
+        }
+      },
+      "_meta": {
+        "eventId": "golden-103",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "image_recovery_operation",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "image_recovery_operation",
+        "operation_id": "image-op-golden",
+        "prompt_id": "prompt-golden",
+        "state": {
+          "state": "completed",
+          "message": "Image recovered"
+        }
+      },
+      "_meta": {
+        "eventId": "golden-104",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "image_recovery_operation",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "image_recovery_operation",
+        "operation_id": "image-op-golden",
+        "prompt_id": "prompt-golden",
+        "state": {
+          "state": "failed",
+          "message": "Recovery failed"
+        }
+      },
+      "_meta": {
+        "eventId": "golden-105",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "retry_state",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "retry_state",
+        "type": "retrying",
+        "attempt": 2,
+        "max_retries": 5,
+        "reason": "temporary provider failure"
+      },
+      "_meta": {
+        "eventId": "golden-106",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "retry_state",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "retry_state",
+        "type": "exhausted",
+        "attempts": 5,
+        "reason": "rate limited",
+        "is_rate_limited": true
+      },
+      "_meta": {
+        "eventId": "golden-107",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "retry_state",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "retry_state",
+        "type": "failed",
+        "error_type": "invalid_params",
+        "message": "invalid request"
+      },
+      "_meta": {
+        "eventId": "golden-108",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "auto_compact_started",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "auto_compact_started",
+        "tokens_used": 81000,
+        "context_window": 100000,
+        "percentage": 81,
+        "reason": "context threshold"
+      },
+      "_meta": {
+        "eventId": "golden-109",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "auto_compact_completed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "auto_compact_completed",
+        "manual": true,
+        "async_compact": true,
+        "tokens_before": 81000,
+        "tokens_after": 12000,
+        "elapsed_ms": 345,
+        "summary_preview": "Compacted history"
+      },
+      "_meta": {
+        "eventId": "golden-110",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "auto_compact_failed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "auto_compact_failed",
+        "error": "compaction failed"
+      },
+      "_meta": {
+        "eventId": "golden-111",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "auto_compact_cancelled",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "auto_compact_cancelled",
+        "reason": "user_cancelled"
+      },
+      "_meta": {
+        "eventId": "golden-112",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "memory_flush_started",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "memory_flush_started"
+      },
+      "_meta": {
+        "eventId": "golden-113",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "memory_flush_completed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "memory_flush_completed",
+        "result": "saved memory",
+        "path": "/memory/flush.md"
+      },
+      "_meta": {
+        "eventId": "golden-114",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "memory_dream_completed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "memory_dream_completed",
+        "result": "consolidated memories",
+        "path": "/memory/dream.md"
+      },
+      "_meta": {
+        "eventId": "golden-115",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "memory_session_saved",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "memory_session_saved",
+        "path": "/memory/session.md"
+      },
+      "_meta": {
+        "eventId": "golden-116",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "image_compressed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "image_compressed",
+        "images": [
+          {
+            "index": 1,
+            "original_bytes": 900000,
+            "compressed_bytes": 200000,
+            "original_width": 4000,
+            "original_height": 3000,
+            "compressed_width": 1600,
+            "compressed_height": 1200
+          }
+        ],
+        "message": "Image resized"
+      },
+      "_meta": {
+        "eventId": "golden-117",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "image_dropped",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "image_dropped",
+        "notes": [
+          "Image 2 dropped: exceeds limit"
+        ]
+      },
+      "_meta": {
+        "eventId": "golden-118",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "hooks_changed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "hooks_changed",
+        "hooks": [
+          {
+            "name": "project/safety:pre_tool_use[0].hooks[0]",
+            "event": "pre_tool_use",
+            "handlerType": "command",
+            "matcher": "bash",
+            "command": "/tools/check.sh",
+            "url": "https://hooks.example.test/check",
+            "timeoutMs": 5000,
+            "sourceDir": "/repo/.grow/hooks",
+            "disabled": true
+          }
+        ],
+        "project_trusted": true,
+        "load_errors": [
+          "hook warning"
+        ]
+      },
+      "_meta": {
+        "eventId": "golden-119",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "plugins_changed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "plugins_changed",
+        "plugins": [
+          {
+            "name": "review",
+            "id": "project/0123abcd/review",
+            "root": "/repo/.grow/plugins/review",
+            "scope": "project",
+            "enabled": true,
+            "version": "1.2.3",
+            "description": "Review tools",
+            "skillCount": 2,
+            "skillNames": [
+              "review",
+              "audit"
+            ],
+            "agentCount": 1,
+            "agentNames": [
+              "reviewer"
+            ],
+            "hookStatus": "active",
+            "hookCount": 1,
+            "mcpServerCount": 1,
+            "mcpStatus": "active_inline",
+            "origin": {
+              "type": "marketplace_install",
+              "source_name": "curated",
+              "git_url": "https://example.test/review.git"
+            },
+            "conflict": "shadowed copy"
+          }
+        ]
+      },
+      "_meta": {
+        "eventId": "golden-120",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "plugin_updates_installed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "plugin_updates_installed",
+        "updates": [
+          [
+            "fixture-plugin",
+            "1.0.0",
+            "1.1.0"
+          ]
+        ]
+      },
+      "_meta": {
+        "eventId": "golden-200",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "session_recap",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "session_recap",
+        "summary": "Reviewed the project and identified the next steps.",
+        "auto": true,
+        "away_period_id": "018f1234-5678-7abc-8def-0123456789ab"
+      },
+      "_meta": {
+        "eventId": "golden-121",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "session_recap_unavailable",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "session_recap_unavailable"
+      },
+      "_meta": {
+        "eventId": "golden-122",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "subagent_spawned",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "subagent_spawned",
+        "subagent_id": "child-golden",
+        "parent_session_id": "parent-golden",
+        "parent_prompt_id": "prompt-golden",
+        "child_session_id": "child-golden",
+        "subagent_type": "general-purpose",
+        "description": "Inspect behavior",
+        "effective_context_source": "resumed",
+        "context_normalized": true,
+        "capability_mode": "read-only",
+        "permission_mode": "independent",
+        "effective_permission_mode": "read-only",
+        "model": "vendor/model-child",
+        "reasoning_effort": "high",
+        "model_state": {
+          "currentModelId": "vendor/model-child",
+          "availableModels": [
+            {
+              "modelId": "vendor/model-child",
+              "name": "Child model",
+              "description": "Pinned child model",
+              "_meta": {
+                "catalog": "child"
+              }
+            }
+          ],
+          "_meta": {
+            "snapshot": "child-models"
+          }
+        },
+        "workflow_agent_names": [
+          "reviewer"
+        ],
+        "resumed_from": "child-prior",
+        "workflow_run_id": "workflow-golden",
+        "goal_id": "goal-golden"
+      },
+      "_meta": {
+        "eventId": "golden-123",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "subagent_progress",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "subagent_progress",
+        "subagent_id": "child-golden",
+        "parent_session_id": "parent-golden",
+        "child_session_id": "child-golden",
+        "duration_ms": 4200,
+        "turn_count": 3,
+        "tool_call_count": 8,
+        "tokens_used": 12000,
+        "context_window_tokens": 100000,
+        "context_usage_pct": 12,
+        "tools_used": [
+          "bash",
+          "read_file"
+        ],
+        "error_count": 1
+      },
+      "_meta": {
+        "eventId": "golden-124",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "subagent_finished",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "subagent_finished",
+        "subagent_id": "child-golden",
+        "child_session_id": "child-golden",
+        "status": "failed",
+        "error": "child error",
+        "tool_calls": 8,
+        "turns": 3,
+        "duration_ms": 4200,
+        "tokens_used": 12000,
+        "output": "partial result"
+      },
+      "_meta": {
+        "eventId": "golden-125",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "task_completed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "task_completed",
+        "task_snapshot": {
+          "task_id": "task-golden",
+          "command": "bash -lc true",
+          "display_command": "true",
+          "cwd": "/repo",
+          "start_time": {
+            "secs_since_epoch": 1700000000,
+            "nanos_since_epoch": 123000000
+          },
+          "end_time": {
+            "secs_since_epoch": 1700000002,
+            "nanos_since_epoch": 456000000
+          },
+          "output": "ok",
+          "output_file": "/tmp/task-golden.log",
+          "truncated": true,
+          "exit_code": 143,
+          "signal": "SIGTERM",
+          "completed": true,
+          "kind": "monitor",
+          "block_waited": true,
+          "explicitly_killed": true,
+          "owner_session_id": "golden",
+          "goal_id": "goal-golden",
+          "goal_definition_revision": 3,
+          "description": "Check service",
+          "is_backgrounded": true
+        }
+      },
+      "_meta": {
+        "eventId": "golden-126",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "task_backgrounded",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "task_backgrounded",
+        "tool_call_id": "tool-golden",
+        "task_id": "task-golden",
+        "command": "sleep 10",
+        "cwd": "/repo",
+        "output_file": "/tmp/task-golden.log",
+        "monitor_description": "Watch service health",
+        "description": "Wait for health check"
+      },
+      "_meta": {
+        "eventId": "golden-127",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "scheduled_task_created",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "scheduled_task_created",
+        "task_id": "schedule-golden",
+        "prompt": "Run the review",
+        "human_schedule": "Every hour",
+        "next_fire_at": "2026-10-21T10:00:00Z"
+      },
+      "_meta": {
+        "eventId": "golden-128",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "scheduled_task_deleted",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "scheduled_task_deleted",
+        "task_id": "schedule-golden"
+      },
+      "_meta": {
+        "eventId": "golden-130",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "workflow_updated",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "workflow_updated",
+        "run_id": "workflow-golden",
+        "definition_id": "project:review",
+        "definition_scope": "project",
+        "definition_hash": "sha256:abc123",
+        "revision": 4,
+        "name": "Review",
+        "objective": "Review changes",
+        "status": "paused",
+        "foreground": true,
+        "phases": [
+          {
+            "title": "Inspect",
+            "state": "completed"
+          }
+        ],
+        "current_phase": "Review",
+        "agent_budget": 6,
+        "agents_used": 2,
+        "agents_remaining": 4,
+        "agent_usage_incomplete": true,
+        "elapsed_ms": 12345,
+        "active_agents": 1,
+        "current_agent_label": "Reviewer",
+        "agents": [
+          {
+            "agent_id": "child-golden",
+            "label": "Reviewer",
+            "phase": "Review",
+            "model": "vendor/model-child",
+            "state": "running",
+            "tokens_used": 1200,
+            "duration_ms": 3000
+          }
+        ],
+        "pause_message": "Waiting for input",
+        "result_summary": "Found two issues"
+      },
+      "_meta": {
+        "eventId": "golden-131",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "goal_updated",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "goal_updated",
+        "goal_id": "goal-golden",
+        "objective": "Finish the review",
+        "status": "active",
+        "token_budget": 50000,
+        "tokens_used": 12000,
+        "usage_breakdown": {
+          "cached_input_tokens": 1000,
+          "uncached_input_tokens": 9000,
+          "unclassified_input_tokens": 200,
+          "output_tokens": 1800
+        },
+        "usage_incomplete": true,
+        "elapsed_ms": 9876,
+        "created_at": "2026-10-20T09:00:00Z",
+        "updated_at": "2026-10-21T09:00:00Z",
+        "status_message": "Continuing"
+      },
+      "_meta": {
+        "eventId": "golden-132",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "ui_notice",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "ui_notice",
+        "correlationId": "notice-golden",
+        "category": "coordination",
+        "subject": "agent message received",
+        "description": "Parent message",
+        "message": "New message received",
+        "tone": "success",
+        "details": "Parent session parent-golden sent message msg-golden."
+      },
+      "_meta": {
+        "eventId": "golden-133",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "control_state_update",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "control_state_update",
+        "epoch": "epoch-golden",
+        "domain": "sampling",
+        "revision": 7,
+        "intent": {
+          "clientId": "client-golden",
+          "generation": 2,
+          "sequence": 9
+        },
+        "snapshot": true,
+        "receiptOnly": true,
+        "phase": "applied",
+        "current": {
+          "kind": "sampling",
+          "model_id": "vendor/model-a",
+          "reasoning_effort": "medium"
+        },
+        "desired": {
+          "kind": "sampling",
+          "model_id": "vendor/model-b",
+          "reasoning_effort": "high"
+        },
+        "message": "Switched model"
+      },
+      "_meta": {
+        "eventId": "golden-134",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "subagent_permission_decision",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "subagent_permission_decision",
+        "child_session_id": "child-golden",
+        "subagent_type": "general-purpose",
+        "description": "Run focused tests",
+        "tool_call_id": "tool-golden",
+        "tool_name": "run_terminal_command",
+        "access_kind": "bash",
+        "access_summary": "cargo test -p shell",
+        "access_detail": "cargo test -p shell -- --nocapture",
+        "outcome": "approved",
+        "source": "main_agent",
+        "reason": "Required by task",
+        "classifier_reason": "Command is in scope",
+        "latency_ms": 42
+      },
+      "_meta": {
+        "eventId": "golden-135",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "rewind_marker",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "rewind_marker",
+        "target_prompt_index": 2,
+        "created_at": "2026-10-21T09:00:00Z"
+      },
+      "_meta": {
+        "eventId": "golden-136",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "turn_completed",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "turn_completed",
+        "prompt_id": "prompt-golden",
+        "identity": {
+          "origin": "user",
+          "turn_kind": "internal",
+          "goal_id": "goal-golden",
+          "goal_definition_revision": 3,
+          "stage_id": 2
+        },
+        "stop_reason": "end_turn",
+        "agent_result": "Review complete",
+        "usage": {
+          "inputTokens": 9000,
+          "outputTokens": 1800,
+          "totalTokens": 10800,
+          "cachedReadTokens": 1000,
+          "cacheCreationTokens": 200,
+          "cacheReadKnownInputTokens": 800,
+          "cacheReadUnknownCalls": 1,
+          "cacheWriteUnknownCalls": 2,
+          "reasoningTokens": 500,
+          "modelCalls": 2,
+          "apiDurationMs": 4300,
+          "costUsdTicks": 12000,
+          "modelUsage": {
+            "vendor/model-a": {
+              "inputTokens": 8000,
+              "outputTokens": 1600,
+              "totalTokens": 9600,
+              "cachedReadTokens": 900,
+              "cacheCreationTokens": 100,
+              "cacheReadKnownInputTokens": 700,
+              "cacheReadUnknownCalls": 1,
+              "cacheWriteUnknownCalls": 1,
+              "reasoningTokens": 400,
+              "modelCalls": 1,
+              "apiDurationMs": 2100,
+              "costUsdTicks": 7000
+            }
+          },
+          "numTurns": 3
+        }
+      },
+      "_meta": {
+        "eventId": "golden-137",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "turn_completed_incomplete",
+    "channel": "grow",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "turn_completed",
+        "prompt_id": "prompt-golden",
+        "identity": {
+          "origin": "user",
+          "turn_kind": "internal",
+          "goal_id": "goal-golden",
+          "goal_definition_revision": 3,
+          "stage_id": 2
+        },
+        "stop_reason": "end_turn",
+        "agent_result": "Review complete",
+        "usage": {
+          "inputTokens": 9000,
+          "outputTokens": 1800,
+          "totalTokens": 10800,
+          "cachedReadTokens": 1000,
+          "cacheCreationTokens": 200,
+          "cacheReadKnownInputTokens": 800,
+          "cacheReadUnknownCalls": 1,
+          "cacheWriteUnknownCalls": 2,
+          "reasoningTokens": 500,
+          "modelCalls": 2,
+          "apiDurationMs": 4300,
+          "costIsPartial": true,
+          "modelUsage": {
+            "vendor/model-a": {
+              "inputTokens": 8000,
+              "outputTokens": 1600,
+              "totalTokens": 9600,
+              "cachedReadTokens": 900,
+              "cacheCreationTokens": 100,
+              "cacheReadKnownInputTokens": 700,
+              "cacheReadUnknownCalls": 1,
+              "cacheWriteUnknownCalls": 1,
+              "reasoningTokens": 400,
+              "modelCalls": 1,
+              "apiDurationMs": 2100,
+              "costIsPartial": true
+            }
+          },
+          "numTurns": 3,
+          "usageIsIncomplete": true
+        }
+      },
+      "_meta": {
+        "eventId": "golden-201",
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "user_message",
+    "channel": "acp",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "user_message_chunk",
+        "content": {
+          "type": "text",
+          "annotations": {
+            "audience": [
+              "assistant"
+            ],
+            "lastModified": "2026-10-21T09:00:00Z",
+            "priority": 0.8,
+            "_meta": {
+              "annotation": "fixture"
+            }
+          },
+          "text": "Please inspect this.",
+          "_meta": {
+            "text": "fixture"
+          }
+        },
+        "messageId": "message-user-golden",
+        "_meta": {
+          "stream": "user"
+        }
+      },
+      "_meta": {
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "agent_message",
+    "channel": "acp",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "annotations": {
+            "audience": [
+              "assistant"
+            ],
+            "lastModified": "2026-10-21T09:00:00Z",
+            "priority": 0.8,
+            "_meta": {
+              "annotation": "fixture"
+            }
+          },
+          "text": "I will inspect it.",
+          "_meta": {
+            "text": "fixture"
+          }
+        },
+        "messageId": "message-agent-golden",
+        "_meta": {
+          "stream": "assistant"
+        }
+      },
+      "_meta": {
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "thought",
+    "channel": "acp",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "content": {
+          "type": "text",
+          "annotations": {
+            "audience": [
+              "assistant"
+            ],
+            "lastModified": "2026-10-21T09:00:00Z",
+            "priority": 0.8,
+            "_meta": {
+              "annotation": "fixture"
+            }
+          },
+          "text": "Need compare the paths.",
+          "_meta": {
+            "text": "fixture"
+          }
+        },
+        "messageId": "message-thought-golden",
+        "_meta": {
+          "stream": "thought"
+        }
+      },
+      "_meta": {
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "tool_call",
+    "channel": "acp",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "tool-golden",
+        "title": "Read source",
+        "kind": "read",
+        "status": "in_progress",
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "annotations": {
+                "audience": [
+                  "assistant"
+                ],
+                "lastModified": "2026-10-21T09:00:00Z",
+                "priority": 0.8,
+                "_meta": {
+                  "annotation": "fixture"
+                }
+              },
+              "text": "Reading source",
+              "_meta": {
+                "text": "fixture"
+              }
+            },
+            "_meta": {
+              "content": "fixture"
+            }
+          }
+        ],
+        "locations": [
+          {
+            "path": "/repo/src/main.rs",
+            "line": 12,
+            "_meta": {
+              "location": "fixture"
+            }
+          }
+        ],
+        "rawInput": {
+          "path": "src/main.rs"
+        },
+        "rawOutput": {
+          "text": "source"
+        },
+        "_meta": {
+          "tool": "fixture"
+        }
+      },
+      "_meta": {
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "tool_call_update",
+    "channel": "acp",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "tool-golden",
+        "kind": "execute",
+        "status": "completed",
+        "title": "Run tests",
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "annotations": {
+                "audience": [
+                  "assistant"
+                ],
+                "lastModified": "2026-10-21T09:00:00Z",
+                "priority": 0.8,
+                "_meta": {
+                  "annotation": "fixture"
+                }
+              },
+              "text": "Tests passed",
+              "_meta": {
+                "text": "fixture"
+              }
+            }
+          }
+        ],
+        "locations": [
+          {
+            "path": "/repo/src/main.rs",
+            "line": 42
+          }
+        ],
+        "rawInput": {
+          "command": "cargo test"
+        },
+        "rawOutput": {
+          "exit_code": 0
+        },
+        "_meta": {
+          "tool": "update-fixture"
+        }
+      },
+      "_meta": {
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "plan",
+    "channel": "acp",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "plan",
+        "entries": [
+          {
+            "content": "Inspect source",
+            "priority": "high",
+            "status": "completed",
+            "_meta": {
+              "entry": "fixture"
+            }
+          },
+          {
+            "content": "Review diff",
+            "priority": "medium",
+            "status": "in_progress",
+            "_meta": {
+              "entry": "fixture-1"
+            }
+          }
+        ],
+        "_meta": {
+          "plan": "fixture"
+        }
+      },
+      "_meta": {
+        "fixture": "history-wire"
+      }
+    }
+  },
+  {
+    "family": "current_mode",
+    "channel": "acp",
+    "notification": {
+      "sessionId": "golden",
+      "update": {
+        "sessionUpdate": "current_mode_update",
+        "currentModeId": "plan",
+        "_meta": {
+          "mode": "fixture"
+        }
+      },
+      "_meta": {
+        "fixture": "history-wire"
+      }
+    }
+  }
+]

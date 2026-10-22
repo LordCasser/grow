@@ -2190,7 +2190,71 @@ impl SessionActor {
                 }
                 quarantined
             };
+            let resync_preview = {
+                let mut requested = self.replay_preview_resync.lock();
+                if requested.as_ref().is_some_and(|key| {
+                    key.request_id == admission_identity.request_id
+                        && key.attempt == admission_identity.attempt
+                }) {
+                    requested.take();
+                    true
+                } else {
+                    false
+                }
+            };
+            if resync_preview && quarantined == 0 {
+                let admitted = self
+                    .chat_state_handle
+                    .admitted_response(admission_identity.clone())
+                    .await
+                    .ok_or_else(|| {
+                        acp::Error::internal_error()
+                            .data("resumed preview has no committed response")
+                    })?;
+                let mut chunks = admitted
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        sampling_types::ConversationItem::Assistant(value)
+                            if !value.content.is_empty() =>
+                        {
+                            Some(acp::SessionUpdate::AgentMessageChunk(
+                                acp::ContentChunk::new(acp::ContentBlock::Text(
+                                    acp::TextContent::new(value.content.to_string()),
+                                )),
+                            ))
+                        }
+                        sampling_types::ConversationItem::Reasoning(value)
+                            if !value.text.is_empty() =>
+                        {
+                            Some(acp::SessionUpdate::AgentThoughtChunk(
+                                acp::ContentChunk::new(acp::ContentBlock::Text(
+                                    acp::TextContent::new(value.text.to_string()),
+                                )),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if chunks.is_empty() {
+                    chunks.push(acp::SessionUpdate::AgentMessageChunk(
+                        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                            String::new(),
+                        ))),
+                    ));
+                }
+                for (index, update) in chunks.into_iter().enumerate() {
+                    let meta = serde_json::json!({"eventId":crate::util::event_id::generate_event_id(self.session_info.id.0.as_ref()),"samplingRequestId":admission_identity.request_id,"samplingAttempt":admission_identity.attempt,"grow/replaceSamplingPreview":index == 0}).as_object().cloned();
+                    let notification =
+                        acp::SessionNotification::new(self.session_info.id.clone(), update)
+                            .meta(meta);
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::Notification(notification.into()));
+                }
+            }
             if quarantined == 0
+                && !resync_preview
                 && !already_admitted
                 && let Some(text) = fallback_text.clone()
             {
@@ -2206,45 +2270,6 @@ impl SessionActor {
                 )
                 .await;
             }
-            let admitted = self
-                .chat_state_handle
-                .admitted_response(admission_identity.clone())
-                .await
-                .ok_or_else(|| {
-                    crate::session::commands::response_projection_error(
-                        "admitted response is absent from active branch",
-                    )
-                })?;
-            let projection = crate::session::response_projection::project_admitted_response(
-                &self.session_info.id,
-                &admitted,
-            )
-            .map_err(|error| {
-                crate::session::commands::response_projection_error(format!(
-                    "projection failed: {error}"
-                ))
-            })?;
-            let (projection_tx, projection_rx) = tokio::sync::oneshot::channel();
-            self.event_tx
-                .send(SessionEvent::ResponseProjection {
-                    projection,
-                    respond_to: projection_tx,
-                })
-                .map_err(|_| {
-                    crate::session::commands::response_projection_error("session event FIFO closed")
-                })?;
-            projection_rx
-                .await
-                .map_err(|_| {
-                    crate::session::commands::response_projection_error(
-                        "durable acknowledgement lost",
-                    )
-                })?
-                .map_err(|error| {
-                    crate::session::commands::response_projection_error(format!(
-                        "durable commit failed: {error}"
-                    ))
-                })?;
             self.finish_sampling_preview(quarantined == 0);
             sampling_recovery = sampler::RecoveryBudget::default();
             *self.sampling_continuation.borrow_mut() = Some(sampling_recovery.clone());

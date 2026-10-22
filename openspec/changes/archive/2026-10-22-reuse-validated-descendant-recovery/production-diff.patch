@@ -1,0 +1,677 @@
+--- before/crates/codegen/pager/src/acp/meta.rs
++++ after/crates/codegen/pager/src/acp/meta.rs
+@@ -22,6 +22,18 @@
+         .filter(|session_id| !session_id.is_empty())
+         .map(|session_id| acp::SessionId::new(session_id.to_owned()))
+         .unwrap_or_else(|| requested.clone())
++}
++
++/// One-shot ownership from this accepted load response. Missing or rejected
++/// metadata requests the fully validated local fallback, not an empty tree.
++pub(crate) fn session_load_descendant_ownership(
++    response_meta: Option<&acp::Meta>,
++    session_id: &acp::SessionId,
++) -> Option<shell::session::storage::DescendantOwnership> {
++    let value = response_meta?.get(shell::session::storage::DESCENDANT_OWNERSHIP_META_KEY)?;
++    let ownership: shell::session::storage::DescendantOwnership =
++        serde_json::from_value(value.clone()).ok()?;
++    ownership.belongs_to(session_id.0.as_ref()).then_some(ownership)
+ }
+ 
+ /// Parsed fields from `SessionNotification._meta`.
+@@ -196,6 +208,33 @@
+     }
+ 
+     #[test]
++    fn load_ownership_is_optional_strict_and_bound_to_canonical_response_identity() {
++        let requested = acp::SessionId::new("suspended-child");
++        let meta = json!({
++            "sessionId": "owning-root",
++            "grow/descendantOwnership": {
++                "version": 1, "session_id": "owning-root", "cut": 0,
++                "hash": "00".repeat(32), "spawns": {}
++            }
++        });
++        let canonical = session_load_identity(meta.as_object(), &requested);
++        assert!(session_load_descendant_ownership(meta.as_object(), &canonical).is_some());
++        assert!(session_load_descendant_ownership(meta.as_object(), &requested).is_none());
++        assert!(session_load_descendant_ownership(None, &canonical).is_none());
++        for (field, value) in [
++            ("version", json!(2)), ("hash", json!("invalid")),
++            ("session_id", json!("foreign")), ("unexpected", json!(true)),
++        ] {
++            let mut invalid = meta.clone();
++            invalid["grow/descendantOwnership"][field] = value;
++            assert!(session_load_descendant_ownership(invalid.as_object(), &canonical).is_none());
++        }
++        let mut invalid = meta;
++        invalid["grow/descendantOwnership"] = json!("malformed");
++        assert!(session_load_descendant_ownership(invalid.as_object(), &canonical).is_none());
++    }
++
++    #[test]
+     fn parse_full_meta() {
+         let meta_json = json!({
+             "totalTokens": 5000u64,
+--- before/crates/codegen/pager/src/app/actions.rs
++++ after/crates/codegen/pager/src/app/actions.rs
+@@ -2301,6 +2301,7 @@
+         /// loader adopts its opaque id without reconstructing lifecycle
+         /// semantics from the id spelling.
+         foreground: Option<prompt_queue::ForegroundSnapshot>,
++        descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+     },
+     /// Session load (resume) failed.
+     SessionLoadFailed {
+@@ -2313,6 +2314,7 @@
+         session_id: acp::SessionId,
+         generation: u64,
+         result: Result<Option<crate::app::prompt_queue::ForegroundSnapshot>, String>,
++        descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+     },
+     /// Local `summary.json` title read for [`Effect::HydrateSessionTitleFromDisk`].
+     SessionTitleFromDisk {
+--- before/crates/codegen/pager/src/app/root/dispatch/session/load.rs
++++ after/crates/codegen/pager/src/app/root/dispatch/session/load.rs
+@@ -563,6 +563,7 @@
+     code_restored: bool,
+     restore_summary: Option<String>,
+     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
++    descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+ ) -> Vec<Effect> {
+     tracing::info!(
+         "Session loaded for agent {:?} session {:?}",
+@@ -694,7 +695,7 @@
+             crate::memory_release::release_retained_memory_with("session-load-replay");
+         }
+         note_peek_page_flip(app, agent_id, page_flip_entry);
+-        crate::app::subagent::restore_descendant_state(app, agent_id);
++        crate::app::subagent::restore_descendant_state(app, agent_id, descendant_ownership);
+         return effects;
+     }
+     vec![]
+--- before/crates/codegen/pager/src/app/root/dispatch/task_result.rs
++++ after/crates/codegen/pager/src/app/root/dispatch/task_result.rs
+@@ -670,6 +670,7 @@
+             code_restored,
+             restore_summary,
+             foreground,
++            descendant_ownership,
+         } => handle_session_loaded(
+             app,
+             agent_id,
+@@ -678,6 +679,7 @@
+             code_restored,
+             restore_summary,
+             foreground,
++            descendant_ownership,
+         ),
+         TaskResult::SessionTitleFromDisk { agent_id, title } => {
+             if let Some(agent) = app.agents.get_mut(&agent_id)
+@@ -700,6 +702,7 @@
+             session_id,
+             generation,
+             result,
++            descendant_ownership,
+         } => {
+             let Some(agent) = app.agents.get_mut(&agent_id) else {
+                 return vec![];
+@@ -720,7 +723,7 @@
+                 agent.show_toast(&format!("Session resync failed: {error}. Reload to retry."));
+                 return vec![];
+             }
+-            crate::app::subagent::restore_descendant_state(app, agent_id);
++            crate::app::subagent::restore_descendant_state(app, agent_id, descendant_ownership);
+             app.agents
+                 .get_mut(&agent_id)
+                 .map_or_else(Vec::new, |agent| maybe_drain_queue(agent).effects)
+--- before/crates/codegen/pager/src/app/root/effects/mod.rs
++++ after/crates/codegen/pager/src/app/root/effects/mod.rs
+@@ -934,6 +934,9 @@
+                             let foreground = parse_session_load_foreground(resp.meta.as_ref());
+                             TaskResult::SessionLoaded {
+                                 agent_id,
++                                descendant_ownership: crate::acp::meta::session_load_descendant_ownership(
++                                    resp.meta.as_ref(), &loaded_session_id,
++                                ),
+                                 session_id: loaded_session_id,
+                                 models: shell::agent::models::SessionModelState::from_config_options(
+                                     resp.config_options,
+@@ -978,10 +981,19 @@
+                 .map_err(|_| "Session resync timed out".to_owned())
+                 .and_then(|result| {
+                     result
+-                        .map(|response| parse_session_load_foreground(response.meta.as_ref()))
++                        .map(|response| (
++                            parse_session_load_foreground(response.meta.as_ref()),
++                            crate::acp::meta::session_load_descendant_ownership(
++                                response.meta.as_ref(), &session_id,
++                            ),
++                        ))
+                         .map_err(|error| sanitize_user_error(&error.to_string()))
+                 });
+-                TaskResult::SessionResynced { agent_id, session_id, generation, result }
++                let (result, descendant_ownership) = match result {
++                    Ok((foreground, ownership)) => (Ok(foreground), ownership),
++                    Err(error) => (Err(error), None),
++                };
++                TaskResult::SessionResynced { agent_id, session_id, generation, result, descendant_ownership }
+             });
+         }
+         Effect::FetchSessionList { cwd, query, seq, .. } => {
+--- before/crates/codegen/pager/src/app/root/event_loop.rs
++++ after/crates/codegen/pager/src/app/root/event_loop.rs
+@@ -112,6 +112,7 @@
+     agent_name: Option<String>,
+     /// Structured regular foreground owner from the reload response.
+     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
++    descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+ }
+ 
+ /// Fields of the reconnect `session/load`, derived from the agent being
+@@ -2167,7 +2168,7 @@
+                                 for (agent_id, plan) in load_plans {
+                                     let mcp_servers =
+                                         shell::util::config::load_mcp_servers(&plan.cwd);
+-                                    let load_req = acp::LoadSessionRequest::new(plan.session_id, plan.cwd).mcp_servers(mcp_servers).meta(plan.meta.as_object().cloned());
++                                    let load_req = acp::LoadSessionRequest::new(plan.session_id.clone(), plan.cwd).mcp_servers(mcp_servers).meta(plan.meta.as_object().cloned());
+                                     match acp_send(load_req, &acp_tx).await {
+                                         Ok(resp) => {
+                                             let agent_name = resp
+@@ -2183,6 +2184,9 @@
+                                                     resp.config_options,
+                                                 ),
+                                                 agent_name,
++                                                descendant_ownership: crate::acp::meta::session_load_descendant_ownership(
++                                                    resp.meta.as_ref(), &plan.session_id,
++                                                ),
+                                                 foreground:
+                                                     effects::parse_session_load_foreground(
+                                                         resp.meta.as_ref(),
+@@ -2199,6 +2203,7 @@
+                                                 models: None,
+                                                 agent_name: None,
+                                                 foreground: None,
++                                                descendant_ownership: None,
+                                             });
+                                         }
+                                     }
+@@ -2348,7 +2353,9 @@
+                         // Root replay only contains direct-child birth facts;
+                         // restore every descendant's later model/effort/Agent
+                         // controls before reconciling local pending controls.
+-                        crate::app::subagent::restore_descendant_state(&mut app, *id);
++                        crate::app::subagent::restore_descendant_state(
++                            &mut app, *id, load.and_then(|load| load.descendant_ownership),
++                        );
+                         if let Some(agent) = app.agents.get_mut(id) {
+                             reconnect_effects.extend(
+                                 dispatch::reconcile_controls_after_reconnect(
+@@ -3883,6 +3890,7 @@
+                 models: None,
+                 agent_name: None,
+                 foreground: None,
++                descendant_ownership: None,
+             },
+         );
+         loads.insert(
+@@ -3893,6 +3901,7 @@
+                 models: None,
+                 agent_name: None,
+                 foreground: None,
++                descendant_ownership: None,
+             },
+         );
+         let pending = vec![active, background];
+@@ -3925,6 +3934,7 @@
+                 models: None,
+                 agent_name: None,
+                 foreground: None,
++                descendant_ownership: None,
+             },
+         );
+         loads.insert(
+@@ -3935,6 +3945,7 @@
+                 models: None,
+                 agent_name: None,
+                 foreground: None,
++                descendant_ownership: None,
+             },
+         );
+         let pending = vec![active, background];
+@@ -3963,6 +3974,7 @@
+                 models: None,
+                 agent_name: None,
+                 foreground: None,
++                descendant_ownership: None,
+             },
+         );
+         let pending = vec![active];
+@@ -4002,6 +4014,7 @@
+                 models: None,
+                 agent_name: None,
+                 foreground: None,
++                descendant_ownership: None,
+             },
+         );
+         let pending = vec![background];
+--- before/crates/codegen/pager/src/app/subagent.rs
++++ after/crates/codegen/pager/src/app/subagent.rs
+@@ -5,7 +5,7 @@
+ //! permission view (provenance labels).
+ #[cfg(test)]
+ use shell::session::storage::stream_replay_updates_at;
+-use shell::session::storage::{ReplayEmission, stream_session_history_at};
++use shell::session::storage::{ChildReplaySpawn, DescendantOwnership, ReplayEmission, stream_session_history_at};
+ use std::sync::Arc;
+ use std::time::Instant;
+ /// Enriched subagent tracking info.
+@@ -113,35 +113,6 @@
+         }
+     }
+ }
+-/// Load the immediate durable child spawn facts owned by `parent_session_id`.
+-/// Ownership and enrichment both come from the same identity-bound parent
+-/// Timeline, so resume parses that Timeline once per parent instead of once
+-/// per replayed child.
+-fn durable_child_spawns(
+-    grow_home: &std::path::Path,
+-    parent_session_id: &str,
+-) -> std::collections::BTreeMap<String, chat_state::SubagentSpawnEvent> {
+-    let Ok(Some(timeline)) =
+-        shell::session::storage::load_timeline_by_id_at(parent_session_id, grow_home)
+-    else {
+-        return std::collections::BTreeMap::new();
+-    };
+-    let mut children = std::collections::BTreeMap::new();
+-    for event in timeline.events() {
+-        let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
+-            &event.kind
+-        else {
+-            continue;
+-        };
+-        children.insert(spawn.child_session_id.clone(), spawn.clone());
+-    }
+-    tracing::trace!(
+-        parent_session_id,
+-        children = children.len(),
+-        "projected durable child ownership from Timeline"
+-    );
+-    children
+-}
+ /// Grow home for the replay path. In production this is just `grow_home()`; the
+ /// whole test override below is `#[cfg(test)]`, so no thread-local or dead
+ /// always-false branch ships in release.
+@@ -212,26 +183,29 @@
+ /// temporary projection without replaying the child transcript.
+ fn enrich_projected_subagent(
+     root: &mut crate::app::agent_view::AgentView,
+-    spawn: &chat_state::SubagentSpawnEvent,
++    child_session_id: &str,
++    spawn: &ChildReplaySpawn,
+ ) {
+     let Some(info) = root
+         .session
+         .subagent_sessions
+-        .get_mut(&spawn.child_session_id)
++        .get_mut(child_session_id)
+     else {
+         return;
+     };
+     if info.subagent_id.as_ref() != spawn.subagent_id {
+         tracing::debug!(
+-            child_session_id = spawn.child_session_id,
++            child_session_id,
+             replayed_subagent_id = %info.subagent_id,
+             durable_subagent_id = spawn.subagent_id,
+             "ignored mismatched durable subagent spawn enrichment"
+         );
+         return;
+     }
+-    enrich_from_spawn(info, spawn);
+-    if let Some(child) = root.subagent_views.get_mut(&spawn.child_session_id) {
++    info.prompt = Some(Arc::from(spawn.prompt.as_str()));
++    info.child_cwd = Some(Arc::from(spawn.child_cwd.as_str()));
++    info.worktree_path = spawn.worktree_path.as_deref().map(Arc::from);
++    if let Some(child) = root.subagent_views.get_mut(child_session_id) {
+         child.session.cwd = std::path::PathBuf::from(&spawn.child_cwd);
+         child.session.set_worktree(spawn.worktree_path.is_some());
+     }
+@@ -314,7 +288,9 @@
+ pub(crate) fn restore_descendant_state(
+     app: &mut crate::app::root::AppView,
+     root_agent_id: crate::app::session::AgentId,
++    ownership: Option<DescendantOwnership>,
+ ) {
++    let _timer = shell::instrumentation_timer!("pager.replay.descendants");
+     use shell::extensions::notification::SessionUpdate;
+ 
+     let Some(root) = app.agents.get(&root_agent_id) else {
+@@ -330,14 +306,28 @@
+         .keys()
+         .cloned()
+         .collect::<std::collections::HashSet<_>>();
+-    let root_spawns = durable_child_spawns(&grow_home, &root_session_id);
++    // A verified empty frontier is useful; absence/foreign metadata is not
++    // evidence of an empty tree. Keep the independent validated fallback.
++    let root_spawns = ownership
++        .filter(|ownership| ownership.belongs_to(&root_session_id))
++        .or_else(|| match shell::session::storage::load_descendant_ownership_at(
++            &root_session_id, &grow_home,
++        ) {
++            Ok(ownership) => ownership,
++            Err(error) => {
++                tracing::debug!(session_id = root_session_id, ?error, "failed to read root ownership");
++                None
++            }
++        })
++        .map(DescendantOwnership::into_spawns)
++        .unwrap_or_default();
+     let mut queue = std::collections::VecDeque::new();
+     let mut visited = std::collections::HashSet::new();
+     let previous_loading_replay = root.session.loading_replay;
+     if let Some(root) = app.agents.get_mut(&root_agent_id) {
+         for (child_session_id, spawn) in &root_spawns {
+             if replayed_direct_children.contains(child_session_id) {
+-                enrich_projected_subagent(root, spawn);
++                enrich_projected_subagent(root, child_session_id, spawn);
+                 queue.push_back(child_session_id.clone());
+             }
+         }
+@@ -353,31 +343,21 @@
+         if !visited.insert(parent_session_id.clone()) {
+             continue;
+         }
+-        let mut durable_children = durable_child_spawns(&grow_home, &parent_session_id);
+-        let mut lifecycle = Vec::new();
+-        if let Err(error) = shell::session::storage::stream_replay_grow_notifications_at(
+-            &parent_session_id,
+-            &grow_home,
+-            |notification| {
+-                if matches!(
+-                    &notification.update,
+-                    SessionUpdate::SubagentSpawned { .. }
+-                        | SessionUpdate::SubagentProgress { .. }
+-                        | SessionUpdate::SubagentFinished { .. }
+-                        | SessionUpdate::ModelChanged { .. }
+-                        | SessionUpdate::AgentChanged { .. }
+-                ) {
+-                    lifecycle.push(notification);
+-                }
+-            },
++        let (ownership, lifecycle) = match shell::session::storage::load_descendant_replay_at(
++            &parent_session_id, &grow_home,
+         ) {
+-            tracing::debug!(
+-                session_id = parent_session_id,
+-                ?error,
+-                "failed to replay descendant lifecycle"
+-            );
+-            continue;
+-        }
++            Ok(Some(snapshot)) => snapshot,
++            Ok(None) => continue,
++            Err(error) => {
++                tracing::debug!(
++                    session_id = parent_session_id,
++                    ?error,
++                    "failed to replay descendant lifecycle"
++                );
++                continue;
++            }
++        };
++        let mut durable_children = ownership.into_spawns();
+ 
+         for mut notification in lifecycle {
+             let discovered_child = match &notification.update {
+@@ -407,7 +387,7 @@
+                 && let Some(spawn) = durable_children.remove(&child)
+             {
+                 if let Some(root) = app.agents.get_mut(&root_agent_id) {
+-                    enrich_projected_subagent(root, &spawn);
++                    enrich_projected_subagent(root, &child, &spawn);
+                 }
+                 queue.push_back(child);
+             }
+--- before/crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs
++++ after/crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs
+@@ -1092,6 +1092,12 @@
+                 self.cfg.borrow().session.load_envrc.unwrap_or(true)
+             }
+         };
++        // Bound to the exact validated snapshot used below, before Timeline
++        // moves into actor bootstrap or child reconciliation appends new facts.
++        let descendant_ownership =
++            crate::session::storage::DescendantOwnership::from_validated(
++                session_id.0.as_ref(), &timeline, &history,
++            );
+         let (delta_completions, subagent_projections) = if no_replay {
+             tracing::info!(
+                 session_id = %session_id.0,
+@@ -1327,6 +1333,12 @@
+         // retain their live selection; reconnect is not a model-control request.
+         drop(catalog_transaction);
+         let mut response_meta_map = serde_json::Map::new();
++        if let Some(ownership_meta) = descendant_ownership.into_load_meta() {
++            response_meta_map.insert(
++                crate::session::storage::DESCENDANT_OWNERSHIP_META_KEY.to_owned(),
++                ownership_meta,
++            );
++        }
+         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
+         if let Some(persist) = persist_data {
+             response_meta_map.insert("grow/persist".to_string(), persist);
+--- before/crates/codegen/shell/src/session/storage/mod.rs
++++ after/crates/codegen/shell/src/session/storage/mod.rs
+@@ -34,6 +34,12 @@
+ };
+ #[cfg(any(test, feature = "test-support"))]
+ pub use legacy_replay_oracle::{PreparedReplay, prepare_replay_lines};
++
++mod descendant_recovery;
++pub use descendant_recovery::{
++    ChildReplaySpawn, DescendantOwnership, DESCENDANT_OWNERSHIP_META_KEY,
++    load_descendant_ownership_at, load_descendant_replay_at,
++};
+ 
+ pub mod jsonl;
+ pub mod search;
+@@ -1756,11 +1762,18 @@
+     session_id: &str,
+     grow_home: &Path,
+ ) -> io::Result<Option<chat_state::Timeline>> {
++    Ok(load_validated_session_at(session_id, grow_home)?.map(|snapshot| snapshot.timeline))
++}
++
++fn load_validated_session_at(
++    session_id: &str,
++    grow_home: &Path,
++) -> io::Result<Option<jsonl::ValidatedTimeline>> {
+     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
+     let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
+         return Ok(None);
+     };
+-    Ok(Some(opened.validated_timeline(session_id)?.timeline))
++    Ok(Some(opened.validated_timeline(session_id)?))
+ }
+ 
+ pub fn load_timeline_by_id(session_id: &str) -> io::Result<Option<chat_state::Timeline>> {
+--- /dev/null
++++ after/crates/codegen/shell/src/session/storage/descendant_recovery.rs
+@@ -0,0 +1,176 @@
++//! Ephemeral ownership projected from one fully validated history frontier.
++//! This is display recovery data, never child execution/resume authority.
++
++use std::collections::BTreeMap;
++use std::io;
++use std::path::Path;
++
++use serde::{Deserialize, Serialize};
++
++use super::SessionUpdate;
++use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
++use crate::session::history::HistorySnapshot;
++
++pub const DESCENDANT_OWNERSHIP_META_KEY: &str = "grow/descendantOwnership";
++
++/// Only fields consumed by the Pager's spawn enrichment. In particular this
++/// does not duplicate execution recipes, model bodies or unrelated spawn data.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct ChildReplaySpawn {
++    pub subagent_id: String,
++    pub prompt: String,
++    pub child_cwd: String,
++    pub worktree_path: Option<String>,
++}
++
++/// Owned by one load response (or one local read), not cached across reloads.
++/// The cut/hash identify its validated source, not a promise that disk cannot
++/// change afterward. The ACP server is the authority for response metadata.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct DescendantOwnership {
++    version: u8,
++    session_id: String,
++    cut: u64,
++    hash: String,
++    spawns: BTreeMap<String, ChildReplaySpawn>,
++}
++
++impl DescendantOwnership {
++    pub(crate) fn from_validated(
++        session_id: &str,
++        timeline: &chat_state::Timeline,
++        history: &HistorySnapshot,
++    ) -> Self {
++        let spawns = timeline
++            .events()
++            .iter()
++            .filter_map(|event| {
++                let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
++                    spawn,
++                )) = &event.kind
++                else {
++                    return None;
++                };
++                Some((
++                    spawn.child_session_id.clone(),
++                    ChildReplaySpawn {
++                        subagent_id: spawn.subagent_id.clone(),
++                        prompt: spawn.prompt.clone(),
++                        child_cwd: spawn.child_cwd.clone(),
++                        worktree_path: spawn.worktree_path.clone(),
++                    },
++                ))
++            })
++            .collect();
++        Self {
++            version: 1,
++            session_id: session_id.to_owned(),
++            cut: history.sources.len() as u64,
++            hash: history.prefix_hash.clone(),
++            spawns,
++        }
++    }
++
++    /// Bound this optional optimization before adding it to a single ACP
++    /// response (the transport has a 64 MiB line limit). Six bytes per source
++    /// byte covers JSON escaping; fixed per-row/envelope costs are conservative.
++    /// Larger roots use the independently validated local fallback.
++    pub(crate) fn into_load_meta(self) -> Option<serde_json::Value> {
++        const MAX_META_BYTES: usize = 1024 * 1024;
++        let bound = self.spawns.iter().fold(
++            512usize.saturating_add(self.session_id.len().saturating_mul(6)),
++            |total, (child, spawn)| {
++                [
++                    child.as_str(),
++                    spawn.subagent_id.as_str(),
++                    spawn.prompt.as_str(),
++                    spawn.child_cwd.as_str(),
++                    spawn.worktree_path.as_deref().unwrap_or_default(),
++                ]
++                .into_iter()
++                .fold(total.saturating_add(128), |bound, text| {
++                    bound.saturating_add(text.len().saturating_mul(6))
++                })
++            },
++        );
++        (bound <= MAX_META_BYTES)
++            .then(|| serde_json::to_value(self).expect("ownership snapshot serializes"))
++    }
++
++    /// Check the enclosing response identity and wire shape before using a
++    /// present payload as authority. An absent or rejected payload falls back
++    /// to an independent validated local read, never an assumed empty map.
++    pub fn belongs_to(&self, session_id: &str) -> bool {
++        self.version == 1
++            && !session_id.is_empty()
++            && self.session_id == session_id
++            && self.hash.len() == 64
++            && self.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
++            && (self.cut != 0 || self.spawns.is_empty())
++            && self
++                .spawns
++                .iter()
++                .all(|(child, spawn)| !child.is_empty() && !spawn.subagent_id.is_empty())
++    }
++
++    pub fn into_spawns(self) -> BTreeMap<String, ChildReplaySpawn> {
++        self.spawns
++    }
++}
++
++/// Independently validate the fallback root instead of trusting UI rows.
++/// Most ordinary loads supply the already validated ownership in their result.
++pub fn load_descendant_ownership_at(
++    session_id: &str,
++    grow_home: &Path,
++) -> io::Result<Option<DescendantOwnership>> {
++    Ok(
++        super::load_validated_session_at(session_id, grow_home)?.map(|snapshot| {
++            DescendantOwnership::from_validated(session_id, &snapshot.timeline, &snapshot.history)
++        }),
++    )
++}
++
++/// One identity-pinned, fully validated read supplies both ownership and the
++/// ordered child lifecycle/control projection. The full projector and its
++/// rewind/cursor rules are shared with all existing history consumers.
++pub fn load_descendant_replay_at(
++    session_id: &str,
++    grow_home: &Path,
++) -> io::Result<Option<(DescendantOwnership, Vec<SessionNotification>)>> {
++    let Some(snapshot) = super::load_validated_session_at(session_id, grow_home)? else {
++        return Ok(None);
++    };
++    let ownership =
++        DescendantOwnership::from_validated(session_id, &snapshot.timeline, &snapshot.history);
++    let prepared = snapshot.history.into_prepare(
++        &acp_transport::protocol::SessionId::new(session_id.to_owned()),
++        &snapshot.timeline,
++        None,
++    )?;
++    let lifecycle = prepared
++        .updates
++        .into_iter()
++        .filter_map(|update| match update {
++            SessionUpdate::Grow(notification)
++                if matches!(
++                    &notification.update,
++                    GrowUpdate::SubagentSpawned { .. }
++                        | GrowUpdate::SubagentProgress { .. }
++                        | GrowUpdate::SubagentFinished { .. }
++                        | GrowUpdate::ModelChanged { .. }
++                        | GrowUpdate::AgentChanged { .. }
++                ) =>
++            {
++                Some(*notification)
++            }
++            _ => None,
++        })
++        .collect();
++    Ok(Some((ownership, lifecycle)))
++}
++
++#[cfg(test)]
++mod tests;

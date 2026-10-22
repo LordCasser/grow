@@ -1,0 +1,4 @@
+   Compiling shell v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+   Compiling pager v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+   Compiling pager-pty-harness v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-pty-harness)
+    Finished `release` profile [optimized] target(s) in 12m 02s

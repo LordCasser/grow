@@ -1,0 +1,21 @@
+{
+  "source_checks": {
+    "passed": 7,
+    "failed": 0,
+    "ignored": 1,
+    "log": "baseline-source-checks.log"
+  },
+  "image_extract_checks": {
+    "passed": 9,
+    "failed": 0,
+    "ignored": 0,
+    "log": "baseline-image-checks.log"
+  },
+  "diagnostic_smoke": {
+    "passed": true,
+    "log": "diagnostic-smoke.log",
+    "excluded_from_performance": "active compilation",
+    "first_history_pipeline": "diagnostic-smoke/first-history.json",
+    "parser_repair": "first delivery success flag is flat JSON bool; initial debug-field assumption rejected and was corrected"
+  }
+}

@@ -16,7 +16,7 @@ const SUMMARY_COLUMN: &str = "summary";
 const TIMELINE_COLUMN: &str = "timeline";
 const SIDEBANDS_COLUMN: &str = "sidebands";
 const BLOBS_COLUMN: &str = "blobs";
-const UPDATES_COLUMN: &str = "updates";
+
 const MAX_SESSION_STATE_BYTES: u64 = 128 * 1024 * 1024;
 
 type ImmutableBlobs = std::collections::BTreeMap<String, String>;
@@ -60,7 +60,7 @@ fn read_entity_state(
     let timeline = validated.timeline;
     let sidebands = validated.sidebands;
     let blobs = read_entity_blobs(opened.directory(), &timeline)?;
-    let updates = opened.update_envelopes()?;
+    let records = opened.journal_records(&validated.history)?;
     Ok(std::collections::HashMap::from([
         (
             SUMMARY_COLUMN.to_string(),
@@ -69,7 +69,7 @@ fn read_entity_state(
         ),
         (
             TIMELINE_COLUMN.to_string(),
-            serde_json::to_value(timeline.events())
+            serde_json::to_value(records)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
         ),
         (
@@ -80,11 +80,6 @@ fn read_entity_state(
         (
             BLOBS_COLUMN.to_string(),
             serde_json::to_value(blobs)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-        ),
-        (
-            UPDATES_COLUMN.to_string(),
-            serde_json::to_value(updates)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
         ),
     ]))
@@ -150,8 +145,10 @@ pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
     *summary_value = serde_json::to_value(summary)
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
     let timeline = validate_timeline_column(&request.state)?;
+    crate::session::history::HistorySnapshot::validate_owner(&timeline, &request.session_id)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
     let sidebands = validate_sidebands_column(&request.state)?;
-    validate_updates_column(&request.state)?;
+
     validate_blobs_column(&request.state, &timeline)?;
     validate_state_size(&request.state)
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
@@ -219,7 +216,7 @@ fn validate_import_state_columns(
         .filter(|column| {
             !matches!(
                 column.as_str(),
-                SUMMARY_COLUMN | TIMELINE_COLUMN | SIDEBANDS_COLUMN | BLOBS_COLUMN | UPDATES_COLUMN
+                SUMMARY_COLUMN | TIMELINE_COLUMN | SIDEBANDS_COLUMN | BLOBS_COLUMN
             )
         })
         .cloned()
@@ -233,39 +230,21 @@ fn validate_import_state_columns(
     Ok(())
 }
 
-fn validate_updates_column(
-    state: &std::collections::HashMap<String, Value>,
-) -> Result<&Vec<Value>, acp::Error> {
-    let updates = state
-        .get(UPDATES_COLUMN)
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            acp::Error::invalid_params().data("session/import requires an updates array")
-        })?;
-    for (index, update) in updates.iter().enumerate() {
-        validate_jsonl_entry_size(update, &format!("update {index}"))?;
-        crate::session::storage::SessionUpdateEnvelope::from_value(update.clone()).map_err(
-            |error| {
-                acp::Error::invalid_params()
-                    .data(format!("session/import update {index} is invalid: {error}"))
-            },
-        )?;
-    }
-    Ok(updates)
-}
-
 fn validate_timeline_column(
     state: &std::collections::HashMap<String, Value>,
 ) -> Result<chat_state::Timeline, acp::Error> {
     let value = state.get(TIMELINE_COLUMN).ok_or_else(|| {
         acp::Error::invalid_params().data("session/import requires a timeline array")
     })?;
-    let events = serde_json::from_value::<Vec<chat_state::TimelineEvent>>(value.clone())
+    let records = serde_json::from_value::<Vec<String>>(value.clone())
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
-    for (index, event) in events.iter().enumerate() {
-        validate_jsonl_entry_size(event, &format!("Timeline event {index}"))?;
-    }
-    let timeline = chat_state::Timeline::from_events(events)
+    let journal = st::JsonlStorageAdapter::decode_journal_lines(&records)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    let timeline = chat_state::Timeline::from_events(journal.events)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    journal
+        .history
+        .validate(&timeline)
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
     let runtime = timeline.runtime_lifecycle();
     if runtime.phase != chat_state::session_runtime::RuntimePhase::Running
@@ -636,7 +615,21 @@ fn write_import_staging(
 
     staging.write_atomic(
         std::ffi::OsStr::new(st::TIMELINE_FILE),
-        &st::to_jsonl_bytes(timeline)?,
+        &timeline
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(|line| format!("{line}\n"))
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Timeline record must be an exact string",
+                        )
+                    })
+            })
+            .collect::<std::io::Result<String>>()?
+            .into_bytes(),
         false,
         true,
     )?;
@@ -689,24 +682,6 @@ fn write_import_staging(
             &decode_blob(&key, &content)?,
         )?;
     }
-    let updates = state
-        .get(UPDATES_COLUMN)
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "session/import requires an updates array",
-            )
-        })?;
-    if !updates.is_empty() {
-        staging.write_atomic(
-            std::ffi::OsStr::new(st::UPDATES_FILE),
-            &st::to_jsonl_bytes(updates)?,
-            false,
-            true,
-        )?;
-    }
-
     let summary = state.get(SUMMARY_COLUMN).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -740,6 +715,47 @@ mod tests {
     use super::*;
     use crate::session::storage::StorageAdapter as _;
     use serde_json::json;
+
+    fn timeline_column(events: &[chat_state::TimelineEvent], wire_updates: &[Value]) -> Value {
+        let facts = wire_updates
+            .iter()
+            .map(|wire_update| {
+                let update = serde_json::from_value::<crate::session::storage::SessionUpdate>(
+                    wire_update.clone(),
+                )
+                .expect("test wire envelope must decode as a session update");
+                crate::session::history::HistoryFact::from_update(&update)
+                    .expect("test update must convert to a history fact")
+                    .expect("test update must produce a history fact")
+            })
+            .collect::<Vec<_>>();
+        let bytes = st::JsonlStorageAdapter::encode_journal(events, &facts)
+            .expect("test Timeline facts must encode");
+        let lines = std::str::from_utf8(&bytes)
+            .expect("encoded Timeline journal is UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        json!(lines)
+    }
+
+    fn test_history_update(
+        session_id: &str,
+        reason: &str,
+    ) -> crate::session::storage::SessionUpdate {
+        crate::session::storage::SessionUpdate::Grow(Box::new(
+            crate::extensions::notification::SessionNotification {
+                session_id: acp::SessionId::new(session_id),
+                update: crate::extensions::notification::SessionUpdate::AutoCompactStarted {
+                    tokens_used: 10,
+                    context_window: 100,
+                    percentage: 10,
+                    reason: reason.to_owned(),
+                },
+                meta: None,
+            },
+        ))
+    }
 
     fn runtime_test_timeline(resumed: bool, open_turn: bool) -> chat_state::Timeline {
         let mut timeline = chat_state::Timeline::default();
@@ -852,14 +868,14 @@ mod tests {
         let suspended = runtime_test_timeline(false, false);
         let suspended_state = std::collections::HashMap::from([(
             TIMELINE_COLUMN.to_string(),
-            serde_json::to_value(suspended.events()).unwrap(),
+            timeline_column(suspended.events(), &[]),
         )]);
         assert!(validate_timeline_column(&suspended_state).is_err());
 
         let resumed = runtime_test_timeline(true, true);
         let resumed_state = std::collections::HashMap::from([(
             TIMELINE_COLUMN.to_string(),
-            serde_json::to_value(resumed.events()).unwrap(),
+            timeline_column(resumed.events(), &[]),
         )]);
         let mut imported = validate_timeline_column(&resumed_state)
             .expect("consumed checkpoint remains valid read-only audit history");
@@ -956,7 +972,7 @@ mod tests {
     fn validate_import_timeline(timeline: &chat_state::Timeline) -> Result<(), acp::Error> {
         let state = std::collections::HashMap::from([(
             TIMELINE_COLUMN.to_string(),
-            serde_json::to_value(timeline.events()).unwrap(),
+            timeline_column(timeline.events(), &[]),
         )]);
         validate_timeline_column(&state).map(|_| ())
     }
@@ -1306,7 +1322,6 @@ mod tests {
             (TIMELINE_COLUMN.to_string(), json!([])),
             (SIDEBANDS_COLUMN.to_string(), json!({})),
             (BLOBS_COLUMN.to_string(), json!({})),
-            (UPDATES_COLUMN.to_string(), json!([])),
         ]);
         assert!(validate_import_state_columns(&valid).is_ok());
 
@@ -1318,6 +1333,14 @@ mod tests {
                 .data
                 .is_some_and(|data| data.to_string().contains("control"))
         );
+        let with_old_updates = std::collections::HashMap::from([
+            (SUMMARY_COLUMN.to_string(), json!({})),
+            (TIMELINE_COLUMN.to_string(), json!([])),
+            (SIDEBANDS_COLUMN.to_string(), json!({})),
+            (BLOBS_COLUMN.to_string(), json!({})),
+            ("updates".to_string(), json!([])),
+        ]);
+        assert!(validate_import_state_columns(&with_old_updates).is_err());
     }
 
     #[test]
@@ -1327,7 +1350,10 @@ mod tests {
         let sideband_id = sideband_events[0].sideband_id.clone();
         let state = std::collections::HashMap::from([
             (SUMMARY_COLUMN.to_string(), json!({})),
-            (TIMELINE_COLUMN.to_string(), json!(parent_events)),
+            (
+                TIMELINE_COLUMN.to_string(),
+                timeline_column(&parent_events, &[]),
+            ),
             (
                 SIDEBANDS_COLUMN.to_string(),
                 serde_json::to_value(std::collections::BTreeMap::from([(
@@ -1343,7 +1369,10 @@ mod tests {
 
         let missing = std::collections::HashMap::from([
             (SUMMARY_COLUMN.to_string(), json!({})),
-            (TIMELINE_COLUMN.to_string(), json!(parent_events)),
+            (
+                TIMELINE_COLUMN.to_string(),
+                timeline_column(&parent_events, &[]),
+            ),
         ]);
         assert!(validate_sidebands_column(&missing).is_err());
 
@@ -1403,25 +1432,42 @@ mod tests {
     }
 
     #[test]
-    fn write_import_writes_columns_and_updates() {
+    fn write_import_writes_unified_timeline_and_derived_history() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path().join("target-session");
+        let relative_parent =
+            Path::new("sessions").join(crate::util::grow_home::encode_cwd_dirname("/work"));
         let parent = st::ContainedDirectory::open(
             tmp.path(),
-            Path::new(""),
+            &relative_parent,
             "session import test parent",
-            false,
+            true,
         )
         .unwrap();
 
         let mut state = std::collections::HashMap::new();
+        let (parent_id, parent_events, sideband_events) = linked_ledgers();
+        let info = crate::session::info::Info {
+            id: acp::SessionId::new(parent_id.clone()),
+            cwd: "/work".into(),
+        };
+        let summary = Summary::new(&info, crate::session::persistence::default_model_id()).unwrap();
         state.insert(
-            "summary".to_string(),
-            json!({ "info": { "id": "s1", "cwd": "/work" } }),
+            SUMMARY_COLUMN.to_string(),
+            serde_json::to_value(summary).unwrap(),
         );
-        let (_, parent_events, sideband_events) = linked_ledgers();
         let sideband_id = sideband_events[0].sideband_id.clone();
-        state.insert("timeline".to_string(), json!(parent_events));
+        let wire_updates = ["first", "second"]
+            .into_iter()
+            .map(|reason| test_history_update(&parent_id, reason))
+            .map(|update| {
+                let envelope = st::SessionUpdateEnvelope::from_update(&update).unwrap();
+                serde_json::to_value(envelope).unwrap()
+            })
+            .collect::<Vec<_>>();
+        state.insert(
+            TIMELINE_COLUMN.to_string(),
+            timeline_column(&parent_events, &wire_updates),
+        );
         state.insert(
             "sidebands".to_string(),
             serde_json::to_value(std::collections::BTreeMap::from([(
@@ -1431,13 +1477,8 @@ mod tests {
             .unwrap(),
         );
         state.insert("blobs".to_string(), json!({}));
-        let updates = vec![
-            json!({ "method": "session/update", "params": { "a": 1 } }),
-            json!({ "method": "session/update", "params": { "b": 2 } }),
-        ];
-        state.insert(UPDATES_COLUMN.to_string(), json!(updates));
-
-        write_import(&parent, std::ffi::OsStr::new("target-session"), &state).unwrap();
+        let dir = tmp.path().join(&relative_parent).join(&parent_id);
+        write_import(&parent, std::ffi::OsStr::new(&parent_id), &state).unwrap();
 
         assert!(dir.join("summary.json").exists(), "summary.json written");
         assert!(
@@ -1448,23 +1489,30 @@ mod tests {
             "sideband ledger written"
         );
         let published_summary = std::fs::read_to_string(dir.join(st::SUMMARY_FILE)).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(dir.join("updates.jsonl"))
+        assert!(!dir.join("updates.jsonl").exists());
+        let imported = st::JsonlStorageAdapter::with_root(tmp.path().to_path_buf())
+            .open_session_by_id(&parent_id)
+            .unwrap()
+            .expect("imported session is readable");
+        let validated = imported.validated_timeline(&parent_id).unwrap();
+        let prepared = validated
+            .history
+            .prepare(&imported.summary().info.id, &validated.timeline, None)
+            .unwrap();
+        assert_eq!(prepared.updates.len(), 2);
+        assert!(
+            std::fs::read_dir(tmp.path().join(&relative_parent))
                 .unwrap()
-                .lines()
-                .count(),
-            2
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with("import-staging")
+                })
         );
-        assert!(std::fs::read_dir(tmp.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .ends_with("import-staging")
-        }));
 
-        let error =
-            write_import(&parent, std::ffi::OsStr::new("target-session"), &state).unwrap_err();
+        let error = write_import(&parent, std::ffi::OsStr::new(&parent_id), &state).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(
             std::fs::read_to_string(dir.join(st::SUMMARY_FILE)).unwrap(),
@@ -1498,7 +1546,6 @@ mod tests {
             (TIMELINE_COLUMN.to_string(), json!([])),
             (SIDEBANDS_COLUMN.to_string(), json!({})),
             (BLOBS_COLUMN.to_string(), json!({})),
-            (UPDATES_COLUMN.to_string(), json!([])),
         ]);
 
         let error = write_import(&parent, std::ffi::OsStr::new("target-session"), &state)

@@ -159,6 +159,7 @@ impl AgentMessageBlock {
 
     /// Finish streaming and do a full re-render for safety.
     pub fn finish(&mut self) {
+        let _timer = diagnostics::instrumentation::timer("pager.message.finish");
         if let Some(pending) = self.pending_image_projection_prefix.take() {
             if let Some(marker) = Self::image_projection_placeholder(&pending) {
                 self.hidden_image_projection_placeholder = Some(marker);
@@ -168,11 +169,20 @@ impl AgentMessageBlock {
         }
         self.filter_image_projection_prefix = false;
         self.content.finish();
-        let text = self.content.text();
-        self.image_refs = crate::prompt_images::extract_image_refs(&text);
+        {
+            let mut timer = diagnostics::instrumentation::timer("pager.message.image_refs");
+            self.image_refs = self.content.with_source(|text| {
+                timer.with_field("source_bytes", text.len() as u64);
+                crate::prompt_images::extract_image_refs(text)
+            });
+            timer.with_field("refs", self.image_refs.len() as u64);
+        }
         // Detection runs once the render is final, after the renderer freezes —
         // never per streaming chunk.
-        self.mermaid = self.content.mermaid_content();
+        {
+            let _timer = diagnostics::instrumentation::timer("pager.message.mermaid");
+            self.mermaid = self.content.mermaid_content();
+        }
     }
 
     /// The detected Mermaid diagrams for this message (empty until finished or

@@ -1,0 +1,11 @@
+{
+  "utc": "2026-10-21T17:01:24.549810+00:00",
+  "reason": "build10 runtime exposed >2x memory regression; stop only owned CLI build before production fix and rebuild validation candidate",
+  "pids": [
+    43978,
+    45387,
+    45559,
+    45626,
+    45644
+  ]
+}

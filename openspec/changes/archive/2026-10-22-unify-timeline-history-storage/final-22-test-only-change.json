@@ -1,0 +1,8 @@
+{
+  "path": "crates/codegen/shell/src/agent/subagent/mod.rs",
+  "before_sha256": "76f4c91dd343fb2c09ce532128d8645938f9802989d827b285bcd0d6b26158b6",
+  "after_sha256": "e3250da273c23bff6cc342daa962388013643f9dfaf1ee2cffcd104b35247f97",
+  "cfg": "test",
+  "function": "finish_from_durable_facts_in_directory",
+  "note": "Two remaining unit helper readers used raw Domain JSON. Replace with the production unified reader; no production compiled code changed. Build21/CLI4 performance binaries remain production-equivalent."
+}

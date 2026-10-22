@@ -1,0 +1,33 @@
+{
+  "started_utc": "2026-10-21T18:05:45.469678+00:00",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--release",
+    "-p",
+    "shell",
+    "-p",
+    "pager",
+    "-p",
+    "pager-pty-harness",
+    "--features",
+    "shell/test-support",
+    "--test",
+    "pty_e2e_persistence",
+    "--test",
+    "pty_e2e_minimal",
+    "--test",
+    "leader_pty_e2e",
+    "--no-run",
+    "--message-format=json"
+  ],
+  "purpose": "Rebuild CLI test fixtures with explicit mock config; production CLI3 unchanged",
+  "source_hashes": {
+    "crates/codegen/pager-pty-harness/src/leader.rs": "ac8b373026ea73cd92c8e453bc15cd7a4e218bcac7949a2aafbc90df9ea75697",
+    "crates/codegen/pager/tests/pty_e2e/minimal/minimal_continue_reprints_transcript.rs": "2d309354c167cdf8180f252d75b2e2c4f7ffd6a68188eb730834d03e8dea1937"
+  },
+  "exit": 0,
+  "completed_utc": "2026-10-21T18:07:45.990793+00:00"
+}

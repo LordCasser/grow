@@ -1,0 +1,83 @@
+[
+  {
+    "filter": "app::acp_handler::tests::",
+    "exit": 101,
+    "log": "final-10-app-acp_handler-tests.log",
+    "passed": 352,
+    "failed": 1,
+    "ignored": 1,
+    "ok": false
+  },
+  {
+    "filter": "acp::tracker::tests::",
+    "exit": 0,
+    "log": "final-10-acp-tracker-tests.log",
+    "passed": 165,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "transcript_projection::",
+    "exit": 0,
+    "log": "final-10-transcript_projection.log",
+    "passed": 20,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "replay_cmd::",
+    "exit": 0,
+    "log": "final-10-replay_cmd.log",
+    "passed": 48,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "export_cmd::tests",
+    "exit": 0,
+    "log": "final-10-export_cmd-tests.log",
+    "passed": 7,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "trajectory_cmd::tests",
+    "exit": 0,
+    "log": "final-10-trajectory_cmd-tests.log",
+    "passed": 2,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "app::subagent::",
+    "exit": 0,
+    "log": "final-10-app-subagent.log",
+    "passed": 46,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "loading_replay_ignores_input_and_preserves_existing_draft_until_session_loaded",
+    "exit": 0,
+    "log": "final-10-loading_replay_ignores_input_and_preserves_existing_draft_until_session_loaded.log",
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "loading_replay_keeps_confirmed_ctrl_d_and_resize_available",
+    "exit": 0,
+    "log": "final-10-loading_replay_keeps_confirmed_ctrl_d_and_resize_available.log",
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  }
+]

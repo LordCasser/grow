@@ -255,7 +255,7 @@ async fn run_nested_tree_recovery(partial_leaf_release: bool, concurrent_resume:
             let facts = [&root_timeline_path, &child_b_timeline_path, &grandchild_timeline_path]
                 .map(|path| {
                     let raw = std::fs::read_to_string(path).unwrap_or_default();
-                    let events = raw.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    let events = parsed_timeline(&raw)
                         .filter(|event| matches!(event["type"].as_str(), Some("runtime" | "turn")))
                         .collect::<Vec<_>>();
                     format!("{}: {}", path.display(), serde_json::to_string(&events).unwrap())
@@ -679,64 +679,54 @@ fn append_partial_leaf_release(
 }
 
 fn read_timeline(path: &Path) -> chat_state::Timeline {
-    let contents = std::fs::read_to_string(path).expect("read Timeline before fault injection");
-    let events = contents
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("valid Timeline event JSON"))
-        .collect();
-    chat_state::Timeline::from_events(events).expect("valid typed Timeline before fault injection")
+    shell::session::testkit::read_timeline_fixture(path)
+        .expect("valid checksummed Timeline before fault injection")
 }
 
 fn append_runtime_events(path: &Path, events: &[chat_state::session_runtime::SessionRuntimeEvent]) {
-    use std::io::Write as _;
-
     let mut timeline = read_timeline(path);
-    let previous_len = timeline.events().len();
+    let mut appended = Vec::with_capacity(events.len());
     for event in events {
-        timeline
-            .record(chat_state::TimelineEventKind::Runtime(event.clone()))
-            .expect("runtime fault-injection event follows the typed state machine");
+        appended.push(
+            timeline
+                .record(chat_state::TimelineEventKind::Runtime(event.clone()))
+                .expect("runtime fault-injection event follows the typed state machine"),
+        );
     }
-    let appended = &timeline.events()[previous_len..];
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .expect("open Timeline for fault injection");
-    for event in appended {
-        writeln!(
-            file,
-            "{}",
-            serde_json::to_string(event).expect("serialize typed event")
-        )
-        .expect("append typed Timeline event");
-    }
+    shell::session::testkit::append_timeline_domain_fixture(path, &appended)
+        .expect("append checksummed Timeline runtime facts");
+}
+
+fn parsed_timeline(contents: &str) -> std::vec::IntoIter<serde_json::Value> {
+    shell::session::testkit::decode_timeline_fixture(contents)
+        .expect("valid checksummed Timeline journal")
+        .events()
+        .iter()
+        .map(|event| serde_json::to_value(event).expect("serialize typed Timeline event"))
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 fn turn_has_ended_with_outcome(contents: &str, turn_id: &str, outcome: &str) -> bool {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .any(|event| {
-            event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
-                && event
-                    .pointer("/event/state")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("ended")
-                && event
-                    .pointer("/event/id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(turn_id)
-                && event
-                    .pointer("/event/outcome")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(outcome)
-        })
+    parsed_timeline(contents).any(|event| {
+        event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
+            && event
+                .pointer("/event/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("ended")
+            && event
+                .pointer("/event/id")
+                .and_then(serde_json::Value::as_str)
+                == Some(turn_id)
+            && event
+                .pointer("/event/outcome")
+                .and_then(serde_json::Value::as_str)
+                == Some(outcome)
+    })
 }
 
 fn spawn_for_tool_call(contents: &str, call_id: &str) -> Option<(String, String)> {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|event| {
             event.get("type").and_then(serde_json::Value::as_str) == Some("subagent")
                 && event
@@ -764,9 +754,7 @@ fn spawn_for_tool_call(contents: &str, call_id: &str) -> Option<(String, String)
 }
 
 fn subagent_id_for_tool_call(contents: &str, call_id: &str) -> Option<String> {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|event| {
             event.get("type").and_then(serde_json::Value::as_str) == Some("subagent")
                 && event
@@ -786,10 +774,7 @@ fn subagent_id_for_tool_call(contents: &str, call_id: &str) -> Option<String> {
 }
 
 fn subagent_completion_receipt_consumed(contents: &str, subagent_id: &str) -> bool {
-    let events = contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .collect::<Vec<_>>();
+    let events = parsed_timeline(contents).collect::<Vec<_>>();
     let receipt_ids = events
         .iter()
         .filter(|event| {
@@ -867,9 +852,7 @@ fn count_subagent_terminal_facts(
         }
     }
 
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|event| is_terminal(event, child_session_id, require_result_ref))
         .count()
 }
@@ -914,9 +897,7 @@ fn session_dir_for_prompt(content: &ContentController, prompt: &str) -> PathBuf 
 
 fn consumed_user_input_count(contents: &str, prompt: &str) -> usize {
     let wrapped_prompt = format!("<user_query>\n{prompt}\n</user_query>");
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|event| {
             event.get("type").and_then(serde_json::Value::as_str) == Some("input")
                 && event
@@ -956,17 +937,13 @@ fn json_field_count(contents: &str, field: &str, expected: &str) -> usize {
             _ => false,
         }
     }
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|value| contains_field(value, field, expected))
         .count()
 }
 
 fn interrupted_command_settlement_count(contents: &str, call_id: &str) -> usize {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|event| {
             event.get("type").and_then(serde_json::Value::as_str) == Some("runtime")
                 && event
@@ -989,9 +966,7 @@ fn interrupted_command_settlement_count(contents: &str, call_id: &str) -> usize 
 }
 
 fn interrupted_tool_result_count(contents: &str, call_id: &str) -> usize {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|event| {
             event.get("type").and_then(serde_json::Value::as_str) == Some("messages")
                 && event
@@ -1026,9 +1001,7 @@ fn interrupted_tool_result_count(contents: &str, call_id: &str) -> usize {
 }
 
 fn tool_result_count(contents: &str, call_id: &str) -> usize {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter(|event| {
             event.get("type").and_then(serde_json::Value::as_str) == Some("messages")
                 && event
@@ -1051,9 +1024,7 @@ fn tool_result_count(contents: &str, call_id: &str) -> usize {
 }
 
 fn started_turn_ids(contents: &str) -> Vec<String> {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    parsed_timeline(contents)
         .filter_map(|event| {
             (event.get("type")?.as_str()? == "turn"
                 && event.pointer("/event/state")?.as_str()? == "started")
@@ -1064,9 +1035,7 @@ fn started_turn_ids(contents: &str) -> Vec<String> {
 }
 
 fn turn_identity_facts(contents: &str) -> String {
-    let facts = contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    let facts = parsed_timeline(contents)
         .filter_map(|event| {
             let kind = event.get("type")?.as_str()?;
             if kind != "turn" {
@@ -1100,20 +1069,17 @@ fn turn_identity_facts(contents: &str) -> String {
 }
 
 fn turn_has_ended(contents: &str, turn_id: &str) -> bool {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .any(|event| {
-            event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
-                && event
-                    .pointer("/event/state")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("ended")
-                && event
-                    .pointer("/event/id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(turn_id)
-        })
+    parsed_timeline(contents).any(|event| {
+        event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
+            && event
+                .pointer("/event/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("ended")
+            && event
+                .pointer("/event/id")
+                .and_then(serde_json::Value::as_str)
+                == Some(turn_id)
+    })
 }
 
 fn process_alive(pid: libc::pid_t) -> bool {

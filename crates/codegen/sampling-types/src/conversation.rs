@@ -4151,7 +4151,6 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// learned that visible reasoning attached to a complete tool exchange is
 /// required.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
-    let skill_ids = skill_load_call_ids(&req.items, req.native_continuation.as_ref());
     let items: Vec<rs::InputItem> = request_segments(req, ApiBackend::Responses)
         .into_iter()
         .flat_map(|segment| match segment {
@@ -4160,7 +4159,7 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
                 replay_portable_reasoning,
             } => defer_agent_messages_after_tool_batch(items)
                 .iter()
-                .flat_map(|item| conversation_item_to_input_items(item, replay_portable_reasoning, &skill_ids))
+                .flat_map(|item| conversation_item_to_input_items(item, replay_portable_reasoning))
                 .collect(),
             RequestSegment::Native(NativeContinuationFragment::Responses(items)) => items,
             RequestSegment::Native(_) => Vec::new(),
@@ -4207,7 +4206,6 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
 fn conversation_item_to_input_items(
     item: &ConversationItem,
     replay_visible_reasoning: bool,
-    skill_ids: &BTreeMap<(String, usize, String), String>,
 ) -> Vec<rs::InputItem> {
     match item {
         ConversationItem::System(s) => {
@@ -4341,25 +4339,15 @@ fn conversation_item_to_input_items(
             if skill.source == SkillLoadSource::Model {
                 return Vec::new();
             }
-            let call_id = skill_load_call_id_for(skill_ids, skill);
-            vec![
-                rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
-                    call_id: call_id.clone(),
-                    name: LOAD_SKILL_TOOL_NAME.to_owned(),
-                    arguments: skill_load_call_arguments(skill),
-                    id: None,
-                    status: None,
-                    namespace: None,
-                })),
-                rs::InputItem::Item(rs::Item::FunctionCallOutput(
-                    rs::FunctionCallOutputItemParam {
-                        call_id,
-                        output: rs::FunctionCallOutput::Text(skill_load_result_content(skill)),
-                        id: None,
-                        status: None,
-                    },
-                )),
-            ]
+            // This is a Runtime result requested by the user, not a model
+            // tool call. Thinking providers require reasoning for model calls;
+            // there is no model reasoning to replay for this host-side fact.
+            vec![rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                r#type: rs::MessageType::Message,
+                role: rs::Role::User,
+                content: rs::EasyInputContent::Text(skill_load_result_content(skill)),
+                phase: None,
+            })]
         }
         ConversationItem::BackendToolCall(b) => {
             vec![rs::InputItem::EasyMessage(rs::EasyInputMessage {
@@ -5795,12 +5783,18 @@ mod tests {
             let wire = portable_wire(request, backend.clone());
             let mut calls = Vec::new();
             wire_skill_load_call_ids(&wire, &mut calls);
-            assert_eq!(
-                calls,
-                [expected_call_id],
-                "backend {backend:?} must project exactly one load_skill call: {wire}"
-            );
-            assert_wire_tool_pairs(&wire, &[expected_call_id]);
+            let runtime_context = backend == ApiBackend::Responses
+                && request.items.iter().any(|item| {
+                    matches!(item,
+                    ConversationItem::SkillLoad(skill) if skill.source == SkillLoadSource::User)
+                });
+            let expected_calls = if runtime_context {
+                vec![]
+            } else {
+                vec![expected_call_id]
+            };
+            assert_eq!(calls, expected_calls, "backend {backend:?}: {wire}");
+            assert_wire_tool_pairs(&wire, &expected_calls);
             assert!(
                 wire.to_string().contains(expected_body),
                 "backend {backend:?} must carry the complete skill body: {wire}"
@@ -5905,7 +5899,116 @@ mod tests {
     }
 
     #[test]
-    fn user_skill_load_projects_one_complete_call_result_pair_on_every_backend() {
+    fn responses_user_skill_is_context_without_synthetic_model_output() {
+        for portable in [false, true] {
+            for learned in [false, true] {
+                let skill = user_skill_load();
+                let ConversationItem::SkillLoad(item) = &skill else {
+                    unreachable!();
+                };
+                let expected = skill_load_result_content(item);
+                let mut request = ConversationRequest::from_items(vec![
+                    ConversationItem::user("/reviewer focus on error handling"),
+                    skill,
+                ]);
+                let original = serde_json::to_value(&request.items).unwrap();
+                request.native_continuation = Some(NativeContinuationProjection {
+                    portable_prefix_len: if portable { request.items.len() } else { 0 },
+                    spans: Vec::new(),
+                    portable_reasoning_backend: learned.then_some(ApiBackend::Responses),
+                });
+                let wire = portable_wire(&request, ApiBackend::Responses);
+                let input = wire["input"].as_array().unwrap();
+                assert_eq!(input.len(), 2);
+                assert_eq!(input[0]["content"], "/reviewer focus on error handling");
+                assert_eq!(input[1]["role"], "user");
+                assert_eq!(input[1]["content"], expected);
+                assert!(input.iter().all(|item| item["type"] == "message"));
+                assert_eq!(serde_json::to_value(&request.items).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn responses_user_skill_waits_for_all_model_tool_results() {
+        let request = ConversationRequest::from_items(vec![
+            ConversationItem::assistant_tool_calls(
+                ["a", "b"]
+                    .into_iter()
+                    .map(|id| ToolCall {
+                        id: id.into(),
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    })
+                    .collect(),
+            ),
+            ConversationItem::tool_result("a", "first"),
+            user_skill_load(),
+            ConversationItem::tool_result("b", "second"),
+        ]);
+        let wire = portable_wire(&request, ApiBackend::Responses);
+        assert_wire_tool_pairs(&wire, &["a", "b"]);
+        let input = wire["input"].as_array().unwrap();
+        assert_eq!(input.len(), 5);
+        assert_eq!(input[3]["call_id"], "b");
+        assert_eq!(input[4]["role"], "user");
+    }
+
+    #[test]
+    fn responses_user_skill_follows_complete_native_tool_batch() {
+        let skill = user_skill_load();
+        let ConversationItem::SkillLoad(item) = &skill else {
+            unreachable!();
+        };
+        let expected = skill_load_result_content(item);
+        let native: Vec<rs::InputItem> = serde_json::from_value(serde_json::json!([
+            {"type":"reasoning", "id":"r_native", "summary":[],
+             "encrypted_content":"opaque"},
+            {"type":"function_call", "call_id":"a", "name":"read_file", "arguments":"{}"},
+            {"type":"function_call", "call_id":"b", "name":"read_file", "arguments":"{}"}
+        ]))
+        .unwrap();
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::user("inspect"),
+            ConversationItem::assistant_tool_calls(vec![
+                ToolCall {
+                    id: "a".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                ToolCall {
+                    id: "b".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+            ]),
+            ConversationItem::tool_result("a", "first"),
+            ConversationItem::tool_result("b", "second"),
+            skill,
+        ]);
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: 1,
+            spans: vec![NativeContinuationSpan {
+                start: 1,
+                end: 2,
+                fragment: NativeContinuationFragment::Responses(native.clone()),
+            }],
+            portable_reasoning_backend: None,
+        });
+        let wire = portable_wire(&request, ApiBackend::Responses);
+        let input = wire["input"].as_array().unwrap();
+        assert_eq!(
+            &input[1..4],
+            serde_json::to_value(native).unwrap().as_array().unwrap()
+        );
+        assert_wire_tool_pairs(&wire, &["a", "b"]);
+        assert_eq!(input.last().unwrap()["role"], "user");
+        assert_eq!(input.last().unwrap()["content"], expected);
+        assert_eq!(input.len(), 7);
+    }
+
+    #[test]
+    fn user_skill_load_projects_complete_context_on_every_backend() {
         let skill = user_skill_load();
         let ConversationItem::SkillLoad(item) = &skill else {
             unreachable!();

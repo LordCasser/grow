@@ -1,6 +1,6 @@
 use super::*;
 use crate::extensions::notification::{UiNotice, UiNoticeCategory, UiNoticeTone};
-use crate::session::storage::{RawReconciliation, ReconciledReplayLine};
+use crate::session::storage::{RawReconciliation, ReconciledReplayLine, StorageAdapter as _};
 use acp_transport::protocol as acp;
 use std::collections::HashMap;
 
@@ -97,6 +97,20 @@ fn user_message_update(session_id: &str, prompt_id: &str, event_id: &str, text: 
         }
     })
     .to_string()
+}
+
+async fn append_history_update(
+    storage: &crate::session::storage::jsonl::JsonlStorageAdapter,
+    info: &crate::session::info::Info,
+    line: &str,
+) {
+    let envelope: crate::session::storage::SessionUpdateEnvelope =
+        serde_json::from_str(line).unwrap();
+    let update = envelope.into_update().unwrap();
+    storage
+        .append_update_durable_commit_aware(info, &update)
+        .await
+        .unwrap();
 }
 
 fn restore_rows<'a>(
@@ -318,6 +332,7 @@ fn synthesized_history_forces_full_cursor_replay() {
         &session_id(),
         &timeline,
         &raw,
+        None,
         Some("seen"),
         |event| {
             calls += 1;
@@ -650,27 +665,21 @@ async fn stream_session_history_uses_the_same_planner_without_rewriting_source_c
             },
         ))
         .unwrap();
+    let before_receipt = user_message_update(
+        info.id.0.as_ref(),
+        "before",
+        "event-before",
+        "before receipt",
+    );
+    let after_receipt =
+        user_message_update(info.id.0.as_ref(), "after", "event-after", "after receipt");
+    append_history_update(&storage, &info, &before_receipt).await;
+    append_history_update(&storage, &info, &after_receipt).await;
     storage
         .append_timeline_event_durable(&info, &event)
         .await
         .unwrap();
 
-    let updates_path = opened
-        .directory()
-        .display_path()
-        .join(crate::session::storage::UPDATES_FILE);
-    let physical_updates = [
-        user_message_update(
-            info.id.0.as_ref(),
-            "before",
-            "event-before",
-            "before receipt",
-        ),
-        user_message_update(info.id.0.as_ref(), "after", "event-after", "after receipt"),
-    ]
-    .join("\n");
-    std::fs::write(&updates_path, format!("{physical_updates}\n")).unwrap();
-    let updates_before = std::fs::read(&updates_path).unwrap();
     let timeline_path = opened
         .directory()
         .display_path()
@@ -703,23 +712,13 @@ async fn stream_session_history_uses_the_same_planner_without_rewriting_source_c
             .as_deref(),
         Some(body)
     );
-    let source_time = event.at_ms as u64;
     assert_eq!(
-        notification.meta.as_ref().unwrap()["timelineEvent"],
-        event.seq.get()
+        notification.meta.as_ref().unwrap()["eventId"],
+        format!("{}-receipt-{}", info.id.0, event.seq.get())
     );
     assert_eq!(
-        notification.meta.as_ref().unwrap()["agentTimestampMs"],
-        source_time
-    );
-    assert!(
-        !notification
-            .meta
-            .as_ref()
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .contains_key("eventId")
+        notification.meta.as_ref().unwrap()["grow/historyTimestampMs"],
+        event.at_ms
     );
 
     let transcript =
@@ -737,11 +736,13 @@ async fn stream_session_history_uses_the_same_planner_without_rewriting_source_c
         unreachable!()
     };
     assert_eq!(
-        transcript_notification.meta.as_ref().unwrap()["agentTimestampMs"],
-        source_time
+        transcript_notification.meta.as_ref().unwrap()["eventId"],
+        format!("{}-receipt-{}", info.id.0, event.seq.get())
     );
-    assert_eq!(transcript.events[transcript_receipt].timestamp_ms, None);
-    assert_eq!(std::fs::read(&updates_path).unwrap(), updates_before);
+    assert_eq!(
+        transcript.events[transcript_receipt].timestamp_ms,
+        Some(event.at_ms as u64)
+    );
     assert_eq!(std::fs::read(&timeline_path).unwrap(), timeline_before);
 }
 
@@ -777,40 +778,41 @@ async fn stream_and_offline_history_restore_incoming_phases_without_delivery_sid
             "The change is ready.".into(),
         )),
     );
-    for event in [
-        &received,
-        &before_approval,
-        &approval,
-        &before_completion,
-        &completed,
-    ] {
-        storage
-            .append_timeline_event_durable(&info, event)
-            .await
-            .unwrap();
-    }
+    let before_approval_update = user_message_update(
+        info.id.0.as_ref(),
+        "before-approval",
+        "event-before-approval",
+        "before approval",
+    );
+    let before_completion_update = user_message_update(
+        info.id.0.as_ref(),
+        "before-completion",
+        "event-before-completion",
+        "before completion",
+    );
+    append_history_update(&storage, &info, &before_approval_update).await;
+    storage
+        .append_timeline_event_durable(&info, &received)
+        .await
+        .unwrap();
+    storage
+        .append_timeline_event_durable(&info, &before_approval)
+        .await
+        .unwrap();
+    storage
+        .append_timeline_event_durable(&info, &approval)
+        .await
+        .unwrap();
+    append_history_update(&storage, &info, &before_completion_update).await;
+    storage
+        .append_timeline_event_durable(&info, &before_completion)
+        .await
+        .unwrap();
+    storage
+        .append_timeline_event_durable(&info, &completed)
+        .await
+        .unwrap();
 
-    let updates_path = opened
-        .directory()
-        .display_path()
-        .join(crate::session::storage::UPDATES_FILE);
-    let physical_updates = [
-        user_message_update(
-            info.id.0.as_ref(),
-            "before-approval",
-            "event-before-approval",
-            "before approval",
-        ),
-        user_message_update(
-            info.id.0.as_ref(),
-            "before-completion",
-            "event-before-completion",
-            "before completion",
-        ),
-    ]
-    .join("\n");
-    std::fs::write(&updates_path, format!("{physical_updates}\n")).unwrap();
-    let updates_before = std::fs::read(&updates_path).unwrap();
     let timeline_path = opened
         .directory()
         .display_path()
@@ -846,8 +848,12 @@ async fn stream_and_offline_history_restore_incoming_phases_without_delivery_sid
             };
             Some((
                 notice.subject.as_deref().unwrap().to_owned(),
-                notification.meta.as_ref().unwrap()["timelineEvent"]
-                    .as_u64()
+                notification.meta.as_ref().unwrap()["eventId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                notification.meta.as_ref().unwrap()["grow/historyTimestampMs"]
+                    .as_i64()
                     .unwrap(),
             ))
         })
@@ -855,9 +861,21 @@ async fn stream_and_offline_history_restore_incoming_phases_without_delivery_sid
     assert_eq!(
         emitted_phases,
         [
-            ("incoming inquiry".into(), received.seq.get()),
-            ("inquiry approval".into(), approval.seq.get()),
-            ("inquiry completed".into(), completed.seq.get()),
+            (
+                "incoming inquiry".into(),
+                format!("{}-receipt-{}", info.id.0, received.seq.get()),
+                received.at_ms,
+            ),
+            (
+                "inquiry approval".into(),
+                format!("{}-receipt-{}", info.id.0, approval.seq.get()),
+                approval.at_ms,
+            ),
+            (
+                "inquiry completed".into(),
+                format!("{}-receipt-{}", info.id.0, completed.seq.get()),
+                completed.at_ms,
+            ),
         ]
     );
 
@@ -876,14 +894,17 @@ async fn stream_and_offline_history_restore_incoming_phases_without_delivery_sid
             };
             Some((
                 notice.subject.as_deref().unwrap().to_owned(),
-                notification.meta.as_ref().unwrap()["timelineEvent"]
-                    .as_u64()
+                notification.meta.as_ref().unwrap()["eventId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                notification.meta.as_ref().unwrap()["grow/historyTimestampMs"]
+                    .as_i64()
                     .unwrap(),
             ))
         })
         .collect::<Vec<_>>();
     assert_eq!(offline_phases, emitted_phases);
-    assert_eq!(std::fs::read(&updates_path).unwrap(), updates_before);
     assert_eq!(std::fs::read(&timeline_path).unwrap(), timeline_before);
     assert_eq!(timeline.events().len(), 5);
     assert!(timeline.events().iter().all(|event| {
@@ -939,15 +960,23 @@ fn source_session_receipts_replay_near_their_reply_anchors_without_writes() {
         }
     }
 
-    let ordered_lines =
-        super::super::with_reconciled_replay_lines(&session_id, &grow_home, |lines| {
-            Ok(lines
-                .iter()
-                .map(|line| line.as_str().to_owned())
-                .collect::<Vec<_>>())
-        })
-        .unwrap()
-        .expect("source session must resolve");
+    let ordered_lines = super::super::with_prepared_history(&session_id, &grow_home, |updates| {
+        let lines = updates
+            .iter()
+            .map(|update| {
+                serde_json::to_string(
+                    &super::super::SessionUpdateEnvelope::from_update(update).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        Ok(lines
+            .iter()
+            .map(|line| line.as_str().to_owned())
+            .collect::<Vec<_>>())
+    })
+    .unwrap()
+    .expect("source session must resolve");
 
     let mut receipt_positions = HashMap::new();
     let mut tool_call_positions = HashMap::new();

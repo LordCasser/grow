@@ -628,7 +628,7 @@ async fn run_user_turn_with_schema(
 ) -> Result<PromptTurnOk, acp::Error> {
     install_test_foreground(actor, prompt_id).await;
     tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(60),
         actor.handle_prompt(
             prompt_id,
             crate::session::actor::tests::support::admit_test_human_input(&actor, prompt_id).await,
@@ -648,6 +648,32 @@ async fn run_user_turn_with_schema(
     )
     .await
     .expect("turn must finish within the timeout (no runaway continue loop)")
+}
+
+fn assert_terminal_boundary_preserves_response_admission(error: &acp::Error) {
+    assert!(crate::session::commands::is_fatal_turn_boundary_error(
+        error
+    ));
+    let data = error.data.as_ref().expect("fatal terminal error has data");
+    assert_eq!(
+        data.get("phase").and_then(serde_json::Value::as_str),
+        Some("terminal")
+    );
+    let cause = data
+        .get("cause")
+        .expect("terminal error preserves its cause");
+    let cause_data = cause
+        .get("data")
+        .expect("fatal response-admission cause has structured data");
+    assert_eq!(
+        cause_data.get("phase").and_then(serde_json::Value::as_str),
+        Some("response-admission")
+    );
+    assert_eq!(
+        cause_data.get("error_kind"),
+        data.get("error_kind"),
+        "the preserved response-admission cause remains a fatal boundary error"
+    );
 }
 
 /// Partial compaction needs an old closed range and a recent verbatim tail;
@@ -2209,7 +2235,7 @@ fn retractable_stream_retry_accepts_only_the_second_candidate_and_bills_both() {
 }
 
 #[test]
-fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
+fn response_admission_fatal_boundary_blocks_tool_dispatch_and_recovery() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2224,9 +2250,9 @@ fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
                 "/v1/messages",
                 messages_turn(
                     &[tool_use_block(
-                        "projection-boundary-call",
+                        "admission-boundary-call",
                         "todo_write",
-                        r#"{"todos":[{"id":"projection-boundary-todo","content":"must not execute","status":"completed"}]}"#,
+                        r#"{"todos":[{"id":"admission-boundary-todo","content":"must not execute","status":"completed"}]}"#,
                     )],
                     "tool_use",
                 ),
@@ -2256,7 +2282,10 @@ fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
                 gateway_tx,
                 persistence_tx,
                 Some(crate::session::storage::AppendUpdateError::NotCommitted(
-                    std::io::Error::other("injected response projection failure"),
+                    std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "injected response admission failure",
+                    ),
                 )),
             )
             .await;
@@ -2272,19 +2301,11 @@ fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
             .await;
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
 
-            let error = run_user_turn(&actor, "projection-boundary")
+            let error = run_user_turn(&actor, "response-admission-boundary")
                 .await
-                .expect_err("projection failure must fail the turn");
-            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error));
-            assert_eq!(
-                error
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("phase"))
-                    .and_then(serde_json::Value::as_str),
-                Some("response-projection")
-            );
-            assert_eq!(server.requests().len(), 1, "fatal projection boundary forbids recovery");
+                .expect_err("response admission failure must fail the turn");
+            assert_terminal_boundary_preserves_response_admission(&error);
+            assert_eq!(server.requests().len(), 1, "fatal admission boundary forbids recovery");
 
             let mut attempts = Vec::new();
             while let Ok(event) = events.try_recv() {
@@ -2297,26 +2318,24 @@ fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
             assert!(!attempts.contains(&SamplingAttemptState::Accepted));
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(conversation.iter().any(|item| matches!(
+            assert!(!conversation.iter().any(|item| matches!(
                 item,
                 ConversationItem::Assistant(assistant)
-                    if assistant.tool_calls.iter().any(|call| call.id.as_ref() == "projection-boundary-call")
+                    if assistant.tool_calls.iter().any(|call| call.id.as_ref() == "admission-boundary-call")
             )));
-            assert!(!conversation
+            assert!(conversation
                 .iter()
-                .any(|item| matches!(item, ConversationItem::ToolResult(_))));
-
-            let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
-            assert!(!timeline.iter().any(|event| matches!(
-                &event.kind,
-                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { .. })
-            )));
+                .all(|item| !matches!(item, ConversationItem::ToolResult(_))));
+            assert!(
+                actor.chat_state_handle.timeline_events().await.is_none(),
+                "permanent response-admission persistence failure poisons the writer and closes its mailbox"
+            );
         }));
     });
 }
 
 #[test]
-fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
+fn response_admission_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2334,9 +2353,9 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
                 "/v1/messages",
                 messages_turn(
                     &[tool_use_block(
-                        "physical-projection-call",
+                        "physical-admission-call",
                         "todo_write",
-                        r#"{"todos":[{"id":"physical-projection-todo","content":"must not execute","status":"completed"}]}"#,
+                        r#"{"todos":[{"id":"physical-admission-todo","content":"must not execute","status":"completed"}]}"#,
                     )],
                     "tool_use",
                 ),
@@ -2362,15 +2381,61 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
             let persistence_task = tokio::task::spawn_local(async move {
                 while let Some(message) = persistence_rx.recv().await {
                     match message {
-                        PersistenceMsg::CommitResponseProjection {
-                            projection,
+                        PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
+                            let is_response_admission = event.messages()
+                                .is_some_and(|messages| messages.response_admission.is_some());
+                            let result = persistence_storage
+                                .append_timeline_event_durable(&persistence_info, &event)
+                                .await;
+                            if is_response_admission && result.is_ok() {
+                                // The canonical fact reached disk, but the writer's ACK is lost.
+                                drop(respond_to);
+                            } else {
+                                let _ = respond_to.send(result);
+                            }
+                        }
+                        PersistenceMsg::Update(update) => {
+                            let _ = persistence_storage
+                                .append_update_durable_commit_aware(&persistence_info, &update)
+                                .await;
+                        }
+                        PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to } => {
+                            let result = persistence_storage
+                                .append_update_durable_commit_aware(&persistence_info, &update)
+                                .await;
+                            let _ = respond_to.send(result);
+                        }
+                        PersistenceMsg::AuxiliaryGrow {
+                            notification,
+                            delivery,
                             respond_to,
+                            ..
                         } => {
-                            persistence_storage
-                                .commit_response_projection(&persistence_info, &projection)
-                                .await
-                                .expect("physical projection must be committed before ACK loss");
-                            drop(respond_to);
+                            let result = persistence_storage
+                                .append_update_durable_commit_aware(
+                                    &persistence_info,
+                                    &crate::session::storage::SessionUpdate::Grow(Box::new(
+                                        notification,
+                                    )),
+                                )
+                                .await;
+                            if matches!(
+                                &result,
+                                Ok(())
+                                    | Err(crate::session::storage::AppendUpdateError::Committed(_))
+                            ) && let Some(delivery) = delivery
+                            {
+                                delivery.publish();
+                            }
+                            if let Some(respond_to) = respond_to {
+                                let _ = respond_to.send(result);
+                            }
+                        }
+                        PersistenceMsg::ReplayBarrier { respond_to, release } => {
+                            let ready = respond_to.send(Ok(())).is_ok();
+                            if ready {
+                                let _ = release.await;
+                            }
                         }
                         PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } => {
                             let _ = respond_to.send(Ok(()));
@@ -2384,7 +2449,7 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
             });
 
             let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
-            let (actor, events) = create_test_actor_ex_with_physical_projection(
+            let (mut actor, events) = create_test_actor_ex_with_physical_projection(
                 0,
                 256_000,
                 85,
@@ -2392,6 +2457,22 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
                 persistence_tx,
             )
             .await;
+            // ChatStateActor bootstraps its real seed through the same physical
+            // persistence path. Waiting for its timeline command also waits for
+            // those seed ACKs, so the journal prefix is not fabricated here.
+            let seed_events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(!seed_events.is_empty());
+            assert_eq!(
+                serde_json::to_value(storage.read_timeline_events_sync(&info).unwrap()).unwrap(),
+                serde_json::to_value(&seed_events).unwrap(),
+            );
+            // The test input payload must live beside the physical journal;
+            // otherwise validated history cannot resolve its prompt blob.
+            actor.session_directory = storage
+                .open_session(&info)
+                .unwrap()
+                .directory_handle();
+            actor.session_dir = actor.session_directory.display_path().to_path_buf();
             let (actor, _, mut events) = configure_actor_with_sampler(
                 &server,
                 sampling_types::ApiBackend::Messages,
@@ -2404,18 +2485,10 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
             .await;
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
 
-            let error = run_user_turn(&actor, "physical-projection-boundary")
+            let error = run_user_turn(&actor, "physical-response-admission-boundary")
                 .await
-                .expect_err("lost projection ACK must fail the turn");
-            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error));
-            assert_eq!(
-                error
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("phase"))
-                    .and_then(serde_json::Value::as_str),
-                Some("response-projection")
-            );
+                .expect_err("lost response admission ACK must fail the turn");
+            assert_terminal_boundary_preserves_response_admission(&error);
             assert_eq!(server.requests().len(), 1, "ACK loss forbids recovery");
 
             let mut attempts = Vec::new();
@@ -2428,40 +2501,50 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
             }
             assert!(!attempts.contains(&SamplingAttemptState::Accepted));
 
-            let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(conversation.iter().any(|item| matches!(
-                item,
-                ConversationItem::Assistant(assistant)
-                    if assistant.tool_calls.iter().any(|call| call.id.as_ref() == "physical-projection-call")
-            )));
-            assert!(!conversation
-                .iter()
-                .any(|item| matches!(item, ConversationItem::ToolResult(_))));
-            let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
-            assert!(!timeline.iter().any(|event| matches!(
-                &event.kind,
-                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { .. })
-            )));
+            assert!(
+                actor.chat_state_handle.timeline_events().await.is_none(),
+                "the 30-second unresolved ACK deadline poisons the writer and closes its mailbox"
+            );
 
-            let updates_path = storage
-                .open_session(&info)
-                .unwrap()
+            let physical_events = storage.read_timeline_events_sync(&info).unwrap();
+            assert_eq!(
+                serde_json::to_value(&physical_events[..seed_events.len()]).unwrap(),
+                serde_json::to_value(&seed_events).unwrap(),
+            );
+            let admissions = physical_events.iter().filter(|event| event.messages()
+                .is_some_and(|messages| messages.response_admission.is_some())).count();
+            assert_eq!(admissions, 1, "the response admission fact committed exactly once before its ACK was lost");
+            assert!(physical_events.iter().any(|event| event.messages()
+                .is_some_and(|messages| messages.items.iter().any(|item| matches!(item,
+                    ConversationItem::Assistant(assistant)
+                        if assistant.tool_calls.iter().any(|call| call.id.as_ref() == "physical-admission-call")
+                )))));
+            assert_eq!(
+                physical_events
+                    .iter()
+                    .filter(|event| matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Tool(_)
+                    ))
+                    .count(),
+                0,
+                "the tool must not execute after admission ACK loss"
+            );
+            let opened = storage.open_session(&info).unwrap();
+            let validated = opened.validated_timeline(info.id.0.as_ref()).unwrap();
+            let history = validated
+                .history
+                .prepare(&info.id, &validated.timeline, None)
+                .unwrap();
+            assert!(
+                !history.updates.is_empty(),
+                "typed presentation updates and the Domain facts form a complete readable history"
+            );
+            assert!(!opened
                 .directory()
                 .display_path()
-                .join("updates.jsonl");
-            let physical = std::fs::read_to_string(updates_path).unwrap();
-            let projection_count = physical
-                .lines()
-                .filter(|line| {
-                    serde_json::from_str::<serde_json::Value>(line)
-                        .ok()
-                        .and_then(|value| value.get("method").and_then(serde_json::Value::as_str).map(str::to_owned))
-                        .as_deref()
-                        == Some(crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD)
-                })
-                .count();
-            assert_eq!(projection_count, 1, "physical projection is committed exactly once");
-            assert!(!physical.contains("samplingRequestId"));
+                .join("updates.jsonl")
+                .exists(), "response admission is stored in the unified timeline");
             persistence_task.abort();
         }));
     });

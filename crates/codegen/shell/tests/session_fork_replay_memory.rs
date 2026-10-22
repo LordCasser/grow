@@ -1,6 +1,6 @@
 //! Regression guard for the fork/resume replay OOM: a counting allocator checks
-//! the streaming load ([`stream_replay_updates_at`]) peaks far below the old
-//! parse-all load and forwards identical content.
+//! the streaming load ([`stream_replay_updates_at`]) against a materialized
+//! typed-history reference and verifies identical content.
 
 #![cfg(unix)]
 
@@ -12,8 +12,7 @@ use acp_transport::protocol as acp;
 use tempfile::TempDir;
 
 use shell::session::storage::{
-    ReplayEmission, SessionUpdate, UpdatesIterator, filter_rewind_updates,
-    stream_replay_updates_at, strip_context_wrappers,
+    ReplayEmission, load_updates_for_replay_at, stream_replay_updates_at,
 };
 use shell::session::testkit::synth::{self, SessionSpec};
 
@@ -50,9 +49,8 @@ fn peak() -> usize {
     PEAK.load(Ordering::Relaxed)
 }
 
-/// Heavy ACU catalog, no rewind points: the parity assert covers the
-/// typed-to-string swap over this transcript, not rewind-marker filtering
-/// (`synth` emits no `rewind_marker` envelopes on the replay path).
+/// Heavy transient catalog, no rewind points: the parity assert covers the
+/// materialized typed-history path against the streaming journal path.
 fn fork_replay_spec() -> SessionSpec {
     SessionSpec::from_env_prefixed(
         "FORK_REPLAY",
@@ -70,44 +68,17 @@ fn fork_replay_spec() -> SessionSpec {
     )
 }
 
-fn reference_load_all(updates_path: &Path) -> Vec<acp::SessionUpdate> {
-    let iter = UpdatesIterator::open(updates_path)
-        .expect("open updates")
-        .expect("updates file exists");
-    let all: Vec<SessionUpdate> = iter.filter_map(|r| r.ok()).collect();
-    let filtered = filter_rewind_updates(all);
-    filtered
-        .into_iter()
-        .flat_map(|u| match u {
-            SessionUpdate::Acp(notif) => vec![strip_context_wrappers(notif.update)],
-            SessionUpdate::Grow(_) => Vec::new(),
-            SessionUpdate::ResponseReplayProjection(projection) => projection
-                .updates
-                .into_iter()
-                .map(|chunk| {
-                    let compact = serde_json::to_value(chunk).expect("projected text");
-                    let reasoning = compact["channel"] == "reasoning";
-                    let text = compact["text"].as_str().expect("projected text body");
-                    let content = acp::ContentChunk::new(acp::ContentBlock::Text(
-                        acp::TextContent::new(text.to_owned()),
-                    ));
-                    if reasoning {
-                        acp::SessionUpdate::AgentThoughtChunk(content)
-                    } else {
-                        acp::SessionUpdate::AgentMessageChunk(content)
-                    }
-                })
-                .collect(),
-        })
-        .collect()
+fn reference_load_all(session_id: &str, grow_home: &Path) -> Vec<acp::SessionUpdate> {
+    load_updates_for_replay_at(session_id, grow_home)
+        .expect("load typed history")
+        .expect("session exists")
 }
 
 fn serialize(u: &acp::SessionUpdate) -> String {
     serde_json::to_string(u).expect("serialize replayed update")
 }
 
-/// Streaming holds one `read_to_string` copy (~1x) plus transient per-update
-/// structs; the old parse-all path held several multiples. Headroom over 1x.
+/// Keep the existing headroom limit for the unified journal layout.
 const MAX_STREAM_PEAK_TO_DISK_RATIO: f64 = 2.0;
 
 // Serial: the process-global counters are only valid when no other test
@@ -119,20 +90,20 @@ fn fork_replay_stream_is_bounded_and_faithful() {
     let cwd = TempDir::new().unwrap();
     let opts = fork_replay_spec();
 
-    let (id, updates_path) = {
+    let (id, timeline_path) = {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let out = rt.block_on(async {
             let (info, dir) = synth::prepare_session(root.path(), cwd.path(), &opts).await;
-            (info.id.0.to_string(), dir.join("updates.jsonl"))
+            (info.id.0.to_string(), dir.join("timeline.jsonl"))
         });
         drop(rt);
         out
     };
 
-    let on_disk = std::fs::metadata(&updates_path).unwrap().len() as usize;
+    let on_disk = std::fs::metadata(&timeline_path).unwrap().len() as usize;
     // The ratio bound is only meaningful once fixed overhead is dwarfed by
     // content; guard against a shrunk spec making the assert trivial.
     assert!(
@@ -141,7 +112,7 @@ fn fork_replay_stream_is_bounded_and_faithful() {
     );
 
     let base_old = begin_measure();
-    let reference = reference_load_all(&updates_path);
+    let reference = reference_load_all(&id, root.path());
     let old_peak = peak() - base_old;
     let ref_count = reference.len();
     let ref_serialized: Vec<String> = reference.iter().map(serialize).collect();

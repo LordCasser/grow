@@ -117,6 +117,7 @@ pub async fn load_session_via_agent<C: acp_transport::AcpClientHandler + 'static
     }
 
     let load_started = Instant::now();
+    tracing::info!(target: crate::instrumentation::TARGET, event = "resume_load_start");
     tokio::time::timeout(
         LOAD_TIMEOUT,
         client_conn.load_session(acp::LoadSessionRequest::new(session_id, cwd)),
@@ -125,6 +126,7 @@ pub async fn load_session_via_agent<C: acp_transport::AcpClientHandler + 'static
     .expect("session/load timed out (>180s)")
     .expect("session/load failed");
     let load_elapsed = load_started.elapsed();
+    tracing::info!(target: crate::instrumentation::TARGET, event = "resume_load_end");
 
     LoadedAgent {
         client_conn,

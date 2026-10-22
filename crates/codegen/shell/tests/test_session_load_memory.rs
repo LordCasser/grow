@@ -13,14 +13,16 @@
 static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
 
 use pretty_assertions::assert_eq;
-use shell::session::storage::{JsonlStorageAdapter, StorageAdapter, prepare_replay_lines};
+use shell::session::storage::{
+    JsonlStorageAdapter, ReplayEmission, StorageAdapter, load_updates_for_replay_at,
+    prepare_replay_lines, stream_replay_updates_at,
+};
 use shell::session::testkit::synth::{self, SessionSpec};
+use std::path::Path;
 use test_support::env::env_parse;
 
 #[cfg(feature = "dhat-heap")]
 use shell::session::info::Info;
-#[cfg(feature = "dhat-heap")]
-use std::path::Path;
 
 use tempfile::TempDir;
 
@@ -28,19 +30,19 @@ const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
 const BYTES_PER_MB_U64: u64 = 1024 * 1024;
 
 fn file_len(path: &std::path::Path) -> u64 {
-    // Fail loud: a silent 0 would collapse the ratio budget instead of
-    // surfacing a missing or unreadable fixture.
-    std::fs::metadata(path).expect("stat updates.jsonl").len()
+    std::fs::metadata(path)
+        .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+        .len()
 }
 
 fn memory_spec() -> SessionSpec {
     SessionSpec::from_env_prefixed("SESSION_LOAD", SessionSpec::default())
 }
 
-/// Non-ignored zero-copy guard: every replay line must borrow from the
-/// transcript, so an owned-copy regression fails here in CI.
+/// Legacy-oracle zero-copy guard: keep the old wire parser's borrowing
+/// contract explicit without treating it as the current resume path.
 #[tokio::test]
-async fn prepare_replay_lines_borrows_the_transcript() {
+async fn legacy_oracle_prepare_replay_lines_borrows_the_transcript() {
     let spec = SessionSpec {
         turns: 3,
         acu_per_turn: 2,
@@ -54,7 +56,7 @@ async fn prepare_replay_lines_borrows_the_transcript() {
     };
     let root = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
-    let (_info, dir) = synth::prepare_session(root.path(), cwd.path(), &spec).await;
+    let (_info, dir) = synth::replay::prepare_legacy_session(root.path(), cwd.path(), &spec).await;
     let transcript =
         std::fs::read_to_string(dir.join("updates.jsonl")).expect("read updates.jsonl");
 
@@ -76,6 +78,14 @@ async fn prepare_replay_lines_borrows_the_transcript() {
     }
 }
 
+/// Count the current typed replay projection outside the measured load window.
+fn expected_history_updates(session_id: &str, grow_home: &Path) -> usize {
+    load_updates_for_replay_at(session_id, grow_home)
+        .expect("load typed replay reference")
+        .expect("synthetic session exists")
+        .len()
+}
+
 /// Let ready tasks drain and timer-driven cleanup run before reading heap
 /// stats, so a drop's frees show up in the next `curr_bytes`/`curr_blocks`.
 #[cfg(feature = "dhat-heap")]
@@ -89,16 +99,24 @@ async fn quiesce() {
 }
 
 #[cfg(feature = "dhat-heap")]
-async fn run_load_cycle(adapter: &JsonlStorageAdapter, info: &Info, updates_path: &Path) -> usize {
+async fn run_load_cycle(adapter: &JsonlStorageAdapter, info: &Info, grow_home: &Path) -> usize {
     let light = adapter
         .load_session_without_updates(info)
         .await
         .expect("load_session_without_updates");
-    let transcript = std::fs::read_to_string(updates_path).expect("read updates.jsonl");
-    let prepared = prepare_replay_lines(&transcript, None);
-    let replayed_lines = prepared.lines.len();
-    drop(prepared);
-    drop(transcript);
+    let mut replayed_lines = 0;
+    let emission = stream_replay_updates_at(info.id.0.as_ref(), grow_home, |_| {
+        replayed_lines += 1;
+    })
+    .expect("stream typed replay");
+    assert_eq!(
+        emission,
+        if replayed_lines == 0 {
+            ReplayEmission::Empty
+        } else {
+            ReplayEmission::Emitted
+        }
+    );
     drop(light);
     quiesce().await;
     replayed_lines
@@ -271,8 +289,8 @@ fn report_summary(o: &DhatOutcome<'_>) {
             "warmup": o.budget.warmup,
             "replayed_lines": o.measured.replayed_lines,
             "expected_lines": o.measured.expected_lines,
-            "on_disk_updates_bytes": o.measured.on_disk_bytes,
-            "on_disk_updates_mb": o.measured.on_disk_bytes as f64 / BYTES_PER_MB,
+            "on_disk_timeline_bytes": o.measured.on_disk_bytes,
+            "on_disk_timeline_mb": o.measured.on_disk_bytes as f64 / BYTES_PER_MB,
             "peak_over_baseline_bytes": o.measured.peak_over_baseline,
             "peak_over_baseline_mb": o.measured.peak_over_baseline as f64 / BYTES_PER_MB,
             "peak_over_on_disk": o.measured.peak_over_baseline as f64 / o.measured.on_disk_bytes.max(1) as f64,
@@ -296,12 +314,12 @@ fn report_summary(o: &DhatOutcome<'_>) {
 fn assert_bounds(o: &DhatOutcome<'_>) {
     assert_eq!(
         o.measured.replayed_lines, o.measured.expected_lines,
-        "replayed line count must equal the non-ACU update count"
+        "streamed replay count must equal the typed history projection count"
     );
 
     assert!(
         o.no_spike(),
-        "load peak {:.1} MB over baseline is {:.2}x the {:.1} MB on-disk updates and exceeds a gate \
+        "load peak {:.1} MB over baseline is {:.2}x the {:.1} MB on-disk Timeline and exceeds a gate \
          (RATIO {}x = {:.1} MB, ABSOLUTE {} MB); load memory is super-linear in session size",
         o.measured.peak_over_baseline as f64 / BYTES_PER_MB,
         o.measured.peak_over_baseline as f64 / o.measured.on_disk_bytes.max(1) as f64,
@@ -334,9 +352,9 @@ async fn session_load_dhat_bounded_and_freed() {
     let root = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
     let (info, dir) = synth::prepare_session(root.path(), cwd.path(), &opts).await;
-    let updates_path = dir.join("updates.jsonl");
-    let on_disk_bytes = file_len(&updates_path);
-    let expected_lines = synth::expected_replay_lines(&opts);
+    let timeline_path = dir.join("timeline.jsonl");
+    let on_disk_bytes = file_len(&timeline_path);
+    let expected_lines = expected_history_updates(info.id.0.as_ref(), root.path());
 
     let budget = DhatBudget {
         warmup: env_parse("SESSION_LOAD_WARMUP", 3usize),
@@ -352,14 +370,14 @@ async fn session_load_dhat_bounded_and_freed() {
     // Warm up before starting the profiler so its lifetime `max_bytes` covers
     // only the measured window, not a warmup transient.
     for _ in 0..budget.warmup {
-        let _ = run_load_cycle(&adapter, &info, &updates_path).await;
+        let _ = run_load_cycle(&adapter, &info, root.path()).await;
     }
 
     let profiler = dhat::Profiler::builder().testing().build();
     let window_before = dhat::HeapStats::get();
     let mut replayed_lines = 0usize;
     for _ in 0..budget.cycles {
-        replayed_lines = run_load_cycle(&adapter, &info, &updates_path).await;
+        replayed_lines = run_load_cycle(&adapter, &info, root.path()).await;
     }
     let window_after = dhat::HeapStats::get();
     drop(profiler);
@@ -530,8 +548,8 @@ mod rss {
     fn report_summary(mode: &str, counts: serde_json::Value, on_disk_bytes: u64, o: &RssOutcome) {
         let mut summary = serde_json::json!({
             "mode": mode,
-            "on_disk_updates_bytes": on_disk_bytes,
-            "on_disk_updates_mb": on_disk_bytes as f64 / BYTES_PER_MB,
+            "on_disk_timeline_bytes": on_disk_bytes,
+            "on_disk_timeline_mb": on_disk_bytes as f64 / BYTES_PER_MB,
             "baseline_rss_mb": o.baseline_bytes() as f64 / BYTES_PER_MB,
             "peak_rss_mb": o.peak_rss as f64 / BYTES_PER_MB,
             "peak_rss_growth_mb": o.peak_growth_bytes() as f64 / BYTES_PER_MB,
@@ -559,7 +577,7 @@ mod rss {
         );
         assert!(
             o.within_budget(),
-            "{prefix}peak RSS grew {:.1} MB over baseline while loading a {:.1} MB updates file \
+            "{prefix}peak RSS grew {:.1} MB over baseline while loading a {:.1} MB Timeline file \
              (bound {} MB)",
             o.peak_growth_bytes() as f64 / BYTES_PER_MB,
             on_disk_bytes as f64 / BYTES_PER_MB,
@@ -574,9 +592,9 @@ mod rss {
         let root = TempDir::new().unwrap();
         let cwd = TempDir::new().unwrap();
         let (info, dir) = synth::prepare_session(root.path(), cwd.path(), &opts).await;
-        let updates_path = dir.join("updates.jsonl");
-        let on_disk_bytes = file_len(&updates_path);
-        let expected_lines = synth::expected_replay_lines(&opts);
+        let timeline_path = dir.join("timeline.jsonl");
+        let on_disk_bytes = file_len(&timeline_path);
+        let expected_lines = expected_history_updates(info.id.0.as_ref(), root.path());
 
         let budget_mb = env_parse("SESSION_LOAD_MAX_PEAK_MB", 1024u64);
         let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
@@ -587,13 +605,21 @@ mod rss {
             .load_session_without_updates(&info)
             .await
             .expect("load_session_without_updates");
-        let transcript = std::fs::read_to_string(&updates_path).expect("read updates.jsonl");
-        let prepared = prepare_replay_lines(&transcript, None);
-        let replayed = prepared.lines.len();
+        let mut replayed = 0;
+        let emission = stream_replay_updates_at(info.id.0.as_ref(), root.path(), |_| {
+            replayed += 1;
+        })
+        .expect("stream typed history");
+        assert_eq!(
+            emission,
+            if replayed == 0 {
+                ReplayEmission::Empty
+            } else {
+                ReplayEmission::Emitted
+            }
+        );
 
         let outcome = sampler.finish(budget_mb);
-        drop(prepared);
-        drop(transcript);
         drop(light);
 
         // Report before asserting so a count regression still emits the summary.
@@ -601,7 +627,7 @@ mod rss {
             "rss",
             serde_json::json!({
                 "replayed_lines": replayed,
-                "expected_lines": expected_lines,
+                "expected_typed_history_updates": expected_lines,
             }),
             on_disk_bytes,
             &outcome,
@@ -609,7 +635,7 @@ mod rss {
 
         assert_eq!(
             replayed, expected_lines,
-            "replayed line count must equal the non-ACU update count"
+            "streamed update count must equal typed history projection"
         );
         assert_bounds(None, on_disk_bytes, &outcome);
     }
@@ -690,7 +716,29 @@ mod rss {
         }
 
         let (info, dir) = synth::prepare_session(grow_home.path(), cwd.path(), &opts).await;
-        let on_disk_bytes = file_len(&dir.join("updates.jsonl"));
+        JsonlStorageAdapter::with_root(grow_home.path().to_path_buf())
+            .update_current_model_and_agent(
+                &info,
+                &shell::agent::models::ModelId::new("test/test-model"),
+                None,
+                None,
+            )
+            .await
+            .expect("set the model configured by the real-agent fixture");
+        let storage = JsonlStorageAdapter::with_root(grow_home.path().to_path_buf());
+        let seed = chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::system(
+            "memory replay fixture governance",
+        )])
+        .expect("valid fixture System head");
+        for event in seed.events() {
+            storage
+                .append_timeline_event_durable(&info, event)
+                .await
+                .expect("persist the real-agent fixture System head");
+        }
+        drop(storage);
+        let on_disk_bytes = file_len(&dir.join("timeline.jsonl"));
+        let expected_lines = expected_history_updates(info.id.0.as_ref(), grow_home.path());
 
         let sampler = RssSampler::start();
 
@@ -703,17 +751,19 @@ mod rss {
         let outcome = sampler.finish(budget_mb);
         report_summary(
             "rss-e2e",
-            serde_json::json!({ "replayed_notifications": replay_count }),
+            serde_json::json!({
+                "replayed_notifications": replay_count,
+                "expected_typed_history_updates": expected_lines,
+            }),
             on_disk_bytes,
             &outcome,
         );
 
-        // At least one notification per synthesized turn must replay; a near-empty
-        // replay that still grew memory would otherwise pass silently.
+        // At least every projected typed ACP fact must reach the client; a
+        // near-empty replay that still grew memory would otherwise pass silently.
         assert!(
-            replay_count >= opts.turns as u64,
-            "replayed {replay_count} notifications, expected at least {} (one per turn)",
-            opts.turns,
+            replay_count >= expected_lines as u64,
+            "replayed {replay_count} notifications, expected at least {expected_lines} typed history updates",
         );
         assert_bounds(Some("e2e"), on_disk_bytes, &outcome);
     }

@@ -1,0 +1,15 @@
+# 数据流与对抗审计
+
+唯一生产链：JsonlStorageAdapter::load_light_data → PersistedDataLight → persistence::PersistedInfoLight → ACP load → replay_session_updates。writer load已构造完整canonicals用于typed append规划，返回完整Vec而非仅missing项。同次load中，初次replay前Timeline只可能追加cold model route observation；该durable append成功后废弃本地Option，新快照重新构造。失败直接返回。resident观察load不返回此Vec；delta始终使用独立快照和AlreadyEmitted路径。noReplay不外发历史。
+
+Option的Some(empty)与None有不同含义，不能按is_empty决定重新构造。Vec顺序与该次Timeline的admitted_responses相同，payload共享Arc而非拷贝正文。它随本次load释放，既不缓存到adapter，也不进入actor长期状态。
+
+复用只代替canonical构造。raw逐条解码物理projection并对版本、会话、request/attempt/event、digest、disposition、updates全字段exact_match；任一conflict返回InvalidData。不能以same_key代替exact，也不能因匹配一条而忽略后面的冲突副本。
+
+planner可借用第一条已验证exact行放到candidate anchor位置，但全部candidate和duplicate仍抑制，changed仍为true，cursor按现有规则完整回退。只有唯一exact且无candidate时保留unchanged。缺失exact仍Canonical，并保留tail-safe检查和durable repair。
+
+新增测试应观察非canonical空白/JSON键顺序的物理行借用，校验anchor前后独立行顺序、duplicate和cursor回退；复用路径的physical payload冲突；路由变更后fallback。旧测试继续覆盖rewind、resident frontier、已发canonical迟到delta、fork继承、repair和sync失败。
+
+后续周边核对：storage/transcript.rs 在 simulated_source计算中使用旧Owned变体，并优先采用candidate anchor和Timeline事件时间。故仅把重排行标成Borrowed并非语义中性。实现保留Canonical规划及合成来源、用Cow借用已exact验证的原始行；transcript继续使用原时间优先级。communication_history的合成行同样改为Owned Cow，不能把它们误归为物理源。需要把transcript完整模块纳入回归。
+
+实现后对抗review未发现阻断问题。唯一producer随同Timeline move完整Vec，replay前唯一变更点显式清空；不加入通用校验/重建框架。补强现代Ctrl+D探针：第一进程退出后清空自有诊断日志，第二次恢复必须等自己的pager.replay.end_batch，且画面不再显示Loading session，避免仅看到历史就把恢复视为完成。此项测试将在固定工具链产物上执行。

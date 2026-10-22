@@ -650,6 +650,8 @@ pub enum SessionCommand {
         /// Internal child lifecycle projections are forwarded after the
         /// parent actor persists them; client-origin updates are persist-only.
         forward_to_gateway: bool,
+        /// True when reconciliation restores a missing presentation projection.
+        restored: bool,
     },
     /// Apply subagent usage into parent ledgers. Acks `()` once chat-state
     /// applied (prompt-attributed or session-only). Drop the oneshot on failure
@@ -677,6 +679,12 @@ pub enum SessionCommand {
     /// Used during reconnect to ensure all buffered content is persisted before replay.
     FlushComplete {
         respond_to: oneshot::Sender<()>,
+    },
+    /// Freeze the actor's outbound FIFO and its existing persistence owner
+    /// at the same complete prefix. Cancellation releases both owners.
+    PauseForReplay {
+        respond_to: oneshot::Sender<std::io::Result<()>>,
+        release: oneshot::Receiver<bool>,
     },
     /// Update MCP servers for an existing session (used during reconnect or
     /// mid-session via the `grow/session/update_mcp_servers` extension method).

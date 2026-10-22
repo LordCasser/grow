@@ -1,0 +1,16 @@
+
+running 11 tests
+test session::storage::communication_history::tests::incoming_phase_identity_distinguishes_source_sessions_when_inquiry_ids_collide ... ok
+test session::storage::communication_history::tests::incoming_phase_restore_does_not_duplicate_when_peer_changes_for_same_source_identity ... ok
+test session::storage::communication_history::tests::inserts_timeline_only_receipts_between_physical_anchors_in_receipt_order ... ok
+test session::storage::communication_history::tests::matched_cached_notice_anchors_missing_inquiry_phases_without_other_anchors ... ok
+test session::storage::communication_history::tests::missing_payload_and_unanchored_fallback_are_explicit_and_bounded ... ok
+test session::storage::communication_history::tests::preserves_existing_notice_position_deduplicates_and_keeps_original_timestamp_without_event_id ... ok
+test session::storage::communication_history::tests::restores_only_missing_incoming_inquiry_phases_around_existing_anchor_rows ... ok
+test session::storage::communication_history::tests::source_session_receipts_replay_near_their_reply_anchors_without_writes ... ignored, read-only check against an explicitly selected source session
+test session::storage::communication_history::tests::stream_and_offline_history_restore_incoming_phases_without_delivery_side_effects ... ok
+test session::storage::communication_history::tests::stream_session_history_uses_the_same_planner_without_rewriting_source_caches ... ok
+test session::storage::communication_history::tests::synthesized_history_forces_full_cursor_replay ... ok
+
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 4325 filtered out; finished in 0.19s
+

@@ -191,11 +191,18 @@ fn reattach_completion_roundtrips_durable_log() {
         // (the PTY port does the same via wait_for_turn_completed).
         let durable_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let recorded = find_session_updates_file(&sid).is_some_and(|updates| {
-                std::fs::read_to_string(&updates)
-                    .unwrap_or_default()
-                    .contains("turn_completed")
-            });
+            let mut recorded = false;
+            let replay = shell::session::storage::stream_replay_grow_notifications_at(
+                &sid,
+                &effective_grow_home(),
+                |notification| {
+                    recorded |= matches!(
+                        notification.update,
+                        shell::extensions::notification::SessionUpdate::TurnCompleted { .. }
+                    );
+                },
+            );
+            let recorded = replay.is_ok() && recorded;
             if recorded {
                 break;
             }

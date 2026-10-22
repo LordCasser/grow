@@ -733,6 +733,59 @@ enum ProjectionBarrier {
 }
 
 #[cfg(test)]
+struct AdmissionAckPersistence {
+    projection_barrier: ProjectionBarrier,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+}
+
+#[cfg(test)]
+impl chat_state::TimelinePersistence for AdmissionAckPersistence {
+    fn persist_timeline_event_and_ack(
+        &mut self,
+        event: &chat_state::TimelineEvent,
+    ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+        let (respond_to, receiver) = tokio::sync::oneshot::channel();
+        let is_response_admission = event
+            .messages()
+            .is_some_and(|messages| messages.response_admission.is_some());
+        if is_response_admission
+            && matches!(&self.projection_barrier, ProjectionBarrier::Inject(Some(_)))
+        {
+            let ProjectionBarrier::Inject(Some(error)) = std::mem::replace(
+                &mut self.projection_barrier,
+                ProjectionBarrier::Inject(None),
+            ) else {
+                unreachable!("matched an injected response admission failure")
+            };
+            let _ = respond_to.send(Err(error.into_io_error()));
+        } else {
+            match &self.projection_barrier {
+                ProjectionBarrier::Inject(_) => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                ProjectionBarrier::Forward => {
+                    let message = PersistenceMsg::TimelineDurablyAndAck {
+                        event: event.clone(),
+                        respond_to,
+                    };
+                    if let Err(error) = self.persistence_tx.send(message) {
+                        if let PersistenceMsg::TimelineDurablyAndAck { respond_to, .. } = error.0 {
+                            let _ = respond_to.send(Err(std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "test persistence observation channel closed",
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        receiver
+    }
+
+    fn flush(&mut self) {}
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum SkillCommitAckFault {
     None,
@@ -863,7 +916,7 @@ async fn create_test_actor_ex_inner(
     gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     bridge_projection_events: bool,
-    mut projection_barrier: ProjectionBarrier,
+    projection_barrier: ProjectionBarrier,
     image_projection_persistence: Option<ImageProjectionPersistence>,
     skill_commit_ack: Option<(
         SkillCommitAckFault,
@@ -878,11 +931,10 @@ async fn create_test_actor_ex_inner(
         tools::implementations::grow_build::todo::runtime::PlanningCommand,
     >,
 ) {
-    // Production owns a persistence actor that acknowledges durable terminal
-    // appends. Unit tests pass an observation channel instead, so bridge the
-    // durable envelope to the historical `Update` shape while completing the
-    // barrier. Tests that care about ordering still observe the exact record.
-    let response_projection_persistence_tx = persistence_tx.clone();
+    // Ordinary unit-test persistence messages use a bridge to the historical
+    // Update shape. Forward mode sends the Timeline event and its original ACK
+    // through that bridge so tests can exercise the physical commit barrier.
+    let physical_timeline = matches!(&projection_barrier, ProjectionBarrier::Forward);
     let (planning_command_tx, planning_command_rx) = tokio::sync::mpsc::unbounded_channel();
     let (actor_persistence_tx, mut actor_persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -892,13 +944,41 @@ async fn create_test_actor_ex_inner(
                     let _ = persistence_tx.send(PersistenceMsg::Update(update));
                     let _ = respond_to.send(Ok(()));
                 }
+                PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to } => {
+                    let result =
+                        persistence_tx
+                            .send(PersistenceMsg::Update(update))
+                            .map_err(|_| {
+                                crate::session::storage::AppendUpdateError::NotCommitted(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::BrokenPipe,
+                                        "test persistence observation channel closed",
+                                    ),
+                                )
+                            });
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::ReplayBarrier {
+                    respond_to,
+                    release,
+                } => {
+                    let ready = respond_to.send(Ok(())).is_ok();
+                    if ready {
+                        let _ = release.await;
+                    }
+                }
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
-                    let (observed_reply, _observed_ack) = tokio::sync::oneshot::channel();
-                    let _ = persistence_tx.send(PersistenceMsg::TimelineDurablyAndAck {
-                        event,
-                        respond_to: observed_reply,
-                    });
-                    let _ = respond_to.send(Ok(()));
+                    if physical_timeline {
+                        let _ = persistence_tx
+                            .send(PersistenceMsg::TimelineDurablyAndAck { event, respond_to });
+                    } else {
+                        let (observed_reply, _observed_ack) = tokio::sync::oneshot::channel();
+                        let _ = persistence_tx.send(PersistenceMsg::TimelineDurablyAndAck {
+                            event,
+                            respond_to: observed_reply,
+                        });
+                        let _ = respond_to.send(Ok(()));
+                    }
                 }
                 PersistenceMsg::SidebandDurablyAndAck { event, respond_to } => {
                     let (observed_reply, _observed_ack) = tokio::sync::oneshot::channel();
@@ -968,43 +1048,6 @@ async fn create_test_actor_ex_inner(
         tokio::spawn(async move {
             while let Some(event) = raw_event_rx.recv().await {
                 match event {
-                    SessionEvent::ResponseProjection {
-                        projection,
-                        respond_to,
-                    } => {
-                        let result = match &mut projection_barrier {
-                            ProjectionBarrier::Inject(projection_error) => {
-                                projection_error.take().map_or(Ok(()), Err)
-                            }
-                            ProjectionBarrier::Forward => {
-                                let (persist_tx, persist_rx) = tokio::sync::oneshot::channel();
-                                let send_result = response_projection_persistence_tx.send(
-                                    PersistenceMsg::CommitResponseProjection {
-                                        projection,
-                                        respond_to: persist_tx,
-                                    },
-                                );
-                                if send_result.is_err() {
-                                    Err(crate::session::storage::AppendUpdateError::NotCommitted(
-                                        std::io::Error::new(
-                                            std::io::ErrorKind::BrokenPipe,
-                                            "test projection persistence channel closed",
-                                        ),
-                                    ))
-                                } else {
-                                    persist_rx.await.unwrap_or_else(|_| {
-                                        Err(crate::session::storage::AppendUpdateError::NotCommitted(
-                                            std::io::Error::new(
-                                                std::io::ErrorKind::BrokenPipe,
-                                                "test projection acknowledgement lost",
-                                            ),
-                                        ))
-                                    })
-                                }
-                            }
-                        };
-                        let _ = respond_to.send(result);
-                    }
                     SessionEvent::FlushReplay {
                         respond_to: Some(respond_to),
                     } => {
@@ -1028,7 +1071,10 @@ async fn create_test_actor_ex_inner(
         match image_projection_persistence {
             Some(persistence) => Box::new(persistence),
             None => match skill_commit_ack {
-                None => Box::new(chat_state::NullTimelinePersistence),
+                None => Box::new(AdmissionAckPersistence {
+                    projection_barrier,
+                    persistence_tx: persistence_tx.clone(),
+                }),
                 Some((fault, injected, durable_events, cancellation_token)) => {
                     Box::new(SkillCommitAckPersistence {
                         fault: std::sync::Mutex::new(fault),
@@ -1315,6 +1361,7 @@ async fn create_test_actor_ex_inner(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampling_preview: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        replay_preview_resync: parking_lot::Mutex::new(None),
         sampler_handle: sampler::SamplerHandle::noop(),
         sampler_owner: std::cell::RefCell::new(None),
         sampler_event_drainer: TaskSlot::new(),

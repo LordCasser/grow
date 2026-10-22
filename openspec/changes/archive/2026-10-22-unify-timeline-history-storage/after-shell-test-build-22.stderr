@@ -1,0 +1,12 @@
+   Compiling tools v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tools)
+   Compiling test-support v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/test-support)
+   Compiling agent v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/agent)
+   Compiling mcp v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/mcp)
+   Compiling client-support v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/client-support)
+   Compiling workspace v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workspace)
+   Compiling plugin-marketplace v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/plugin-marketplace)
+   Compiling shell-base v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell-base)
+   Compiling announcements v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/announcements)
+   Compiling memory v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/memory)
+   Compiling shell v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+    Finished `release` profile [optimized] target(s) in 5m 33s

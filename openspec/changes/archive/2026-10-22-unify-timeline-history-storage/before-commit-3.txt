@@ -1,0 +1,26 @@
+
+running 1 test
+test session::storage::jsonl::response_commit_perf::normal_response_storage_commit_release ... PERF_RESPONSE_COMMIT {"body_bytes":4096,"rounds":21,"total_ms":{"median":28.675458000000003,"p95":48.83775},"candidate_anchor_exact_append_ms":{"median":5.915916999999999,"p95":15.841416},"timeline_admission_durable_append_ms":{"median":9.880457999999999,"p95":16.722084000000002},"projection_build_with_digest_ms":{"median":0.036042,"p95":0.041458},"projection_commit_ms":{"median":9.938917,"p95":17.465917},"ledger_barriers":{"scope":"Timeline and updates ledgers only; excludes summary, artifact, and all other system calls","update_file":42,"update_directory":42,"timeline_file":21,"timeline_directory":21}}
+PERF_RESPONSE_COMMIT {"body_bytes":32768,"rounds":21,"total_ms":{"median":41.405417,"p95":48.864084000000005},"candidate_anchor_exact_append_ms":{"median":13.295167,"p95":15.637667},"timeline_admission_durable_append_ms":{"median":14.114666999999999,"p95":18.13425},"projection_build_with_digest_ms":{"median":0.106959,"p95":0.125916},"projection_commit_ms":{"median":14.831459,"p95":16.83525},"ledger_barriers":{"scope":"Timeline and updates ledgers only; excludes summary, artifact, and all other system calls","update_file":42,"update_directory":42,"timeline_file":21,"timeline_directory":21}}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4340 filtered out; finished in 5.70s
+
+        5.71 real         0.04 user         0.17 sys
+            26738688  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2132  page reclaims
+                   5  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                4859  voluntary context switches
+                2155  involuntary context switches
+          1306481886  instructions retired
+           832672894  cycles elapsed
+            12714656  peak memory footprint

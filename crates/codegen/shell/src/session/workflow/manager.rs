@@ -1272,7 +1272,6 @@ impl WorkflowManager {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            timeline.clone(),
         );
         let manager = Arc::new(tokio::sync::Mutex::new(WorkflowManager::new(
             session_id,
@@ -1398,7 +1397,6 @@ impl WorkflowManager {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            test_timeline(),
         );
         let manager = Arc::new(tokio::sync::Mutex::new(WorkflowManager::new(
             "test-session".into(),
@@ -1922,7 +1920,6 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            test_timeline(),
         );
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
         let manager = WorkflowManager::new(
@@ -2681,7 +2678,6 @@ complete("restored after explicit resume");"#;
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            test_timeline(),
         );
         let mut manager = WorkflowManager::new(
             "scratch-failure-test".into(),

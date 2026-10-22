@@ -1900,6 +1900,8 @@ pub(crate) struct SessionActor {
     /// `send_update`d by then). `None` between turns.
     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(crate) sampling_preview: Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
+    pub(crate) replay_preview_resync:
+        parking_lot::Mutex<Option<crate::session::history::ResponseKey>>,
     /// Handle to the per-session `sampler` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;

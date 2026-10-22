@@ -667,10 +667,14 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
-fn parsed_timeline(contents: &str) -> impl Iterator<Item = serde_json::Value> + '_ {
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+fn parsed_timeline(contents: &str) -> std::vec::IntoIter<serde_json::Value> {
+    shell::session::testkit::decode_timeline_fixture(contents)
+        .expect("valid checksummed Timeline journal")
+        .events()
+        .iter()
+        .map(|event| serde_json::to_value(event).expect("serialize typed Timeline event"))
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 fn started_turn_ids(contents: &str) -> Vec<String> {

@@ -1,0 +1,25 @@
+/Users/lordcasser/workspace/projects/grow/target/debug/deps/pty_e2e_persistence-d87bfba196ee602c
+CLI /Users/lordcasser/workspace/projects/grow/target/debug/grow grow 2.4.3 (a1d1c296) shell/test-support
+resume_input_latency::resume_input_latency_128_512_turns exact enumeration=1
+
+running 1 test
+test resume_input_latency::resume_input_latency_128_512_turns ... [resume-phase] turns=128 name=pager.frame.diff count=40 sum_ms=46.5 max_ms=6.5
+[resume-phase] turns=128 name=pager.frame.queue count=37 sum_ms=0.4 max_ms=0.1
+[resume-phase] turns=128 name=pager.frame.render count=40 sum_ms=591.6 max_ms=85.8
+[resume-phase] turns=128 name=pager.frame.write count=37 sum_ms=15.9 max_ms=4.8
+[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.2 max_ms=0.2
+[resume-phase] turns=128 name=session.load_session count=1 sum_ms=2295.3 max_ms=2295.3
+[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=1703.2 max_ms=1703.2
+[resume-pty] turns=128 update_bytes=7680607 history_visible_ms=2824.8 ready_echo_p95_ms=9.0 ready_echo_max_ms=9.5 frames=37
+[resume-phase] turns=512 name=pager.frame.diff count=75 sum_ms=65.7 max_ms=2.8
+[resume-phase] turns=512 name=pager.frame.queue count=68 sum_ms=0.5 max_ms=0.0
+[resume-phase] turns=512 name=pager.frame.render count=75 sum_ms=1024.9 max_ms=50.4
+[resume-phase] turns=512 name=pager.frame.write count=68 sum_ms=16.2 max_ms=7.9
+[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.3 max_ms=0.3
+[resume-phase] turns=512 name=session.load_session count=1 sum_ms=6319.6 max_ms=6319.6
+[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=4434.2 max_ms=4434.2
+[resume-pty] turns=512 update_bytes=30722143 history_visible_ms=6895.4 ready_echo_p95_ms=7.7 ready_echo_max_ms=10.7 frames=68
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 36.77s
+

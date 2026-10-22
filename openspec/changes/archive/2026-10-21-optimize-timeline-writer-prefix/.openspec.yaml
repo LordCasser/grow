@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-21
+skip_specs: true
+reason: "仅优化恢复内部算法，保留既有校验、持久化、顺序和客户端契约。"

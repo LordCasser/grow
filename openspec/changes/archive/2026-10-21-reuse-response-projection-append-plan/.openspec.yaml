@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-21
+skip_specs: true
+reason: "该 change 仅优化 projection 恢复的内部规划复用，保留现有 Timeline、projection 与持久化行为契约。"

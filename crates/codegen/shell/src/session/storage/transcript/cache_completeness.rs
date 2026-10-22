@@ -692,6 +692,14 @@ mod tests {
         serde_json::to_string(&envelope).unwrap()
     }
 
+    fn typed_cached_turn_completed(prompt_id: &str) -> crate::session::storage::SessionUpdate {
+        let cached = cached_turn_completed(prompt_id);
+        let envelope: serde_json::Value = serde_json::from_str(&cached).unwrap();
+        let notification: crate::extensions::notification::SessionNotification =
+            serde_json::from_value(envelope["params"].clone()).unwrap();
+        crate::session::storage::SessionUpdate::Grow(Box::new(notification))
+    }
+
     fn add_workflow_notification_turn(timeline: &mut Timeline) -> String {
         let source = NotificationSource::WorkflowHandoff {
             run_id: "workflow-1".into(),
@@ -776,6 +784,14 @@ mod tests {
         let unrelated = cached_turn_completed("other-prompt");
         let error = validate_ended_user_turns("session", &timeline, &[&unrelated]).unwrap_err();
         assert!(error.to_string().contains("prompt-0"));
+        assert!(super::super::validate_ended_user_turns(&timeline, &[]).is_err());
+        assert!(
+            super::super::validate_ended_user_turns(
+                &timeline,
+                &[typed_cached_turn_completed("other-prompt")]
+            )
+            .is_err()
+        );
 
         let exact = cached_turn_completed("prompt-0");
         let envelope: serde_json::Value = serde_json::from_str(&exact).unwrap();
@@ -788,6 +804,11 @@ mod tests {
             "turn_completed"
         );
         validate_ended_user_turns("session", &timeline, &[&exact]).unwrap();
+        super::super::validate_ended_user_turns(
+            &timeline,
+            &[typed_cached_turn_completed("prompt-0")],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -816,8 +837,20 @@ mod tests {
 
         let unrelated = cached_turn_completed("some-other-prompt");
         assert!(validate_ended_user_turns("session", &timeline, &[&unrelated]).is_err());
+        assert!(
+            super::super::validate_ended_user_turns(
+                &timeline,
+                &[typed_cached_turn_completed("some-other-prompt")]
+            )
+            .is_err()
+        );
         let exact = cached_turn_completed(&prompt_id);
         validate_ended_user_turns("session", &timeline, &[&exact]).unwrap();
+        super::super::validate_ended_user_turns(
+            &timeline,
+            &[typed_cached_turn_completed(&prompt_id)],
+        )
+        .unwrap();
         assert_eq!(turn, TurnId(3));
     }
 
@@ -831,6 +864,11 @@ mod tests {
 
         let exact = cached_turn_completed("prompt-0");
         validate_ended_user_turns("session", &timeline, &[&exact]).unwrap();
+        super::super::validate_ended_user_turns(
+            &timeline,
+            &[typed_cached_turn_completed("prompt-0")],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -845,6 +883,7 @@ mod tests {
             vec![serde_json::json!({"type": "text", "text": "prompt-0"})],
         );
         validate_ended_user_turns("session", &timeline, &[]).unwrap();
+        super::super::validate_ended_user_turns(&timeline, &[]).unwrap();
     }
 
     #[test]

@@ -1,0 +1,60 @@
+
+running 1 test
+test resume_input_latency::resume_modern_admission_projection_128_512_turns ... [testkit] admitted history: turns=128 admissions=128 missing_projections=128 updates=0B timeline=4671796B rewind=3434B total=4675230B
+[resume-phase] turns=128 name=pager.frame.diff count=35 sum_ms=10.7 max_ms=0.6
+[resume-phase] turns=128 name=pager.frame.queue count=25 sum_ms=0.1 max_ms=0.0
+[resume-phase] turns=128 name=pager.frame.render count=35 sum_ms=40.4 max_ms=7.1
+[resume-phase] turns=128 name=pager.frame.write count=25 sum_ms=0.7 max_ms=0.1
+[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=128 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=128 name=session.fs_notify_start count=1 sum_ms=4.9 max_ms=4.9
+[resume-phase] turns=128 name=session.load.history_projection count=1 sum_ms=0.6 max_ms=0.6
+[resume-phase] turns=128 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=128 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1
+[resume-phase] turns=128 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1
+[resume-phase] turns=128 name=session.load.timeline_evidence count=3 sum_ms=0.7 max_ms=0.2
+[resume-phase] turns=128 name=session.load.timeline_fold count=3 sum_ms=0.7 max_ms=0.2
+[resume-phase] turns=128 name=session.load.timeline_read_decode count=3 sum_ms=37.5 max_ms=12.8
+[resume-phase] turns=128 name=session.load_light count=1 sum_ms=13.8 max_ms=13.8
+[resume-phase] turns=128 name=session.load_session count=1 sum_ms=128.0 max_ms=128.0
+[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=65.5 max_ms=65.5
+[resume-phase] turns=128 name=session.reconcile_stale_tasks count=1 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=128 name=session.spawn.install_coordination_backend count=1 sum_ms=3.5 max_ms=3.5
+[resume-phase] turns=128 name=session.spawn.prepare count=1 sum_ms=0.5 max_ms=0.5
+[resume-phase] turns=128 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3
+[resume-phase] turns=128 name=session.spawn_actor_call count=1 sum_ms=18.6 max_ms=18.6
+[resume-phase] turns=128 name=session.spawn_and_register count=1 sum_ms=23.0 max_ms=23.0
+[resume-phase] turns=128 name=session.spawn_and_register_session count=1 sum_ms=23.0 max_ms=23.0
+[resume-phase] turns=128 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0
+[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=163.9 ready_ms=193.7 ready_echo_p95_ms=6.4 ready_echo_max_ms=6.4 frames=25
+[testkit] admitted history: turns=512 admissions=512 missing_projections=512 updates=0B timeline=18694843B rewind=3434B total=18698277B
+[resume-phase] turns=512 name=pager.frame.diff count=48 sum_ms=4.8 max_ms=0.2
+[resume-phase] turns=512 name=pager.frame.queue count=27 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=512 name=pager.frame.render count=48 sum_ms=35.4 max_ms=10.3
+[resume-phase] turns=512 name=pager.frame.write count=27 sum_ms=0.6 max_ms=0.2
+[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.0 max_ms=5.0
+[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.8 max_ms=2.8
+[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0
+[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1
+[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1
+[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.3 max_ms=1.2
+[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.9 max_ms=1.2
+[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=153.2 max_ms=51.7
+[resume-phase] turns=512 name=session.load_light count=1 sum_ms=54.4 max_ms=54.4
+[resume-phase] turns=512 name=session.load_session count=1 sum_ms=390.5 max_ms=390.5
+[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=280.3 max_ms=280.3
+[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1
+[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.2 max_ms=4.2
+[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6
+[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3
+[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=21.8 max_ms=21.8
+[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=27.1 max_ms=27.1
+[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=27.1 max_ms=27.1
+[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0
+[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=451.2 ready_ms=481.4 ready_echo_p95_ms=4.3 ready_echo_max_ms=4.3 frames=27
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 2.87s
+

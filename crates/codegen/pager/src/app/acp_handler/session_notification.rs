@@ -335,7 +335,8 @@ pub(super) fn drop_unexpected_replay(
 /// every applied arm (Plan, bg-stdout, tracker) — dropped updates (dedup,
 /// promptId gate, unexpected replay) deliberately don't move it.
 pub(super) fn advance_reconnect_cursor(agent: &mut AgentView, meta: &mut NotificationMeta) {
-    if let Some(id) = meta.event_id.take() {
+    agent.note_history_applied(meta.history_cursor.as_deref());
+    if let Some(id) = meta.history_cursor.take().or_else(|| meta.event_id.take()) {
         agent.advance_reconnect_cursor(id, meta.is_replay);
     }
 }
@@ -522,20 +523,32 @@ fn handle_session_notification_inner(
         tracing::warn!("Failed to parse {}", notif.method.as_ref());
         return false;
     };
-    match &session_notif.update {
-        GrowSessionUpdate::TaskBackgrounded { .. } => {
-            return handle_task_backgrounded(notif, app);
-        }
-        GrowSessionUpdate::TaskCompleted { .. } => {
-            return handle_task_completed(notif, app);
-        }
+    let background_changed = match &session_notif.update {
+        GrowSessionUpdate::TaskBackgrounded { .. } => Some(handle_task_backgrounded(notif, app)),
+        GrowSessionUpdate::TaskCompleted { .. } => Some(handle_task_completed(notif, app)),
         GrowSessionUpdate::ScheduledTaskCreated { .. } => {
-            return handle_scheduled_task_created(notif, app);
+            Some(handle_scheduled_task_created(notif, app))
         }
         GrowSessionUpdate::ScheduledTaskDeleted { .. } => {
-            return handle_scheduled_task_deleted(notif, app);
+            Some(handle_scheduled_task_deleted(notif, app))
         }
-        _ => {}
+        _ => None,
+    };
+    if let Some(changed) = background_changed {
+        if changed
+            && let Some(matched) = find_session_match(app, &session_notif.session_id)
+            && let Some(agent) = app.agents.get_mut(&matched.agent_id())
+        {
+            agent.note_history_applied(
+                session_notif
+                    .meta
+                    .as_ref()
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|meta| meta.get("grow/historyCursor"))
+                    .and_then(serde_json::Value::as_str),
+            );
+        }
+        return changed;
     }
     let matched = match forced_descendant_owner
         .filter(|owner| {
@@ -657,7 +670,8 @@ fn handle_session_notification_inner(
             if let Some(seq) = meta.event_seq {
                 child.session.last_applied_grow_event_seq = Some(seq);
             }
-            if let Some(id) = meta.event_id {
+            child.note_history_applied(meta.history_cursor.as_deref());
+            if let Some(id) = meta.history_cursor.or(meta.event_id) {
                 child.advance_reconnect_cursor(id, meta.is_replay);
             }
         }
@@ -1612,7 +1626,8 @@ fn handle_session_notification_inner(
                     if let Some(seq) = meta.event_seq {
                         parent_view.session.last_applied_grow_event_seq = Some(seq);
                     }
-                    if let Some(id) = meta.event_id {
+                    parent_view.note_history_applied(meta.history_cursor.as_deref());
+                    if let Some(id) = meta.history_cursor.or(meta.event_id) {
                         parent_view.advance_reconnect_cursor(id, meta.is_replay);
                     }
                 }
@@ -1625,7 +1640,10 @@ fn handle_session_notification_inner(
             {
                 agent.session.last_applied_grow_event_seq = Some(seq);
             }
-            if let Some(id) = meta.event_id
+            if !late_lifecycle {
+                agent.note_history_applied(meta.history_cursor.as_deref());
+            }
+            if let Some(id) = meta.history_cursor.or(meta.event_id)
                 && !late_lifecycle
             {
                 agent.advance_reconnect_cursor(id, meta.is_replay);

@@ -1,0 +1,26 @@
+{
+  "crates/codegen/pager/src/scrollback/blocks/replay_media_tests.rs": {
+    "before": "da47d200f48f5015d9cf090c77e4cbb1d947522b7658acee7217af4cdfedc6d3",
+    "after": "5b82c091ea6574273f132e452d195955220e5443d38bac6e7b1e12c4849f9416"
+  },
+  "crates/codegen/pager/src/scrollback/blocks/agent.rs": {
+    "before": "9f494d300d39dc5d3a90e56f3b8f8f758e4003c4dcc360c08a34ff45923f166c",
+    "after": "7632727c4e3ce9ba01feb2526f2d0dfdfe9c2b60d095981fd7aeb1bc2165f3ee"
+  },
+  "crates/codegen/pager-render/src/prompt_images.rs": {
+    "before": "0d226989d8b23cefe1f13ee9548b0aad902235812aa6d3db1c7a14490f394f50",
+    "after": "bba0ffd2350e1c9d60792807bee0590b30570b452b8f6275ad22b967c43c169c"
+  },
+  "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs": {
+    "before": "94e1e289d9f276d5366e2bd9675b898ea6ed5b6772971d306b9ad0818ee456c9",
+    "after": "d6566f61a88c74a384409cf02819c41063dec163d2c900a146e8b06965693326"
+  },
+  "crates/codegen/pager/src/scrollback/state/layout/replay_tests.rs": {
+    "before": "63171c2edb97f54281f958f5482ffffdd80d9150548b30d9730024a8074f2866",
+    "after": "9146437b5cf664385fd4237bfd4bfd508a65be1129f8838b2c23029bea1caa76"
+  },
+  "crates/codegen/pager/src/scrollback/blocks/source_scan_tests.rs": {
+    "before": "bdc1e29faa6518e072d5a4167fe0f17b326b04a7db05c00cd21da66cdb449f53",
+    "after": "3a5bbda30f992f61a6acd6e911b15cac432c75cbed96f5fa0f5bcba1944c2780"
+  }
+}

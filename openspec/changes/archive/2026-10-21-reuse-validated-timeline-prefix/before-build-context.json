@@ -1,0 +1,33 @@
+{
+  "baseline_context": {
+    "path": "baseline-build-context.json",
+    "sha256": "0a74695e4456e5b56aed08c750f833e293c6c7b856597d15d84ccdde5614d6a3"
+  },
+  "head": "a1d1c2965075c87645eab22adce6d48b19410c59",
+  "platform": "macOS 27.0.1 arm64 (same recorded build platform as baseline)",
+  "toolchain": "Rust 1.93.1 (recorded in baseline build context)",
+  "target_dir": "/Users/lordcasser/workspace/projects/grow/target/resume-release",
+  "profile": "normal --release; workspace settings unchanged",
+  "build_jobs": 4,
+  "incremental": false,
+  "source_sha256": {
+    "Cargo.toml": "55b6e04c016a8f38afde2e9c55f721cb9dcf77f9695802bd9d2f3710c04fece6",
+    "Cargo.lock": "f1a77cf803507ac9bf31f31f4ce78336e8f296121985d39b6f4be5bac355f6b7",
+    "rust-toolchain.toml": "9940224d9ec981b239b10371b7d98c559b3fe5196a4c54a451da127786c77bca",
+    "crates/codegen/chat-state/src/timeline.rs": "316c98f293ef6ebd5c8d3e4d5e261bc39e678d40414bd1d7c024e377bf42b335",
+    "crates/codegen/shell/src/session/storage/jsonl/mod.rs": "9750c086b628e383fe7103792caaee436549eb0c86d971d8d09f66eea1574733",
+    "crates/codegen/shell/src/session/response_projection.rs": "5fd080e7b8def085952eb90430e80c8425f64e372ef682921bb2505436255392",
+    "crates/codegen/shell/src/agent/mvp_agent/mod.rs": "db9259440ed5bb14660011d06ecc47f7de1b586941812fd4e840d32d1fda21ff",
+    "crates/codegen/shell/tests/session_load_perf.rs": "c58005caf6df87da0d418b5c8cf0530e24b59c3c09724bbee6ce352721ec1d2b"
+  },
+  "working_tree_diff_sha256": "85a606b2280bb3da8b77df2dda0edfacf912aabc601b02224f18744e9331d95c",
+  "working_tree_diff_scope": "SHA-256 of git diff HEAD --binary (tracked files only); this shared worktree also contains untracked files, and the fingerprint does not attribute any dirty file to this change.",
+  "cli_binary": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/grow",
+  "cli_sha256": "e9056c001db64805699cd19d96d7f6a0df294793f04de4aa35f947721c760bdf",
+  "cli_version": "grow 2.4.3 (a1d1c296) [stable]",
+  "measurement_binary": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/session_load_perf-7e3695fd37f050d9",
+  "measurement_binary_sha256": "a51f214cb193a891f83457deb94392a9555e29fa5d3b7e481a86ff341824a549",
+  "measurement_fixture": "cold process; warm page cache; fixture setup outside timed RPC",
+  "measurement_rss_scope": "whole test process including fixture generation and post-load updates read; not isolated load peak",
+  "baseline": "C1 archived implementation; fresh C2 before matrix uses same release perf executable; later concurrent UI-only work is not attributed to C2"
+}

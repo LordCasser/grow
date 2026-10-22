@@ -1,0 +1,64 @@
+
+running 1 test
+test full_session_load_e2e ... [testkit] admitted history: turns=512 admissions=512 missing_projections=32 updates=18222273B timeline=17752322B rewind=5482B total=35980077B
+
+[perf] e2e session: updates=18.2 MB rewind=0.0 MB
+
+[perf] e2e: updates.jsonl composition (18.2 MB total):
+  sessionUpdate kind                  count         MB       %
+  response_replay_projection            480       15.9   87.4%
+  available_commands_update            1024        2.0   11.0%
+  agent_message_chunk                   512        0.2    1.0%
+  user_message_chunk                    512        0.1    0.6%
+
+[perf] ===== END-TO-END session/load (what the pager waits on) =====
+  total session/load round-trip :    3045.2 ms
+  notifications replayed         :      1028
+  available_commands_update      :         1 replayed / 1024 on disk
+  live catalog reached          :      true
+  time-to-first notification     :    2003.0 ms
+  time-to-last notification      :    3045.2 ms
+  first historical text          :    2003.0 ms
+  last historical text           :    2348.8 ms
+  historical text chunks / bytes : 1024 / 16797586
+  ---- shell-side nested/inclusive timers (not additive) ----
+  session.load_session                                3043.4 ms count=1
+  session.load_light                                  1300.9 ms count=1
+  session.load_session_replay                          808.2 ms count=1
+  session.spawn_and_register_session                   803.2 ms count=1
+  session.spawn_and_register                           803.0 ms count=1
+  session.load.response_projection_plan                684.0 ms count=1
+  session.projection.typed_canonical                   681.9 ms count=1
+  session.spawn_actor_call                             492.3 ms count=1
+  session.replay.forward_updates                       395.8 ms count=1
+  session.spawn.install_coordination_backend           309.3 ms count=1
+  session.load.response_projection_appends             243.7 ms count=1
+  session.load.timeline_read_decode                    232.6 ms count=1
+  session.replay.drain_completions                     228.7 ms count=1
+  session.replay.read_and_reconcile                    176.8 ms count=1
+  session.load.physical_updates_decode                 133.4 ms count=1
+  session.replay.response_reconcile                    102.7 ms count=1
+  session.reconcile_stale_tasks                         49.5 ms count=1
+  skill_discovery                                       14.5 ms count=2
+  session.replay.read_snapshot                           6.7 ms count=1
+  session.load.timeline_fold                             3.9 ms count=1
+  session.load.timeline_evidence                         1.4 ms count=1
+  session.spawn.prepare                                  0.8 ms count=1
+  session.spawn.publish_coordination                     0.4 ms count=1
+  session.load.projection_metadata                       0.3 ms count=1
+  plugin_discovery                                       0.3 ms count=2
+  session.load.state_projections                         0.1 ms count=1
+  mcp_merge                                              0.1 ms count=1
+  session.load.open_session                              0.1 ms count=1
+  session.replay.communication_restore                   0.1 ms count=1
+  session.load.model_route_reconcile                     0.1 ms count=1
+  session.delta_flush_replay                             0.0 ms count=1
+  session.stale_tasks_drain_completions                  0.0 ms count=1
+  session.delta_drain_completions                        0.0 ms count=1
+================================================================
+
+PERF_RESUME {"format":"modern","turns":512,"missing_every":"16","route_seeded":true,"timeline_bytes":17752322,"updates_bytes":18222273,"load_ms":3045.219292,"first_notification_ms":2003.012,"first_history_ms":2003.012,"last_history_ms":2348.831292,"max_history_gap_ms":98.18995799999999,"history_count":1024,"history_bytes":16797586,"phases":[{"name":"session.load_session","count":1,"ms":3043.406},{"name":"session.load_light","count":1,"ms":1300.885},{"name":"session.load_session_replay","count":1,"ms":808.205},{"name":"session.spawn_and_register_session","count":1,"ms":803.165},{"name":"session.spawn_and_register","count":1,"ms":802.957},{"name":"session.load.response_projection_plan","count":1,"ms":684.012},{"name":"session.projection.typed_canonical","count":1,"ms":681.858},{"name":"session.spawn_actor_call","count":1,"ms":492.28},{"name":"session.replay.forward_updates","count":1,"ms":395.823},{"name":"session.spawn.install_coordination_backend","count":1,"ms":309.26},{"name":"session.load.response_projection_appends","count":1,"ms":243.743},{"name":"session.load.timeline_read_decode","count":1,"ms":232.591},{"name":"session.replay.drain_completions","count":1,"ms":228.703},{"name":"session.replay.read_and_reconcile","count":1,"ms":176.785},{"name":"session.load.physical_updates_decode","count":1,"ms":133.365},{"name":"session.replay.response_reconcile","count":1,"ms":102.653},{"name":"session.reconcile_stale_tasks","count":1,"ms":49.509},{"name":"skill_discovery","count":2,"ms":14.533999999999999},{"name":"session.replay.read_snapshot","count":1,"ms":6.68},{"name":"session.load.timeline_fold","count":1,"ms":3.907},{"name":"session.load.timeline_evidence","count":1,"ms":1.356},{"name":"session.spawn.prepare","count":1,"ms":0.824},{"name":"session.spawn.publish_coordination","count":1,"ms":0.38},{"name":"session.load.projection_metadata","count":1,"ms":0.338},{"name":"plugin_discovery","count":2,"ms":0.27},{"name":"session.load.state_projections","count":1,"ms":0.129},{"name":"mcp_merge","count":1,"ms":0.122},{"name":"session.load.open_session","count":1,"ms":0.107},{"name":"session.replay.communication_restore","count":1,"ms":0.057},{"name":"session.load.model_route_reconcile","count":1,"ms":0.053},{"name":"session.delta_flush_replay","count":1,"ms":0.007},{"name":"session.stale_tasks_drain_completions","count":1,"ms":0.001},{"name":"session.delta_drain_completions","count":1,"ms":0.0}]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 5.90s
+

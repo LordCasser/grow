@@ -1,0 +1,42 @@
+{
+  "grow": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-grow",
+    "sha256": "709ccda97b7b5570fe452db816d4d1b6b8746cadb48c0acf467543e290e3768d"
+  },
+  "mermaid_playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-mermaid_playground",
+    "sha256": "caaccda4c1a367ff2324919378ba7558ff413c02f421a9126ddca8c3f2b51e94"
+  },
+  "mouse-events-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-mouse-events-playground",
+    "sha256": "c802b262f90870daa27b2a5bf478baf8331cfeb661e8afc536714564db575ae6"
+  },
+  "question-view-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-question-view-playground",
+    "sha256": "d04e93c1c5cea98a6e37c7c500008c8af9d848f28f1bebb93ba5a0c71ed55524"
+  },
+  "scrollback-selection-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-scrollback-selection-playground",
+    "sha256": "1260505299bfe5b69ddce2830bc7d13484fb0a8374f39bb8e0f074c19e2f76ae"
+  },
+  "scrollback_search_playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-scrollback_search_playground",
+    "sha256": "dbfb631cc9f87fdb1c6bdc9c9e21741b355de1277019e8a4b37a94a271d055b1"
+  },
+  "todo-pane-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-todo-pane-playground",
+    "sha256": "9ad18a7ab4a520f3ce8cd0beb8e40d41cdcfdadfacf2988faa2ead3ffa72a587"
+  },
+  "pty_e2e_persistence": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-pty_e2e_persistence",
+    "sha256": "2697eb24f0ad94f0d70fc07d3ffd79374b19f249f174f9dfd372e42796147c06"
+  },
+  "pager": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-pager",
+    "sha256": "65ba020e64fbceb9b1c8247048205520a4fe33748b4222ca22766f376221f476"
+  },
+  "markdown": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-markdown",
+    "sha256": "a846c92d212bed7034f144a4ce957cfc008fd93ee2a049405a7385bcb41a1991"
+  }
+}

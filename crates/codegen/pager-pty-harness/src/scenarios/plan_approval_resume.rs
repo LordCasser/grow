@@ -280,8 +280,6 @@ fn foreground_request_count(content: &ContentController) -> usize {
 }
 
 fn has_durable_deferred_receipt(grow_home: &std::path::Path, artifact_hash: &str) -> Result<bool> {
-    use std::io::BufRead;
-
     let sessions = grow_home.join("sessions");
     let sessions = match std::fs::read_dir(sessions) {
         Ok(entries) => entries,
@@ -300,15 +298,14 @@ fn has_durable_deferred_receipt(grow_home: &std::path::Path, artifact_hash: &str
                 continue;
             }
             let timeline = session.join("timeline.jsonl");
-            let file = match std::fs::File::open(timeline) {
-                Ok(file) => file,
+            let typed_timeline = match shell::session::testkit::read_timeline_fixture(&timeline) {
+                Ok(timeline) => timeline,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
             let mut latest_behavior = None;
-            for line in std::io::BufReader::new(file).lines() {
-                let line = line?;
-                let event: serde_json::Value = serde_json::from_str(&line)?;
+            for event in typed_timeline.events() {
+                let event = serde_json::to_value(event)?;
                 if event.get("type").and_then(serde_json::Value::as_str) == Some("control") {
                     latest_behavior = event
                         .get("event")

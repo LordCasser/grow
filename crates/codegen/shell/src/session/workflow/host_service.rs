@@ -1034,7 +1034,6 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1158,7 +1157,6 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1331,7 +1329,6 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1411,7 +1408,6 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
-            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();

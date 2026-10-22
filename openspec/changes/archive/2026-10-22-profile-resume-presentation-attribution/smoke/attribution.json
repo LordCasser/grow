@@ -1,0 +1,1158 @@
+[
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "turns": 128,
+    "source": "after-modern-1/run-modern-128-85167-1792633353045386000-loading.json",
+    "source_stats": {
+      "timeline_bytes": 4672054,
+      "updates_bytes": 0,
+      "timeline_and_updates_bytes": 4672054,
+      "counted_files": [
+        "timeline.jsonl",
+        "updates.jsonl"
+      ],
+      "excluded_source_files": [
+        "summary and other session files"
+      ],
+      "source_file_count": 1,
+      "history_body": {
+        "notifications": 257,
+        "notification_types": {
+          "agent_message_chunk": 129,
+          "user_message_chunk": 128
+        },
+        "canonical_turns_by_fixture_sequence_marker": 128,
+        "assistant_message_notifications": 129,
+        "message_blocks": 257,
+        "block_types": {
+          "text": 257
+        },
+        "text_bytes": 4199330,
+        "scope": "typed_projector_output",
+        "matches_runtime_notification_input": true
+      }
+    },
+    "phases": {
+      "pager.frame.render": {
+        "count": 5,
+        "sum_ms": 9.606,
+        "max_ms": 7.916,
+        "source_bytes": 0
+      },
+      "pager.frame.diff": {
+        "count": 5,
+        "sum_ms": 0.741,
+        "max_ms": 0.282,
+        "source_bytes": 0
+      },
+      "pager.frame.queue": {
+        "count": 3,
+        "sum_ms": 0.016,
+        "max_ms": 0.011,
+        "source_bytes": 0
+      },
+      "pager.frame.present": {
+        "count": 5,
+        "sum_ms": 10.704,
+        "max_ms": 8.151,
+        "source_bytes": 0
+      },
+      "pager.frame.wait": {
+        "count": 3,
+        "sum_ms": 0.043,
+        "max_ms": 0.024,
+        "source_bytes": 0
+      },
+      "pager.frame.write": {
+        "count": 3,
+        "sum_ms": 0.196,
+        "max_ms": 0.077,
+        "source_bytes": 0
+      },
+      "pager.frame.delivery": {
+        "count": 3,
+        "sum_ms": 0.308,
+        "max_ms": 0.132,
+        "source_bytes": 0
+      },
+      "plugin_discovery": {
+        "count": 2,
+        "sum_ms": 0.119,
+        "max_ms": 0.072,
+        "source_bytes": 0
+      },
+      "mcp_merge": {
+        "count": 1,
+        "sum_ms": 0.104,
+        "max_ms": 0.104,
+        "source_bytes": 0
+      },
+      "session.load.open_session": {
+        "count": 1,
+        "sum_ms": 0.072,
+        "max_ms": 0.072,
+        "source_bytes": 0
+      },
+      "session.load.timeline_read_decode": {
+        "count": 2,
+        "sum_ms": 25.958,
+        "max_ms": 13.018,
+        "source_bytes": 0
+      },
+      "session.load.timeline_fold": {
+        "count": 2,
+        "sum_ms": 0.443,
+        "max_ms": 0.254,
+        "source_bytes": 0
+      },
+      "session.load.timeline_evidence": {
+        "count": 2,
+        "sum_ms": 0.583,
+        "max_ms": 0.327,
+        "source_bytes": 0
+      },
+      "session.load.state_projections": {
+        "count": 1,
+        "sum_ms": 0.103,
+        "max_ms": 0.103,
+        "source_bytes": 0
+      },
+      "session.load_light": {
+        "count": 1,
+        "sum_ms": 14.17,
+        "max_ms": 14.17,
+        "source_bytes": 0
+      },
+      "session.load.model_route_reconcile": {
+        "count": 1,
+        "sum_ms": 0.005,
+        "max_ms": 0.005,
+        "source_bytes": 0
+      },
+      "session.load.history_projection": {
+        "count": 1,
+        "sum_ms": 0.744,
+        "max_ms": 0.744,
+        "source_bytes": 0
+      },
+      "pager.markdown.finish": {
+        "count": 128,
+        "sum_ms": 50.35300000000003,
+        "max_ms": 2.311,
+        "source_bytes": 4196368
+      },
+      "pager.message.image_refs": {
+        "count": 128,
+        "sum_ms": 6.247999999999984,
+        "max_ms": 0.612,
+        "source_bytes": 4196368
+      },
+      "pager.message.mermaid": {
+        "count": 128,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "pager.message.finish": {
+        "count": 128,
+        "sum_ms": 57.66300000000004,
+        "max_ms": 2.933,
+        "source_bytes": 0
+      },
+      "pager.acp.apply_batch": {
+        "count": 13,
+        "sum_ms": 64.89799999999998,
+        "max_ms": 9.849,
+        "source_bytes": 0
+      },
+      "session.load_session_replay": {
+        "count": 1,
+        "sum_ms": 65.187,
+        "max_ms": 65.187,
+        "source_bytes": 0
+      },
+      "session.delta_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.reconcile_stale_tasks": {
+        "count": 1,
+        "sum_ms": 0.056,
+        "max_ms": 0.056,
+        "source_bytes": 0
+      },
+      "session.stale_tasks_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.spawn.prepare": {
+        "count": 1,
+        "sum_ms": 0.896,
+        "max_ms": 0.896,
+        "source_bytes": 0
+      },
+      "skill_discovery": {
+        "count": 2,
+        "sum_ms": 0.339,
+        "max_ms": 0.171,
+        "source_bytes": 0
+      },
+      "session.spawn_actor_call": {
+        "count": 1,
+        "sum_ms": 24.638,
+        "max_ms": 24.638,
+        "source_bytes": 0
+      },
+      "pager.markdown.wrap": {
+        "count": 2,
+        "sum_ms": 2.73,
+        "max_ms": 1.577,
+        "source_bytes": 65584
+      },
+      "session.spawn.install_coordination_backend": {
+        "count": 1,
+        "sum_ms": 4.163,
+        "max_ms": 4.163,
+        "source_bytes": 0
+      },
+      "session.spawn.publish_coordination": {
+        "count": 1,
+        "sum_ms": 0.387,
+        "max_ms": 0.387,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register": {
+        "count": 1,
+        "sum_ms": 30.263,
+        "max_ms": 30.263,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register_session": {
+        "count": 1,
+        "sum_ms": 30.399,
+        "max_ms": 30.399,
+        "source_bytes": 0
+      },
+      "session.fs_notify_start": {
+        "count": 1,
+        "sum_ms": 6.074,
+        "max_ms": 6.074,
+        "source_bytes": 0
+      },
+      "session.load_session": {
+        "count": 1,
+        "sum_ms": 137.742,
+        "max_ms": 137.742,
+        "source_bytes": 0
+      },
+      "pager.replay.end_batch": {
+        "count": 1,
+        "sum_ms": 0.009,
+        "max_ms": 0.009,
+        "source_bytes": 0
+      },
+      "pager.replay.release_memory": {
+        "count": 1,
+        "sum_ms": 1.396,
+        "max_ms": 1.396,
+        "source_bytes": 0
+      },
+      "pager.replay.finalize": {
+        "count": 1,
+        "sum_ms": 15.594,
+        "max_ms": 15.594,
+        "source_bytes": 0
+      }
+    },
+    "slow_progress": null,
+    "events": [
+      {
+        "kind": "process_started",
+        "elapsed_ms": 0.0
+      },
+      {
+        "kind": "first_sequence_marker_pty_received",
+        "marker": "GROW_SEQ_000128",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 1390.29375
+      },
+      {
+        "kind": "last_history_marker_pty_received",
+        "marker": "GROW_SEQ_000128",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 1390.29375
+      },
+      {
+        "kind": "first_sequence_marker_visible",
+        "marker": "GROW_SEQ_000128",
+        "elapsed_ms": 1396.6948750000001
+      },
+      {
+        "kind": "last_history_marker_visible",
+        "marker": "GROW_SEQ_000128",
+        "elapsed_ms": 1396.6948750000001
+      },
+      {
+        "kind": "replay_completion_observed",
+        "timer": "pager.replay.finalize",
+        "legacy_proxy": false,
+        "elapsed_ms": 1442.1905829999998
+      },
+      {
+        "kind": "ready_prompt_stable",
+        "elapsed_ms": 1969.5512499999998
+      }
+    ],
+    "loading_applied_notifications": 265,
+    "loading_apply_batch_ms": 64.898,
+    "loading_frame_sequences": [
+      2,
+      3
+    ],
+    "loading_frame_wait_ms": [
+      0.008,
+      0.024
+    ],
+    "loading_writer_ack_observation_delta_ms": [
+      0.004,
+      -0.001
+    ]
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "turns": 512,
+    "source": "after-modern-1/run-modern-512-85167-1792633354756061000-loading.json",
+    "source_stats": {
+      "timeline_bytes": 18695101,
+      "updates_bytes": 0,
+      "timeline_and_updates_bytes": 18695101,
+      "counted_files": [
+        "timeline.jsonl",
+        "updates.jsonl"
+      ],
+      "excluded_source_files": [
+        "summary and other session files"
+      ],
+      "source_file_count": 1,
+      "history_body": {
+        "notifications": 1025,
+        "notification_types": {
+          "agent_message_chunk": 513,
+          "user_message_chunk": 512
+        },
+        "canonical_turns_by_fixture_sequence_marker": 512,
+        "assistant_message_notifications": 513,
+        "message_blocks": 1025,
+        "block_types": {
+          "text": 1025
+        },
+        "text_bytes": 16797602,
+        "scope": "typed_projector_output",
+        "matches_runtime_notification_input": true
+      }
+    },
+    "phases": {
+      "pager.frame.render": {
+        "count": 6,
+        "sum_ms": 22.313,
+        "max_ms": 8.995,
+        "source_bytes": 0
+      },
+      "pager.frame.diff": {
+        "count": 6,
+        "sum_ms": 0.71,
+        "max_ms": 0.192,
+        "source_bytes": 0
+      },
+      "pager.frame.queue": {
+        "count": 5,
+        "sum_ms": 0.018000000000000002,
+        "max_ms": 0.009,
+        "source_bytes": 0
+      },
+      "pager.frame.present": {
+        "count": 6,
+        "sum_ms": 23.345,
+        "max_ms": 9.142,
+        "source_bytes": 0
+      },
+      "pager.frame.wait": {
+        "count": 5,
+        "sum_ms": 0.057,
+        "max_ms": 0.024,
+        "source_bytes": 0
+      },
+      "pager.frame.write": {
+        "count": 5,
+        "sum_ms": 0.265,
+        "max_ms": 0.124,
+        "source_bytes": 0
+      },
+      "pager.frame.delivery": {
+        "count": 5,
+        "sum_ms": 0.41200000000000003,
+        "max_ms": 0.163,
+        "source_bytes": 0
+      },
+      "plugin_discovery": {
+        "count": 2,
+        "sum_ms": 0.112,
+        "max_ms": 0.064,
+        "source_bytes": 0
+      },
+      "mcp_merge": {
+        "count": 1,
+        "sum_ms": 0.095,
+        "max_ms": 0.095,
+        "source_bytes": 0
+      },
+      "session.load.open_session": {
+        "count": 1,
+        "sum_ms": 0.07,
+        "max_ms": 0.07,
+        "source_bytes": 0
+      },
+      "session.load.timeline_read_decode": {
+        "count": 2,
+        "sum_ms": 101.72200000000001,
+        "max_ms": 50.915,
+        "source_bytes": 0
+      },
+      "session.load.timeline_fold": {
+        "count": 2,
+        "sum_ms": 2.0140000000000002,
+        "max_ms": 1.101,
+        "source_bytes": 0
+      },
+      "session.load.timeline_evidence": {
+        "count": 2,
+        "sum_ms": 2.186,
+        "max_ms": 1.101,
+        "source_bytes": 0
+      },
+      "session.load.state_projections": {
+        "count": 1,
+        "sum_ms": 0.105,
+        "max_ms": 0.105,
+        "source_bytes": 0
+      },
+      "session.load_light": {
+        "count": 1,
+        "sum_ms": 53.672,
+        "max_ms": 53.672,
+        "source_bytes": 0
+      },
+      "session.load.model_route_reconcile": {
+        "count": 1,
+        "sum_ms": 0.005,
+        "max_ms": 0.005,
+        "source_bytes": 0
+      },
+      "session.load.history_projection": {
+        "count": 1,
+        "sum_ms": 2.542,
+        "max_ms": 2.542,
+        "source_bytes": 0
+      },
+      "pager.markdown.finish": {
+        "count": 512,
+        "sum_ms": 190.43200000000002,
+        "max_ms": 1.408,
+        "source_bytes": 16785424
+      },
+      "pager.message.image_refs": {
+        "count": 512,
+        "sum_ms": 23.217000000000144,
+        "max_ms": 0.292,
+        "source_bytes": 16785424
+      },
+      "pager.message.mermaid": {
+        "count": 512,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "pager.message.finish": {
+        "count": 512,
+        "sum_ms": 217.75099999999978,
+        "max_ms": 1.715,
+        "source_bytes": 0
+      },
+      "pager.acp.apply_batch": {
+        "count": 37,
+        "sum_ms": 233.74800000000002,
+        "max_ms": 8.132,
+        "source_bytes": 0
+      },
+      "pager.markdown.wrap": {
+        "count": 6,
+        "sum_ms": 7.101,
+        "max_ms": 1.274,
+        "source_bytes": 196720
+      },
+      "session.load_session_replay": {
+        "count": 1,
+        "sum_ms": 251.562,
+        "max_ms": 251.562,
+        "source_bytes": 0
+      },
+      "session.delta_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.reconcile_stale_tasks": {
+        "count": 1,
+        "sum_ms": 0.134,
+        "max_ms": 0.134,
+        "source_bytes": 0
+      },
+      "session.stale_tasks_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.spawn.prepare": {
+        "count": 1,
+        "sum_ms": 0.59,
+        "max_ms": 0.59,
+        "source_bytes": 0
+      },
+      "skill_discovery": {
+        "count": 2,
+        "sum_ms": 0.28,
+        "max_ms": 0.168,
+        "source_bytes": 0
+      },
+      "session.spawn_actor_call": {
+        "count": 1,
+        "sum_ms": 24.273,
+        "max_ms": 24.273,
+        "source_bytes": 0
+      },
+      "session.spawn.install_coordination_backend": {
+        "count": 1,
+        "sum_ms": 4.046,
+        "max_ms": 4.046,
+        "source_bytes": 0
+      },
+      "session.spawn.publish_coordination": {
+        "count": 1,
+        "sum_ms": 0.348,
+        "max_ms": 0.348,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register": {
+        "count": 1,
+        "sum_ms": 29.418,
+        "max_ms": 29.418,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register_session": {
+        "count": 1,
+        "sum_ms": 29.455,
+        "max_ms": 29.455,
+        "source_bytes": 0
+      },
+      "session.fs_notify_start": {
+        "count": 1,
+        "sum_ms": 5.152,
+        "max_ms": 5.152,
+        "source_bytes": 0
+      },
+      "session.load_session": {
+        "count": 1,
+        "sum_ms": 370.606,
+        "max_ms": 370.606,
+        "source_bytes": 0
+      },
+      "pager.replay.end_batch": {
+        "count": 1,
+        "sum_ms": 0.034,
+        "max_ms": 0.034,
+        "source_bytes": 0
+      },
+      "pager.replay.release_memory": {
+        "count": 1,
+        "sum_ms": 2.164,
+        "max_ms": 2.164,
+        "source_bytes": 0
+      },
+      "pager.replay.finalize": {
+        "count": 1,
+        "sum_ms": 56.344,
+        "max_ms": 56.344,
+        "source_bytes": 0
+      }
+    },
+    "slow_progress": null,
+    "events": [
+      {
+        "kind": "process_started",
+        "elapsed_ms": 0.0
+      },
+      {
+        "kind": "first_sequence_marker_pty_received",
+        "marker": "GROW_SEQ_000112",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 164.785708
+      },
+      {
+        "kind": "last_history_marker_pty_received",
+        "marker": "GROW_SEQ_000512",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 479.9635
+      },
+      {
+        "kind": "first_sequence_marker_visible",
+        "marker": "GROW_SEQ_000112",
+        "elapsed_ms": 172.687833
+      },
+      {
+        "kind": "last_history_marker_visible",
+        "marker": "GROW_SEQ_000512",
+        "elapsed_ms": 413.963208
+      },
+      {
+        "kind": "replay_completion_observed",
+        "timer": "pager.replay.finalize",
+        "legacy_proxy": false,
+        "elapsed_ms": 487.664583
+      },
+      {
+        "kind": "ready_prompt_stable",
+        "elapsed_ms": 1035.82525
+      }
+    ],
+    "loading_applied_notifications": 1033,
+    "loading_apply_batch_ms": 233.748,
+    "loading_frame_sequences": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "loading_frame_wait_ms": [
+      0.004,
+      0.008,
+      0.009,
+      0.024
+    ],
+    "loading_writer_ack_observation_delta_ms": [
+      0.011,
+      7.2509999999999994,
+      -0.001,
+      0.0
+    ]
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "turns": 128,
+    "source": "before-modern-1/run-modern-128-85149-1792633349034522000-loading.json",
+    "source_stats": {
+      "timeline_bytes": 4672054,
+      "updates_bytes": 0,
+      "timeline_and_updates_bytes": 4672054,
+      "counted_files": [
+        "timeline.jsonl",
+        "updates.jsonl"
+      ],
+      "excluded_source_files": [
+        "summary and other session files"
+      ],
+      "source_file_count": 1,
+      "history_body": {
+        "notifications": 257,
+        "notification_types": {
+          "agent_message_chunk": 129,
+          "user_message_chunk": 128
+        },
+        "canonical_turns_by_fixture_sequence_marker": 128,
+        "assistant_message_notifications": 129,
+        "message_blocks": 257,
+        "block_types": {
+          "text": 257
+        },
+        "text_bytes": 4199330,
+        "scope": "typed_projector_output",
+        "matches_runtime_notification_input": true
+      }
+    },
+    "phases": {
+      "pager.frame.render": {
+        "count": 5,
+        "sum_ms": 8.971,
+        "max_ms": 7.06,
+        "source_bytes": 0
+      },
+      "pager.frame.diff": {
+        "count": 5,
+        "sum_ms": 0.76,
+        "max_ms": 0.291,
+        "source_bytes": 0
+      },
+      "pager.frame.queue": {
+        "count": 3,
+        "sum_ms": 0.011,
+        "max_ms": 0.008,
+        "source_bytes": 0
+      },
+      "pager.frame.write": {
+        "count": 3,
+        "sum_ms": 0.173,
+        "max_ms": 0.071,
+        "source_bytes": 0
+      },
+      "plugin_discovery": {
+        "count": 2,
+        "sum_ms": 0.111,
+        "max_ms": 0.065,
+        "source_bytes": 0
+      },
+      "mcp_merge": {
+        "count": 1,
+        "sum_ms": 0.095,
+        "max_ms": 0.095,
+        "source_bytes": 0
+      },
+      "session.load.open_session": {
+        "count": 1,
+        "sum_ms": 0.064,
+        "max_ms": 0.064,
+        "source_bytes": 0
+      },
+      "session.load.timeline_read_decode": {
+        "count": 1,
+        "sum_ms": 13.123,
+        "max_ms": 13.123,
+        "source_bytes": 0
+      },
+      "session.load.timeline_fold": {
+        "count": 1,
+        "sum_ms": 0.242,
+        "max_ms": 0.242,
+        "source_bytes": 0
+      },
+      "session.load.timeline_evidence": {
+        "count": 1,
+        "sum_ms": 0.435,
+        "max_ms": 0.435,
+        "source_bytes": 0
+      },
+      "session.load.state_projections": {
+        "count": 1,
+        "sum_ms": 0.068,
+        "max_ms": 0.068,
+        "source_bytes": 0
+      },
+      "session.load_light": {
+        "count": 1,
+        "sum_ms": 14.421,
+        "max_ms": 14.421,
+        "source_bytes": 0
+      },
+      "session.load.model_route_reconcile": {
+        "count": 1,
+        "sum_ms": 0.004,
+        "max_ms": 0.004,
+        "source_bytes": 0
+      },
+      "session.load.history_projection": {
+        "count": 1,
+        "sum_ms": 0.693,
+        "max_ms": 0.693,
+        "source_bytes": 0
+      },
+      "session.load_session_replay": {
+        "count": 1,
+        "sum_ms": 64.482,
+        "max_ms": 64.482,
+        "source_bytes": 0
+      },
+      "session.delta_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.reconcile_stale_tasks": {
+        "count": 1,
+        "sum_ms": 0.058,
+        "max_ms": 0.058,
+        "source_bytes": 0
+      },
+      "session.stale_tasks_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.spawn.prepare": {
+        "count": 1,
+        "sum_ms": 0.972,
+        "max_ms": 0.972,
+        "source_bytes": 0
+      },
+      "skill_discovery": {
+        "count": 2,
+        "sum_ms": 0.255,
+        "max_ms": 0.137,
+        "source_bytes": 0
+      },
+      "session.spawn_actor_call": {
+        "count": 1,
+        "sum_ms": 24.592,
+        "max_ms": 24.592,
+        "source_bytes": 0
+      },
+      "session.spawn.install_coordination_backend": {
+        "count": 1,
+        "sum_ms": 3.751,
+        "max_ms": 3.751,
+        "source_bytes": 0
+      },
+      "session.spawn.publish_coordination": {
+        "count": 1,
+        "sum_ms": 0.315,
+        "max_ms": 0.315,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register": {
+        "count": 1,
+        "sum_ms": 29.774,
+        "max_ms": 29.774,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register_session": {
+        "count": 1,
+        "sum_ms": 29.903,
+        "max_ms": 29.903,
+        "source_bytes": 0
+      },
+      "session.fs_notify_start": {
+        "count": 1,
+        "sum_ms": 13.174,
+        "max_ms": 13.174,
+        "source_bytes": 0
+      },
+      "session.load_session": {
+        "count": 1,
+        "sum_ms": 136.553,
+        "max_ms": 136.553,
+        "source_bytes": 0
+      },
+      "pager.replay.end_batch": {
+        "count": 1,
+        "sum_ms": 0.01,
+        "max_ms": 0.01,
+        "source_bytes": 0
+      }
+    },
+    "slow_progress": null,
+    "events": [
+      {
+        "kind": "process_started",
+        "elapsed_ms": 0.0
+      },
+      {
+        "kind": "first_sequence_marker_pty_received",
+        "marker": "GROW_SEQ_000128",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 1390.184125
+      },
+      {
+        "kind": "last_history_marker_pty_received",
+        "marker": "GROW_SEQ_000128",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 1390.184125
+      },
+      {
+        "kind": "first_sequence_marker_visible",
+        "marker": "GROW_SEQ_000128",
+        "elapsed_ms": 1406.260542
+      },
+      {
+        "kind": "last_history_marker_visible",
+        "marker": "GROW_SEQ_000128",
+        "elapsed_ms": 1406.260542
+      },
+      {
+        "kind": "replay_completion_observed",
+        "timer": "pager.replay.end_batch",
+        "legacy_proxy": true,
+        "elapsed_ms": 1449.388667
+      },
+      {
+        "kind": "ready_prompt_stable",
+        "elapsed_ms": 1986.209458
+      }
+    ],
+    "loading_applied_notifications": 0,
+    "loading_apply_batch_ms": 0,
+    "loading_frame_sequences": [],
+    "loading_frame_wait_ms": [],
+    "loading_writer_ack_observation_delta_ms": []
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "turns": 512,
+    "source": "before-modern-1/run-modern-512-85149-1792633350687852000-loading.json",
+    "source_stats": {
+      "timeline_bytes": 18695101,
+      "updates_bytes": 0,
+      "timeline_and_updates_bytes": 18695101,
+      "counted_files": [
+        "timeline.jsonl",
+        "updates.jsonl"
+      ],
+      "excluded_source_files": [
+        "summary and other session files"
+      ],
+      "source_file_count": 1,
+      "history_body": {
+        "notifications": 1025,
+        "notification_types": {
+          "agent_message_chunk": 513,
+          "user_message_chunk": 512
+        },
+        "canonical_turns_by_fixture_sequence_marker": 512,
+        "assistant_message_notifications": 513,
+        "message_blocks": 1025,
+        "block_types": {
+          "text": 1025
+        },
+        "text_bytes": 16797602,
+        "scope": "typed_projector_output",
+        "matches_runtime_notification_input": true
+      }
+    },
+    "phases": {
+      "pager.frame.render": {
+        "count": 6,
+        "sum_ms": 22.859,
+        "max_ms": 9.233,
+        "source_bytes": 0
+      },
+      "pager.frame.diff": {
+        "count": 6,
+        "sum_ms": 0.697,
+        "max_ms": 0.188,
+        "source_bytes": 0
+      },
+      "pager.frame.queue": {
+        "count": 5,
+        "sum_ms": 0.016,
+        "max_ms": 0.005,
+        "source_bytes": 0
+      },
+      "pager.frame.write": {
+        "count": 5,
+        "sum_ms": 0.26,
+        "max_ms": 0.142,
+        "source_bytes": 0
+      },
+      "plugin_discovery": {
+        "count": 2,
+        "sum_ms": 0.108,
+        "max_ms": 0.063,
+        "source_bytes": 0
+      },
+      "mcp_merge": {
+        "count": 1,
+        "sum_ms": 0.096,
+        "max_ms": 0.096,
+        "source_bytes": 0
+      },
+      "session.load.open_session": {
+        "count": 1,
+        "sum_ms": 0.062,
+        "max_ms": 0.062,
+        "source_bytes": 0
+      },
+      "session.load.timeline_read_decode": {
+        "count": 1,
+        "sum_ms": 50.719,
+        "max_ms": 50.719,
+        "source_bytes": 0
+      },
+      "session.load.timeline_fold": {
+        "count": 1,
+        "sum_ms": 0.945,
+        "max_ms": 0.945,
+        "source_bytes": 0
+      },
+      "session.load.timeline_evidence": {
+        "count": 1,
+        "sum_ms": 1.33,
+        "max_ms": 1.33,
+        "source_bytes": 0
+      },
+      "session.load.state_projections": {
+        "count": 1,
+        "sum_ms": 0.103,
+        "max_ms": 0.103,
+        "source_bytes": 0
+      },
+      "session.load_light": {
+        "count": 1,
+        "sum_ms": 53.655,
+        "max_ms": 53.655,
+        "source_bytes": 0
+      },
+      "session.load.model_route_reconcile": {
+        "count": 1,
+        "sum_ms": 0.006,
+        "max_ms": 0.006,
+        "source_bytes": 0
+      },
+      "session.load.history_projection": {
+        "count": 1,
+        "sum_ms": 2.98,
+        "max_ms": 2.98,
+        "source_bytes": 0
+      },
+      "session.load_session_replay": {
+        "count": 1,
+        "sum_ms": 250.112,
+        "max_ms": 250.112,
+        "source_bytes": 0
+      },
+      "session.delta_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.reconcile_stale_tasks": {
+        "count": 1,
+        "sum_ms": 0.136,
+        "max_ms": 0.136,
+        "source_bytes": 0
+      },
+      "session.stale_tasks_drain_completions": {
+        "count": 1,
+        "sum_ms": 0.0,
+        "max_ms": 0.0,
+        "source_bytes": 0
+      },
+      "session.spawn.prepare": {
+        "count": 1,
+        "sum_ms": 0.583,
+        "max_ms": 0.583,
+        "source_bytes": 0
+      },
+      "skill_discovery": {
+        "count": 2,
+        "sum_ms": 0.29,
+        "max_ms": 0.18,
+        "source_bytes": 0
+      },
+      "session.spawn_actor_call": {
+        "count": 1,
+        "sum_ms": 28.02,
+        "max_ms": 28.02,
+        "source_bytes": 0
+      },
+      "session.spawn.install_coordination_backend": {
+        "count": 1,
+        "sum_ms": 4.491,
+        "max_ms": 4.491,
+        "source_bytes": 0
+      },
+      "session.spawn.publish_coordination": {
+        "count": 1,
+        "sum_ms": 0.377,
+        "max_ms": 0.377,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register": {
+        "count": 1,
+        "sum_ms": 33.643,
+        "max_ms": 33.643,
+        "source_bytes": 0
+      },
+      "session.spawn_and_register_session": {
+        "count": 1,
+        "sum_ms": 33.682,
+        "max_ms": 33.682,
+        "source_bytes": 0
+      },
+      "session.fs_notify_start": {
+        "count": 1,
+        "sum_ms": 5.127,
+        "max_ms": 5.127,
+        "source_bytes": 0
+      },
+      "session.load_session": {
+        "count": 1,
+        "sum_ms": 372.22,
+        "max_ms": 372.22,
+        "source_bytes": 0
+      },
+      "pager.replay.end_batch": {
+        "count": 1,
+        "sum_ms": 0.039,
+        "max_ms": 0.039,
+        "source_bytes": 0
+      }
+    },
+    "slow_progress": null,
+    "events": [
+      {
+        "kind": "process_started",
+        "elapsed_ms": 0.0
+      },
+      {
+        "kind": "first_sequence_marker_pty_received",
+        "marker": "GROW_SEQ_000112",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 164.176875
+      },
+      {
+        "kind": "last_history_marker_pty_received",
+        "marker": "GROW_SEQ_000512",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 482.684417
+      },
+      {
+        "kind": "first_sequence_marker_visible",
+        "marker": "GROW_SEQ_000112",
+        "elapsed_ms": 172.050291
+      },
+      {
+        "kind": "last_history_marker_visible",
+        "marker": "GROW_SEQ_000512",
+        "elapsed_ms": 412.095125
+      },
+      {
+        "kind": "replay_completion_observed",
+        "timer": "pager.replay.end_batch",
+        "legacy_proxy": true,
+        "elapsed_ms": 435.298708
+      },
+      {
+        "kind": "ready_prompt_stable",
+        "elapsed_ms": 981.998708
+      }
+    ],
+    "loading_applied_notifications": 0,
+    "loading_apply_batch_ms": 0,
+    "loading_frame_sequences": [],
+    "loading_frame_wait_ms": [],
+    "loading_writer_ack_observation_delta_ms": []
+  }
+]

@@ -12,7 +12,6 @@ pub(crate) struct GoalNotifySender {
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     budget: sampler::PreviewEventBudget,
     preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
-    chat_state: chat_state::ChatStateHandle,
     source_revision: u64,
 }
 
@@ -23,7 +22,6 @@ impl GoalNotifySender {
         persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
         budget: sampler::PreviewEventBudget,
         preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
-        chat_state: chat_state::ChatStateHandle,
         source_revision: u64,
     ) -> Self {
         Self {
@@ -32,7 +30,6 @@ impl GoalNotifySender {
             persistence_tx,
             budget,
             preview,
-            chat_state,
             source_revision,
         }
     }
@@ -48,10 +45,23 @@ impl GoalNotifySender {
             };
             let mut meta = None;
             crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
+            let source_id = format!(
+                "goal:{}:definition:{}",
+                goal.goal_id, goal.definition_revision
+            );
+            let mut meta = meta.unwrap_or_default();
+            meta.insert(
+                "grow/displayProjectionSource".to_owned(),
+                serde_json::Value::String(source_id),
+            );
+            meta.insert(
+                "grow/displayProjectionRevision".to_owned(),
+                serde_json::Value::from(self.source_revision),
+            );
             let notification = GrowSessionNotification {
                 session_id: self.session_id.clone(),
                 update: build_goal_updated(&goal, tokens_used, elapsed_ms),
-                meta: meta.map(serde_json::Value::Object),
+                meta: Some(serde_json::Value::Object(meta)),
             };
             let Some(prepared) = crate::session::notifications::prepare_auxiliary_grow(
                 &self.persistence_tx,
@@ -62,22 +72,6 @@ impl GoalNotifySender {
             ) else {
                 return;
             };
-            if let Err(error) =
-                crate::session::notifications::record_display_projection_expectation(
-                    &self.chat_state,
-                    &notification,
-                    chat_state::DisplayProjectionKind::GoalUpdated,
-                    format!(
-                        "goal:{}:definition:{}",
-                        goal.goal_id, goal.definition_revision
-                    ),
-                    self.source_revision,
-                )
-                .await
-            {
-                tracing::error!(%error, "Goal display projection expectation was not committed; suppressing publication");
-                return;
-            }
             crate::session::notifications::publish_prepared_auxiliary_grow(
                 &self.gateway,
                 &self.persistence_tx,
@@ -178,141 +172,115 @@ pub(crate) fn format_elapsed(ms: u64) -> String {
 mod tests {
     use super::*;
 
-    struct RejectProjectionExpectation {
-        observed: tokio::sync::mpsc::UnboundedSender<chat_state::TimelineEvent>,
-    }
-
-    impl chat_state::TimelinePersistence for RejectProjectionExpectation {
-        fn persist_timeline_event_and_ack(
-            &mut self,
-            event: &chat_state::TimelineEvent,
-        ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
-            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-            if matches!(
-                &event.kind,
-                chat_state::TimelineEventKind::DisplayProjectionExpected(_)
-            ) {
-                let _ = self.observed.send(event.clone());
-                let _ = ack_tx.send(Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected projection expectation ACK failure",
-                )));
-            } else {
-                let _ = ack_tx.send(Ok(()));
-            }
-            ack_rx
-        }
-
-        fn flush(&mut self) {}
-    }
-
     #[tokio::test(flavor = "current_thread")]
-    async fn goal_update_is_not_published_when_projection_expectation_ack_fails() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
-                let cancellation = tokio_util::sync::CancellationToken::new();
-                let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
-                let chat_state = chat_state::ChatStateActor::spawn(
-                    vec![sampling_types::ConversationItem::system(
-                        "test system prompt",
-                    )],
-                    sampling_types::SamplingConfig {
-                        base_url: "http://localhost".to_string(),
-                        model: "test".to_string(),
-                        output_limit: None,
-                        temperature: None,
-                        top_p: None,
-                        api_backend: Default::default(),
-                        extra_headers: Default::default(),
-                        query_params: Default::default(),
-                        env_http_headers: Default::default(),
-                        context_window: std::num::NonZeroU64::new(256_000)
-                            .expect("nonzero test context window"),
-                        reasoning_effort: None,
-                        stream_tool_calls: None,
-                    },
-                    Box::new(RejectProjectionExpectation {
-                        observed: observed_tx,
-                    }),
-                    chat_event_tx,
-                    cancellation.clone(),
-                );
-                // A query is admitted only after the actor has durably completed
-                // its bootstrap facts, so the injected failure targets the live
-                // expectation generated by GoalNotifySender.
-                chat_state
-                    .get_sampling_config()
-                    .await
-                    .expect("bootstrap facts are acknowledged");
+    async fn goal_snapshot_is_one_typed_fact_before_live_publication() {
+        let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gateway = acp_transport::AcpAgentGatewaySender::new(gateway_tx);
+        let (session_persistence_tx, mut session_persistence_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let budget = sampler::PreviewEventBudget::default();
+        let sender = GoalNotifySender::new(
+            agent_client_protocol::schema::v1::SessionId::new("goal-projection-ack"),
+            gateway,
+            session_persistence_tx,
+            budget.clone(),
+            std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            7,
+        );
+        let goal = GoalState {
+            architecture_version: crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION,
+            goal_id: "goal-1".into(),
+            definition_revision: 3,
+            objective: "ship the feature".into(),
+            status: GoalStatus::Active,
+            token_budget: None,
+            tokens_used: 0,
+            usage_breakdown: None,
+            usage_incomplete: false,
+            usage_incomplete_acknowledged: false,
+            elapsed_ms: 0,
+            created_at: "2026-10-19T00:00:00Z".into(),
+            updated_at: "2026-10-19T00:00:00Z".into(),
+            status_message: None,
+            blocked_audit: None,
+        };
 
-                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-                let gateway = acp_transport::AcpAgentGatewaySender::new(gateway_tx);
-                let (session_persistence_tx, mut session_persistence_rx) =
-                    tokio::sync::mpsc::unbounded_channel();
-                let budget = sampler::PreviewEventBudget::default();
-                let sender = GoalNotifySender::new(
-                    agent_client_protocol::schema::v1::SessionId::new("goal-projection-ack"),
-                    gateway,
-                    session_persistence_tx,
-                    budget.clone(),
-                    std::sync::Arc::new(parking_lot::Mutex::new(None)),
-                    chat_state.clone(),
-                    7,
-                );
-                let goal = GoalState {
-                    architecture_version: crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION,
-                    goal_id: "goal-1".into(),
-                    definition_revision: 3,
-                    objective: "ship the feature".into(),
-                    status: GoalStatus::Active,
-                    token_budget: None,
-                    tokens_used: 0,
-                    usage_breakdown: None,
-                    usage_incomplete: false,
-                    usage_incomplete_acknowledged: false,
-                    elapsed_ms: 0,
-                    created_at: "2026-10-19T00:00:00Z".into(),
-                    updated_at: "2026-10-19T00:00:00Z".into(),
-                    status_message: None,
-                    blocked_audit: None,
-                };
+        sender.emit_goal_updated(Some((goal, 125)), 0).await;
 
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    sender.emit_goal_updated(Some((goal, 125)), 0),
-                )
-                .await
-                .expect("failed expectation ACK returns without publishing");
+        let message = session_persistence_rx
+            .try_recv()
+            .expect("goal snapshot is queued as one durable fact");
+        let notification = match &message {
+            PersistenceMsg::AuxiliaryGrow { notification, .. } => notification,
+            other => panic!("expected AuxiliaryGrow, got {other:?}"),
+        };
+        assert!(matches!(
+            &notification.update,
+            GrowSessionUpdate::GoalUpdated {
+                goal_id,
+                objective,
+                status,
+                token_budget: None,
+                tokens_used: 0,
+                usage_breakdown,
+                usage_incomplete: false,
+                elapsed_ms: 125,
+                created_at,
+                updated_at,
+                status_message: None,
+            } if goal_id == "goal-1"
+                && objective == "ship the feature"
+                && status == "active"
+                && usage_breakdown.cached_input_tokens == 0
+                && usage_breakdown.uncached_input_tokens == 0
+                && usage_breakdown.unclassified_input_tokens == 0
+                && usage_breakdown.output_tokens == 0
+                && created_at == "2026-10-19T00:00:00Z"
+                && updated_at == "2026-10-19T00:00:00Z"
+        ));
+        let meta = notification.meta.as_ref().unwrap().as_object().unwrap();
+        assert!(
+            meta.get("eventId")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+        assert_eq!(
+            meta.get("grow/displayProjectionSource")
+                .and_then(serde_json::Value::as_str),
+            Some("goal:goal-1:definition:3")
+        );
+        assert_eq!(
+            meta.get("grow/displayProjectionRevision")
+                .and_then(serde_json::Value::as_u64),
+            Some(7)
+        );
+        let update = crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone()));
+        let fact = crate::session::history::HistoryFact::from_update(&update)
+            .expect("goal snapshot converts to a history fact")
+            .expect("goal snapshot is a history fact");
+        let round_trip = fact
+            .into_update(&notification.session_id)
+            .expect("history fact converts back to an update")
+            .expect("goal snapshot remains an update");
+        assert_eq!(
+            serde_json::to_value(round_trip).unwrap(),
+            serde_json::to_value(update).unwrap(),
+            "history fact round-trips the full notification"
+        );
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "live update awaits writer ACK"
+        );
 
-                let attempted =
-                    tokio::time::timeout(std::time::Duration::from_secs(1), observed_rx.recv())
-                        .await
-                        .expect("producer attempted a typed expectation")
-                        .expect("persistence seam remains available");
-                assert!(matches!(
-                    attempted.kind,
-                    chat_state::TimelineEventKind::DisplayProjectionExpected(ref expected)
-                        if expected.kind == chat_state::DisplayProjectionKind::GoalUpdated
-                            && expected.source_id == "goal:goal-1:definition:3"
-                            && expected.source_revision == 7
-                ));
-                assert!(
-                    chat_state.is_closed(),
-                    "permanent ACK failure closes writer"
-                );
-                assert!(gateway_rx.try_recv().is_err(), "no live update was sent");
-                assert!(
-                    session_persistence_rx.try_recv().is_err(),
-                    "no cache update was queued"
-                );
-                let all_credits = budget
-                    .try_acquire_bytes(sampler::PreviewEventBudget::MAX_BYTES)
-                    .expect("both prepared notification reservations were released");
-                drop(all_credits);
+        drop(message);
 
-                cancellation.cancel();
-            })
-            .await;
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "failed persistence sends no live update"
+        );
+        let all_credits = budget
+            .try_acquire_bytes(sampler::PreviewEventBudget::MAX_BYTES)
+            .expect("dropping the refused fact releases the full preview budget");
+        drop(all_credits);
     }
 }

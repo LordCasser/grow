@@ -1,0 +1,42 @@
+[
+  {
+    "stage": "before",
+    "run": 1,
+    "binary_sha256": "243d2fa5b2e23837c5f0c5dd307d97427a2da6210c9353991e65e23d7d2b92ea",
+    "scope": "fixture-complete marker through exit; includes agent initialization/cleanup; ps observer overhead; timings excluded",
+    "first_rss_bytes": 450134016,
+    "peak_rss_bytes": 780337152,
+    "samples": 34,
+    "source": "before-rss-2048-1.txt"
+  },
+  {
+    "stage": "after",
+    "run": 1,
+    "binary_sha256": "7c006aea7c169fc662ff05b2d93aa2f494724089aba4df71b26e508a5379654d",
+    "scope": "fixture-complete marker through exit; includes agent initialization/cleanup; ps observer overhead; timings excluded",
+    "first_rss_bytes": 526237696,
+    "peak_rss_bytes": 811106304,
+    "samples": 36,
+    "source": "after-rss-2048-1.txt"
+  },
+  {
+    "stage": "before",
+    "run": 2,
+    "binary_sha256": "243d2fa5b2e23837c5f0c5dd307d97427a2da6210c9353991e65e23d7d2b92ea",
+    "scope": "fixture-complete marker through exit; includes agent initialization/cleanup; ps observer overhead; timings excluded",
+    "first_rss_bytes": 452231168,
+    "peak_rss_bytes": 768475136,
+    "samples": 27,
+    "source": "before-rss-2048-2.txt"
+  },
+  {
+    "stage": "after",
+    "run": 2,
+    "binary_sha256": "7c006aea7c169fc662ff05b2d93aa2f494724089aba4df71b26e508a5379654d",
+    "scope": "fixture-complete marker through exit; includes agent initialization/cleanup; ps observer overhead; timings excluded",
+    "first_rss_bytes": 524681216,
+    "peak_rss_bytes": 675479552,
+    "samples": 29,
+    "source": "after-rss-2048-2.txt"
+  }
+]

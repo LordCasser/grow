@@ -13,12 +13,16 @@ use chat_state::{
 };
 
 use super::jsonl::{JsonlStorageAdapter, OpenedSession};
+use super::{CommittedJsonlLines, SessionUpdate, TIMELINE_FILE, strip_context_wrappers};
+
+#[cfg(test)]
 use super::{
-    CommittedJsonlLines, ReconciledReplayLine, SessionUpdate, SessionUpdateEnvelope, TIMELINE_FILE,
-    UPDATES_FILE, filter_rewind_lines, reconcile_raw_replay_lines, strip_context_wrappers,
+    ReconciledReplayLine, SessionUpdateEnvelope, UPDATES_FILE, filter_rewind_lines,
+    reconcile_raw_replay_lines,
 };
 
 mod activity;
+#[cfg(test)]
 mod cache_completeness;
 
 const MAX_NODES: usize = 512;
@@ -74,7 +78,8 @@ pub struct TranscriptNode {
 
 struct Facts {
     opened: OpenedSession,
-    updates: Option<CapturedLedger>,
+    ledger: CapturedLedger,
+    history: crate::session::history::HistorySnapshot,
     timeline: Timeline,
     control: Option<crate::session::control::SessionControlSnapshot>,
     title: Option<String>,
@@ -134,7 +139,15 @@ impl CapturedLedger {
         name: &str,
         budget: &mut Budget,
     ) -> io::Result<Self> {
-        let file = directory.open_regular(OsStr::new(name), "transcript source")?;
+        let file = directory
+            .open_regular(OsStr::new(name), "transcript source")
+            .map_err(|error| {
+                if name == TIMELINE_FILE && error.kind() == io::ErrorKind::NotFound {
+                    invalid("mandatory Timeline ledger is missing")
+                } else {
+                    error
+                }
+            })?;
         let len = file.metadata()?.len();
         budget.add_bytes(len)?;
         Ok(Self {
@@ -186,7 +199,7 @@ fn load_facts(
     grow_home: &Path,
     facts: &mut BTreeMap<String, Facts>,
     budget: &mut Budget,
-    display: bool,
+    _display: bool,
 ) -> io::Result<()> {
     if facts.contains_key(session_id) {
         return Ok(());
@@ -201,22 +214,20 @@ fn load_facts(
     if opened.summary().info.id.to_string() != session_id {
         return Err(invalid(format!("session identity mismatch: {session_id}")));
     }
-    // Updates are published after their authority. Capture their frontier
-    // first; a later Timeline frontier can reconcile a missing display row.
-    let updates = if display {
-        match CapturedLedger::open(opened.directory(), UPDATES_FILE, budget) {
-            Ok(ledger) => Some(ledger),
-            Err(error) if error.kind() == ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        }
-    } else {
-        None
-    };
     let ledger = CapturedLedger::open(opened.directory(), TIMELINE_FILE, budget)?;
-    let timeline = Timeline::from_events(
-        ledger.versioned(u64::from(chat_state::TIMELINE_SCHEMA_VERSION), budget)?,
-    )
-    .map_err(|error| invalid(format!("session '{session_id}': {error}")))?;
+    let mut remaining_records = MAX_TIMELINE_EVENTS - budget.events;
+    let journal = JsonlStorageAdapter::read_journal_at_frontier(
+        ledger.file.try_clone()?,
+        ledger.path.clone(),
+        ledger.len,
+        &mut remaining_records,
+    )?;
+    budget.events = MAX_TIMELINE_EVENTS - remaining_records;
+    let timeline = Timeline::from_events(journal.events)
+        .map_err(|error| invalid(format!("session '{session_id}': {error}")))?;
+    let mut history = journal.history;
+    history.validate(&timeline)?;
+    history.load_notices(opened.directory(), &timeline, session_id)?;
     let control =
         crate::session::control::SessionControlSnapshot::latest_from_timeline(timeline.events())
             .map_err(|error| invalid(format!("session '{session_id}' control: {error}")))?;
@@ -268,10 +279,11 @@ fn load_facts(
             last_seq,
             sideband_activity,
             selected_spawns,
+            ledger,
             timeline,
             control,
             opened,
-            updates,
+            history,
         },
     );
     Ok(())
@@ -679,221 +691,38 @@ fn project_session(
     budget: &mut Budget,
 ) -> io::Result<TranscriptSession> {
     let facts = all.get(session_id).expect("session was captured");
+    if facts.ledger.file.metadata()?.len() < facts.ledger.len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "captured Timeline ledger was truncated",
+        ));
+    }
     let opened = &facts.opened;
     let session_id = opened.summary().info.id.to_string();
-    let lines = match &facts.updates {
-        Some(ledger) => {
-            let mut lines = Vec::new();
-            for (index, line) in ledger.lines()?.enumerate() {
-                budget.add_events(1)?;
-                let line = String::from_utf8(line?).map_err(|error| invalid(error.to_string()))?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let envelope: SessionUpdateEnvelope =
-                    serde_json::from_str(&line).map_err(|error| {
-                        invalid(format!(
-                            "session '{session_id}' update {}: {error}",
-                            index + 1
-                        ))
-                    })?;
-                // Projection caches use snake_case; public notifications use
-                // camelCase. Validate identity even on rows removed by rewind
-                // or admission reconciliation.
-                let identity = envelope
-                    .params
-                    .get("sessionId")
-                    .or_else(|| envelope.params.get("session_id"))
-                    .and_then(serde_json::Value::as_str);
-                if identity != Some(session_id.as_str()) {
-                    return Err(invalid(format!(
-                        "session '{session_id}' update {} has a different or missing session identity",
-                        index + 1
-                    )));
-                }
-                lines.push(line);
+    let prepared = facts
+        .history
+        .prepare(&opened.summary().info.id, &facts.timeline, None)?;
+    validate_ended_user_turns(&facts.timeline, &prepared.updates)?;
+    let mut events = Vec::with_capacity(prepared.updates.len());
+    for mut update in prepared.updates {
+        let timestamp_ms = match &update {
+            SessionUpdate::Acp(value) => value.meta.as_ref(),
+            SessionUpdate::Grow(value) => {
+                value.meta.as_ref().and_then(serde_json::Value::as_object)
             }
-            lines
+            #[cfg(any(test, feature = "test-support"))]
+            SessionUpdate::ResponseReplayProjection(_) => None,
         }
-        None => {
-            let only_identity_facts = facts.timeline.events().iter().all(|event| {
-                matches!(
-                    event.kind,
-                    TimelineEventKind::SessionTitle(_) | TimelineEventKind::SubagentSeed(_)
-                )
-            });
-            if !only_identity_facts {
-                return Err(invalid(format!(
-                    "session '{session_id}' has Timeline facts but no committed updates ledger"
-                )));
-            }
-            Vec::new()
+        .and_then(|meta| meta.get("grow/historyTimestampMs"))
+        .and_then(serde_json::Value::as_u64);
+        if let SessionUpdate::Acp(value) = &mut update {
+            value.update = strip_context_wrappers(value.update.clone());
         }
-    };
-    if lines.is_empty()
-        && facts.timeline.events().iter().any(|event| {
-            !matches!(
-                event.kind,
-                TimelineEventKind::SessionTitle(_) | TimelineEventKind::SubagentSeed(_)
-            )
-        })
-    {
-        return Err(invalid(format!(
-            "session '{session_id}' has Timeline facts but no committed display updates; retry"
-        )));
-    }
-    let filtered = filter_rewind_lines(lines.iter().map(String::as_str).collect());
-    // Rewind selects the visible branch for transcript reconstruction but does
-    // not rewrite the append-only updates ledger. Validate durable projection
-    // expectations against that captured physical ledger before filtering, or
-    // a valid projection from a discarded branch would look missing.
-    cache_completeness::validate_expected_display_projections(
-        session_id.as_str(),
-        &facts.timeline,
-        &lines.iter().map(String::as_str).collect::<Vec<_>>(),
-    )?;
-    cache_completeness::validate_committed_user_echoes(
-        session_id.as_str(),
-        &facts.timeline,
-        &filtered,
-    )?;
-    cache_completeness::validate_ended_user_turns(session_id.as_str(), &facts.timeline, &filtered)?;
-    // Reconciliation replaces a payload-free preview anchor with canonical
-    // text. Preserve that anchor's recorded timing and prompt ownership, not
-    // the newly serialized envelope's current timestamp.
-    let mut anchors = BTreeMap::new();
-    for line in &filtered {
-        let envelope: SessionUpdateEnvelope =
-            serde_json::from_str(line).map_err(|error| invalid(error.to_string()))?;
-        if envelope.method != super::ACP_SESSION_UPDATE_METHOD {
-            continue;
-        }
-        let Some(meta) = envelope
-            .params
-            .get("_meta")
-            .and_then(serde_json::Value::as_object)
-        else {
-            continue;
-        };
-        if let (Some(request), Some(attempt)) = (
-            meta.get("samplingRequestId")
-                .and_then(serde_json::Value::as_str),
-            meta.get("samplingAttempt")
-                .and_then(serde_json::Value::as_u64),
-        ) {
-            let timing = [
-                "promptId",
-                "turnStartMs",
-                "streamStartMs",
-                "agentTimestampMs",
-            ]
-            .into_iter()
-            .filter_map(|key| meta.get(key).map(|value| (key.to_owned(), value.clone())))
-            .collect::<serde_json::Map<_, _>>();
-            anchors.entry((request.to_owned(), attempt)).or_insert((
-                timing,
-                (envelope.timestamp != 0).then(|| envelope.timestamp.saturating_mul(1000)),
-            ));
-        }
-    }
-    let reconciled =
-        reconcile_raw_replay_lines(&opened.summary().info.id, &facts.timeline, filtered)?;
-    let reconciled = super::communication_history::restore(
-        &opened.summary().info.id,
-        &facts.timeline,
-        reconciled,
-        |receipt| {
-            if let TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
-                payload_ref,
-                ..
-            }) = &receipt.kind
-            {
-                let payload_bytes = facts
-                    .opened
-                    .directory()
-                    .open_relative(
-                        Path::new("artifacts/notifications"),
-                        "notification payload directory",
-                        false,
-                    )
-                    .and_then(|directory| {
-                        directory.open_regular(
-                            OsStr::new(&format!("{}.txt", payload_ref.blake3)),
-                            "notification payload",
-                        )
-                    })
-                    .and_then(|file| file.metadata())
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(payload_ref.bytes);
-                budget.add_bytes(payload_bytes)?;
-            }
-            let notice =
-                super::communication_history::read_notice(facts.opened.directory(), receipt)?;
-            if notice.is_some() {
-                budget.add_events(1)?;
-            }
-            Ok(notice)
-        },
-    )?;
-    let timeline_times = facts
-        .timeline
-        .events()
-        .iter()
-        .filter_map(|event| {
-            u64::try_from(event.at_ms)
-                .ok()
-                .map(|at| (event.seq.get(), at))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut events = Vec::new();
-    for line in reconciled.lines {
-        let synthetic = matches!(line, ReconciledReplayLine::Owned(_));
-        let envelope: SessionUpdateEnvelope = serde_json::from_str(line.as_str())
-            .map_err(|error| invalid(format!("invalid committed transcript update: {error}")))?;
-        let timestamp_ms = (!synthetic && envelope.timestamp != 0)
-            .then(|| envelope.timestamp.saturating_mul(1000));
-        match envelope
-            .into_update()
-            .map_err(|error| invalid(format!("invalid transcript update: {error}")))?
-        {
-            SessionUpdate::ResponseReplayProjection(projection) => {
-                let projection_time = timeline_times.get(&projection.timeline_event).copied();
-                let anchor =
-                    anchors.get(&(projection.request_id.clone(), u64::from(projection.attempt)));
-                let notifications = projection.into_notifications();
-                budget.add_events(notifications.len())?;
-                for mut notification in notifications {
-                    if let Some((timing, _)) = anchor {
-                        notification
-                            .meta
-                            .get_or_insert_with(Default::default)
-                            .extend(timing.clone());
-                    }
-                    notification.update = strip_context_wrappers(notification.update);
-                    events.push(TranscriptEvent {
-                        update: SessionUpdate::Acp(Box::new(notification)),
-                        timestamp_ms: anchor
-                            .and_then(|(_, timestamp)| *timestamp)
-                            .or(projection_time)
-                            .or(timestamp_ms.filter(|_| !synthetic)),
-                        simulated_source: synthetic,
-                    });
-                }
-            }
-            SessionUpdate::Acp(mut notification) => {
-                notification.update = strip_context_wrappers(notification.update);
-                events.push(TranscriptEvent {
-                    update: SessionUpdate::Acp(notification),
-                    timestamp_ms,
-                    simulated_source: false,
-                });
-            }
-            update @ SessionUpdate::Grow(_) => events.push(TranscriptEvent {
-                update,
-                timestamp_ms,
-                simulated_source: synthetic,
-            }),
-        }
+        events.push(TranscriptEvent {
+            update,
+            timestamp_ms,
+            simulated_source: false,
+        });
     }
     restore_observational_facts(&session_id, facts, all, &mut events, budget)?;
     restore_control_snapshot(facts, &mut events, budget)?;
@@ -932,6 +761,78 @@ fn project_session(
         open_activity: activity.open_starts,
         unknown_activity: activity.unknown_activity,
     })
+}
+
+/// Offline transcripts must not present an ended user turn as still running
+/// when its user-facing terminal was interrupted before publication.
+fn validate_ended_user_turns(timeline: &Timeline, updates: &[SessionUpdate]) -> io::Result<()> {
+    use chat_state::{InputEvent, NotificationEvent, TurnTerminalSource};
+    let mut committed = BTreeSet::new();
+    for id in timeline.branch_transcript_with_ids().0 {
+        if id.item != 0 {
+            continue;
+        }
+        match &timeline.events()[id.event.get() as usize].kind {
+            TimelineEventKind::Input(InputEvent::Consumed {
+                turn,
+                item: sampling_types::ConversationItem::User(user),
+                display_echo,
+                ..
+            }) => {
+                if user.prompt_index.is_some() && display_echo.is_none() {
+                    return Err(invalid(
+                        "committed user input has no durable display fingerprint",
+                    ));
+                }
+                committed.insert(*turn);
+            }
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                turn,
+                input: Some(sampling_types::ConversationItem::User(_)),
+                ..
+            }) => {
+                committed.insert(*turn);
+            }
+            _ => {}
+        }
+    }
+    let published = updates
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::Grow(notification) => match &notification.update {
+                crate::extensions::notification::SessionUpdate::TurnCompleted {
+                    prompt_id, ..
+                } => Some(prompt_id.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let started = timeline
+        .events()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Turn(TurnEvent::Started { id, prompt_id, .. }) => {
+                Some((*id, prompt_id.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for event in timeline.events() {
+        if let TimelineEventKind::Turn(TurnEvent::Ended { id, terminal, .. }) = &event.kind {
+            if committed.contains(id)
+                && terminal.source != TurnTerminalSource::Recovery
+                && !started
+                    .get(id)
+                    .is_some_and(|prompt| published.contains(prompt))
+            {
+                return Err(invalid(
+                    "ended committed user turn has no matching TurnCompleted history fact",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Restore only the captured endpoint when the display cache disagrees with
@@ -1170,6 +1071,7 @@ fn restore_observational_facts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::history::HistoryFact;
     use crate::session::persistence::Summary;
     use crate::util::grow_home::encode_cwd_dirname;
     use agent_client_protocol::schema::v1::SessionId;
@@ -1206,18 +1108,9 @@ mod tests {
             serde_json::to_vec(&summary).unwrap(),
         )
         .unwrap();
-        let lines = timeline
-            .events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>();
         std::fs::write(
             dir.join(TIMELINE_FILE),
-            if lines.is_empty() {
-                String::new()
-            } else {
-                lines.join("\n") + "\n"
-            },
+            JsonlStorageAdapter::encode_journal(timeline.events(), &[]).unwrap(),
         )
         .unwrap();
     }
@@ -1530,16 +1423,15 @@ mod tests {
                 acp::SessionModeId::new("normal"),
             )),
         )));
-        let envelope = SessionUpdateEnvelope::from_update(&update).unwrap();
-        let mut committed = serde_json::to_vec(&envelope).unwrap();
-        committed.push(b'\n');
+        let fact = HistoryFact::from_update(&update).unwrap().unwrap();
+        let child_dir = home
+            .path()
+            .join("sessions")
+            .join(encode_cwd_dirname("/project"))
+            .join("grandchild");
         std::fs::write(
-            home.path()
-                .join("sessions")
-                .join(encode_cwd_dirname("/project"))
-                .join("grandchild")
-                .join(UPDATES_FILE),
-            committed,
+            child_dir.join(TIMELINE_FILE),
+            JsonlStorageAdapter::encode_journal(grandchild.events(), &[fact]).unwrap(),
         )
         .unwrap();
 
@@ -1588,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_updates_cannot_turn_recorded_lifecycle_into_empty_transcript() {
+    fn missing_timeline_cannot_turn_recorded_lifecycle_into_empty_transcript() {
         let home = tempfile::tempdir().unwrap();
         let mut timeline = Timeline::default();
         timeline
@@ -1597,21 +1489,32 @@ mod tests {
             ))))
             .unwrap();
         write_session(home.path(), "root", "/project", &timeline, false);
+        let timeline_path = home
+            .path()
+            .join("sessions")
+            .join(encode_cwd_dirname("/project"))
+            .join("root")
+            .join(TIMELINE_FILE);
+        std::fs::remove_file(timeline_path).unwrap();
         let error = read_session_at("root", home.path()).unwrap_err();
-        assert!(error.to_string().contains("no committed updates ledger"));
+        assert!(
+            error
+                .to_string()
+                .contains("mandatory Timeline ledger is missing")
+        );
     }
 
     #[test]
     fn oversized_source_is_rejected_before_materialization() {
         let home = tempfile::tempdir().unwrap();
         write_session(home.path(), "root", "/project", &Timeline::default(), false);
-        let updates_path = home
+        let timeline_path = home
             .path()
             .join("sessions")
             .join(encode_cwd_dirname("/project"))
             .join("root")
-            .join(UPDATES_FILE);
-        let file = std::fs::File::create(updates_path).unwrap();
+            .join(TIMELINE_FILE);
+        let file = std::fs::File::create(timeline_path).unwrap();
         file.set_len(MAX_SOURCE_BYTES + 1).unwrap();
         let error = read_session_at("root", home.path()).unwrap_err();
         assert!(error.to_string().contains("read budget"));

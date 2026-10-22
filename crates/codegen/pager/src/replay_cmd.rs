@@ -70,7 +70,8 @@ fn source_time(event: &TranscriptEvent) -> Option<u64> {
             .as_ref()
             .and_then(|m| m.get("agentTimestampMs"))
             .and_then(|v| v.as_u64()),
-        SessionUpdate::ResponseReplayProjection(_) => None,
+        #[allow(unreachable_patterns)] // Only the test-support legacy oracle adds another variant.
+        _ => None,
     };
     // Use the notification's original time, never a synthetic envelope's write time.
     agent_time.or(event.timestamp_ms)

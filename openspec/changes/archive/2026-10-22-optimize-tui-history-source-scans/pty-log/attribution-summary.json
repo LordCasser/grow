@@ -1,0 +1,5680 @@
+[
+  {
+    "stage": "after",
+    "case": "modern",
+    "turns": 128,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 126.97370899999999,
+        "range_ms": [
+          124.25691599999999,
+          163.547042
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 132.96787500000002,
+        "range_ms": [
+          128.860084,
+          167.724167
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 126.97370899999999,
+        "range_ms": [
+          124.25691599999999,
+          163.547042
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 132.96787500000002,
+        "range_ms": [
+          128.860084,
+          167.724167
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 671.496875,
+        "range_ms": [
+          669.0896250000001,
+          682.3586670000001
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 133.086458,
+        "range_ms": [
+          128.956625,
+          167.820167
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.092,
+        "range_ms": [
+          0.088,
+          0.093
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 6.34,
+        "range_ms": [
+          5.945999999999998,
+          9.064
+        ],
+        "counts": [
+          13,
+          13,
+          13
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 0.33499999999999996,
+        "range_ms": [
+          0.31,
+          0.5609999999999999
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.41300000000000003,
+        "range_ms": [
+          0.40700000000000003,
+          1.038
+        ],
+        "counts": [
+          3,
+          3,
+          4
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 1.516,
+        "range_ms": [
+          1.514,
+          4.132
+        ],
+        "counts": [
+          3,
+          3,
+          4
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.003,
+          0.008
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 0.956,
+        "range_ms": [
+          0.904,
+          2.801
+        ],
+        "counts": [
+          3,
+          3,
+          4
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 0.049999999999999996,
+        "range_ms": [
+          0.032,
+          0.28300000000000003
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.236,
+        "range_ms": [
+          0.198,
+          0.256
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.011
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 1.8659999999999979,
+        "range_ms": [
+          1.6799999999999977,
+          1.8689999999999987
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 0.36800000000000027,
+        "range_ms": [
+          0.2880000000000002,
+          0.5390000000000003
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 0.5830000000000003,
+        "range_ms": [
+          0.5540000000000003,
+          0.6360000000000003
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.01,
+        "range_ms": [
+          0.009,
+          0.011
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 1.402,
+        "range_ms": [
+          1.179,
+          1.467
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 1.343,
+        "range_ms": [
+          1.128,
+          1.4
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.1,
+        "range_ms": [
+          0.093,
+          0.11399999999999999
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.002,
+        "range_ms": [
+          0.002,
+          0.002
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.298,
+        "range_ms": [
+          5.173,
+          5.5
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 0.598,
+        "range_ms": [
+          0.593,
+          0.619
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.004,
+          0.005
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.064,
+        "range_ms": [
+          0.062,
+          0.071
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.079,
+        "range_ms": [
+          0.067,
+          0.081
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 0.251,
+        "range_ms": [
+          0.243,
+          0.266
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 0.189,
+        "range_ms": [
+          0.184,
+          0.198
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 12.811,
+        "range_ms": [
+          12.744,
+          12.859
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 13.755,
+        "range_ms": [
+          13.661,
+          13.851
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 67.653,
+        "range_ms": [
+          67.106,
+          77.559
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 6.903,
+        "range_ms": [
+          6.522,
+          7.963
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.026,
+        "range_ms": [
+          0.024,
+          0.029
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 3.624,
+        "range_ms": [
+          3.582,
+          3.989
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.551,
+        "range_ms": [
+          0.55,
+          0.552
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.351,
+        "range_ms": [
+          0.319,
+          0.379
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 18.05,
+        "range_ms": [
+          17.029,
+          18.66
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 22.716,
+        "range_ms": [
+          21.669,
+          23.64
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 22.745,
+        "range_ms": [
+          21.7,
+          23.67
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.304,
+        "range_ms": [
+          0.291,
+          0.317
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "turns": 512,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 169.33724999999998,
+        "range_ms": [
+          168.201708,
+          170.03725
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 175.729209,
+        "range_ms": [
+          174.801833,
+          176.71875
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 169.33724999999998,
+        "range_ms": [
+          168.201708,
+          170.03725
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 175.729209,
+        "range_ms": [
+          174.801833,
+          176.71875
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 718.662417,
+        "range_ms": [
+          716.825209,
+          744.141208
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 202.31025,
+        "range_ms": [
+          201.853083,
+          232.30183300000002
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.09,
+        "range_ms": [
+          0.089,
+          0.091
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 23.134999999999998,
+        "range_ms": [
+          22.750000000000004,
+          23.303000000000008
+        ],
+        "counts": [
+          36,
+          36,
+          36
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 0.31699999999999995,
+        "range_ms": [
+          0.311,
+          0.34700000000000003
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.54,
+        "range_ms": [
+          0.526,
+          0.544
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 18.442,
+        "range_ms": [
+          18.207,
+          18.859
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.01,
+        "range_ms": [
+          0.01,
+          0.011
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 17.686,
+        "range_ms": [
+          17.46,
+          18.117
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 0.035,
+        "range_ms": [
+          0.034,
+          0.039
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.214,
+        "range_ms": [
+          0.206,
+          0.238
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.markdown.wrap": {
+        "median_ms": 2.311,
+        "range_ms": [
+          2.25,
+          2.355
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 6.36399999999998,
+        "range_ms": [
+          6.253999999999942,
+          6.397999999999989
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 1.3989999999999865,
+        "range_ms": [
+          1.3319999999999914,
+          1.5139999999999825
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 1.9449999999999756,
+        "range_ms": [
+          1.9019999999999888,
+          2.104999999999996
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.037,
+        "range_ms": [
+          0.033,
+          0.038
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 2.097,
+        "range_ms": [
+          2.03,
+          5.052
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_frame": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 2.006,
+        "range_ms": [
+          1.942,
+          4.971
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.107,
+        "range_ms": [
+          0.101,
+          0.109
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.003,
+          0.004
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.241,
+        "range_ms": [
+          1.203,
+          5.284
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 2.661,
+        "range_ms": [
+          2.522,
+          2.69
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.007,
+        "range_ms": [
+          0.006,
+          0.007
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.067,
+        "range_ms": [
+          0.061,
+          0.084
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.107,
+        "range_ms": [
+          0.105,
+          0.116
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 1.165,
+        "range_ms": [
+          1.11,
+          1.32
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 1.124,
+        "range_ms": [
+          0.797,
+          1.325
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 50.952,
+        "range_ms": [
+          50.792,
+          51.173
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 53.889,
+        "range_ms": [
+          53.428,
+          54.486
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 141.739,
+        "range_ms": [
+          135.484,
+          167.087
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 25.808,
+        "range_ms": [
+          25.606,
+          26.236
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.125,
+        "range_ms": [
+          0.116,
+          0.127
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 4.428,
+        "range_ms": [
+          4.274,
+          9.164
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.574,
+        "range_ms": [
+          0.574,
+          0.576
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.335,
+        "range_ms": [
+          0.294,
+          3.518
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 21.42,
+        "range_ms": [
+          21.236,
+          25.345
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 30.619,
+        "range_ms": [
+          26.898,
+          34.604
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 30.65,
+        "range_ms": [
+          26.932,
+          34.638
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.22899999999999998,
+        "range_ms": [
+          0.222,
+          0.282
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "turns": 2048,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 430.826709,
+        "range_ms": [
+          425.519208,
+          438.11091600000003
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 449.465917,
+        "range_ms": [
+          442.73483400000003,
+          453.092416
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 430.826709,
+        "range_ms": [
+          425.519208,
+          438.11091600000003
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 449.465917,
+        "range_ms": [
+          442.73483400000003,
+          453.092416
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 996.940792,
+        "range_ms": [
+          996.412958,
+          1022.5432500000001
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 480.17204200000003,
+        "range_ms": [
+          475.5595,
+          499.727
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.093,
+        "range_ms": [
+          0.089,
+          0.098
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 89.22599999999998,
+        "range_ms": [
+          88.795,
+          96.31000000000006
+        ],
+        "counts": [
+          132,
+          132,
+          132
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 0.45999999999999996,
+        "range_ms": [
+          0.434,
+          0.46399999999999997
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.708,
+        "range_ms": [
+          0.6900000000000001,
+          0.745
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 58.508,
+        "range_ms": [
+          55.187999999999995,
+          65.09
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.019,
+        "range_ms": [
+          0.015,
+          0.022
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 57.385999999999996,
+        "range_ms": [
+          54.121,
+          63.973
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 0.075,
+        "range_ms": [
+          0.064,
+          0.093
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.26999999999999996,
+        "range_ms": [
+          0.269,
+          0.288
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.markdown.wrap": {
+        "median_ms": 2.358,
+        "range_ms": [
+          2.254,
+          2.417
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 23.588999999999217,
+        "range_ms": [
+          23.30099999999948,
+          24.180000000000174
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 6.061000000000103,
+        "range_ms": [
+          6.0240000000001,
+          6.09200000000011
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 7.670999999999736,
+        "range_ms": [
+          7.655999999999729,
+          7.719999999999735
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.144,
+        "range_ms": [
+          0.135,
+          0.154
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 2.965,
+        "range_ms": [
+          2.672,
+          3.267
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_frame": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 2.751,
+        "range_ms": [
+          2.474,
+          3.07
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.107,
+        "range_ms": [
+          0.10400000000000001,
+          0.111
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.004,
+          0.005
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.234,
+        "range_ms": [
+          5.209,
+          5.248
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 10.919,
+        "range_ms": [
+          10.792,
+          11.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.015,
+        "range_ms": [
+          0.014,
+          0.017
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.068,
+        "range_ms": [
+          0.067,
+          0.11
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.136,
+        "range_ms": [
+          0.135,
+          0.138
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 5.408,
+        "range_ms": [
+          5.379,
+          5.758
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 4.714,
+        "range_ms": [
+          4.687,
+          5.617
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 202.962,
+        "range_ms": [
+          201.682,
+          204.896
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 214.967,
+        "range_ms": [
+          214.505,
+          216.424
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 404.748,
+        "range_ms": [
+          400.898,
+          410.684
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 102.631,
+        "range_ms": [
+          102.089,
+          109.75
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.495,
+        "range_ms": [
+          0.492,
+          0.505
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 5.834,
+        "range_ms": [
+          5.825,
+          6.155
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.575,
+        "range_ms": [
+          0.566,
+          0.598
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.3,
+        "range_ms": [
+          0.283,
+          0.368
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 36.574,
+        "range_ms": [
+          35.396,
+          36.676
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 43.471,
+        "range_ms": [
+          42.233,
+          43.795
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 43.508,
+        "range_ms": [
+          42.27,
+          43.832
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.24,
+        "range_ms": [
+          0.235,
+          0.28700000000000003
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "turns": 512,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 255.92820799999998,
+        "range_ms": [
+          253.03683300000003,
+          259.509292
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 289.600417,
+        "range_ms": [
+          267.336334,
+          295.121208
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 255.92820799999998,
+        "range_ms": [
+          253.03683300000003,
+          259.509292
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 289.620584,
+        "range_ms": [
+          267.353334,
+          295.149625
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 814.699041,
+        "range_ms": [
+          802.414,
+          818.2920839999999
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 290.00120899999996,
+        "range_ms": [
+          267.69858400000004,
+          295.512291
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.088,
+        "range_ms": [
+          0.087,
+          0.089
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 23.003,
+        "range_ms": [
+          22.969999999999985,
+          24.316
+        ],
+        "counts": [
+          37,
+          38,
+          37
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 100.293,
+        "range_ms": [
+          90.422,
+          100.297
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.302,
+        "range_ms": [
+          0.286,
+          0.346
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 1.134,
+        "range_ms": [
+          1.1059999999999999,
+          1.228
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.003,
+        "range_ms": [
+          0.003,
+          0.007
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 0.72,
+        "range_ms": [
+          0.706,
+          0.761
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 100.053,
+        "range_ms": [
+          90.132,
+          100.06200000000001
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.162,
+        "range_ms": [
+          0.16199999999999998,
+          0.197
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.002
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 6.201999999999986,
+        "range_ms": [
+          6.004999999999989,
+          6.571999999999955
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 1.515999999999983,
+        "range_ms": [
+          1.477999999999986,
+          1.5199999999999823
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 2.0489999999999937,
+        "range_ms": [
+          1.9249999999999847,
+          2.0609999999999906
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.04,
+        "range_ms": [
+          0.04,
+          0.044
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 1.893,
+        "range_ms": [
+          1.842,
+          2.16
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 1.806,
+        "range_ms": [
+          1.751,
+          2.074
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.10500000000000001,
+        "range_ms": [
+          0.101,
+          0.107
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.003,
+          0.004
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.278,
+        "range_ms": [
+          5.252,
+          15.441
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 2.572,
+        "range_ms": [
+          2.532,
+          2.601
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.006,
+        "range_ms": [
+          0.006,
+          0.007
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.062,
+        "range_ms": [
+          0.062,
+          0.065
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.095,
+        "range_ms": [
+          0.086,
+          0.101
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 1.155,
+        "range_ms": [
+          1.095,
+          1.346
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 0.894,
+        "range_ms": [
+          0.794,
+          1.068
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 50.591,
+        "range_ms": [
+          50.517,
+          51.242
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 53.44,
+        "range_ms": [
+          52.994,
+          54.122
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 139.837,
+        "range_ms": [
+          134.425,
+          144.392
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 25.776,
+        "range_ms": [
+          25.677,
+          27.187
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.131,
+        "range_ms": [
+          0.126,
+          0.137
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 4.174,
+        "range_ms": [
+          3.704,
+          5.074
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.587,
+        "range_ms": [
+          0.563,
+          0.602
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.334,
+        "range_ms": [
+          0.3,
+          0.386
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 22.566,
+        "range_ms": [
+          21.525,
+          22.651
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 27.404,
+        "range_ms": [
+          26.643,
+          28.742
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 27.437,
+        "range_ms": [
+          26.675,
+          28.775
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.262,
+        "range_ms": [
+          0.25,
+          0.287
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "turns": 2048,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 385.41425000000004,
+        "range_ms": [
+          376.800459,
+          385.865
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 407.11537500000003,
+        "range_ms": [
+          405.27750000000003,
+          409.281667
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 521.500667,
+        "range_ms": [
+          512.7613749999999,
+          523.940375
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 551.684584,
+        "range_ms": [
+          540.701666,
+          564.532875
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 1101.731583,
+        "range_ms": [
+          1092.4547499999999,
+          1113.708083
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 555.479834,
+        "range_ms": [
+          541.258083,
+          565.1371670000001
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.092,
+        "range_ms": [
+          0.091,
+          0.093
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 90.72300000000001,
+        "range_ms": [
+          88.27799999999998,
+          91.65499999999999
+        ],
+        "counts": [
+          131,
+          133,
+          131
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 199.667,
+        "range_ms": [
+          191.864,
+          200.55
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.638,
+        "range_ms": [
+          0.616,
+          0.6559999999999999
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 59.78,
+        "range_ms": [
+          56.19199999999999,
+          60.252
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.021,
+        "range_ms": [
+          0.015000000000000001,
+          0.022000000000000002
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 58.815000000000005,
+        "range_ms": [
+          55.132999999999996,
+          59.206
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 199.20600000000002,
+        "range_ms": [
+          191.48200000000003,
+          200.11899999999997
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.332,
+        "range_ms": [
+          0.27999999999999997,
+          0.34099999999999997
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.markdown.wrap": {
+        "median_ms": 3.621,
+        "range_ms": [
+          3.55,
+          3.64
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 23.864999999999466,
+        "range_ms": [
+          23.20099999999921,
+          24.316999999999716
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 6.102000000000113,
+        "range_ms": [
+          6.0470000000000885,
+          6.102000000000113
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 8.020999999999606,
+        "range_ms": [
+          7.723999999999813,
+          8.060999999999643
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.091,
+        "range_ms": [
+          0.061,
+          0.128
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 3.127,
+        "range_ms": [
+          2.908,
+          5.917
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_frame": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 2.975,
+        "range_ms": [
+          2.783,
+          5.726
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.103,
+        "range_ms": [
+          0.098,
+          0.111
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.003,
+          0.005
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.207,
+        "range_ms": [
+          1.433,
+          5.303
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 10.835,
+        "range_ms": [
+          10.825,
+          10.936
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.017,
+        "range_ms": [
+          0.015,
+          0.131
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.065,
+        "range_ms": [
+          0.064,
+          0.109
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.151,
+        "range_ms": [
+          0.141,
+          0.185
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 5.546,
+        "range_ms": [
+          5.197,
+          5.638
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 4.553,
+        "range_ms": [
+          4.503,
+          4.743
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 202.509,
+        "range_ms": [
+          202.199,
+          207.965
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 214.127,
+        "range_ms": [
+          213.356,
+          219.595
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 431.432,
+        "range_ms": [
+          428.337,
+          431.676
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 126.529,
+        "range_ms": [
+          121.395,
+          127.168
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.489,
+        "range_ms": [
+          0.486,
+          0.498
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 5.345,
+        "range_ms": [
+          5.295,
+          5.942
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.583,
+        "range_ms": [
+          0.573,
+          0.666
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.385,
+        "range_ms": [
+          0.352,
+          0.392
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 40.042,
+        "range_ms": [
+          37.673,
+          40.346
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 46.787,
+        "range_ms": [
+          44.208,
+          47.037
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 46.821,
+        "range_ms": [
+          44.243,
+          47.075
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.277,
+        "range_ms": [
+          0.226,
+          0.285
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 128,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 140.57883299999997,
+        "range_ms": [
+          133.214167,
+          212.766209
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 144.461833,
+        "range_ms": [
+          137.44179200000002,
+          217.363541
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 140.57883299999997,
+        "range_ms": [
+          133.214167,
+          212.766209
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 144.461833,
+        "range_ms": [
+          137.44179200000002,
+          217.363541
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 661.3711249999999,
+        "range_ms": [
+          658.844333,
+          750.555875
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 144.57304100000002,
+        "range_ms": [
+          137.53479199999998,
+          217.450375
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.089,
+        "range_ms": [
+          0.088,
+          0.111
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 11.938,
+        "range_ms": [
+          11.337000000000003,
+          21.744
+        ],
+        "counts": [
+          13,
+          13,
+          13
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 0.225,
+        "range_ms": [
+          0.157,
+          0.262
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.396,
+        "range_ms": [
+          0.386,
+          0.758
+        ],
+        "counts": [
+          3,
+          4,
+          3
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 1.462,
+        "range_ms": [
+          1.3499999999999999,
+          4.286
+        ],
+        "counts": [
+          3,
+          4,
+          3
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.003,
+          0.005
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 0.919,
+        "range_ms": [
+          0.848,
+          3.316
+        ],
+        "counts": [
+          3,
+          4,
+          3
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 0.018000000000000002,
+        "range_ms": [
+          0.012,
+          0.019999999999999997
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.17099999999999999,
+        "range_ms": [
+          0.096,
+          0.20700000000000002
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.01
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 7.588000000000002,
+        "range_ms": [
+          7.059000000000004,
+          10.18699999999999
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 6.042999999999993,
+        "range_ms": [
+          5.475000000000001,
+          8.881999999999993
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 0.4000000000000003,
+        "range_ms": [
+          0.3830000000000003,
+          0.4010000000000003
+        ],
+        "counts": [
+          128,
+          128,
+          128
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.003,
+        "range_ms": [
+          0.002,
+          0.199
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.01,
+        "range_ms": [
+          0.009,
+          0.01
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 1.538,
+        "range_ms": [
+          1.183,
+          1.616
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 1.22,
+        "range_ms": [
+          1.074,
+          1.48
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.097,
+        "range_ms": [
+          0.097,
+          0.129
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.232,
+        "range_ms": [
+          5.13,
+          16.348
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 0.578,
+        "range_ms": [
+          0.573,
+          0.609
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.005,
+        "range_ms": [
+          0.005,
+          0.006
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.064,
+        "range_ms": [
+          0.064,
+          0.073
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.063,
+        "range_ms": [
+          0.052,
+          0.066
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 0.237,
+        "range_ms": [
+          0.202,
+          0.266
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 0.198,
+        "range_ms": [
+          0.187,
+          0.203
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 12.716,
+        "range_ms": [
+          12.636,
+          12.927
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 13.659,
+        "range_ms": [
+          13.481,
+          13.836
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 82.24,
+        "range_ms": [
+          75.325,
+          101.241
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 12.486,
+        "range_ms": [
+          11.942,
+          20.396
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.024,
+        "range_ms": [
+          0.023,
+          0.033
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 3.547,
+        "range_ms": [
+          3.331,
+          5.761
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.557,
+        "range_ms": [
+          0.532,
+          0.561
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.305,
+        "range_ms": [
+          0.283,
+          0.46
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 19.067,
+        "range_ms": [
+          17.397,
+          19.517
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 23.514,
+        "range_ms": [
+          21.925,
+          26.23
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 23.543,
+        "range_ms": [
+          21.955,
+          26.261
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.243,
+        "range_ms": [
+          0.236,
+          0.42900000000000005
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 512,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 165.881791,
+        "range_ms": [
+          165.19033299999998,
+          165.94204200000001
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 172.57575,
+        "range_ms": [
+          171.96075,
+          173.02224999999999
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 165.881791,
+        "range_ms": [
+          165.19033299999998,
+          165.94204200000001
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 172.57575,
+        "range_ms": [
+          171.96075,
+          173.02224999999999
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 747.2503750000001,
+        "range_ms": [
+          741.047958,
+          749.888583
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 225.669083,
+        "range_ms": [
+          220.405834,
+          231.198083
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.096,
+        "range_ms": [
+          0.093,
+          0.099
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 44.852000000000004,
+        "range_ms": [
+          44.121,
+          45.54
+        ],
+        "counts": [
+          38,
+          37,
+          37
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 0.313,
+        "range_ms": [
+          0.3,
+          0.375
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.529,
+        "range_ms": [
+          0.499,
+          0.5529999999999999
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 17.311,
+        "range_ms": [
+          16.388,
+          17.326
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.008,
+        "range_ms": [
+          0.007,
+          0.013000000000000001
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 16.523,
+        "range_ms": [
+          15.632,
+          16.608999999999998
+        ],
+        "counts": [
+          4,
+          4,
+          4
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 0.03,
+        "range_ms": [
+          0.027,
+          0.031
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.228,
+        "range_ms": [
+          0.21,
+          0.23399999999999999
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.markdown.wrap": {
+        "median_ms": 2.342,
+        "range_ms": [
+          2.321,
+          2.379
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 28.442999999999945,
+        "range_ms": [
+          27.964999999999836,
+          28.486999999999817
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 23.07900000000015,
+        "range_ms": [
+          22.425000000000132,
+          23.228000000000097
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 1.7829999999999946,
+        "range_ms": [
+          1.7279999999999882,
+          1.8249999999999946
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.002,
+        "range_ms": [
+          0.002,
+          0.004
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.052,
+        "range_ms": [
+          0.047,
+          0.088
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 2.249,
+        "range_ms": [
+          2.2,
+          2.533
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_frame": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 2.078,
+        "range_ms": [
+          2.022,
+          2.322
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.111,
+        "range_ms": [
+          0.104,
+          0.128
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.191,
+        "range_ms": [
+          5.116,
+          5.317
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 2.634,
+        "range_ms": [
+          2.508,
+          2.7
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.007,
+        "range_ms": [
+          0.007,
+          0.012
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.066,
+        "range_ms": [
+          0.066,
+          0.069
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.097,
+        "range_ms": [
+          0.093,
+          0.107
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 1.131,
+        "range_ms": [
+          1.103,
+          1.151
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 1.039,
+        "range_ms": [
+          0.986,
+          1.201
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 50.681,
+        "range_ms": [
+          50.427,
+          50.895
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 53.489,
+        "range_ms": [
+          53.418,
+          53.646
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 161.484,
+        "range_ms": [
+          158.824,
+          170.573
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 47.72,
+        "range_ms": [
+          46.811,
+          48.453
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.129,
+        "range_ms": [
+          0.121,
+          0.151
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 3.961,
+        "range_ms": [
+          3.865,
+          4.032
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.59,
+        "range_ms": [
+          0.569,
+          0.596
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.351,
+        "range_ms": [
+          0.322,
+          0.365
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 26.592,
+        "range_ms": [
+          20.61,
+          27.308
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 31.688,
+        "range_ms": [
+          25.541,
+          32.268
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 31.723,
+        "range_ms": [
+          25.574,
+          32.3
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.002
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.267,
+        "range_ms": [
+          0.242,
+          0.271
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 2048,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 411.87820899999997,
+        "range_ms": [
+          409.543541,
+          413.763
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 429.193125,
+        "range_ms": [
+          428.511041,
+          432.93454199999996
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 538.0905,
+        "range_ms": [
+          536.518625,
+          538.295
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 555.471083,
+        "range_ms": [
+          553.71025,
+          559.134667
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 1144.360791,
+        "range_ms": [
+          1116.032042,
+          1177.402625
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 630.2455,
+        "range_ms": [
+          608.956542,
+          659.8061250000001
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.097,
+        "range_ms": [
+          0.092,
+          0.102
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 182.86100000000008,
+        "range_ms": [
+          179.70999999999998,
+          183.06799999999993
+        ],
+        "counts": [
+          134,
+          134,
+          134
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 0.495,
+        "range_ms": [
+          0.46,
+          0.579
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.815,
+        "range_ms": [
+          0.8079999999999999,
+          0.8469999999999999
+        ],
+        "counts": [
+          7,
+          7,
+          7
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 56.944,
+        "range_ms": [
+          55.278999999999996,
+          59.943
+        ],
+        "counts": [
+          7,
+          7,
+          7
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.026000000000000002,
+        "range_ms": [
+          0.024999999999999998,
+          0.026000000000000002
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 55.577,
+        "range_ms": [
+          54.08,
+          58.641
+        ],
+        "counts": [
+          7,
+          7,
+          7
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 0.084,
+        "range_ms": [
+          0.075,
+          0.12299999999999998
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.29700000000000004,
+        "range_ms": [
+          0.261,
+          0.33899999999999997
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.002
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.markdown.wrap": {
+        "median_ms": 3.665,
+        "range_ms": [
+          3.532,
+          3.765
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 112.99300000000207,
+        "range_ms": [
+          108.05300000000108,
+          113.65000000000302
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 90.137999999998,
+        "range_ms": [
+          90.12299999999999,
+          91.7109999999975
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 6.8679999999998085,
+        "range_ms": [
+          6.208000000000054,
+          7.338999999999799
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.003,
+          0.005
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.151,
+        "range_ms": [
+          0.142,
+          0.153
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 3.558,
+        "range_ms": [
+          3.224,
+          3.917
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_frame": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 3.289,
+        "range_ms": [
+          2.959,
+          3.639
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.11,
+        "range_ms": [
+          0.105,
+          0.125
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 5.183,
+        "range_ms": [
+          1.335,
+          5.285
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 11.25,
+        "range_ms": [
+          10.877,
+          11.459
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.016,
+        "range_ms": [
+          0.016,
+          0.018
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.067,
+        "range_ms": [
+          0.066,
+          0.077
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.13,
+        "range_ms": [
+          0.124,
+          0.136
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 6.001,
+        "range_ms": [
+          5.26,
+          6.358
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 4.804,
+        "range_ms": [
+          4.554,
+          5.037
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 203.817,
+        "range_ms": [
+          202.597,
+          205.25
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 216.448,
+        "range_ms": [
+          214.917,
+          216.74
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 541.513,
+        "range_ms": [
+          533.908,
+          574.853
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 227.52,
+        "range_ms": [
+          223.419,
+          229.521
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.497,
+        "range_ms": [
+          0.496,
+          0.5
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 6.091,
+        "range_ms": [
+          6.04,
+          11.506
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.573,
+        "range_ms": [
+          0.558,
+          0.587
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.359,
+        "range_ms": [
+          0.349,
+          4.607
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 38.166,
+        "range_ms": [
+          36.602,
+          46.052
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 45.251,
+        "range_ms": [
+          43.735,
+          62.942
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 45.285,
+        "range_ms": [
+          43.769,
+          62.984
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.002,
+        "range_ms": [
+          0.002,
+          0.002
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.23399999999999999,
+        "range_ms": [
+          0.215,
+          0.28
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 512,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 265.15916699999997,
+        "range_ms": [
+          260.038,
+          268.73758300000003
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 297.02025,
+        "range_ms": [
+          292.3675,
+          297.25487499999997
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 265.15916699999997,
+        "range_ms": [
+          260.038,
+          268.73758300000003
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 297.040167,
+        "range_ms": [
+          292.384416,
+          297.273
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 854.599916,
+        "range_ms": [
+          841.308083,
+          855.44425
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 297.353083,
+        "range_ms": [
+          292.717583,
+          297.604
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.123,
+        "range_ms": [
+          0.093,
+          0.138
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 44.788999999999994,
+        "range_ms": [
+          44.432,
+          46.19200000000001
+        ],
+        "counts": [
+          37,
+          36,
+          37
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 100.3,
+        "range_ms": [
+          99.994,
+          100.321
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.439,
+        "range_ms": [
+          0.41100000000000003,
+          0.454
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 17.375,
+        "range_ms": [
+          16.591,
+          18.125
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.009000000000000001,
+        "range_ms": [
+          0.008,
+          0.013000000000000001
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 16.798000000000002,
+        "range_ms": [
+          15.937999999999999,
+          17.471
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 100.049,
+        "range_ms": [
+          99.717,
+          100.051
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.21300000000000002,
+        "range_ms": [
+          0.187,
+          0.22699999999999998
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.markdown.wrap": {
+        "median_ms": 2.342,
+        "range_ms": [
+          2.315,
+          2.347
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 28.317999999999845,
+        "range_ms": [
+          28.244999999999827,
+          28.59899999999996
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 22.938000000000105,
+        "range_ms": [
+          22.738000000000202,
+          23.015000000000132
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 1.6779999999999928,
+        "range_ms": [
+          1.5469999999999853,
+          1.7599999999999927
+        ],
+        "counts": [
+          512,
+          512,
+          512
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.002,
+        "range_ms": [
+          0.002,
+          0.003
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.015,
+        "range_ms": [
+          0.012,
+          0.029
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 2.107,
+        "range_ms": [
+          2.077,
+          2.452
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_frame": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 2.004,
+        "range_ms": [
+          1.967,
+          2.32
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.113,
+        "range_ms": [
+          0.10400000000000001,
+          0.152
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 16.407,
+        "range_ms": [
+          5.229,
+          16.742
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 2.588,
+        "range_ms": [
+          2.481,
+          2.639
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.009,
+        "range_ms": [
+          0.007,
+          0.009
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.065,
+        "range_ms": [
+          0.061,
+          0.071
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.101,
+        "range_ms": [
+          0.099,
+          0.111
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 1.146,
+        "range_ms": [
+          1.06,
+          1.197
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 1.067,
+        "range_ms": [
+          0.814,
+          1.1
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 50.874,
+        "range_ms": [
+          50.836,
+          51.832
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 53.769,
+        "range_ms": [
+          53.736,
+          54.365
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 167.976,
+        "range_ms": [
+          160.846,
+          180.623
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 52.892,
+        "range_ms": [
+          52.687,
+          54.481
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.129,
+        "range_ms": [
+          0.127,
+          0.131
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 4.005,
+        "range_ms": [
+          3.859,
+          5.188
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.596,
+        "range_ms": [
+          0.553,
+          0.613
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.346,
+        "range_ms": [
+          0.327,
+          0.385
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 21.604,
+        "range_ms": [
+          21.368,
+          23.046
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 27.652,
+        "range_ms": [
+          26.556,
+          28.103
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 27.688,
+        "range_ms": [
+          26.589,
+          28.138
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.002
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.292,
+        "range_ms": [
+          0.28300000000000003,
+          0.346
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 2048,
+    "runs": 3,
+    "events": {
+      "first_sequence_marker_pty_received": {
+        "median_ms": 377.96345799999995,
+        "range_ms": [
+          372.85395900000003,
+          385.163584
+        ]
+      },
+      "first_sequence_marker_visible": {
+        "median_ms": 403.481208,
+        "range_ms": [
+          392.039875,
+          417.68716700000004
+        ]
+      },
+      "last_history_marker_pty_received": {
+        "median_ms": 637.6358749999999,
+        "range_ms": [
+          636.66475,
+          659.43525
+        ]
+      },
+      "last_history_marker_visible": {
+        "median_ms": 666.2395,
+        "range_ms": [
+          662.233667,
+          706.986459
+        ]
+      },
+      "process_started": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ]
+      },
+      "ready_prompt_stable": {
+        "median_ms": 1221.061167,
+        "range_ms": [
+          1217.1822080000002,
+          1244.1567499999999
+        ]
+      },
+      "replay_completion_observed": {
+        "median_ms": 666.797833,
+        "range_ms": [
+          662.867042,
+          707.597125
+        ]
+      }
+    },
+    "phases": {
+      "mcp_merge": {
+        "median_ms": 0.087,
+        "range_ms": [
+          0.081,
+          0.089
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.acp.apply_batch": {
+        "median_ms": 180.144,
+        "range_ms": [
+          180.05399999999995,
+          182.27899999999997
+        ],
+        "counts": [
+          133,
+          134,
+          134
+        ]
+      },
+      "pager.frame.delivery": {
+        "median_ms": 241.714,
+        "range_ms": [
+          240.66000000000003,
+          244.369
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.diff": {
+        "median_ms": 0.7329999999999999,
+        "range_ms": [
+          0.732,
+          0.828
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.present": {
+        "median_ms": 55.447,
+        "range_ms": [
+          54.886,
+          67.726
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.queue": {
+        "median_ms": 0.022,
+        "range_ms": [
+          0.018000000000000002,
+          0.023
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.render": {
+        "median_ms": 54.271,
+        "range_ms": [
+          53.565,
+          66.517
+        ],
+        "counts": [
+          6,
+          6,
+          6
+        ]
+      },
+      "pager.frame.wait": {
+        "median_ms": 241.28199999999998,
+        "range_ms": [
+          240.27300000000002,
+          243.977
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.frame.write": {
+        "median_ms": 0.257,
+        "range_ms": [
+          0.256,
+          0.266
+        ],
+        "counts": [
+          5,
+          5,
+          5
+        ]
+      },
+      "pager.markdown.finish": {
+        "median_ms": 0.001,
+        "range_ms": [
+          0.001,
+          0.001
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.markdown.wrap": {
+        "median_ms": 4.677,
+        "range_ms": [
+          4.63,
+          4.884
+        ],
+        "counts": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pager.message.finish": {
+        "median_ms": 113.54700000000297,
+        "range_ms": [
+          112.94000000000177,
+          113.80000000000305
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.image_refs": {
+        "median_ms": 91.73899999999814,
+        "range_ms": [
+          91.73099999999692,
+          92.14199999999677
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.message.mermaid": {
+        "median_ms": 7.340999999999838,
+        "range_ms": [
+          6.702999999999977,
+          7.38499999999981
+        ],
+        "counts": [
+          2048,
+          2048,
+          2048
+        ]
+      },
+      "pager.replay.descendants": {
+        "median_ms": 0.004,
+        "range_ms": [
+          0.003,
+          0.004
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.end_batch": {
+        "median_ms": 0.135,
+        "range_ms": [
+          0.132,
+          0.137
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.finalize": {
+        "median_ms": 3.288,
+        "range_ms": [
+          3.217,
+          3.304
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_applied": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.first_frame": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "pager.replay.release_memory": {
+        "median_ms": 3.036,
+        "range_ms": [
+          2.968,
+          3.049
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "plugin_discovery": {
+        "median_ms": 0.1,
+        "range_ms": [
+          0.1,
+          0.111
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      },
+      "session.delta_drain_completions": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.fs_notify_start": {
+        "median_ms": 1.403,
+        "range_ms": [
+          1.329,
+          5.355
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.history_projection": {
+        "median_ms": 11.133,
+        "range_ms": [
+          11.076,
+          11.284
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.model_route_reconcile": {
+        "median_ms": 0.016,
+        "range_ms": [
+          0.016,
+          0.017
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.open_session": {
+        "median_ms": 0.065,
+        "range_ms": [
+          0.055,
+          0.066
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.state_projections": {
+        "median_ms": 0.16,
+        "range_ms": [
+          0.151,
+          0.161
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_evidence": {
+        "median_ms": 5.84,
+        "range_ms": [
+          5.707,
+          6.674
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_fold": {
+        "median_ms": 4.267,
+        "range_ms": [
+          4.165,
+          5.122
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load.timeline_read_decode": {
+        "median_ms": 206.878,
+        "range_ms": [
+          203.635,
+          208.001
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_light": {
+        "median_ms": 217.904,
+        "range_ms": [
+          216.87,
+          219.47
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session": {
+        "median_ms": 558.59,
+        "range_ms": [
+          543.946,
+          579.191
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.load_session_replay": {
+        "median_ms": 237.777,
+        "range_ms": [
+          237.649,
+          250.944
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.reconcile_stale_tasks": {
+        "median_ms": 0.498,
+        "range_ms": [
+          0.483,
+          0.52
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.replay.first_send": {
+        "median_ms": 0.0,
+        "range_ms": [
+          0.0,
+          0.0
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.install_coordination_backend": {
+        "median_ms": 5.4,
+        "range_ms": [
+          4.99,
+          5.839
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.prepare": {
+        "median_ms": 0.576,
+        "range_ms": [
+          0.572,
+          0.604
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn.publish_coordination": {
+        "median_ms": 0.341,
+        "range_ms": [
+          0.329,
+          0.435
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_actor_call": {
+        "median_ms": 36.974,
+        "range_ms": [
+          36.793,
+          42.242
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register": {
+        "median_ms": 43.943,
+        "range_ms": [
+          42.842,
+          48.668
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.spawn_and_register_session": {
+        "median_ms": 43.98,
+        "range_ms": [
+          42.879,
+          48.701
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "session.stale_tasks_drain_completions": {
+        "median_ms": 0.002,
+        "range_ms": [
+          0.001,
+          0.002
+        ],
+        "counts": [
+          1,
+          1,
+          1
+        ]
+      },
+      "skill_discovery": {
+        "median_ms": 0.225,
+        "range_ms": [
+          0.22,
+          0.293
+        ],
+        "counts": [
+          2,
+          2,
+          2
+        ]
+      }
+    }
+  }
+]

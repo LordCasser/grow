@@ -1,0 +1,10 @@
+{
+  "before": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/c2-before/grow",
+    "sha256": "e9056c001db64805699cd19d96d7f6a0df294793f04de4aa35f947721c760bdf"
+  },
+  "after": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/grow",
+    "sha256": "cbcd91c2e13ef170a6ea158a2030388eb31b264e61dfa033cde29824c4b40b32"
+  }
+}

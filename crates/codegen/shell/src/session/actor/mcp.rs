@@ -287,7 +287,8 @@ impl SessionActor {
             }
         }
         drop(state);
-        self.refresh_mcp_snapshot_under_publication(&publication).await;
+        self.refresh_mcp_snapshot_under_publication(&publication)
+            .await;
         let snapshot = crate::extensions::mcp::build_mcp_status(&self.mcp_state, &bridge).await;
         self.emit_mcp_catalog_updates(
             snapshot
@@ -336,7 +337,8 @@ impl SessionActor {
     /// itself stays static (cacheable).
     pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder(&self) {
         let publication = self.mcp.publication_bridge.lock().await;
-        self.refresh_mcp_snapshot_under_publication(&publication).await;
+        self.refresh_mcp_snapshot_under_publication(&publication)
+            .await;
     }
 
     // Callers hold the publication lock through registration and snapshot.
@@ -722,7 +724,8 @@ impl SessionActor {
                 .await;
         }
         drop(state);
-        self.refresh_mcp_snapshot_under_publication(&publication).await;
+        self.refresh_mcp_snapshot_under_publication(&publication)
+            .await;
         drop(publication);
         // Config updates can run while snapshot refresh waits for its lock.
         if self
@@ -1298,7 +1301,10 @@ impl SessionActor {
                                 .collect();
                             for reg in registrations {
                                 let qualified_name = reg.name.clone();
-                                if capabilities.as_ref().is_some_and(|state| !state.mcp_tool_eligible(&qualified_name)) {
+                                if capabilities
+                                    .as_ref()
+                                    .is_some_and(|state| !state.mcp_tool_eligible(&qualified_name))
+                                {
                                     continue;
                                 }
                                 let prefix = format!(
@@ -1509,7 +1515,10 @@ impl SessionActor {
                 }
                 for reg in regs {
                     let qualified_name = reg.name.clone();
-                    if capabilities.as_ref().is_some_and(|state| !state.mcp_tool_eligible(&qualified_name)) {
+                    if capabilities
+                        .as_ref()
+                        .is_some_and(|state| !state.mcp_tool_eligible(&qualified_name))
+                    {
                         continue;
                     }
                     let prefix = format!(
@@ -1563,7 +1572,10 @@ impl SessionActor {
                 true,
                 generation,
             )
-            .await { return; }
+            .await
+            {
+                return;
+            }
             mcp_handshakes_done.notify_waiters();
             drop(publication);
             for (server_name, tools) in ui_tools_by_server {

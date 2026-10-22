@@ -1,0 +1,1198 @@
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state/src/actor/mod.rs:858:
+                     sampling_types::ApiBackend::Responses => portable
+                         .iter()
+                         .any(|item| matches!(item, ConversationItem::Reasoning(_))),
+-                    sampling_types::ApiBackend::ChatCompletions => portable
+-                        .iter()
+-                        .any(|item| matches!(item, ConversationItem::Assistant(_)))
+-                        || surface.iter().any(|item| match item {
+-                            ConversationItem::AgentMessage(batch) => !batch.messages.is_empty(),
+-                            ConversationItem::SkillLoad(skill) => {
+-                                skill.source == sampling_types::SkillLoadSource::User
+-                            }
+-                            _ => false,
+-                        })
+-                        || projection.spans.iter().any(|span| {
++                    sampling_types::ApiBackend::ChatCompletions => {
++                        portable
++                            .iter()
++                            .any(|item| matches!(item, ConversationItem::Assistant(_)))
++                            || surface.iter().any(|item| match item {
++                                ConversationItem::AgentMessage(batch) => !batch.messages.is_empty(),
++                                ConversationItem::SkillLoad(skill) => {
++                                    skill.source == sampling_types::SkillLoadSource::User
++                                }
++                                _ => false,
++                            }) || projection.spans.iter().any(|span| {
+                             matches!(
+                                 &span.fragment,
+                                 sampling_types::NativeContinuationFragment::ChatCompletions(message)
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state/src/actor/mod.rs:875:
+                                     if message.reasoning_content.is_none()
+                             )
+-                        }),
++                        })
++                    }
+                     sampling_types::ApiBackend::Messages => false,
+                 };
+                 let changed = self
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state/src/lib.rs:62:
+ };
+ pub use timeline::{
+     ActiveControlContext, AdmittedResponse, AdmittedResponseView, CompactionEvent, CompactionMode,
+-    ControlContext,
+-    ControlContextActivation, ControlContextLayer, ControlEvent, DisplayProjectionExpectation,
+-    DisplayProjectionKind, EventSeq, HookAggregateDecision, HookCause, HookEvent, HookEventType,
+-    HookFailurePolicy, HookGateDecision, HookGateKind, HookHandlerKind, HookHandlerLifecycle,
+-    HookHandlerPlan, HookHandlerPlanAction, HookHandlerProvenance, HookLifecycleProjection,
+-    HookRunControl, HookRunOutcome, HookRunSkipReason, HookStopDecision, ImageProjectionEvent,
+-    ImageShadow, ImageShadowSource, ImageToolCallShadow, InputAdmissionDecision, InputBlockReason,
+-    InputDismissReason, InputEvent, InputIntent, InputLifecycle, InputPayloadRef, InputRoute,
+-    InputState, InteractionEvent, InteractionKind, InteractionResolution,
+-    MAX_HOOK_CONTROL_TEXT_BYTES, MAX_HOOK_HANDLER_NAME_BYTES, MAX_HOOK_HANDLERS, MAX_HOOK_ID_BYTES,
+-    MAX_INPUT_PAYLOAD_BYTES, MAX_NOTIFICATION_ID_BYTES, MAX_NOTIFICATION_PAYLOAD_BYTES,
++    ControlContext, ControlContextActivation, ControlContextLayer, ControlEvent,
++    DisplayProjectionExpectation, DisplayProjectionKind, EventSeq, HookAggregateDecision,
++    HookCause, HookEvent, HookEventType, HookFailurePolicy, HookGateDecision, HookGateKind,
++    HookHandlerKind, HookHandlerLifecycle, HookHandlerPlan, HookHandlerPlanAction,
++    HookHandlerProvenance, HookLifecycleProjection, HookRunControl, HookRunOutcome,
++    HookRunSkipReason, HookStopDecision, ImageProjectionEvent, ImageShadow, ImageShadowSource,
++    ImageToolCallShadow, InputAdmissionDecision, InputBlockReason, InputDismissReason, InputEvent,
++    InputIntent, InputLifecycle, InputPayloadRef, InputRoute, InputState, InteractionEvent,
++    InteractionKind, InteractionResolution, MAX_HOOK_CONTROL_TEXT_BYTES,
++    MAX_HOOK_HANDLER_NAME_BYTES, MAX_HOOK_HANDLERS, MAX_HOOK_ID_BYTES, MAX_INPUT_PAYLOAD_BYTES,
++    MAX_NOTIFICATION_ID_BYTES, MAX_NOTIFICATION_PAYLOAD_BYTES,
+     MAX_PENDING_MONITOR_PROGRESS_PER_TASK, MAX_TURN_INPUTS, MAX_WORKFLOW_INITIAL_MANIFEST_BYTES,
+     MAX_WORKFLOW_RUN_ID_BYTES, MessageCause, MessageEvent, NotificationDismissReason,
+     NotificationEvent, NotificationOwner, NotificationPayloadRef, NotificationSource,
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/mcp/src/servers.rs:2534:
+ 
+     loop {
+         let result = peer
+-            .list_tools(Some(
+-                PaginatedRequestParams::default().with_cursor(cursor),
+-            ))
++            .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+             .await?;
+         let next_cursor = result.next_cursor;
+         if let Some(next) = next_cursor.as_ref()
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/src/acp/meta.rs:152:
+                 .and_then(|v| v.as_str())
+                 .map(|s| s.to_string()),
+             is_replay: m.get("isReplay").and_then(|v| v.as_bool()).unwrap_or(false),
+-            replace_sampling_preview: m.get("grow/replaceSamplingPreview").and_then(serde_json::Value::as_bool).unwrap_or(false),
++            replace_sampling_preview: m
++                .get("grow/replaceSamplingPreview")
++                .and_then(serde_json::Value::as_bool)
++                .unwrap_or(false),
+             event_id,
+-            history_cursor: m.get("grow/historyCursor").and_then(serde_json::Value::as_str).map(str::to_owned),
++            history_cursor: m
++                .get("grow/historyCursor")
++                .and_then(serde_json::Value::as_str)
++                .map(str::to_owned),
+             event_seq,
+             sampling_request_id: m
+                 .get("samplingRequestId")
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/src/acp/tracker.rs:1079:
+             &update,
+             acp::SessionUpdate::AgentMessageChunk(_) | acp::SessionUpdate::AgentThoughtChunk(_)
+         );
+-        if is_sampling_preview && meta.replace_sampling_preview && let Some(key) = Self::sampling_key(meta) {
++        if is_sampling_preview
++            && meta.replace_sampling_preview
++            && let Some(key) = Self::sampling_key(meta)
++        {
+             // Reconnect may have replaced the transcript while this attempt was
+             // still provisional. Remove only its provisional entries; unrelated
+             // tools/notices and committed responses retain their original order.
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/src/acp/tracker.rs:1086:
+-            let ids = self.sampling_preview_entries.remove(&key).unwrap_or_default();
+-            for id in &ids { scrollback.remove_entry(*id); }
+-            if self.current_agent_msg.is_some_and(|id| ids.contains(&id)) { self.current_agent_msg = None; }
+-            if self.current_thinking.is_some_and(|id| ids.contains(&id)) { self.current_thinking = None; self.last_thinking_elapsed_ms = None; }
+-            if self.sampling_attempt.as_ref() == Some(&key) { self.sampling_attempt = None; }
++            let ids = self
++                .sampling_preview_entries
++                .remove(&key)
++                .unwrap_or_default();
++            for id in &ids {
++                scrollback.remove_entry(*id);
++            }
++            if self.current_agent_msg.is_some_and(|id| ids.contains(&id)) {
++                self.current_agent_msg = None;
++            }
++            if self.current_thinking.is_some_and(|id| ids.contains(&id)) {
++                self.current_thinking = None;
++                self.last_thinking_elapsed_ms = None;
++            }
++            if self.sampling_attempt.as_ref() == Some(&key) {
++                self.sampling_attempt = None;
++            }
+         }
+         if is_sampling_preview
+             && let Some(key) = Self::sampling_key(meta)
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/src/acp/tracker.rs:3722:
+         let mut sb = ScrollbackState::new();
+         let mut tracker = AcpUpdateTracker::new();
+         let first = sampling_meta("request", 1);
+-        tracker.handle_sampling_attempt("request".into(), 1, SamplingAttemptState::Started, &mut sb);
++        tracker.handle_sampling_attempt(
++            "request".into(),
++            1,
++            SamplingAttemptState::Started,
++            &mut sb,
++        );
+         assert!(tracker.handle_update(agent_chunk("attempt one"), &first, &mut sb));
+-        tracker.handle_sampling_attempt("request".into(), 1, SamplingAttemptState::Accepted, &mut sb);
++        tracker.handle_sampling_attempt(
++            "request".into(),
++            1,
++            SamplingAttemptState::Accepted,
++            &mut sb,
++        );
+ 
+         let second = sampling_meta("request", 2);
+-        tracker.handle_sampling_attempt("request".into(), 2, SamplingAttemptState::Started, &mut sb);
++        tracker.handle_sampling_attempt(
++            "request".into(),
++            2,
++            SamplingAttemptState::Started,
++            &mut sb,
++        );
+         assert!(tracker.handle_update(agent_chunk("stale attempt two"), &second, &mut sb));
+         tracker.handle_update(
+             tool_call("between-attempts", acp::ToolKind::Read, "src/lib.rs"),
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/src/acp/tracker.rs:3738:
+ 
+         let mut replacement = second;
+         replacement.replace_sampling_preview = true;
+-        assert!(tracker.handle_update(
+-            agent_chunk("resynced attempt two"),
+-            &replacement,
+-            &mut sb,
+-        ));
++        assert!(tracker.handle_update(agent_chunk("resynced attempt two"), &replacement, &mut sb,));
+ 
+-        let entries = sb.iter_entries().map(|(_, entry)| &entry.block).collect::<Vec<_>>();
+-        let agent_texts = entries.iter().filter_map(|block| match block {
+-            RenderBlock::AgentMessage(message) => Some(message.text()),
+-            _ => None,
+-        }).collect::<Vec<_>>();
++        let entries = sb
++            .iter_entries()
++            .map(|(_, entry)| &entry.block)
++            .collect::<Vec<_>>();
++        let agent_texts = entries
++            .iter()
++            .filter_map(|block| match block {
++                RenderBlock::AgentMessage(message) => Some(message.text()),
++                _ => None,
++            })
++            .collect::<Vec<_>>();
+         assert_eq!(agent_texts, vec!["attempt one", "resynced attempt two"]);
+-        assert!(entries.iter().any(|block| matches!(
+-            block,
+-            RenderBlock::ToolCall(crate::scrollback::blocks::tool::ToolCallBlock::Read(_))
+-        )), "the independent tool entry must survive preview replacement");
+-        assert!(entries.iter().any(|block| matches!(
+-            block,
+-            RenderBlock::Notice(notice) if notice.text == "independent notice"
+-        )), "the independent notice must survive preview replacement");
++        assert!(
++            entries.iter().any(|block| matches!(
++                block,
++                RenderBlock::ToolCall(crate::scrollback::blocks::tool::ToolCallBlock::Read(_))
++            )),
++            "the independent tool entry must survive preview replacement"
++        );
++        assert!(
++            entries.iter().any(|block| matches!(
++                block,
++                RenderBlock::Notice(notice) if notice.text == "independent notice"
++            )),
++            "the independent notice must survive preview replacement"
++        );
+     }
+ 
+     #[test]
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/src/export_cmd.rs:338:
+         shell::session::testkit::write_timeline_history_fixture(
+             &directory,
+             timeline.events(),
+-            &[shell::session::storage::SessionUpdate::Acp(Box::new(notification))],
++            &[shell::session::storage::SessionUpdate::Acp(Box::new(
++                notification,
++            ))],
+         )
+         .unwrap();
+     }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/src/trajectory_cmd.rs:123:
+         shell::session::testkit::write_timeline_history_fixture(
+             &directory,
+             timeline.events(),
+-            &[shell::session::storage::SessionUpdate::Acp(Box::new(notification))],
++            &[shell::session::storage::SessionUpdate::Acp(Box::new(
++                notification,
++            ))],
+         )
+         .unwrap();
+     }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs:178:
+         files_per_rewind: 2,
+         file_content_len: 256,
+     };
+-    let (info, directory) = synth::replay::prepare_legacy_session(&grow_home, &project_cwd, &spec).await;
++    let (info, directory) =
++        synth::replay::prepare_legacy_session(&grow_home, &project_cwd, &spec).await;
+     let marker = format!("RESUME_READY_{turns}");
+     if modern {
+         let route = sampling_types::model_image_input_key_from_parts(
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs:303:
+         ),
+     );
+     if modern {
+-        let notification = agent_client_protocol::schema::v1::SessionNotification::new(info.id.clone(), update);
+-        JsonlStorageAdapter::with_root(grow_home.clone()).append_update(&info, &shell::session::storage::SessionUpdate::Acp(Box::new(notification))).await.expect("append last replay marker");
++        let notification =
++            agent_client_protocol::schema::v1::SessionNotification::new(info.id.clone(), update);
++        JsonlStorageAdapter::with_root(grow_home.clone())
++            .append_update(
++                &info,
++                &shell::session::storage::SessionUpdate::Acp(Box::new(notification)),
++            )
++            .await
++            .expect("append last replay marker");
+     } else {
+         let line = serde_json::json!({"timestamp":0,"method":"session/update","params":{"sessionId":info.id,"update":update}});
+         use std::io::Write as _;
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs:311:
+-        writeln!(std::fs::OpenOptions::new().append(true).open(directory.join("updates.jsonl")).expect("open temporary legacy fixture"), "{line}").unwrap();
++        writeln!(
++            std::fs::OpenOptions::new()
++                .append(true)
++                .open(directory.join("updates.jsonl"))
++                .expect("open temporary legacy fixture"),
++            "{line}"
++        )
++        .unwrap();
+         synth::replay::finish_legacy_fixture(&info, &directory);
+     }
+     if std::env::var_os("GROW_PTY_LEGACY_COMPARISON").is_some() {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs:315:
+-        shell::session::testkit::legacy_comparison::export_legacy_comparison_fixture(&info, &directory).expect("export isolated pre-change benchmark fixture");
++        shell::session::testkit::legacy_comparison::export_legacy_comparison_fixture(
++            &info, &directory,
++        )
++        .expect("export isolated pre-change benchmark fixture");
+     }
+ 
+     let binary = pager_binary().expect("resolve pager binary");
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/tests/pty_e2e/suspend_nested_task_tree.rs:708:
+ }
+ 
+ fn turn_has_ended_with_outcome(contents: &str, turn_id: &str, outcome: &str) -> bool {
+-    parsed_timeline(contents)
+-        .any(|event| {
+-            event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
+-                && event
+-                    .pointer("/event/state")
+-                    .and_then(serde_json::Value::as_str)
+-                    == Some("ended")
+-                && event
+-                    .pointer("/event/id")
+-                    .and_then(serde_json::Value::as_str)
+-                    == Some(turn_id)
+-                && event
+-                    .pointer("/event/outcome")
+-                    .and_then(serde_json::Value::as_str)
+-                    == Some(outcome)
+-        })
++    parsed_timeline(contents).any(|event| {
++        event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
++            && event
++                .pointer("/event/state")
++                .and_then(serde_json::Value::as_str)
++                == Some("ended")
++            && event
++                .pointer("/event/id")
++                .and_then(serde_json::Value::as_str)
++                == Some(turn_id)
++            && event
++                .pointer("/event/outcome")
++                .and_then(serde_json::Value::as_str)
++                == Some(outcome)
++    })
+ }
+ 
+ fn spawn_for_tool_call(contents: &str, call_id: &str) -> Option<(String, String)> {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/pager/tests/pty_e2e/suspend_nested_task_tree.rs:1070:
+ }
+ 
+ fn turn_has_ended(contents: &str, turn_id: &str) -> bool {
+-    parsed_timeline(contents)
+-        .any(|event| {
+-            event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
+-                && event
+-                    .pointer("/event/state")
+-                    .and_then(serde_json::Value::as_str)
+-                    == Some("ended")
+-                && event
+-                    .pointer("/event/id")
+-                    .and_then(serde_json::Value::as_str)
+-                    == Some(turn_id)
+-        })
++    parsed_timeline(contents).any(|event| {
++        event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
++            && event
++                .pointer("/event/state")
++                .and_then(serde_json::Value::as_str)
++                == Some("ended")
++            && event
++                .pointer("/event/id")
++                .and_then(serde_json::Value::as_str)
++                == Some(turn_id)
++    })
+ }
+ 
+ fn process_alive(pid: libc::pid_t) -> bool {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/agent/subagent/mod.rs:3040:
+     terminal: &chat_state::SubagentTerminalEvent,
+     child_directory: &crate::session::storage::ContainedDirectory,
+ ) -> Result<SessionUpdate, String> {
+-    let events = crate::session::storage::JsonlStorageAdapter::read_timeline_from_directory(
+-        child_directory,
+-    )
+-    .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
++    let events =
++        crate::session::storage::JsonlStorageAdapter::read_timeline_from_directory(child_directory)
++            .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
+     let child = chat_state::Timeline::from_events(events)
+         .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
+     let result = child
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/agent/update_chunk_merge.rs:400:
+ ) {
+     if prev.session_id != new.session_id
+         || !sampling_metadata_compatible(prev.meta.as_ref(), new.meta.as_ref())
+-        || new.meta.as_ref().and_then(|meta| meta.get("grow/replaceSamplingPreview")).and_then(serde_json::Value::as_bool) == Some(true)
++        || new
++            .meta
++            .as_ref()
++            .and_then(|meta| meta.get("grow/replaceSamplingPreview"))
++            .and_then(serde_json::Value::as_bool)
++            == Some(true)
+     {
+         return (true, prev, Some(new));
+     }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/extensions/session_state.rs:1450:
+             id: acp::SessionId::new(parent_id.clone()),
+             cwd: "/work".into(),
+         };
+-        let summary =
+-            Summary::new(&info, crate::session::persistence::default_model_id()).unwrap();
++        let summary = Summary::new(&info, crate::session::persistence::default_model_id()).unwrap();
+         state.insert(
+             SUMMARY_COLUMN.to_string(),
+             serde_json::to_value(summary).unwrap(),
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/interjection.rs:402:
+         for (index, content_block) in content_blocks.into_iter().enumerate() {
+             let notification_meta = if let Some(echo) = display_echo {
+                 serde_json::json!({"eventId": format!("{}-echo-{}-{index}", self.session_info.id.0, echo.message_id)})
+-            } else { self.build_notification_meta() };
++            } else {
++                self.build_notification_meta()
++            };
+             let update = acp::SessionUpdate::UserMessageChunk(
+                 acp::ContentChunk::new(content_block).meta(user_chunk_meta.clone()),
+             );
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/interjection.rs:546:
+                 // The consuming Domain event fsyncs this same journal prefix.
+                 // An ambiguous/rejected consume leaves only an unreferenced
+                 // typed echo; retry uses identical per-block identities.
+-                self.publish_synthetic_user_message(&display_text, item.clone(), false, &images, false, Some(&display_echo)).await;
++                self.publish_synthetic_user_message(
++                    &display_text,
++                    item.clone(),
++                    false,
++                    &images,
++                    false,
++                    Some(&display_echo),
++                )
++                .await;
+ 
+                 let publication = if group.items.is_empty() {
+                     self.consume_steer_inputs(
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp.rs:287:
+             }
+         }
+         drop(state);
+-        self.refresh_mcp_snapshot_under_publication(&publication).await;
++        self.refresh_mcp_snapshot_under_publication(&publication)
++            .await;
+         let snapshot = crate::extensions::mcp::build_mcp_status(&self.mcp_state, &bridge).await;
+         self.emit_mcp_catalog_updates(
+             snapshot
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp.rs:336:
+     /// itself stays static (cacheable).
+     pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder(&self) {
+         let publication = self.mcp.publication_bridge.lock().await;
+-        self.refresh_mcp_snapshot_under_publication(&publication).await;
++        self.refresh_mcp_snapshot_under_publication(&publication)
++            .await;
+     }
+ 
+     // Callers hold the publication lock through registration and snapshot.
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp.rs:722:
+                 .await;
+         }
+         drop(state);
+-        self.refresh_mcp_snapshot_under_publication(&publication).await;
++        self.refresh_mcp_snapshot_under_publication(&publication)
++            .await;
+         drop(publication);
+         // Config updates can run while snapshot refresh waits for its lock.
+         if self
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp.rs:1298:
+                                 .collect();
+                             for reg in registrations {
+                                 let qualified_name = reg.name.clone();
+-                                if capabilities.as_ref().is_some_and(|state| !state.mcp_tool_eligible(&qualified_name)) {
++                                if capabilities
++                                    .as_ref()
++                                    .is_some_and(|state| !state.mcp_tool_eligible(&qualified_name))
++                                {
+                                     continue;
+                                 }
+                                 let prefix = format!(
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp.rs:1509:
+                 }
+                 for reg in regs {
+                     let qualified_name = reg.name.clone();
+-                    if capabilities.as_ref().is_some_and(|state| !state.mcp_tool_eligible(&qualified_name)) {
++                    if capabilities
++                        .as_ref()
++                        .is_some_and(|state| !state.mcp_tool_eligible(&qualified_name))
++                    {
+                         continue;
+                     }
+                     let prefix = format!(
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp.rs:1563:
+                 true,
+                 generation,
+             )
+-            .await { return; }
++            .await
++            {
++                return;
++            }
+             mcp_handshakes_done.notify_waiters();
+             drop(publication);
+             for (server_name, tools) in ui_tools_by_server {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp_snapshot.rs:104:
+             .tools
+             .clone();
+         if tools.is_empty() {
+-            self.refresh_mcp_snapshot_under_publication(publication).await;
++            self.refresh_mcp_snapshot_under_publication(publication)
++                .await;
+             return;
+         }
+         let mut all_ui_tools: std::collections::HashMap<
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mcp_snapshot.rs:140:
+             )
+             .await;
+         }
+-        self.refresh_mcp_snapshot_under_publication(publication).await;
++        self.refresh_mcp_snapshot_under_publication(publication)
++            .await;
+         self.emit_mcp_catalog_updates(all_ui_tools);
+     }
+ }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/mod.rs:1900:
+     /// `send_update`d by then). `None` between turns.
+     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+     pub(crate) sampling_preview: Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
+-    pub(crate) replay_preview_resync: parking_lot::Mutex<Option<crate::session::history::ResponseKey>>,
++    pub(crate) replay_preview_resync:
++        parking_lot::Mutex<Option<crate::session::history::ResponseKey>>,
+     /// Handle to the per-session `sampler` actor.
+     ///
+     /// Live sessions get a real handle from `spawn_session_actor`;
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/image_input_recovery_tests.rs:67:
+                 PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to }
+                 | PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to } => {
+                     let result = if let Some(storage) = &sideband_storage {
+-                        storage.append_update_durable_commit_aware(&info, &update).await
++                        storage
++                            .append_update_durable_commit_aware(&info, &update)
++                            .await
+                     } else {
+                         Ok(())
+                     };
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/image_input_recovery_tests.rs:93:
+                     };
+                     if matches!(
+                         &result,
+-                        Ok(())
+-                            | Err(crate::session::storage::AppendUpdateError::Committed(_))
++                        Ok(()) | Err(crate::session::storage::AppendUpdateError::Committed(_))
+                     ) && let Some(delivery) = delivery
+                     {
+                         delivery.publish();
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/sampling_failure_recovery_tests.rs:29:
+         .run_until(async {
+             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+-            let (actor, event_rx) = create_test_actor_ex(
+-                0,
+-                256_000,
+-                85,
+-                gateway_tx,
+-                persistence_tx,
+-            )
+-            .await;
++            let (actor, event_rx) =
++                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+             let actor = std::sync::Arc::new(actor);
+             let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+             let (_chat_event_tx, chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/sampling_failure_recovery_tests.rs:82:
+             actor
+                 .notifications
+                 .persistence_tx
+-                .send(crate::session::persistence::PersistenceMsg::AppendUpdateDurablyAndAck {
+-                    update: crate::session::storage::SessionUpdate::Acp(Box::new(
+-                        acp::SessionNotification::new(
+-                            actor.session_info.id.clone(),
+-                            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+-                                acp::ContentBlock::Text(acp::TextContent::new(
+-                                    "writer-after-cancel",
++                .send(
++                    crate::session::persistence::PersistenceMsg::AppendUpdateDurablyAndAck {
++                        update: crate::session::storage::SessionUpdate::Acp(Box::new(
++                            acp::SessionNotification::new(
++                                actor.session_info.id.clone(),
++                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
++                                    acp::ContentBlock::Text(acp::TextContent::new(
++                                        "writer-after-cancel",
++                                    )),
+                                 )),
+-                            )),
+-                        ),
+-                    )),
+-                    respond_to: ack_tx,
+-                })
++                            ),
++                        )),
++                        respond_to: ack_tx,
++                    },
++                )
+                 .expect("writer inbox remains open while replay is paused");
+-            assert!(matches!(
+-                ack_rx.try_recv(),
+-                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+-            ), "the replay barrier must hold later writer traffic");
++            assert!(
++                matches!(
++                    ack_rx.try_recv(),
++                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
++                ),
++                "the replay barrier must hold later writer traffic"
++            );
+ 
+             drop(release); // cancellation after acknowledgement means resync.
+             tokio::time::timeout(Duration::from_secs(5), async {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/sampling_failure_recovery_tests.rs:106:
+                 loop {
+-                    if actor.replay_preview_resync.lock().as_ref().is_some_and(|key| {
+-                        key.request_id == "late-attempt" && key.attempt == 3
+-                    }) {
++                    if actor
++                        .replay_preview_resync
++                        .lock()
++                        .as_ref()
++                        .is_some_and(|key| key.request_id == "late-attempt" && key.attempt == 3)
++                    {
+                         break;
+                     }
+                     tokio::task::yield_now().await;
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/sampling_failure_recovery_tests.rs:204:
+                     tokio::task::spawn_local(async move {
+                         while let Some(message) = persisted.recv().await {
+                             match message {
+-                                PersistenceMsg::AppendUpdateBufferedAndAck { respond_to, .. } => {
++                                PersistenceMsg::AppendUpdateBufferedAndAck {
++                                    respond_to, ..
++                                } => {
+                                     let _ = respond_to.send(Ok(()));
+                                 }
+-                                PersistenceMsg::ReplayBarrier { respond_to, release } => {
++                                PersistenceMsg::ReplayBarrier {
++                                    respond_to,
++                                    release,
++                                } => {
+                                     let ready = respond_to.send(Ok(())).is_ok();
+                                     if ready {
+                                         let _ = release.await;
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/support.rs:945:
+                     let _ = respond_to.send(Ok(()));
+                 }
+                 PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to } => {
+-                    let result = persistence_tx
+-                        .send(PersistenceMsg::Update(update))
+-                        .map_err(|_| {
+-                            crate::session::storage::AppendUpdateError::NotCommitted(
+-                                std::io::Error::new(
+-                                    std::io::ErrorKind::BrokenPipe,
+-                                    "test persistence observation channel closed",
+-                                ),
+-                            )
+-                        });
++                    let result =
++                        persistence_tx
++                            .send(PersistenceMsg::Update(update))
++                            .map_err(|_| {
++                                crate::session::storage::AppendUpdateError::NotCommitted(
++                                    std::io::Error::new(
++                                        std::io::ErrorKind::BrokenPipe,
++                                        "test persistence observation channel closed",
++                                    ),
++                                )
++                            });
+                     let _ = respond_to.send(result);
+                 }
+-                PersistenceMsg::ReplayBarrier { respond_to, release } => {
++                PersistenceMsg::ReplayBarrier {
++                    respond_to,
++                    release,
++                } => {
+                     let ready = respond_to.send(Ok(())).is_ok();
+                     if ready {
+                         let _ = release.await;
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/actor/tests/truncation_recovery_tests.rs:651:
+ }
+ 
+ fn assert_terminal_boundary_preserves_response_admission(error: &acp::Error) {
+-    assert!(crate::session::commands::is_fatal_turn_boundary_error(error));
++    assert!(crate::session::commands::is_fatal_turn_boundary_error(
++        error
++    ));
+     let data = error.data.as_ref().expect("fatal terminal error has data");
+-    assert_eq!(data.get("phase").and_then(serde_json::Value::as_str), Some("terminal"));
+-    let cause = data.get("cause").expect("terminal error preserves its cause");
++    assert_eq!(
++        data.get("phase").and_then(serde_json::Value::as_str),
++        Some("terminal")
++    );
++    let cause = data
++        .get("cause")
++        .expect("terminal error preserves its cause");
+     let cause_data = cause
+         .get("data")
+         .expect("fatal response-admission cause has structured data");
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/goal_notification.rs:239:
+                 && updated_at == "2026-10-19T00:00:00Z"
+         ));
+         let meta = notification.meta.as_ref().unwrap().as_object().unwrap();
+-        assert!(meta.get("eventId").and_then(serde_json::Value::as_str).is_some());
++        assert!(
++            meta.get("eventId")
++                .and_then(serde_json::Value::as_str)
++                .is_some()
++        );
+         assert_eq!(
+             meta.get("grow/displayProjectionSource")
+                 .and_then(serde_json::Value::as_str),
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/goal_notification.rs:263:
+             serde_json::to_value(update).unwrap(),
+             "history fact round-trips the full notification"
+         );
+-        assert!(gateway_rx.try_recv().is_err(), "live update awaits writer ACK");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "live update awaits writer ACK"
++        );
+ 
+         drop(message);
+ 
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/goal_notification.rs:270:
+-        assert!(gateway_rx.try_recv().is_err(), "failed persistence sends no live update");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "failed persistence sends no live update"
++        );
+         let all_credits = budget
+             .try_acquire_bytes(sampler::PreviewEventBudget::MAX_BYTES)
+             .expect("dropping the refused fact releases the full preview budget");
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/mod.rs:243:
+ pub mod timeline_persistence;
+ pub mod trajectory;
+ pub use client_support::session::info;
++pub(crate) mod history;
+ pub mod mcp_catalog;
+ pub mod mcp_dispatcher;
+ #[cfg(test)]
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/mod.rs:253:
+ pub mod persistence;
+ #[cfg(any(test, feature = "test-support"))]
+ pub(crate) mod response_projection;
+-pub(crate) mod history;
+ pub use client_support::placeholder_images;
+ pub mod behavior;
+ pub(crate) mod diagnostics;
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/storage/communication_history/tests.rs:960:
+         }
+     }
+ 
+-    let ordered_lines =
+-        super::super::with_prepared_history(&session_id, &grow_home, |updates| {
+-            let lines = updates.iter().map(|update| serde_json::to_string(&super::super::SessionUpdateEnvelope::from_update(update).unwrap()).unwrap()).collect::<Vec<_>>();
+-            Ok(lines
+-                .iter()
+-                .map(|line| line.as_str().to_owned())
+-                .collect::<Vec<_>>())
+-        })
+-        .unwrap()
+-        .expect("source session must resolve");
++    let ordered_lines = super::super::with_prepared_history(&session_id, &grow_home, |updates| {
++        let lines = updates
++            .iter()
++            .map(|update| {
++                serde_json::to_string(
++                    &super::super::SessionUpdateEnvelope::from_update(update).unwrap(),
++                )
++                .unwrap()
++            })
++            .collect::<Vec<_>>();
++        Ok(lines
++            .iter()
++            .map(|line| line.as_str().to_owned())
++            .collect::<Vec<_>>())
++    })
++    .unwrap()
++    .expect("source session must resolve");
+ 
+     let mut receipt_positions = HashMap::new();
+     let mut tool_call_positions = HashMap::new();
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/storage/jsonl/durable_tests.rs:1431:
+ 
+ #[tokio::test]
+ async fn incoming_inquiry_notices_are_bound_to_typed_source_facts() {
+-    use crate::coordination::{
+-        IncomingInquiryAudit, InquiryDirection, InquiryEvent,
+-    };
++    use crate::coordination::{IncomingInquiryAudit, InquiryDirection, InquiryEvent};
+     use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+ 
+     let root = tempfile::tempdir().unwrap();
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/storage/jsonl/durable_tests.rs:1446:
+     let path = adapter.session_dir(&info).join(TIMELINE_FILE);
+     let mut timeline = chat_state::Timeline::default();
+ 
+-    let incoming = |source_peer_id: &str, source_session_id: &str| {
+-        InquiryEvent::Incoming {
+-            inquiry_id: "shared-inquiry".into(),
+-            audit: IncomingInquiryAudit {
+-                direction: InquiryDirection::ParentToChild,
+-                source_peer_id: source_peer_id.into(),
+-                source_session_id: source_session_id.into(),
+-                source_cwd: "/source/workspace".into(),
+-                delegated_subagent_task_name: None,
+-                question: "Can you inspect this?".into(),
+-                approval: None,
+-                outcome: None,
+-            },
+-        }
++    let incoming = |source_peer_id: &str, source_session_id: &str| InquiryEvent::Incoming {
++        inquiry_id: "shared-inquiry".into(),
++        audit: IncomingInquiryAudit {
++            direction: InquiryDirection::ParentToChild,
++            source_peer_id: source_peer_id.into(),
++            source_session_id: source_session_id.into(),
++            source_cwd: "/source/workspace".into(),
++            delegated_subagent_task_name: None,
++            question: "Can you inspect this?".into(),
++            approval: None,
++            outcome: None,
++        },
+     };
+     let wrap = |notice, event_id: &str| {
+         SessionUpdate::Grow(Box::new(SessionNotification {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/storage/jsonl/durable_tests.rs:1519:
+     let mut audit = IncomingInquiryAudit::from_notice(&unknown_source).unwrap();
+     audit.source_session_id = "no-domain-source".into();
+     unknown_source.details = Some(serde_json::to_string(&audit).unwrap());
+-    assert!(adapter
+-        .append_update_durable_commit_aware(
+-            &info,
+-            &wrap(unknown_source, "unknown-source-event"),
+-        )
+-        .await
+-        .is_err());
++    assert!(
++        adapter
++            .append_update_durable_commit_aware(
++                &info,
++                &wrap(unknown_source, "unknown-source-event"),
++            )
++            .await
++            .is_err()
++    );
+     assert_eq!(std::fs::read(&path).unwrap(), before_invalid);
+ 
+     let mut malformed = stored_notices[0].clone();
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/storage/jsonl/durable_tests.rs:1532:
+     malformed.details = Some("{malformed details".into());
+     for event_id in ["malformed-new-event", "inquiry-notice-a"] {
+-        assert!(adapter
+-            .append_update_durable_commit_aware(&info, &wrap(malformed.clone(), event_id))
+-            .await
+-            .is_err());
++        assert!(
++            adapter
++                .append_update_durable_commit_aware(&info, &wrap(malformed.clone(), event_id))
++                .await
++                .is_err()
++        );
+         assert_eq!(std::fs::read(&path).unwrap(), before_invalid);
+     }
+ 
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/testkit/mod.rs:41:
+ /// codec, then validate its domain events as a typed Timeline.
+ #[cfg(feature = "test-support")]
+ pub fn decode_timeline_fixture(contents: &str) -> std::io::Result<chat_state::Timeline> {
+-    let complete_len = contents
+-        .rfind('\n')
+-        .map_or(0, |position| position + 1);
++    let complete_len = contents.rfind('\n').map_or(0, |position| position + 1);
+     let lines = contents[..complete_len]
+         .lines()
+         .map(str::to_owned)
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/session/testkit/mod.rs:75:
+             "cannot append a Timeline fixture after an incomplete record",
+         ));
+     }
+-    let lines = contents
+-        .lines()
+-        .map(str::to_owned)
+-        .collect::<Vec<_>>();
++    let lines = contents.lines().map(str::to_owned).collect::<Vec<_>>();
+     let mut journal = crate::session::storage::JsonlStorageAdapter::decode_journal_lines(&lines)?;
+-    let mut timeline = chat_state::Timeline::from_events(journal.events.clone())
+-        .map_err(std::io::Error::other)?;
++    let mut timeline =
++        chat_state::Timeline::from_events(journal.events.clone()).map_err(std::io::Error::other)?;
+     let mut encoded = Vec::new();
+ 
+     for event in events {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:120:
+                 "scheduler tombstone",
+             )?;
+         } else {
+-            crate::session::persistence::append_buffered_and_ack(
+-                &config.persistence.tx,
+-                update,
+-            )
+-            .await
+-            .map_err(|error| format!("scheduler tombstone was not appended: {error}"))?;
++            crate::session::persistence::append_buffered_and_ack(&config.persistence.tx, update)
++                .await
++                .map_err(|error| format!("scheduler tombstone was not appended: {error}"))?;
+         }
+         Ok(params)
+     }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1000:
+             };
+             respond_to.send(Ok("notification-1".into())).unwrap();
+             let PersistenceMsg::AuxiliaryGrow {
+-                    delivery: None,
++                delivery: None,
+                 respond_to: Some(respond_to),
+                 ..
+             } = persistence_rx.recv().await.expect("durable UI projection")
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1064:
+             cmd_rx.recv().await,
+             Some(SessionCommand::ReceiveNotification { .. })
+         ));
+-        assert!(gateway_rx.try_recv().is_err(), "completion waits for append commit");
+-        let message = persistence_rx.recv().await.expect("completion persistence message");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "completion waits for append commit"
++        );
++        let message = persistence_rx
++            .recv()
++            .await
++            .expect("completion persistence message");
+         assert!(matches!(
+             &message,
+             PersistenceMsg::AuxiliaryGrow { notification, .. }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1094:
+             cmd_rx.try_recv(),
+             Ok(SessionCommand::DispatchNotificationHook { .. })
+         ));
+-        assert!(gateway_rx.try_recv().is_err(), "completion waits for append commit");
+-        let message = persistence_rx.recv().await.expect("completion persistence message");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "completion waits for append commit"
++        );
++        let message = persistence_rx
++            .recv()
++            .await
++            .expect("completion persistence message");
+         assert!(matches!(
+             &message,
+             PersistenceMsg::AuxiliaryGrow { notification, .. }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1211:
+             Ok(SessionCommand::DispatchNotificationHook { .. })
+         ));
+         assert!(cmd_rx.try_recv().is_err());
+-        assert!(gateway_rx.try_recv().is_err(), "completion waits for append commit");
+-        let message = persistence_rx.recv().await.expect("completion persistence message");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "completion waits for append commit"
++        );
++        let message = persistence_rx
++            .recv()
++            .await
++            .expect("completion persistence message");
+         assert!(matches!(
+             &message,
+             PersistenceMsg::AuxiliaryGrow { notification, .. }
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1320:
+                 .is_some_and(|id| id.starts_with("test-session-")),
+             "persisted Grow bridge lines must carry an eventId"
+         );
+-        assert!(gateway_rx.try_recv().is_err(), "live scheduler event waits for commit");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "live scheduler event waits for commit"
++        );
+         let _persisted = commit_auxiliary_grow(msg);
+         assert!(matches!(
+             gateway_rx.try_recv().expect("committed scheduler event is published"),
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1352:
+ 
+         let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+         let mut offsets = HashMap::new();
+-        let handling = handle_notification_with_ack(
+-            &config,
+-            bash_output_notification(),
+-            &mut offsets,
+-            false,
+-        );
++        let handling =
++            handle_notification_with_ack(&config, bash_output_notification(), &mut offsets, false);
+         let persistence_and_delivery = async {
+             let message = tokio::time::timeout(Duration::from_secs(1), persistence_rx.recv())
+                 .await
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1377:
+                 .and_then(serde_json::Value::as_str)
+                 .expect("persisted ACP bridge lines must carry an eventId")
+                 .to_string();
+-            assert!(gateway_rx.try_recv().is_err(), "live output waits for append ACK");
+-            respond_to.send(Ok(())).expect("bash emitter awaits writer ACK");
++            assert!(
++                gateway_rx.try_recv().is_err(),
++                "live output waits for append ACK"
++            );
++            respond_to
++                .send(Ok(()))
++                .expect("bash emitter awaits writer ACK");
+             let message = tokio::time::timeout(Duration::from_secs(1), gateway_rx.recv())
+                 .await
+                 .expect("committed bash output should be broadcast")
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1400:
+             tokio::join!(handling, persistence_and_delivery);
+         result.unwrap();
+         assert_eq!(persisted_id, broadcast_id);
+-        assert!(gateway_rx.try_recv().is_err(), "one append produces one broadcast");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "one append produces one broadcast"
++        );
+     }
+ 
+     #[tokio::test]
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1409:
+ 
+         let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+         let mut offsets = HashMap::new();
+-        let handling = handle_notification_with_ack(
+-            &config,
+-            bash_output_notification(),
+-            &mut offsets,
+-            false,
+-        );
++        let handling =
++            handle_notification_with_ack(&config, bash_output_notification(), &mut offsets, false);
+         let persistence = async {
+             let message = tokio::time::timeout(Duration::from_secs(1), persistence_rx.recv())
+                 .await
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1423:
+             let PersistenceMsg::AppendUpdateBufferedAndAck { respond_to, .. } = message else {
+                 panic!("expected buffered append for bash output");
+             };
+-            assert!(gateway_rx.try_recv().is_err(), "failed append must not publish live output");
++            assert!(
++                gateway_rx.try_recv().is_err(),
++                "failed append must not publish live output"
++            );
+             respond_to
+-                .send(Err(crate::session::storage::AppendUpdateError::NotCommitted(
+-                    std::io::Error::other("injected append failure"),
+-                )))
++                .send(Err(
++                    crate::session::storage::AppendUpdateError::NotCommitted(
++                        std::io::Error::other("injected append failure"),
++                    ),
++                ))
+                 .expect("bash emitter awaits writer ACK");
+         };
+         let (result, ()) = tokio::join!(handling, persistence);
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1434:
+         assert!(result.is_err());
+-        assert!(gateway_rx.try_recv().is_err(), "failed append is never broadcast");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "failed append is never broadcast"
++        );
+     }
+     #[tokio::test]
+     async fn scheduled_task_removed_is_persisted() {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1468:
+             let meta = notif.meta.as_ref().expect("scheduler metadata");
+             assert_eq!(meta["grow/schedulerGeneration"], "generation-a");
+             assert_eq!(meta["grow/schedulerRevision"], 2);
+-            assert!(gateway_rx.try_recv().is_err(), "broadcast waits for append ACK");
+-            respond_to.send(Ok(())).expect("producer is waiting for writer ACK");
++            assert!(
++                gateway_rx.try_recv().is_err(),
++                "broadcast waits for append ACK"
++            );
++            respond_to
++                .send(Ok(()))
++                .expect("producer is waiting for writer ACK");
+         };
+         let (result, ()) = tokio::join!(removal, persistence);
+         result.unwrap();
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1566:
+             _ => panic!("expected Grow update"),
+         };
+         assert!(grow_persisted_event_id(notif).is_some());
+-        assert!(gateway_rx.try_recv().is_err(), "live update waits for append commit");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "live update waits for append commit"
++        );
+         let _persisted = commit_auxiliary_grow(message);
+         assert!(matches!(
+             gateway_rx.try_recv().expect("committed update is published"),
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1591:
+             _ => panic!("expected Grow update"),
+         };
+         assert!(grow_persisted_event_id(notif).is_some());
+-        assert!(gateway_rx.try_recv().is_err(), "live update waits for append commit");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "live update waits for append commit"
++        );
+         let _persisted = commit_auxiliary_grow(message);
+         assert!(matches!(
+             gateway_rx.try_recv().expect("committed update is published"),
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1625:
+             panic!("expected task completion projection");
+         };
+         assert!(task_snapshot.output.is_empty());
+-        assert!(gateway_rx.try_recv().is_err(), "live completion waits for append commit");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "live completion waits for append commit"
++        );
+         let _persisted = commit_auxiliary_grow(message);
+         let acp_transport::AcpClientMessage::ExtNotification(live) =
+             gateway_rx.try_recv().expect("live completion")
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1699:
+                     .is_some(),
+                 "the persisted mode line must be stamped"
+             );
+-            assert!(gateway_rx.try_recv().is_err(), "broadcast waits for append ACK");
+-            respond_to.send(Ok(())).expect("mode emitter awaits writer ACK");
++            assert!(
++                gateway_rx.try_recv().is_err(),
++                "broadcast waits for append ACK"
++            );
++            respond_to
++                .send(Ok(()))
++                .expect("mode emitter awaits writer ACK");
+         };
+         let ((), ()) = tokio::join!(mode, persistence);
+         assert!(matches!(
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1908:
+             cmd_rx.try_recv().is_err(),
+             "block_waited completion should not send a durable receipt"
+         );
+-        assert!(gateway_rx.try_recv().is_err(), "completion UI waits for append commit");
+-        let message = persistence_rx.recv().await.expect("task completion projection");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "completion UI waits for append commit"
++        );
++        let message = persistence_rx
++            .recv()
++            .await
++            .expect("task completion projection");
+         let _persisted = commit_auxiliary_grow(message);
+         let mut found_ext = false;
+         while let Ok(msg) = gateway_rx.try_recv() {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/shell/src/tools/notification_bridge.rs:1947:
+             cmd_rx.try_recv().is_err(),
+             "explicitly_killed completion should not send a durable receipt"
+         );
+-        assert!(gateway_rx.try_recv().is_err(), "completion UI waits for append commit");
+-        let message = persistence_rx.recv().await.expect("task completion projection");
++        assert!(
++            gateway_rx.try_recv().is_err(),
++            "completion UI waits for append commit"
++        );
++        let message = persistence_rx
++            .recv()
++            .await
++            .expect("task completion projection");
+         let _persisted = commit_auxiliary_grow(message);
+         let mut found_ext = false;
+         while let Ok(msg) = gateway_rx.try_recv() {
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/tools/src/registry/types.rs:1431:
+         let tid = tool_protocol::ToolId::new(tool_name)
+             .unwrap_or_else(|_| tool_protocol::ToolId::new("unknown").expect("valid"));
+         let detail = if tool_name.contains("__") {
+-            format!("MCP tool is not registered in this session: {tool_name}. Refresh search_tool to check the current catalog; this error does not establish whether the remote tool exists or the server is connected.")
++            format!(
++                "MCP tool is not registered in this session: {tool_name}. Refresh search_tool to check the current catalog; this error does not establish whether the remote tool exists or the server is connected."
++            )
+         } else {
+             format!("Tool not found: {tool_name}")
+         };
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/tools/src/registry/types.rs:2288:
+         let toolset = ToolRegistryBuilder::new()
+             .finalize(ToolServerConfig::default(), test_session_context(&tmp))
+             .unwrap();
+-        let error = toolset.try_parse("demo__missing", &serde_json::json!({})).await.unwrap_err();
++        let error = toolset
++            .try_parse("demo__missing", &serde_json::json!({}))
++            .await
++            .unwrap_err();
+         assert!(error.detail.contains("not registered in this session"));
+         assert!(error.detail.contains("Refresh search_tool"));
+         assert!(matches!(error.kind, tool_runtime::ToolErrorKind::NotFound));
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/tools/src/registry/types.rs:2295:
+-        let native = toolset.try_parse("missing", &serde_json::json!({})).await.unwrap_err();
++        let native = toolset
++            .try_parse("missing", &serde_json::json!({}))
++            .await
++            .unwrap_err();
+         assert_eq!(native.detail, "Tool not found: missing");
+     }
+ 

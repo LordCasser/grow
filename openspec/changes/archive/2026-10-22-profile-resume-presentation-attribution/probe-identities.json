@@ -1,0 +1,18 @@
+{
+  "pty_e2e_persistence": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p0-pty_e2e_persistence",
+    "sha256": "6df3208ac99096f1dca701d0207362cc51e35e24815952a151f563bfe5b2b660"
+  },
+  "pager": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p0-pager",
+    "sha256": "66a842e399b44a942f2baf562152d429608c7e2a162a1526da97b315b4869335"
+  },
+  "session_load_perf": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p0-session_load_perf",
+    "sha256": "c67c3f6dd59ba640985734a31be237609dd63b7fb1fcd9be43737de1f2897a68"
+  },
+  "pager_render": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p0-pager_render",
+    "sha256": "c109ad47cd41d6380e2ccd2917a48796586e3b40a70467de0773a90599fe3e61"
+  }
+}

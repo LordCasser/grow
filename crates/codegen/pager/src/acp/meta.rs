@@ -24,6 +24,18 @@ pub(crate) fn session_load_identity(
         .unwrap_or_else(|| requested.clone())
 }
 
+/// One-shot ownership from this accepted load response. Missing or rejected
+/// metadata requests the fully validated local fallback, not an empty tree.
+pub(crate) fn session_load_descendant_ownership(
+    response_meta: Option<&acp::Meta>,
+    session_id: &acp::SessionId,
+) -> Option<shell::session::storage::DescendantOwnership> {
+    let value = response_meta?.get(shell::session::storage::DESCENDANT_OWNERSHIP_META_KEY)?;
+    let ownership: shell::session::storage::DescendantOwnership =
+        serde_json::from_value(value.clone()).ok()?;
+    ownership.belongs_to(session_id.0.as_ref()).then_some(ownership)
+}
+
 /// Parsed fields from `SessionNotification._meta`.
 ///
 /// Extracted once in [`acp_handler`](super::super::app::acp_handler) and passed
@@ -53,6 +65,10 @@ pub struct NotificationMeta {
     /// id is kept — the numeric suffix alone is ambiguous across the
     /// non-monotonic counter runs of a multi-resume history.
     pub event_id: Option<String>,
+    /// Versioned proof of an applied physical Timeline projection row.
+    pub history_cursor: Option<String>,
+    /// Replace an interrupted provisional attempt with its complete admitted text.
+    pub replace_sampling_preview: bool,
     /// Monotonic per-process sequence parsed from `eventId`
     /// (`"{sessionId}-{counter}"`, see `shell util::event_id`). The
     /// agent stamps the SAME `eventId` on the live emission and on the persisted
@@ -148,7 +164,15 @@ impl NotificationMeta {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             is_replay: m.get("isReplay").and_then(|v| v.as_bool()).unwrap_or(false),
+            replace_sampling_preview: m
+                .get("grow/replaceSamplingPreview")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             event_id,
+            history_cursor: m
+                .get("grow/historyCursor")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
             event_seq,
             sampling_request_id: m
                 .get("samplingRequestId")
@@ -181,6 +205,33 @@ mod tests {
     fn session_load_identity_falls_back_when_response_meta_has_no_id() {
         let requested = acp::SessionId::new("ordinary-session".to_owned());
         assert_eq!(session_load_identity(None, &requested), requested);
+    }
+
+    #[test]
+    fn load_ownership_is_optional_strict_and_bound_to_canonical_response_identity() {
+        let requested = acp::SessionId::new("suspended-child");
+        let meta = json!({
+            "sessionId": "owning-root",
+            "grow/descendantOwnership": {
+                "version": 1, "session_id": "owning-root", "cut": 0,
+                "hash": "00".repeat(32), "spawns": {}
+            }
+        });
+        let canonical = session_load_identity(meta.as_object(), &requested);
+        assert!(session_load_descendant_ownership(meta.as_object(), &canonical).is_some());
+        assert!(session_load_descendant_ownership(meta.as_object(), &requested).is_none());
+        assert!(session_load_descendant_ownership(None, &canonical).is_none());
+        for (field, value) in [
+            ("version", json!(2)), ("hash", json!("invalid")),
+            ("session_id", json!("foreign")), ("unexpected", json!(true)),
+        ] {
+            let mut invalid = meta.clone();
+            invalid["grow/descendantOwnership"][field] = value;
+            assert!(session_load_descendant_ownership(invalid.as_object(), &canonical).is_none());
+        }
+        let mut invalid = meta;
+        invalid["grow/descendantOwnership"] = json!("malformed");
+        assert!(session_load_descendant_ownership(invalid.as_object(), &canonical).is_none());
     }
 
     #[test]

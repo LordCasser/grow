@@ -5,7 +5,7 @@
 //! permission view (provenance labels).
 #[cfg(test)]
 use shell::session::storage::stream_replay_updates_at;
-use shell::session::storage::{ReplayEmission, stream_session_history_at};
+use shell::session::storage::{ChildReplaySpawn, DescendantOwnership, ReplayEmission, stream_session_history_at};
 use std::sync::Arc;
 use std::time::Instant;
 /// Enriched subagent tracking info.
@@ -113,35 +113,6 @@ impl SubagentInfo {
         }
     }
 }
-/// Load the immediate durable child spawn facts owned by `parent_session_id`.
-/// Ownership and enrichment both come from the same identity-bound parent
-/// Timeline, so resume parses that Timeline once per parent instead of once
-/// per replayed child.
-fn durable_child_spawns(
-    grow_home: &std::path::Path,
-    parent_session_id: &str,
-) -> std::collections::BTreeMap<String, chat_state::SubagentSpawnEvent> {
-    let Ok(Some(timeline)) =
-        shell::session::storage::load_timeline_by_id_at(parent_session_id, grow_home)
-    else {
-        return std::collections::BTreeMap::new();
-    };
-    let mut children = std::collections::BTreeMap::new();
-    for event in timeline.events() {
-        let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
-            &event.kind
-        else {
-            continue;
-        };
-        children.insert(spawn.child_session_id.clone(), spawn.clone());
-    }
-    tracing::trace!(
-        parent_session_id,
-        children = children.len(),
-        "projected durable child ownership from Timeline"
-    );
-    children
-}
 /// Grow home for the replay path. In production this is just `grow_home()`; the
 /// whole test override below is `#[cfg(test)]`, so no thread-local or dead
 /// always-false branch ships in release.
@@ -212,26 +183,29 @@ fn enrich_from_spawn(info: &mut SubagentInfo, spawn: &chat_state::SubagentSpawnE
 /// temporary projection without replaying the child transcript.
 fn enrich_projected_subagent(
     root: &mut crate::app::agent_view::AgentView,
-    spawn: &chat_state::SubagentSpawnEvent,
+    child_session_id: &str,
+    spawn: &ChildReplaySpawn,
 ) {
     let Some(info) = root
         .session
         .subagent_sessions
-        .get_mut(&spawn.child_session_id)
+        .get_mut(child_session_id)
     else {
         return;
     };
     if info.subagent_id.as_ref() != spawn.subagent_id {
         tracing::debug!(
-            child_session_id = spawn.child_session_id,
+            child_session_id,
             replayed_subagent_id = %info.subagent_id,
             durable_subagent_id = spawn.subagent_id,
             "ignored mismatched durable subagent spawn enrichment"
         );
         return;
     }
-    enrich_from_spawn(info, spawn);
-    if let Some(child) = root.subagent_views.get_mut(&spawn.child_session_id) {
+    info.prompt = Some(Arc::from(spawn.prompt.as_str()));
+    info.child_cwd = Some(Arc::from(spawn.child_cwd.as_str()));
+    info.worktree_path = spawn.worktree_path.as_deref().map(Arc::from);
+    if let Some(child) = root.subagent_views.get_mut(child_session_id) {
         child.session.cwd = std::path::PathBuf::from(&spawn.child_cwd);
         child.session.set_worktree(spawn.worktree_path.is_some());
     }
@@ -290,6 +264,8 @@ pub(crate) fn replay_inherited_updates(
             }
             _ => {}
         },
+        // Shell exposes one additional storage-oracle variant only in test builds.
+        #[allow(unreachable_patterns)]
         _ => {}
     }) {
         Ok(outcome) => outcome,
@@ -312,7 +288,9 @@ pub(crate) fn replay_inherited_updates(
 pub(crate) fn restore_descendant_state(
     app: &mut crate::app::root::AppView,
     root_agent_id: crate::app::session::AgentId,
+    ownership: Option<DescendantOwnership>,
 ) {
+    let _timer = shell::instrumentation_timer!("pager.replay.descendants");
     use shell::extensions::notification::SessionUpdate;
 
     let Some(root) = app.agents.get(&root_agent_id) else {
@@ -328,14 +306,28 @@ pub(crate) fn restore_descendant_state(
         .keys()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let root_spawns = durable_child_spawns(&grow_home, &root_session_id);
+    // A verified empty frontier is useful; absence/foreign metadata is not
+    // evidence of an empty tree. Keep the independent validated fallback.
+    let root_spawns = ownership
+        .filter(|ownership| ownership.belongs_to(&root_session_id))
+        .or_else(|| match shell::session::storage::load_descendant_ownership_at(
+            &root_session_id, &grow_home,
+        ) {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                tracing::debug!(session_id = root_session_id, ?error, "failed to read root ownership");
+                None
+            }
+        })
+        .map(DescendantOwnership::into_spawns)
+        .unwrap_or_default();
     let mut queue = std::collections::VecDeque::new();
     let mut visited = std::collections::HashSet::new();
     let previous_loading_replay = root.session.loading_replay;
     if let Some(root) = app.agents.get_mut(&root_agent_id) {
         for (child_session_id, spawn) in &root_spawns {
             if replayed_direct_children.contains(child_session_id) {
-                enrich_projected_subagent(root, spawn);
+                enrich_projected_subagent(root, child_session_id, spawn);
                 queue.push_back(child_session_id.clone());
             }
         }
@@ -351,31 +343,21 @@ pub(crate) fn restore_descendant_state(
         if !visited.insert(parent_session_id.clone()) {
             continue;
         }
-        let mut durable_children = durable_child_spawns(&grow_home, &parent_session_id);
-        let mut lifecycle = Vec::new();
-        if let Err(error) = shell::session::storage::stream_replay_grow_notifications_at(
-            &parent_session_id,
-            &grow_home,
-            |notification| {
-                if matches!(
-                    &notification.update,
-                    SessionUpdate::SubagentSpawned { .. }
-                        | SessionUpdate::SubagentProgress { .. }
-                        | SessionUpdate::SubagentFinished { .. }
-                        | SessionUpdate::ModelChanged { .. }
-                        | SessionUpdate::AgentChanged { .. }
-                ) {
-                    lifecycle.push(notification);
-                }
-            },
+        let (ownership, lifecycle) = match shell::session::storage::load_descendant_replay_at(
+            &parent_session_id, &grow_home,
         ) {
-            tracing::debug!(
-                session_id = parent_session_id,
-                ?error,
-                "failed to replay descendant lifecycle"
-            );
-            continue;
-        }
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::debug!(
+                    session_id = parent_session_id,
+                    ?error,
+                    "failed to replay descendant lifecycle"
+                );
+                continue;
+            }
+        };
+        let mut durable_children = ownership.into_spawns();
 
         for mut notification in lifecycle {
             let discovered_child = match &notification.update {
@@ -405,7 +387,7 @@ pub(crate) fn restore_descendant_state(
                 && let Some(spawn) = durable_children.remove(&child)
             {
                 if let Some(root) = app.agents.get_mut(&root_agent_id) {
-                    enrich_projected_subagent(root, &spawn);
+                    enrich_projected_subagent(root, &child, &spawn);
                 }
                 queue.push_back(child);
             }
@@ -843,7 +825,7 @@ mod tests {
         );
     }
     /// The child-transcript replay purges exactly once when it actually
-    /// parsed an `updates.jsonl` transient — and never when the load no-ops
+    /// parsed a typed history transient — and never when the load no-ops
     /// (missing file) or the open takes the already-replayed skip path. The
     /// purge lives inside `replay_inherited_updates` so BOTH producers (the
     /// eager live-spawn path and this deferred first-open path) are covered.
@@ -874,11 +856,24 @@ mod tests {
             serde_json::to_vec(&summary).unwrap(),
         )
         .unwrap();
-        let tool_line = format!(
-            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
+        write_history_fixture(
+            &session_dir,
+            &chat_state::Timeline::default(),
+            vec![shell::session::storage::SessionUpdate::Acp(Box::new(
+                acp::SessionNotification::new(
+                    acp::SessionId::new(child_sid),
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc1")), "Read foo")
+                            .kind(acp::ToolKind::Read)
+                            .status(acp::ToolCallStatus::Pending)
+                            .content(vec![])
+                            .locations(vec![acp::ToolCallLocation::new(std::path::PathBuf::from(
+                                "/tmp/foo",
+                            ))]),
+                    ),
+                ),
+            ))],
         );
-        std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
-        write_timeline_events(&session_dir, &chat_state::Timeline::default());
         set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
         let mut parent = make_min_child_view();
         parent
@@ -928,8 +923,7 @@ mod tests {
         assert!(parent.session.subagent_sessions[ghost_sid].child_updates_replayed);
         let empty_sid = "child-purge-empty";
         let empty_dir = setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), empty_sid);
-        write_timeline_events(&empty_dir, &chat_state::Timeline::default());
-        std::fs::write(empty_dir.join("updates.jsonl"), "").unwrap();
+        write_history_fixture(&empty_dir, &chat_state::Timeline::default(), vec![]);
         assert_eq!(
             stream_replay_updates_at(empty_sid, home.path(), |_| panic!("empty history"))
                 .expect("empty fixture must be readable"),
@@ -1008,11 +1002,24 @@ mod tests {
         let child_sid = "child-notice-before-replay";
         let session_dir =
             setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), child_sid);
-        write_timeline_events(&session_dir, &chat_state::Timeline::default());
-        let tool_line = format!(
-            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
+        write_history_fixture(
+            &session_dir,
+            &chat_state::Timeline::default(),
+            vec![shell::session::storage::SessionUpdate::Acp(Box::new(
+                acp::SessionNotification::new(
+                    acp::SessionId::new(child_sid),
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc1")), "Read foo")
+                            .kind(acp::ToolKind::Read)
+                            .status(acp::ToolCallStatus::Pending)
+                            .content(vec![])
+                            .locations(vec![acp::ToolCallLocation::new(std::path::PathBuf::from(
+                                "/tmp/foo",
+                            ))]),
+                    ),
+                ),
+            ))],
         );
-        std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
         set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
 
         let mut parent = make_min_child_view();
@@ -1271,12 +1278,15 @@ mod tests {
         write_timeline_events(dir, &timeline);
     }
     fn write_timeline_events(dir: &std::path::Path, timeline: &chat_state::Timeline) {
-        let mut bytes = Vec::new();
-        for event in timeline.events() {
-            serde_json::to_writer(&mut bytes, event).unwrap();
-            bytes.push(b'\n');
-        }
-        std::fs::write(dir.join("timeline.jsonl"), bytes).unwrap();
+        write_history_fixture(dir, timeline, vec![]);
+    }
+    fn write_history_fixture(
+        dir: &std::path::Path,
+        timeline: &chat_state::Timeline,
+        updates: Vec<shell::session::storage::SessionUpdate>,
+    ) {
+        shell::session::testkit::write_timeline_history_fixture(dir, timeline.events(), &updates)
+            .unwrap();
     }
     fn write_parent_receipt_session(
         grow_home: &std::path::Path,
@@ -1375,10 +1385,9 @@ mod tests {
         let child_sid = "child-image-history-order";
         let session_dir =
             setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), child_sid);
-        write_timeline_events(&session_dir, &chat_state::Timeline::default());
         set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
 
-        let grow_line = |event_seq: u64, update| {
+        let grow_update = |event_seq: u64, update| {
             let notification = SessionNotification {
                 session_id: agent_client_protocol::schema::v1::SessionId::new(child_sid),
                 update,
@@ -1387,14 +1396,9 @@ mod tests {
                     "promptId": "child-prompt",
                 })),
             };
-            serde_json::json!({
-                "timestamp": 0,
-                "method": "_grow/session/update",
-                "params": notification,
-            })
-            .to_string()
+            shell::session::storage::SessionUpdate::Grow(Box::new(notification))
         };
-        let acp_line = |event_seq: u64, update| {
+        let acp_update = |event_seq: u64, update| {
             let notification = agent_client_protocol::schema::v1::SessionNotification::new(
                 agent_client_protocol::schema::v1::SessionId::new(child_sid),
                 update,
@@ -1407,15 +1411,10 @@ mod tests {
                 .as_object()
                 .cloned(),
             );
-            serde_json::json!({
-                "timestamp": 0,
-                "method": "session/update",
-                "params": notification,
-            })
-            .to_string()
+            shell::session::storage::SessionUpdate::Acp(Box::new(notification))
         };
         let lines = [
-            grow_line(
+            grow_update(
                 10,
                 GrowUpdate::ImageRecoveryOperation {
                     operation_id: "recover-from-disk".into(),
@@ -1425,7 +1424,7 @@ mod tests {
                     },
                 },
             ),
-            acp_line(
+            acp_update(
                 11,
                 agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(
                     agent_client_protocol::schema::v1::ContentChunk::new(
@@ -1437,7 +1436,7 @@ mod tests {
                     ),
                 ),
             ),
-            grow_line(
+            grow_update(
                 12,
                 GrowUpdate::TurnCompleted {
                     prompt_id: "child-prompt".into(),
@@ -1448,7 +1447,7 @@ mod tests {
                 },
             ),
         ];
-        std::fs::write(session_dir.join("updates.jsonl"), lines.join("\n") + "\n").unwrap();
+        write_history_fixture(&session_dir, &chat_state::Timeline::default(), lines.into());
 
         let mut child = make_min_child_view();
         replay_inherited_updates(&mut child, child_sid);

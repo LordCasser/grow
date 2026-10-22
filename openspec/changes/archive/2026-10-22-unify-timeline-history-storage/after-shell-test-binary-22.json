@@ -1,0 +1,19 @@
+{
+  "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/shell-74ca532e077db41e",
+  "sha256": "928628bdfc39fc93a1b748b9c6ce73258d7db1d23bddd3ebad1bff31841aba88",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--release",
+    "-p",
+    "shell",
+    "--features",
+    "test-support",
+    "--lib",
+    "--no-run",
+    "--message-format=json"
+  ],
+  "test_only_change": "final-22-test-only-change.json"
+}

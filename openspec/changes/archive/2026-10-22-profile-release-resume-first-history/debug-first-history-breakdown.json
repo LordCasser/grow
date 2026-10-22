@@ -1,0 +1,13 @@
+{
+  "source": "r6-modern-2048-run-3.txt",
+  "first_history_ms": 6691.947958,
+  "serial_inclusive_stages_ms": {
+    "session.load_light": 4251.93,
+    "session.replay.read_snapshot": 26.147,
+    "session.replay.read_and_reconcile": 718.221,
+    "session.replay.forward_updates": 1575.8
+  },
+  "known_sum_ms": 6572.098,
+  "residual_ms": 119.84995799999979,
+  "note": "Same actual sample selected by median total, not sum of independent medians; duration-only historical log does not attribute residual."
+}

@@ -1,0 +1,140 @@
+[
+  {
+    "turns": 128,
+    "runs": [
+      {
+        "turns": 128.0,
+        "notifications": 256.0,
+        "user_messages": 128.0,
+        "assistant_messages": 128.0,
+        "assistant_source_bytes": 4196352.0,
+        "timeline_bytes": 4671249.0,
+        "decode_project_ms": 20.05,
+        "handler_ms": 72.496,
+        "finish_reload_ms": 1.426,
+        "source": "semantic-128-1.log"
+      },
+      {
+        "turns": 128.0,
+        "notifications": 256.0,
+        "user_messages": 128.0,
+        "assistant_messages": 128.0,
+        "assistant_source_bytes": 4196352.0,
+        "timeline_bytes": 4671249.0,
+        "decode_project_ms": 14.424,
+        "handler_ms": 58.03,
+        "finish_reload_ms": 0.438,
+        "source": "semantic-128-2.log"
+      },
+      {
+        "turns": 128.0,
+        "notifications": 256.0,
+        "user_messages": 128.0,
+        "assistant_messages": 128.0,
+        "assistant_source_bytes": 4196352.0,
+        "timeline_bytes": 4671249.0,
+        "decode_project_ms": 14.497,
+        "handler_ms": 57.972,
+        "finish_reload_ms": 0.44,
+        "source": "semantic-128-3.log"
+      }
+    ],
+    "median": {
+      "decode_project_ms": 14.497,
+      "handler_ms": 58.03,
+      "finish_reload_ms": 0.44
+    }
+  },
+  {
+    "turns": 512,
+    "runs": [
+      {
+        "turns": 512.0,
+        "notifications": 1024.0,
+        "user_messages": 512.0,
+        "assistant_messages": 512.0,
+        "assistant_source_bytes": 16785408.0,
+        "timeline_bytes": 18694954.0,
+        "decode_project_ms": 76.483,
+        "handler_ms": 407.959,
+        "finish_reload_ms": 0.484,
+        "source": "semantic-512-1.log"
+      },
+      {
+        "turns": 512.0,
+        "notifications": 1024.0,
+        "user_messages": 512.0,
+        "assistant_messages": 512.0,
+        "assistant_source_bytes": 16785408.0,
+        "timeline_bytes": 18694954.0,
+        "decode_project_ms": 57.998,
+        "handler_ms": 224.617,
+        "finish_reload_ms": 0.489,
+        "source": "semantic-512-2.log"
+      },
+      {
+        "turns": 512.0,
+        "notifications": 1024.0,
+        "user_messages": 512.0,
+        "assistant_messages": 512.0,
+        "assistant_source_bytes": 16785408.0,
+        "timeline_bytes": 18694954.0,
+        "decode_project_ms": 59.192,
+        "handler_ms": 226.373,
+        "finish_reload_ms": 0.512,
+        "source": "semantic-512-3.log"
+      }
+    ],
+    "median": {
+      "decode_project_ms": 59.192,
+      "handler_ms": 226.373,
+      "finish_reload_ms": 0.489
+    }
+  },
+  {
+    "turns": 2048,
+    "runs": [
+      {
+        "turns": 2048.0,
+        "notifications": 4096.0,
+        "user_messages": 2048.0,
+        "assistant_messages": 2048.0,
+        "assistant_source_bytes": 67141632.0,
+        "timeline_bytes": 74822194.0,
+        "decode_project_ms": 227.708,
+        "handler_ms": 935.689,
+        "finish_reload_ms": 0.772,
+        "source": "semantic-2048-1.log"
+      },
+      {
+        "turns": 2048.0,
+        "notifications": 4096.0,
+        "user_messages": 2048.0,
+        "assistant_messages": 2048.0,
+        "assistant_source_bytes": 67141632.0,
+        "timeline_bytes": 74822194.0,
+        "decode_project_ms": 235.495,
+        "handler_ms": 914.834,
+        "finish_reload_ms": 0.825,
+        "source": "semantic-2048-2.log"
+      },
+      {
+        "turns": 2048.0,
+        "notifications": 4096.0,
+        "user_messages": 2048.0,
+        "assistant_messages": 2048.0,
+        "assistant_source_bytes": 67141632.0,
+        "timeline_bytes": 74822194.0,
+        "decode_project_ms": 233.669,
+        "handler_ms": 909.308,
+        "finish_reload_ms": 0.814,
+        "source": "semantic-2048-3.log"
+      }
+    ],
+    "median": {
+      "decode_project_ms": 233.669,
+      "handler_ms": 914.834,
+      "finish_reload_ms": 0.814
+    }
+  }
+]

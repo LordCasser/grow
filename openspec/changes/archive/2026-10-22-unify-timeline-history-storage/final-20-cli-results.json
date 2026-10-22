@@ -1,0 +1,20 @@
+[
+  {
+    "test": "resume_input_latency::resume_dense_history_progress_with_slow_writer",
+    "exit": 0,
+    "ok": true,
+    "log": "final-20-pty_e2e_persistence.log",
+    "seconds": 111.78217862499878,
+    "driver_sha256": "c22d95d08a358f6727486dc2ea03e35dad722d5218a6539d123e463dae6f2ec1",
+    "cli_sha256": "f5cbf930408698612a8acefa629b71f424247b633dee32ce087137bb96f44a4e"
+  },
+  {
+    "test": "leader_reattach_cancellation_roundtrips_durable_log::leader_reattach_cancellation_roundtrips_durable_log",
+    "exit": 0,
+    "ok": true,
+    "log": "final-20-leader_pty_e2e.log",
+    "seconds": 12.609665042022243,
+    "driver_sha256": "e86cfe49d01610f1324656c8443faae4ab5b679d7b50de86f643e31fe8e7fe0f",
+    "cli_sha256": "f5cbf930408698612a8acefa629b71f424247b633dee32ce087137bb96f44a4e"
+  }
+]

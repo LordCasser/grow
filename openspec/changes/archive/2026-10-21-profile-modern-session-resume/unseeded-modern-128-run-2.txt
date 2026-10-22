@@ -1,0 +1,63 @@
+['/Users/lordcasser/workspace/projects/grow/target/debug/deps/session_load_perf-c1951fcebb27b71d', 'full_session_load_e2e', '--exact', '--nocapture', '--test-threads=1', '--ignored']
+Exact enumeration=1
+
+running 1 test
+test full_session_load_e2e ... [testkit] admitted history: turns=128 admissions=128 missing_projections=0 updates=4820762B timeline=4436394B rewind=5482B total=9262638B
+
+[perf] e2e session: updates=4.8 MB rewind=0.0 MB
+
+[perf] e2e: updates.jsonl composition (4.8 MB total):
+  sessionUpdate kind                  count         MB       %
+  response_replay_projection            128        4.2   88.1%
+  available_commands_update             256        0.5   10.4%
+  agent_message_chunk                   128        0.0    1.0%
+  user_message_chunk                    128        0.0    0.6%
+
+[perf] ===== END-TO-END session/load (what the pager waits on) =====
+  total session/load round-trip :    1247.4 ms
+  notifications replayed         :       260
+  available_commands_update      :         1 replayed / 256 on disk
+  live catalog reached          :      true
+  time-to-first notification     :     854.5 ms
+  time-to-last notification      :    1247.4 ms
+  first historical text          :     854.5 ms
+  last historical text           :     874.6 ms
+  historical text chunks / bytes : 256 / 4199314
+  ---- shell-side nested/inclusive timers (not additive) ----
+  session.load_session                                1245.6 ms count=1
+  session.load_session_replay                          413.1 ms count=1
+  session.spawn_and_register_session                   377.1 ms count=1
+  session.spawn_and_register                           376.9 ms count=1
+  session.replay.read_and_reconcile                    278.0 ms count=1
+  session.load_light                                   265.4 ms count=1
+  session.replay.response_reconcile                    259.5 ms count=1
+  session.projection.raw_canonical                     173.1 ms count=1
+  session.load.response_projection_plan                169.3 ms count=1
+  session.projection.typed_canonical                   168.7 ms count=1
+  session.replay.forward_updates                        99.3 ms count=1
+  session.spawn_actor_call                              71.5 ms count=1
+  session.load.timeline_read_decode                     58.7 ms count=1
+  session.load.physical_updates_decode                  35.0 ms count=1
+  session.replay.drain_completions                      33.7 ms count=1
+  skill_discovery                                       13.9 ms count=2
+  session.reconcile_stale_tasks                         12.4 ms count=1
+  session.replay.read_snapshot                           1.9 ms count=1
+  session.load.timeline_fold                             0.9 ms count=1
+  session.load.timeline_evidence                         0.4 ms count=1
+  plugin_discovery                                       0.3 ms count=2
+  session.load.open_session                              0.1 ms count=1
+  mcp_merge                                              0.1 ms count=1
+  session.load.projection_metadata                       0.1 ms count=1
+  session.load.state_projections                         0.0 ms count=1
+  session.replay.communication_restore                   0.0 ms count=1
+  session.load.response_projection_appends               0.0 ms count=1
+  session.delta_flush_replay                             0.0 ms count=1
+  session.stale_tasks_drain_completions                  0.0 ms count=1
+  session.delta_drain_completions                        0.0 ms count=1
+================================================================
+
+PERF_RESUME {"format":"modern","turns":128,"missing_every":"0","timeline_bytes":4436394,"updates_bytes":4820762,"load_ms":1247.382,"first_notification_ms":854.5,"first_history_ms":854.5,"last_history_ms":874.598416,"max_history_gap_ms":8.789791,"history_count":256,"history_bytes":4199314,"phases":[{"name":"session.load_session","count":1,"ms":1245.616},{"name":"session.load_session_replay","count":1,"ms":413.09},{"name":"session.spawn_and_register_session","count":1,"ms":377.139},{"name":"session.spawn_and_register","count":1,"ms":376.904},{"name":"session.replay.read_and_reconcile","count":1,"ms":277.973},{"name":"session.load_light","count":1,"ms":265.433},{"name":"session.replay.response_reconcile","count":1,"ms":259.469},{"name":"session.projection.raw_canonical","count":1,"ms":173.07},{"name":"session.load.response_projection_plan","count":1,"ms":169.319},{"name":"session.projection.typed_canonical","count":1,"ms":168.658},{"name":"session.replay.forward_updates","count":1,"ms":99.346},{"name":"session.spawn_actor_call","count":1,"ms":71.53},{"name":"session.load.timeline_read_decode","count":1,"ms":58.706},{"name":"session.load.physical_updates_decode","count":1,"ms":34.993},{"name":"session.replay.drain_completions","count":1,"ms":33.694},{"name":"skill_discovery","count":2,"ms":13.881},{"name":"session.reconcile_stale_tasks","count":1,"ms":12.361},{"name":"session.replay.read_snapshot","count":1,"ms":1.86},{"name":"session.load.timeline_fold","count":1,"ms":0.897},{"name":"session.load.timeline_evidence","count":1,"ms":0.357},{"name":"plugin_discovery","count":2,"ms":0.274},{"name":"session.load.open_session","count":1,"ms":0.12},{"name":"mcp_merge","count":1,"ms":0.109},{"name":"session.load.projection_metadata","count":1,"ms":0.09},{"name":"session.load.state_projections","count":1,"ms":0.039},{"name":"session.replay.communication_restore","count":1,"ms":0.024},{"name":"session.load.response_projection_appends","count":1,"ms":0.003},{"name":"session.delta_flush_replay","count":1,"ms":0.002},{"name":"session.stale_tasks_drain_completions","count":1,"ms":0.001},{"name":"session.delta_drain_completions","count":1,"ms":0.0}]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.04s
+

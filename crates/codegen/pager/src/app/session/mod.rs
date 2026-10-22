@@ -1017,6 +1017,9 @@ pub struct AgentSession {
     /// Session is currently replaying historical updates from `session/load`.
     /// Used to suppress live-style redraw/render work until the load completes.
     pub loading_replay: bool,
+    /// Opt-in attribution only; reset for each replay window, never a cursor gate.
+    pub(crate) replay_first_applied: Option<String>,
+    pub(crate) replay_first_frame: bool,
     /// The retry-failure UI already reported this turn's terminal error.
     /// Both completion rails suppress a duplicate marker/toast. Reset at turn boundaries.
     pub model_failure_reported: bool,
@@ -1339,6 +1342,8 @@ impl AgentSession {
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
+            replay_first_applied: None,
+            replay_first_frame: false,
             model_failure_reported: false,
             tracker: AcpUpdateTracker::new(),
             available_commands: Vec::new(),
@@ -1399,6 +1404,8 @@ impl AgentSession {
         self.live_feedback = None;
         self.prompt_history_loading = true;
         self.loading_replay = true;
+        self.replay_first_applied = None;
+        self.replay_first_frame = false;
         self.replay_live_cursor_seen = false;
     }
 

@@ -1,0 +1,43 @@
+{
+  "scoped_command": [
+    "/Users/lordcasser/.cargo/bin/rustfmt",
+    "--edition",
+    "2024",
+    "--config",
+    "skip_children=true",
+    "--check",
+    "crates/codegen/chat-state/src/lib.rs",
+    "crates/codegen/pager/src/acp/meta.rs",
+    "crates/codegen/pager/src/acp/tracker.rs",
+    "crates/codegen/pager/src/export_cmd.rs",
+    "crates/codegen/pager/src/trajectory_cmd.rs",
+    "crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs",
+    "crates/codegen/pager/tests/pty_e2e/suspend_nested_task_tree.rs",
+    "crates/codegen/shell/src/agent/subagent/mod.rs",
+    "crates/codegen/shell/src/agent/update_chunk_merge.rs",
+    "crates/codegen/shell/src/extensions/session_state.rs",
+    "crates/codegen/shell/src/session/actor/interjection.rs",
+    "crates/codegen/shell/src/session/actor/mcp.rs",
+    "crates/codegen/shell/src/session/actor/mcp_snapshot.rs",
+    "crates/codegen/shell/src/session/actor/mod.rs",
+    "crates/codegen/shell/src/session/actor/tests/image_input_recovery_tests.rs",
+    "crates/codegen/shell/src/session/actor/tests/sampling_failure_recovery_tests.rs",
+    "crates/codegen/shell/src/session/actor/tests/support.rs",
+    "crates/codegen/shell/src/session/actor/tests/truncation_recovery_tests.rs",
+    "crates/codegen/shell/src/session/goal_notification.rs",
+    "crates/codegen/shell/src/session/mod.rs",
+    "crates/codegen/shell/src/session/storage/communication_history/tests.rs",
+    "crates/codegen/shell/src/session/storage/jsonl/durable_tests.rs",
+    "crates/codegen/shell/src/session/testkit/mod.rs",
+    "crates/codegen/shell/src/tools/notification_bridge.rs",
+    "crates/codegen/shell/tests/test_tool_dispatch_duration_smoke.rs"
+  ],
+  "scoped_exit": 0,
+  "global_check": "final-format-check-after.txt",
+  "global_existing_HEAD_files": {
+    "crates/codegen/chat-state/src/actor/mod.rs": true,
+    "crates/codegen/mcp/src/servers.rs": true,
+    "crates/codegen/tools/src/registry/types.rs": true
+  },
+  "note": "Global cargo fmt check reports formatting only in these three files unchanged from HEAD. No unrelated formatting edits."
+}

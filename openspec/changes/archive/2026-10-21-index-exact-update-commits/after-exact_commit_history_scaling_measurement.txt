@@ -1,0 +1,35 @@
+Binary: /Users/lordcasser/workspace/projects/grow/target/debug/deps/shell-f7cac3aa63c59686
+Profile: dev/test opt-level=0 debug=0 incremental=0 jobs=2; sequential direct executable; RUST_MIN_STACK=16777216
+
+RUN 1
+
+running 1 test
+test session::storage::jsonl::durable_tests::exact_commit_history_scaling_measurement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4329 filtered out; finished in 1.42s
+
+EXACT_COMMIT count=128 bytes=565906 lookups=16 lookup_ms=4.806 commits=16 commit_ms=175.881
+EXACT_COMMIT count=512 bytes=2263954 lookups=16 lookup_ms=13.464 commits=16 commit_ms=195.602
+EXACT_COMMIT count=2048 bytes=9057194 lookups=16 lookup_ms=51.692 commits=16 commit_ms=162.541
+
+RUN 2
+
+running 1 test
+test session::storage::jsonl::durable_tests::exact_commit_history_scaling_measurement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4329 filtered out; finished in 1.31s
+
+EXACT_COMMIT count=128 bytes=565906 lookups=16 lookup_ms=4.107 commits=16 commit_ms=149.601
+EXACT_COMMIT count=512 bytes=2263954 lookups=16 lookup_ms=14.182 commits=16 commit_ms=153.367
+EXACT_COMMIT count=2048 bytes=9057194 lookups=16 lookup_ms=51.498 commits=16 commit_ms=157.321
+
+RUN 3
+
+running 1 test
+test session::storage::jsonl::durable_tests::exact_commit_history_scaling_measurement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4329 filtered out; finished in 1.41s
+
+EXACT_COMMIT count=128 bytes=565906 lookups=16 lookup_ms=4.122 commits=16 commit_ms=190.810
+EXACT_COMMIT count=512 bytes=2263954 lookups=16 lookup_ms=13.364 commits=16 commit_ms=173.721
+EXACT_COMMIT count=2048 bytes=9057194 lookups=16 lookup_ms=52.012 commits=16 commit_ms=181.227

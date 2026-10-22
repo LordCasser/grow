@@ -1,0 +1,172 @@
+[
+  {
+    "profile": "modern-128",
+    "runs": 1,
+    "load_ms": 123.095208,
+    "load_ms_range": [
+      123.095208,
+      123.095208
+    ],
+    "first_history_ms": 36.445167,
+    "first_history_ms_range": [
+      36.445167,
+      36.445167
+    ],
+    "last_history_ms": 40.032083,
+    "last_history_ms_range": [
+      40.032083,
+      40.032083
+    ],
+    "max_history_gap_ms": 1.115875,
+    "max_history_gap_ms_range": [
+      1.115875,
+      1.115875
+    ],
+    "process_peak_rss_bytes": 111312896,
+    "process_peak_rss_bytes_range": [
+      111312896,
+      111312896
+    ],
+    "timeline_bytes": 4437097,
+    "timeline_bytes_range": [
+      4437097,
+      4437097
+    ],
+    "updates_bytes": 4820762,
+    "updates_bytes_range": [
+      4820762,
+      4820762
+    ],
+    "directory_bytes": 9263748,
+    "directory_bytes_range": [
+      9263748,
+      9263748
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.083,
+      "plugin_discovery": 0.206,
+      "session.delta_drain_completions": 0.0,
+      "session.delta_flush_replay": 0.001,
+      "session.load.model_route_reconcile": 0.01,
+      "session.load.open_session": 0.094,
+      "session.load.physical_updates_decode": 4.198,
+      "session.load.projection_metadata": 0.025,
+      "session.load.response_projection_appends": 0.0,
+      "session.load.response_projection_plan": 8.887,
+      "session.load.state_projections": 0.006,
+      "session.load.timeline_evidence": 0.229,
+      "session.load.timeline_fold": 0.21,
+      "session.load.timeline_read_decode": 4.299,
+      "session.load.writer_prefix": 5.629,
+      "session.load_light": 18.437,
+      "session.load_session": 122.157,
+      "session.load_session_replay": 9.616,
+      "session.projection.typed_canonical": 8.654,
+      "session.reconcile_stale_tasks": 3.384,
+      "session.replay.communication_restore": 0.003,
+      "session.replay.drain_completions": 1.808,
+      "session.replay.forward_updates": 1.443,
+      "session.replay.read_and_reconcile": 4.731,
+      "session.replay.read_snapshot": 1.574,
+      "session.replay.response_reconcile": 1.905,
+      "session.spawn.install_coordination_backend": 2.528,
+      "session.spawn.prepare": 0.418,
+      "session.spawn.publish_coordination": 1.071,
+      "session.spawn_actor_call": 33.531,
+      "session.spawn_and_register": 37.758,
+      "session.spawn_and_register_session": 37.833,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 16.961
+    }
+  },
+  {
+    "profile": "modern-2048",
+    "runs": 1,
+    "load_ms": 781.229292,
+    "load_ms_range": [
+      781.229292,
+      781.229292
+    ],
+    "first_history_ms": 428.798209,
+    "first_history_ms_range": [
+      428.798209,
+      428.798209
+    ],
+    "last_history_ms": 618.926292,
+    "last_history_ms_range": [
+      618.926292,
+      618.926292
+    ],
+    "max_history_gap_ms": 56.706834,
+    "max_history_gap_ms_range": [
+      56.706834,
+      56.706834
+    ],
+    "process_peak_rss_bytes": 731512832,
+    "process_peak_rss_bytes_range": [
+      731512832,
+      731512832
+    ],
+    "timeline_bytes": 71032018,
+    "timeline_bytes_range": [
+      71032018,
+      71032018
+    ],
+    "updates_bytes": 77140456,
+    "updates_bytes_range": [
+      77140456,
+      77140456
+    ],
+    "directory_bytes": 148178363,
+    "directory_bytes_range": [
+      148178363,
+      148178363
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.119,
+      "plugin_discovery": 0.224,
+      "session.delta_drain_completions": 0.0,
+      "session.delta_flush_replay": 0.002,
+      "session.load.model_route_reconcile": 0.017,
+      "session.load.open_session": 0.1,
+      "session.load.physical_updates_decode": 71.752,
+      "session.load.projection_metadata": 0.314,
+      "session.load.response_projection_appends": 0.001,
+      "session.load.response_projection_plan": 142.926,
+      "session.load.state_projections": 0.093,
+      "session.load.timeline_evidence": 4.165,
+      "session.load.timeline_fold": 2.643,
+      "session.load.timeline_read_decode": 65.489,
+      "session.load.writer_prefix": 85.603,
+      "session.load_light": 289.694,
+      "session.load_session": 780.175,
+      "session.load_session_replay": 194.078,
+      "session.projection.typed_canonical": 138.884,
+      "session.reconcile_stale_tasks": 54.223,
+      "session.replay.communication_restore": 0.078,
+      "session.replay.drain_completions": 63.89,
+      "session.replay.forward_updates": 23.562,
+      "session.replay.read_and_reconcile": 82.202,
+      "session.replay.read_snapshot": 24.344,
+      "session.replay.response_reconcile": 31.891,
+      "session.spawn.install_coordination_backend": 2.061,
+      "session.spawn.prepare": 0.428,
+      "session.spawn.publish_coordination": 0.361,
+      "session.spawn_actor_call": 181.423,
+      "session.spawn_and_register": 184.364,
+      "session.spawn_and_register_session": 184.439,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 13.807
+    }
+  }
+]

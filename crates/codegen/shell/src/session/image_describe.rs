@@ -536,11 +536,9 @@ mod tests {
     }
 
     fn write_timeline(path: &Path, timeline: &chat_state::Timeline) {
-        let mut bytes = Vec::new();
-        for event in timeline.events() {
-            serde_json::to_writer(&mut bytes, event).unwrap();
-            bytes.push(b'\n');
-        }
+        let bytes =
+            crate::session::storage::JsonlStorageAdapter::encode_journal(timeline.events(), &[])
+                .unwrap();
         std::fs::write(path.join("timeline.jsonl"), bytes).unwrap();
     }
 

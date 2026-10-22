@@ -1,0 +1,76 @@
+{
+  "started_utc": "2026-10-21T19:10:52.148275+00:00",
+  "binaries": {
+    "session_load_perf": {
+      "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/session_load_perf-7e3695fd37f050d9",
+      "sha256": "7c006aea7c169fc662ff05b2d93aa2f494724089aba4df71b26e508a5379654d"
+    },
+    "shell": {
+      "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/shell-92ae284a12587859",
+      "sha256": "2d86101c218bf4dc31aee4fa8ef4e533378b2f90fe864312f01d6491c9e77a34"
+    },
+    "pty_e2e_persistence": {
+      "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pty_e2e_persistence-a3d8341929662456",
+      "sha256": "cf65468ba09f63123acc37e49ca2d94ac721ea2436bba5358ba69151dd6aa80d"
+    }
+  },
+  "cli": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/grow",
+    "sha256": "f4f432dce245cb2d585e21817a1a8a79e382e5d417839a125327173de74d34cf"
+  },
+  "builds_and_correctness_complete": true,
+  "preflight_compilers": [],
+  "tool_verification": "final-25-tool-context.json",
+  "note": "Sequential 3-pair AB/BA. No task builds/tests overlap; external machine load uncontrolled. Shell21 commit benchmark uses unchanged production logic; cfg(test) reader-only fix22 is outside commit path.",
+  "completed_utc": "2026-10-21T19:12:30.919156+00:00",
+  "commands": [
+    [
+      "python3",
+      "openspec/changes/unify-timeline-history-storage/run_paired_matrix.py",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/c3-before/session_load_perf",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/session_load_perf-7e3695fd37f050d9",
+      "--output",
+      "openspec/changes/unify-timeline-history-storage/final-paired"
+    ],
+    [
+      "python3",
+      "openspec/changes/unify-timeline-history-storage/run_paired_commit.py",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/c3-before/shell-commit-bench",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/shell-92ae284a12587859",
+      "--output",
+      "openspec/changes/unify-timeline-history-storage/final-paired"
+    ],
+    [
+      "python3",
+      "openspec/changes/profile-release-resume-first-history/run_pty_comparison.py",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pty_e2e_persistence-a3d8341929662456",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/c3-before/grow",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/grow",
+      "--output",
+      "openspec/changes/unify-timeline-history-storage/final-paired"
+    ],
+    [
+      "python3",
+      "openspec/changes/profile-release-resume-first-history/sample_resume_rss.py",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/c3-before/session_load_perf",
+      "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/session_load_perf-7e3695fd37f050d9",
+      "--output",
+      "openspec/changes/unify-timeline-history-storage/final-paired"
+    ],
+    [
+      "python3",
+      "openspec/changes/profile-release-resume-first-history/analyze_measurements.py",
+      "openspec/changes/unify-timeline-history-storage/final-paired",
+      "--stage",
+      "paired-before"
+    ],
+    [
+      "python3",
+      "openspec/changes/profile-release-resume-first-history/analyze_measurements.py",
+      "openspec/changes/unify-timeline-history-storage/final-paired",
+      "--stage",
+      "paired-after"
+    ]
+  ],
+  "status": "all completed"
+}

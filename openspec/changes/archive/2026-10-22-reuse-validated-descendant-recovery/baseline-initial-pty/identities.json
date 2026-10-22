@@ -1,0 +1,10 @@
+{
+  "before": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/descendant-recovery-release/binaries/before-grow",
+    "sha256": "15a715c188cf73abd5eaaaaa7b3ed1ccc66d416381aa8f8b43df8fc1ebaa1095"
+  },
+  "after": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/descendant-recovery-release/binaries/before-grow",
+    "sha256": "15a715c188cf73abd5eaaaaa7b3ed1ccc66d416381aa8f8b43df8fc1ebaa1095"
+  }
+}

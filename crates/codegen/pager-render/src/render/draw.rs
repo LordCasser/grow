@@ -172,6 +172,7 @@ impl WriterSync {
 pub struct WriterPayload {
     pub(crate) sequence: u64,
     pub(crate) data: Vec<u8>,
+    queued_at: Option<Instant>,
 }
 pub type WriterSender = mpsc::Sender<WriterPayload>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +220,18 @@ impl Write for TermWriter {
         }
         let sequence = self.sync.reserve_sequence();
         let data = std::mem::take(&mut self.buf);
-        if self.tx.send(WriterPayload { sequence, data }).is_err() {
+        let queued_at = (diagnostics::instrumentation::current_mode()
+            != diagnostics::instrumentation::InstrumentationMode::Disabled)
+            .then(Instant::now);
+        if self
+            .tx
+            .send(WriterPayload {
+                sequence,
+                data,
+                queued_at,
+            })
+            .is_err()
+        {
             let error = std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "terminal writer thread exited",
@@ -298,9 +310,17 @@ fn write_payload(
     payload: &WriterPayload,
     sync: &WriterSync,
 ) -> std::io::Result<()> {
+    if let Some(queued_at) = payload.queued_at {
+        // Includes queue residence, injected delay and stderr-lock acquisition.
+        tracing::info!(target: diagnostics::instrumentation::TARGET,
+            event = "timing", name = "pager.frame.wait",
+            elapsed_us = queued_at.elapsed().as_micros() as u64,
+            sequence = payload.sequence, bytes = payload.data.len() as u64);
+    }
     let mut timer = diagnostics::instrumentation::timer("pager.frame.write");
     timer.with_field("bytes", payload.data.len() as u64);
-    match writer
+    timer.with_field("sequence", payload.sequence);
+    let result = match writer
         .write_all(&payload.data)
         .and_then(|()| writer.flush())
     {
@@ -312,7 +332,16 @@ fn write_payload(
             sync.mark_failed(std::io::Error::new(error.kind(), error.to_string()));
             Err(error)
         }
+    };
+    drop(timer);
+    if let Some(queued_at) = payload.queued_at {
+        tracing::info!(target: diagnostics::instrumentation::TARGET,
+            event = "timing", name = "pager.frame.delivery",
+            elapsed_us = queued_at.elapsed().as_micros() as u64,
+            sequence = payload.sequence, bytes = payload.data.len() as u64,
+            success = result.is_ok());
     }
+    result
 }
 /// Spawn a background OS thread that writes frame data to stderr.
 ///
@@ -560,6 +589,7 @@ mod tests {
         let payload = WriterPayload {
             sequence,
             data: b"frame bytes".to_vec(),
+            queued_at: Some(Instant::now()),
         };
         let mut sink = Vec::new();
         write_payload(&mut sink, &payload, &sync).expect("write payload");
@@ -593,6 +623,7 @@ mod tests {
         let payload = WriterPayload {
             sequence,
             data: b"frame bytes".to_vec(),
+            queued_at: Some(Instant::now()),
         };
         let mut sink = FlushFailWriter { data: Vec::new() };
         assert!(write_payload(&mut sink, &payload, &sync).is_err());
@@ -617,6 +648,7 @@ mod tests {
         let payload = WriterPayload {
             sequence,
             data: b"frame bytes".to_vec(),
+            queued_at: Some(Instant::now()),
         };
         assert!(write_payload(&mut FailingWriter, &payload, &sync).is_err());
         assert_eq!(sync.written(), 0);

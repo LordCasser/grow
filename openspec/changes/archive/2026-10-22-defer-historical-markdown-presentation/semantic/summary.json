@@ -1,0 +1,422 @@
+[
+  {
+    "stage": "before",
+    "turns": 128,
+    "runs": 3,
+    "metrics": {
+      "turns": {
+        "median": 128.0,
+        "range": [
+          128.0,
+          128.0
+        ]
+      },
+      "notifications": {
+        "median": 256.0,
+        "range": [
+          256.0,
+          256.0
+        ]
+      },
+      "user_messages": {
+        "median": 128.0,
+        "range": [
+          128.0,
+          128.0
+        ]
+      },
+      "assistant_messages": {
+        "median": 128.0,
+        "range": [
+          128.0,
+          128.0
+        ]
+      },
+      "assistant_source_bytes": {
+        "median": 4196352.0,
+        "range": [
+          4196352.0,
+          4196352.0
+        ]
+      },
+      "timeline_bytes": {
+        "median": 4671249.0,
+        "range": [
+          4671249.0,
+          4671249.0
+        ]
+      },
+      "decode_project_ms": {
+        "median": 14.897,
+        "range": [
+          14.595,
+          15.737
+        ]
+      },
+      "handler_ms": {
+        "median": 59.783,
+        "range": [
+          58.996,
+          60.936
+        ]
+      },
+      "finish_reload_ms": {
+        "median": 0.453,
+        "range": [
+          0.449,
+          0.567
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "turns": 512,
+    "runs": 3,
+    "metrics": {
+      "turns": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ]
+      },
+      "notifications": {
+        "median": 1024.0,
+        "range": [
+          1024.0,
+          1024.0
+        ]
+      },
+      "user_messages": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ]
+      },
+      "assistant_messages": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ]
+      },
+      "assistant_source_bytes": {
+        "median": 16785408.0,
+        "range": [
+          16785408.0,
+          16785408.0
+        ]
+      },
+      "timeline_bytes": {
+        "median": 18694954.0,
+        "range": [
+          18694954.0,
+          18694954.0
+        ]
+      },
+      "decode_project_ms": {
+        "median": 57.019,
+        "range": [
+          56.854,
+          58.033
+        ]
+      },
+      "handler_ms": {
+        "median": 226.354,
+        "range": [
+          222.938,
+          229.371
+        ]
+      },
+      "finish_reload_ms": {
+        "median": 0.485,
+        "range": [
+          0.466,
+          0.523
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "turns": 2048,
+    "runs": 3,
+    "metrics": {
+      "turns": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ]
+      },
+      "notifications": {
+        "median": 4096.0,
+        "range": [
+          4096.0,
+          4096.0
+        ]
+      },
+      "user_messages": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ]
+      },
+      "assistant_messages": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ]
+      },
+      "assistant_source_bytes": {
+        "median": 67141632.0,
+        "range": [
+          67141632.0,
+          67141632.0
+        ]
+      },
+      "timeline_bytes": {
+        "median": 74822194.0,
+        "range": [
+          74822194.0,
+          74822194.0
+        ]
+      },
+      "decode_project_ms": {
+        "median": 235.024,
+        "range": [
+          233.773,
+          239.801
+        ]
+      },
+      "handler_ms": {
+        "median": 918.504,
+        "range": [
+          912.122,
+          955.685
+        ]
+      },
+      "finish_reload_ms": {
+        "median": 0.823,
+        "range": [
+          0.816,
+          0.925
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "turns": 128,
+    "runs": 3,
+    "metrics": {
+      "turns": {
+        "median": 128.0,
+        "range": [
+          128.0,
+          128.0
+        ]
+      },
+      "notifications": {
+        "median": 256.0,
+        "range": [
+          256.0,
+          256.0
+        ]
+      },
+      "user_messages": {
+        "median": 128.0,
+        "range": [
+          128.0,
+          128.0
+        ]
+      },
+      "assistant_messages": {
+        "median": 128.0,
+        "range": [
+          128.0,
+          128.0
+        ]
+      },
+      "assistant_source_bytes": {
+        "median": 4196352.0,
+        "range": [
+          4196352.0,
+          4196352.0
+        ]
+      },
+      "timeline_bytes": {
+        "median": 4671249.0,
+        "range": [
+          4671249.0,
+          4671249.0
+        ]
+      },
+      "decode_project_ms": {
+        "median": 15.227,
+        "range": [
+          15.168,
+          15.83
+        ]
+      },
+      "handler_ms": {
+        "median": 9.951,
+        "range": [
+          9.688,
+          10.055
+        ]
+      },
+      "finish_reload_ms": {
+        "median": 0.08,
+        "range": [
+          0.072,
+          0.16
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "turns": 512,
+    "runs": 3,
+    "metrics": {
+      "turns": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ]
+      },
+      "notifications": {
+        "median": 1024.0,
+        "range": [
+          1024.0,
+          1024.0
+        ]
+      },
+      "user_messages": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ]
+      },
+      "assistant_messages": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ]
+      },
+      "assistant_source_bytes": {
+        "median": 16785408.0,
+        "range": [
+          16785408.0,
+          16785408.0
+        ]
+      },
+      "timeline_bytes": {
+        "median": 18694954.0,
+        "range": [
+          18694954.0,
+          18694954.0
+        ]
+      },
+      "decode_project_ms": {
+        "median": 59.214,
+        "range": [
+          58.003,
+          174.991
+        ]
+      },
+      "handler_ms": {
+        "median": 37.852,
+        "range": [
+          36.882,
+          42.09
+        ]
+      },
+      "finish_reload_ms": {
+        "median": 0.11,
+        "range": [
+          0.106,
+          0.118
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "turns": 2048,
+    "runs": 3,
+    "metrics": {
+      "turns": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ]
+      },
+      "notifications": {
+        "median": 4096.0,
+        "range": [
+          4096.0,
+          4096.0
+        ]
+      },
+      "user_messages": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ]
+      },
+      "assistant_messages": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ]
+      },
+      "assistant_source_bytes": {
+        "median": 67141632.0,
+        "range": [
+          67141632.0,
+          67141632.0
+        ]
+      },
+      "timeline_bytes": {
+        "median": 74822194.0,
+        "range": [
+          74822194.0,
+          74822194.0
+        ]
+      },
+      "decode_project_ms": {
+        "median": 239.232,
+        "range": [
+          238.418,
+          423.602
+        ]
+      },
+      "handler_ms": {
+        "median": 150.09,
+        "range": [
+          149.709,
+          154.57
+        ]
+      },
+      "finish_reload_ms": {
+        "median": 0.426,
+        "range": [
+          0.422,
+          0.498
+        ]
+      }
+    }
+  }
+]

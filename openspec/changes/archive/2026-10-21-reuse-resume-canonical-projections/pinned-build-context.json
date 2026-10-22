@@ -1,0 +1,30 @@
+{
+  "target": "/tmp/grow-r5-r6-rust193.3273f6q7",
+  "versions": [
+    "cargo 1.93.1 (083ac5135 2025-12-15)",
+    "rustc 1.93.1 (01f6ddf75 2026-02-11)"
+  ],
+  "profile": "debug=0, incremental=0, jobs=2",
+  "binaries": {
+    "shell": {
+      "name": "shell-cc37478213c3506b",
+      "sha256": "392e1d4581dc05d0559e78be9d42c8b1d1c142c1458866b29c48362562b6614d"
+    },
+    "pager": {
+      "name": "pager-43eb1b49c1a581f2",
+      "sha256": "117e1b6f2d0fcb2da431a3c4afdaa189e9d5e750f8fc576a81f58812c9b1d7d8"
+    },
+    "pty_e2e_persistence": {
+      "name": "pty_e2e_persistence-7059ab7b8160f0ef",
+      "sha256": "251af2e98ba40d479e9ec325203651f2c2553a32ff8cb11a2973513356e31c2e"
+    },
+    "session_load_perf": {
+      "name": "session_load_perf-5ab446586b96e270",
+      "sha256": "39300671bc1ea1481cf391f858fcf2a9c948b9a19d7923d88faaf875033c0273"
+    },
+    "cli": {
+      "name": "debug/grow",
+      "sha256": "8cc3cbc3186aa97b8e0533eb4826d882ce80347590a93823e4908c97846281e3"
+    }
+  }
+}

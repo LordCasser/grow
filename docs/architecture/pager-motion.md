@@ -86,6 +86,10 @@ Scrollback 搜索提交只保留一份待扫描的最新 query 与 corpus 更新
 
 History search uses the same one-slot pending state and nonblocking Drop edge. Drop sets a worker-visible stop flag before queuing Stop; scoring and highlight collection check it between entries and abandon partial results. One nucleo score, highlight-index calculation, or current sort can finish after Drop, so cancellation has no wall-clock deadline. The history worker contract is recorded in [client surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-history-search-submission-does-not-wait-for-worker-capacity).
 
+## 历史 Markdown 的派生缓存
+
+恢复仍先完整校验并按顺序交付历史，再释放普通输入。历史 assistant/thinking 消息结束时立即完成原文归一化和消息状态，图片引用也在这个边界探测；离屏 Markdown 的最终解析和排版缓存则在首次显示、复制、链接或来源映射访问前补齐。可能包含 Mermaid 的消息继续在结束时解析，保留图表来源和按钮位置。离屏高度统一按原文估算，不随缓存冷热改变；可见区域仍精确测量并使用现有滚动锚点校正。见 [历史 Markdown 契约](../../openspec/specs/client-surfaces/spec.md#requirement-historical-markdown-defers-only-derived-presentation-work)。
+
 ## 持久化边界
 
 `FrameStamp`、所有 deadline、activity projection 和 liveness 查询租约都不序列化。

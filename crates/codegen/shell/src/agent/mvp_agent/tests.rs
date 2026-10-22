@@ -2131,29 +2131,78 @@ fn find_model_by_catalog_id_never_matches_routing_slug() {
         "the routing slug is not a catalog identity"
     );
 }
-fn write_updates(dir: &std::path::Path, lines: &[&str]) {
-    let path = dir.join("updates.jsonl");
-    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+fn write_history(dir: &std::path::Path, updates: &[crate::session::storage::SessionUpdate]) {
+    let facts = updates
+        .iter()
+        .filter_map(|update| crate::session::history::HistoryFact::from_update(update).unwrap())
+        .collect::<Vec<_>>();
+    let bytes = crate::session::storage::JsonlStorageAdapter::encode_journal(&[], &facts).unwrap();
+    std::fs::write(dir.join(crate::session::storage::TIMELINE_FILE), bytes).unwrap();
 }
 fn stale_tasks(dir: &std::path::Path) -> Vec<OrphanedTask> {
     let directory = crate::session::storage::ContainedDirectory::open(
         dir,
         std::path::Path::new(""),
-        "updates fixture",
+        "Timeline fixture",
         false,
     )
     .unwrap();
-    MvpAgent::find_stale_background_task_projections(&directory)
+    let Ok(journal) =
+        crate::session::storage::JsonlStorageAdapter::read_journal_from_directory(&directory)
+    else {
+        return Vec::new();
+    };
+    MvpAgent::find_stale_background_task_projections(&acp::SessionId::new("s"), &journal.history)
 }
-fn bg_line(task_id: &str) -> String {
-    format!(
-        r#"{{"timestamp":1,"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"task_backgrounded","task_id":"{task_id}","command":"sleep 99","cwd":"/tmp"}}}}}}"#
-    )
+fn bg_update(task_id: &str) -> crate::session::storage::SessionUpdate {
+    use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+    crate::session::storage::SessionUpdate::Grow(Box::new(SessionNotification {
+        session_id: acp::SessionId::new("s"),
+        update: GrowUpdate::TaskBackgrounded {
+            tool_call_id: format!("tool-{task_id}"),
+            task_id: task_id.into(),
+            command: "sleep 99".into(),
+            cwd: "/tmp".into(),
+            output_file: String::new(),
+            monitor_description: None,
+            description: None,
+        },
+        meta: None,
+    }))
 }
-fn completed_line(task_id: &str) -> String {
-    format!(
-        r#"{{"timestamp":2,"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"task_completed","task_snapshot":{{"task_id":"{task_id}","completed":true}}}}}}}}"#
-    )
+fn completed_update(task_id: &str) -> crate::session::storage::SessionUpdate {
+    use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+    use tools::computer::types::TaskKind;
+    use tools::types::TaskSnapshot;
+    let snapshot = TaskSnapshot {
+        task_id: task_id.into(),
+        command: "sleep 99".into(),
+        display_command: None,
+        cwd: "/tmp".into(),
+        start_time: std::time::SystemTime::UNIX_EPOCH,
+        end_time: Some(std::time::SystemTime::UNIX_EPOCH),
+        output: String::new(),
+        output_file: std::path::PathBuf::new(),
+        truncated: false,
+        exit_code: Some(0),
+        signal: None,
+        completed: true,
+        kind: TaskKind::Bash,
+        block_waited: false,
+        explicitly_killed: false,
+        owner_session_id: None,
+        goal_id: None,
+        goal_definition_revision: None,
+        description: None,
+        is_backgrounded: true,
+    };
+    crate::session::storage::SessionUpdate::Grow(Box::new(SessionNotification {
+        session_id: acp::SessionId::new("s"),
+        update: GrowUpdate::TaskCompleted {
+            task_snapshot: snapshot,
+        },
+        meta: None,
+    }))
 }
 fn orphaned_ids(tasks: &[OrphanedTask]) -> std::collections::HashSet<&str> {
     tasks.iter().map(|t| t.task_id.as_str()).collect()
@@ -2166,19 +2215,17 @@ fn orphaned_tasks_returns_empty_for_no_file() {
 #[test]
 fn orphaned_tasks_returns_empty_when_all_completed() {
     let tmp = tempfile::tempdir().unwrap();
-    let bg = bg_line("t1");
-    let done = completed_line("t1");
-    write_updates(tmp.path(), &[&bg, &done]);
+    write_history(tmp.path(), &[bg_update("t1"), completed_update("t1")]);
     let result = stale_tasks(tmp.path());
     assert!(result.is_empty());
 }
 #[test]
 fn orphaned_tasks_returns_uncompleted() {
     let tmp = tempfile::tempdir().unwrap();
-    let bg1 = bg_line("t1");
-    let bg2 = bg_line("t2");
-    let done1 = completed_line("t1");
-    write_updates(tmp.path(), &[&bg1, &bg2, &done1]);
+    write_history(
+        tmp.path(),
+        &[bg_update("t1"), bg_update("t2"), completed_update("t1")],
+    );
     let result = stale_tasks(tmp.path());
     let ids = orphaned_ids(&result);
     assert_eq!(ids.len(), 1);
@@ -2187,11 +2234,15 @@ fn orphaned_tasks_returns_uncompleted() {
 #[test]
 fn orphaned_tasks_returns_multiple_uncompleted() {
     let tmp = tempfile::tempdir().unwrap();
-    let bg1 = bg_line("t1");
-    let bg2 = bg_line("t2");
-    let bg3 = bg_line("t3");
-    let done2 = completed_line("t2");
-    write_updates(tmp.path(), &[&bg1, &bg2, &bg3, &done2]);
+    write_history(
+        tmp.path(),
+        &[
+            bg_update("t1"),
+            bg_update("t2"),
+            bg_update("t3"),
+            completed_update("t2"),
+        ],
+    );
     let result = stale_tasks(tmp.path());
     let ids = orphaned_ids(&result);
     assert_eq!(ids.len(), 2);
@@ -2201,46 +2252,88 @@ fn orphaned_tasks_returns_multiple_uncompleted() {
 #[test]
 fn orphaned_tasks_captures_command_and_cwd() {
     let tmp = tempfile::tempdir().unwrap();
-    let bg = bg_line("t1");
-    write_updates(tmp.path(), &[&bg]);
+    write_history(tmp.path(), &[bg_update("t1")]);
     let result = stale_tasks(tmp.path());
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].command, "sleep 99");
     assert_eq!(result[0].cwd, "/tmp");
 }
 #[test]
-fn orphaned_tasks_skips_malformed_lines() {
+fn orphaned_tasks_fails_closed_on_invalid_committed_fact() {
     let tmp = tempfile::tempdir().unwrap();
-    let bg = bg_line("t1");
-    write_updates(tmp.path(), &["not json", &bg, "{}"]);
-    let result = stale_tasks(tmp.path());
-    assert_eq!(result.len(), 1);
+    write_history(tmp.path(), &[bg_update("t1")]);
+    let bad = serde_json::value::RawValue::from_string(
+        r#"{"meta":null,"content":{"kind":"future_fact","data":{}}}"#.into(),
+    )
+    .unwrap();
+    let path = tmp.path().join(crate::session::storage::TIMELINE_FILE);
+    let records = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let journal =
+        crate::session::storage::JsonlStorageAdapter::decode_journal_lines(&records).unwrap();
+    let invalid =
+        crate::session::history::encode_presentation(journal.state.records, 0, &bad).unwrap();
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(&invalid)
+        .unwrap();
+    assert!(
+        stale_tasks(tmp.path()).is_empty(),
+        "an invalid committed record must fail closed"
+    );
 }
 #[test]
 fn orphaned_tasks_ignores_unrelated_updates() {
     let tmp = tempfile::tempdir().unwrap();
-    let bg = bg_line("t1");
-    let unrelated = r#"{"timestamp":1,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"auto_compact_started","percentage":80}}}"#;
-    write_updates(tmp.path(), &[&bg, unrelated]);
+    use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+    let unrelated = crate::session::storage::SessionUpdate::Grow(Box::new(SessionNotification {
+        session_id: acp::SessionId::new("s"),
+        update: GrowUpdate::AutoCompactStarted {
+            tokens_used: 80,
+            context_window: 100,
+            percentage: 80,
+            reason: "threshold".into(),
+        },
+        meta: None,
+    }));
+    write_history(tmp.path(), &[bg_update("t1"), unrelated]);
     let result = stale_tasks(tmp.path());
     assert_eq!(result.len(), 1);
 }
 #[test]
 fn orphaned_tasks_filters_rewind_dead_branches() {
     let tmp = tempfile::tempdir().unwrap();
-    let user_msg = r#"{"timestamp":0,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}}}}"#;
-    let bg_before_rewind = bg_line("t-dead");
-    let rewind = r#"{"timestamp":3,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2025-01-01T00:00:00Z"}}}"#;
-    let user_msg2 = r#"{"timestamp":4,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"retry"}}}}"#;
-    let bg_after_rewind = bg_line("t-alive");
-    write_updates(
+    use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+    let user = |text: &str| {
+        crate::session::storage::SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            acp::SessionId::new("s"),
+            acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text),
+            ))),
+        )))
+    };
+    let rewind = crate::session::storage::SessionUpdate::Grow(Box::new(SessionNotification {
+        session_id: acp::SessionId::new("s"),
+        update: GrowUpdate::RewindMarker {
+            target_prompt_index: 0,
+            created_at: "2025-01-01T00:00:00Z".into(),
+        },
+        meta: None,
+    }));
+    write_history(
         tmp.path(),
         &[
-            user_msg,
-            &bg_before_rewind,
+            user("hello"),
+            bg_update("t-dead"),
             rewind,
-            user_msg2,
-            &bg_after_rewind,
+            user("retry"),
+            bg_update("t-alive"),
         ],
     );
     let result = stale_tasks(tmp.path());
@@ -4534,149 +4627,118 @@ fn replay_frontier_timeline(
 }
 
 #[test]
-fn resident_response_snapshot_delivers_future_projection_once_before_tools() {
+fn projection_forwarding_preserves_raw_acp_metadata_and_completion_semantics() {
     run_local_for_bridge_test(|| async {
         use crate::session::response_projection::project_admitted_response;
-        for already_admitted in [false, true] {
-            for cursor in [None, Some("frontier-1")] {
-                let root = tempfile::tempdir().unwrap();
-                let sid = acp::SessionId::new("frontier-session");
-                let timeline = replay_frontier_timeline(
-                    "frontier-request",
-                    1,
-                    vec![
-                        sampling_types::ConversationItem::Reasoning(
-                            sampling_types::synthesized_reasoning_item("thought"),
-                        ),
-                        sampling_types::ConversationItem::assistant("answer"),
-                    ],
-                    0,
-                );
-                let projection =
-                    project_admitted_response(&sid, &timeline.admitted_responses()[0]).unwrap();
-                let snapshot = if already_admitted {
-                    timeline.clone()
-                } else {
-                    chat_state::Timeline::from_events(
-                        timeline.events()[..timeline.events().len() - 1].to_vec(),
-                    )
-                    .unwrap()
-                };
-                let prefix = format!(
-                    "\n{}\n\n",
-                    serde_json::json!({
-                        "method":"session/update", "params": {
-                            "sessionId":sid, "update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"prompt"}},
-                            "_meta":{"eventId":"frontier-1"}
-                        }
-                    })
-                );
-                let tail = format!(
-                    "{}\n{}\n",
-                    serde_json::json!({
-                        "method":"_grow/response-replay-projection", "params":projection
-                    }),
-                    serde_json::json!({
-                        "method":"session/update", "params": {
-                            "sessionId":sid, "update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"tool completed","status":"completed"},
-                            "_meta":{"eventId":"frontier-2"}
-                        }
-                    })
-                );
-                let path = root.path().join("updates.jsonl");
-                // Deterministic ordering: authority was captured above; commit
-                // the newer cache before the production initial replay reads it.
-                std::fs::write(
-                    &path,
-                    if already_admitted {
-                        prefix.clone()
-                    } else {
-                        format!("{prefix}{tail}")
-                    },
-                )
-                .unwrap();
-                let directory = crate::session::storage::ContainedDirectory::open(
-                    root.path(),
-                    std::path::Path::new(""),
-                    "reconnect fixture",
-                    false,
-                )
-                .unwrap();
-                let cwd = paths::AbsPathBuf::new(root.path().to_path_buf()).unwrap();
+        let sid = acp::SessionId::new("typed-replay");
+        let timeline = replay_frontier_timeline(
+            "typed-request",
+            1,
+            vec![
+                sampling_types::ConversationItem::Reasoning(
+                    sampling_types::synthesized_reasoning_item("thought"),
+                ),
+                sampling_types::ConversationItem::assistant("answer"),
+            ],
+            0,
+        );
+        let projection =
+            project_admitted_response(&sid, &timeline.admitted_responses()[0]).unwrap();
+        let projection_line =
+            serde_json::json!({"method":"_grow/response-replay-projection", "params":projection})
+                .to_string();
+        let plain_lines = projection
+            .into_notifications()
+            .into_iter()
+            .map(|notification| {
+                serde_json::json!({"method":"session/update","params":notification}).to_string()
+            })
+            .collect::<Vec<_>>();
+        let persist = serde_json::json!({"token":"persist-proof"});
+        let client = serde_json::json!("client-1");
+        for mark_replay in [false, true] {
+            let mut outputs = Vec::new();
+            for lines in [vec![projection_line.clone()], plain_lines.clone()] {
                 let mut agent = build_minimal_agent_for_tests();
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 agent.gateway = GatewaySender::new(tx);
-                let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-                let captured = seen.clone();
-                let drain = tokio::task::spawn_local(async move {
-                    while let Some(message) = rx.recv().await {
-                        match message {
-                            acp_transport::AcpClientMessage::SessionNotification(args) => {
-                                captured.borrow_mut().push(args.request);
-                                let _ = args.response_tx.send(Ok(()));
-                            }
-                            _ => panic!("unexpected replay message"),
-                        }
-                    }
-                });
-                let (offset, mark_replay, _) = agent
-                    .replay_session_updates(
-                        &sid, &cwd, &directory, &snapshot, true, None, None, cursor,
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    offset,
-                    prefix.len() as u64,
-                    "snapshot must leave the entire future projection for delta; admitted={already_admitted}, cursor={cursor:?}"
-                );
-                if already_admitted {
-                    use std::io::Write as _;
-                    std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&path)
-                        .unwrap()
-                        .write_all(tail.as_bytes())
-                        .unwrap();
+                let mut completions = Vec::new();
+                let mut tools = std::collections::HashMap::new();
+                for line in lines {
+                    agent.forward_raw_replay_line(
+                        &line,
+                        Some(&persist),
+                        Some(&client),
+                        &mut completions,
+                        mark_replay,
+                        &mut tools,
+                    );
                 }
-                let physical_before_delta = std::fs::read(&path).unwrap();
-                for completion in agent.replay_session_updates_from_offset_enqueue(
-                    &sid,
-                    &directory,
-                    offset,
-                    &snapshot,
-                    None,
-                    None,
-                    mark_replay,
-                ) {
+                let mut notices = Vec::new();
+                while let Ok(message) = rx.try_recv() {
+                    let acp_transport::AcpClientMessage::SessionNotification(args) = message else {
+                        panic!("expected ACP notice")
+                    };
+                    let value = serde_json::to_value(args.request).unwrap();
+                    assert_eq!(value["_meta"]["responseProjection"], true);
+                    assert_eq!(value["_meta"]["samplingRequestId"], "typed-request");
+                    assert_eq!(value["_meta"]["grow/leaderClientId"], client);
+                    if mark_replay {
+                        assert_eq!(value["_meta"]["isReplay"], true);
+                        assert_eq!(value["_meta"]["grow/persist"], persist);
+                    } else {
+                        assert!(value["_meta"].get("isReplay").is_none());
+                    }
+                    notices.push(value);
+                    args.response_tx.send(Ok(())).unwrap();
+                }
+                assert_eq!(notices.len(), 2);
+                assert_eq!(completions.len(), 2);
+                for completion in completions {
                     completion.await.unwrap().unwrap();
                 }
-                let visible = seen
-                    .borrow()
-                    .iter()
-                    .filter_map(|notice| match &notice.update {
-                        acp::SessionUpdate::AgentThoughtChunk(chunk)
-                        | acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
-                            acp::ContentBlock::Text(text) => Some(text.text.clone()),
-                            _ => None,
-                        },
-                        acp::SessionUpdate::ToolCall(_) => Some("tool".to_owned()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    visible,
-                    ["thought", "answer", "tool"],
-                    "admitted={already_admitted}, cursor={cursor:?}"
-                );
-                assert_eq!(
-                    std::fs::read(&path).unwrap(),
-                    physical_before_delta,
-                    "replay reconciliation must not rewrite the updates ledger; admitted={already_admitted}, cursor={cursor:?}"
-                );
-                drain.abort();
+                assert!(tools.is_empty());
+                outputs.push(notices);
             }
+            assert_eq!(outputs[0], outputs[1]);
         }
+    });
+}
+
+#[test]
+fn fixed_timeline_snapshot_replays_complete_response_before_independent_history() {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        tokio::task::LocalSet::new().run_until(async {
+            let sid = acp::SessionId::new("snapshot");
+            let cwd_dir = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(cwd_dir.path().to_path_buf()).unwrap();
+            let timeline = crate::session::storage::jsonl::tests::response_projection_production_timeline("request", 1, "canonical");
+            let root = tempfile::tempdir().unwrap();
+            let adapter = crate::session::storage::JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let info = crate::session::info::Info { id: sid.clone(), cwd: cwd.as_str().to_owned() };
+            use crate::session::storage::StorageAdapter;
+            adapter.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+            for event in &timeline.events()[..4] { adapter.append_timeline_event_durable(&info, event).await.unwrap(); }
+            let candidate = acp::SessionNotification::new(sid.clone(), acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("preview"))))).meta(serde_json::json!({"eventId":"candidate","samplingRequestId":"request","samplingAttempt":1}).as_object().cloned());
+            adapter.append_acp_event_exact(&info, &candidate).await.unwrap();
+            let after = acp::SessionNotification::new(sid.clone(), acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("independent"))))).meta(serde_json::json!({"eventId":"independent"}).as_object().cloned());
+            adapter.append_acp_event_exact(&info, &after).await.unwrap();
+            adapter.append_timeline_event_durable(&info, timeline.events().last().unwrap()).await.unwrap();
+            let opened = adapter.open_session(&info).unwrap();
+            let snapshot = opened.validated_timeline(sid.0.as_ref()).unwrap();
+            let before = std::fs::read(opened.directory().display_path().join("timeline.jsonl")).unwrap();
+            let mut agent = build_minimal_agent_for_tests();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            agent.gateway = GatewaySender::new(tx);
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let captured = seen.clone();
+            let drain = tokio::task::spawn_local(async move { while let Some(message) = rx.recv().await { if let acp_transport::AcpClientMessage::SessionNotification(args) = message { captured.borrow_mut().push(args.request); let _ = args.response_tx.send(Ok(())); } } });
+            agent.replay_session_updates(&sid, &cwd, opened.directory(), &snapshot.timeline, &snapshot.history, true, None, None, None).await.unwrap();
+            let texts = seen.borrow().iter().filter_map(|notice| match &notice.update { acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content { acp::ContentBlock::Text(value) => Some(value.text.clone()), _ => None }, _ => None }).collect::<Vec<_>>();
+            assert_eq!(texts, ["canonical", "independent"]);
+            assert_eq!(std::fs::read(opened.directory().display_path().join("timeline.jsonl")).unwrap(), before);
+            drain.abort();
+        }).await;
     });
 }
 

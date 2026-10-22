@@ -38,12 +38,15 @@ async fn continue_resumes_session_with_history() {
     first
         .wait_for_text(&turn_sentinel(1), Duration::from_secs(30))
         .expect("turn 1 rendered");
-    // Quit via Ctrl+Q double-press: focus is in the prompt, so 'q' would just type.
+    // Use the actual global quit path, including its persistence barrier.
     first.update(Duration::from_millis(500));
-    first.inject_keys(b"\x11").expect("ctrl-q once");
-    first.update(Duration::from_millis(200));
-    first.inject_keys(b"\x11").expect("ctrl-q confirm");
-    first.quit().expect("reap first pager");
+    first.inject_keys(b"\x04\x04").expect("confirm Ctrl+D");
+    assert_eq!(
+        first
+            .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
+            .unwrap(),
+        0
+    );
 
     let mut resumed = PtyHarness::spawn_with_content_in_dir(
         &binary,
@@ -55,9 +58,19 @@ async fn continue_resumes_session_with_history() {
     )
     .expect("spawn resumed pager");
 
+    // Historical text may be visible before the load barrier enables input.
     resumed
-        .wait_for_text(&turn_sentinel(1), WELCOME_TIMEOUT)
-        .expect("history replayed after --continue");
+        .wait_until_stable(
+            "ready resumed history",
+            WELCOME_TIMEOUT,
+            Duration::from_millis(500),
+            |h| {
+                h.contains_text(&turn_sentinel(1))
+                    && h.contains_text("grow · Mock")
+                    && !h.contains_text("Loading session")
+            },
+        )
+        .expect("history replayed and input ready after --continue");
     let screen = resumed.screen_contents();
     assert_eq!(
         screen.matches(&turn_sentinel(1)).count(),
@@ -79,5 +92,11 @@ async fn continue_resumes_session_with_history() {
         resumed.screen_contents()
     );
 
-    resumed.quit().expect("quit resumed pager");
+    resumed.inject_keys(b"\x04\x04").expect("confirm Ctrl+D");
+    assert_eq!(
+        resumed
+            .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
+            .unwrap(),
+        0
+    );
 }

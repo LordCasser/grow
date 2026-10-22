@@ -1,0 +1,5 @@
+   Compiling pager v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+   Compiling shell v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+   Compiling cli v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/cli)
+   Compiling pager-minimal v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-minimal)
+    Finished `release` profile [optimized] target(s) in 3m 17s

@@ -3,7 +3,7 @@
 //! The timeline is the durable causal ledger for a session. Streaming deltas
 //! are transport-only; complete messages and lifecycle boundaries are facts.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sampling_types::{
@@ -218,7 +218,7 @@ pub enum SurfaceOp {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseAdmissionIdentity {
     pub request_id: String,
@@ -243,6 +243,27 @@ pub struct AdmittedResponse {
     pub identity: ResponseAdmissionIdentity,
     pub items: Vec<ConversationItem>,
     pub quarantined_tool_exchanges: usize,
+}
+
+/// A scoped view of a selected canonical response. No item or tool payloads
+/// are cloned while preparing historical projections.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedResponseView<'a> {
+    pub event_seq: EventSeq,
+    pub identity: &'a ResponseAdmissionIdentity,
+    pub items: &'a [ConversationItem],
+    pub quarantined_tool_exchanges: usize,
+}
+
+impl AdmittedResponse {
+    pub fn as_view(&self) -> AdmittedResponseView<'_> {
+        AdmittedResponseView {
+            event_seq: self.event_seq,
+            identity: &self.identity,
+            items: &self.items,
+            quarantined_tool_exchanges: self.quarantined_tool_exchanges,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1622,9 +1643,8 @@ struct TimelineEventWire {
     version: u8,
     seq: EventSeq,
     at_ms: i64,
-    #[serde(rename = "type")]
-    event_type: String,
-    event: serde_json::Value,
+    #[serde(flatten)]
+    kind: TimelineEventKind,
 }
 
 impl<'de> Deserialize<'de> for TimelineEvent {
@@ -1633,16 +1653,11 @@ impl<'de> Deserialize<'de> for TimelineEvent {
         D: serde::Deserializer<'de>,
     {
         let wire = TimelineEventWire::deserialize(deserializer)?;
-        let kind = serde_json::from_value(serde_json::json!({
-            "type": wire.event_type,
-            "event": wire.event,
-        }))
-        .map_err(serde::de::Error::custom)?;
         Ok(Self {
             version: wire.version,
             seq: wire.seq,
             at_ms: wire.at_ms,
-            kind,
+            kind: wire.kind,
         })
     }
 }
@@ -1792,6 +1807,72 @@ pub struct Timeline {
     terminal_tasks: BTreeSet<String>,
     subagent_result_recorded: bool,
     lifecycle: LifecycleFold,
+    latest_completed_attempts: HashMap<String, u32>,
+    response_admission_identities: HashSet<ResponseAdmissionIdentity>,
+    surface_tool_identity: SurfaceToolIdentitySummary,
+}
+
+/// Quarantine emits one range per malformed assistant; adjacent carrier and
+/// result items affect each range's extent, not its count. Keep only active
+/// Surface IDs needed to extend that count without rescanning prior items.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SurfaceToolIdentitySummary {
+    seen_ids: HashSet<String>,
+    malformed_assistants: usize,
+}
+
+impl SurfaceToolIdentitySummary {
+    fn malformed_appended_count(&self, items: &[ConversationItem]) -> usize {
+        let mut appended_ids = HashSet::new();
+        let mut malformed_assistants = 0;
+        for item in items {
+            let ConversationItem::Assistant(assistant) = item else {
+                continue;
+            };
+            let mut malformed = false;
+            for call in &assistant.tool_calls {
+                let issue = crate::compaction_utils::tool_identity_issue_with_seen(call, |id| {
+                    self.seen_ids.contains(id) || appended_ids.contains(id)
+                });
+                if issue.is_some() {
+                    malformed = true;
+                } else {
+                    appended_ids.insert(call.id.as_ref().to_owned());
+                }
+            }
+            if malformed {
+                malformed_assistants += 1;
+            }
+        }
+        malformed_assistants
+    }
+
+    fn extend(&mut self, items: &[ConversationItem]) {
+        for item in items {
+            let ConversationItem::Assistant(assistant) = item else {
+                continue;
+            };
+            let mut malformed = false;
+            for call in &assistant.tool_calls {
+                let issue = crate::compaction_utils::tool_identity_issue_with_seen(call, |id| {
+                    self.seen_ids.contains(id)
+                });
+                if issue.is_some() {
+                    malformed = true;
+                } else {
+                    self.seen_ids.insert(call.id.as_ref().to_owned());
+                }
+            }
+            if malformed {
+                self.malformed_assistants += 1;
+            }
+        }
+    }
+
+    fn rebuild(&mut self, items: &[ConversationItem]) {
+        *self = Self::default();
+        self.extend(items);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2090,6 +2171,20 @@ impl Timeline {
     /// Identity-bearing assistant responses belonging to the currently
     /// selected branch, in Timeline order.
     pub fn admitted_responses(&self) -> Vec<AdmittedResponse> {
+        self.admitted_response_views()
+            .into_iter()
+            .map(|response| AdmittedResponse {
+                event_seq: response.event_seq,
+                identity: response.identity.clone(),
+                items: response.items.to_vec(),
+                quarantined_tool_exchanges: response.quarantined_tool_exchanges,
+            })
+            .collect()
+    }
+
+    /// Borrow response payloads at this exact Timeline revision, computing the
+    /// selected branch once for the complete batch.
+    pub fn admitted_response_views(&self) -> Vec<AdmittedResponseView<'_>> {
         let selected_events = fold_branch_provenance(self).admitted_response_events;
         self.events
             .iter()
@@ -2100,10 +2195,10 @@ impl Timeline {
                 let admission = message.response_admission.as_ref()?;
                 selected_events
                     .contains(&event.seq)
-                    .then(|| AdmittedResponse {
+                    .then_some(AdmittedResponseView {
                         event_seq: event.seq,
-                        identity: admission.identity.clone(),
-                        items: message.items.clone(),
+                        identity: &admission.identity,
+                        items: &message.items,
                         quarantined_tool_exchanges: admission.quarantined_tool_exchanges,
                     })
             })
@@ -3486,6 +3581,19 @@ impl Timeline {
         active_step: bool,
     ) {
         match &event.kind {
+            TimelineEventKind::Request(RequestEvent::Completed { id, attempt, .. }) => {
+                self.latest_completed_attempts.insert(id.clone(), *attempt);
+            }
+            TimelineEventKind::Messages(MessageEvent {
+                response_admission: Some(admission),
+                ..
+            }) => {
+                self.response_admission_identities
+                    .insert(admission.identity.clone());
+            }
+            _ => {}
+        }
+        match &event.kind {
             TimelineEventKind::Planning(planning) => {
                 self.planning = Some(PlanningSnapshot {
                     seq: event.seq,
@@ -3612,6 +3720,7 @@ impl Timeline {
                     }
                 }
                 self.surface_revision = self.surface_revision.saturating_add(1);
+                self.surface_tool_identity.rebuild(&self.surface);
             }
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: Some(input),
@@ -4657,33 +4766,26 @@ impl Timeline {
             {
                 return Err(TimelineError::InvalidResponseAdmissionShape);
             }
-            let completed_attempt =
-                self.events
-                    .iter()
-                    .rev()
-                    .find_map(|event| match &event.kind {
-                        TimelineEventKind::Request(RequestEvent::Completed {
-                            id, attempt, ..
-                        }) if id == &admission.identity.request_id => Some(*attempt),
-                        _ => None,
-                    });
+            let completed_attempt = self
+                .latest_completed_attempts
+                .get(&admission.identity.request_id)
+                .copied();
             if completed_attempt != Some(admission.identity.attempt) {
                 return Err(TimelineError::InvalidResponseAdmissionIdentity);
             }
-            if self.events.iter().any(|event| {
-                matches!(
-                    &event.kind,
-                    TimelineEventKind::Messages(MessageEvent {
-                        response_admission: Some(existing), ..
-                    }) if existing.identity == admission.identity
-                )
-            }) {
+            if self
+                .response_admission_identities
+                .contains(&admission.identity)
+            {
                 return Err(TimelineError::DuplicateResponseAdmissionIdentity);
             }
-            let mut candidate = self.surface.clone();
-            candidate.extend(messages.items.iter().cloned());
-            let quarantined =
-                crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut candidate);
+            let quarantined = self
+                .surface_tool_identity
+                .malformed_assistants
+                .saturating_add(
+                    self.surface_tool_identity
+                        .malformed_appended_count(&messages.items),
+                );
             if quarantined != admission.quarantined_tool_exchanges {
                 return Err(TimelineError::InvalidResponseAdmissionResult);
             }
@@ -5170,6 +5272,7 @@ impl Timeline {
                         item,
                     }),
                 );
+                self.surface_tool_identity.rebuild(&self.surface);
             }
         }
         if matches!(&messages.surface, SurfaceOp::Replace { .. }) {
@@ -5180,6 +5283,8 @@ impl Timeline {
     /// Control activation preserves the source event's original item offset,
     /// even when a boundary activates only a subset of its contexts.
     fn append_surface_item(&mut self, source: SurfaceId, item: ConversationItem) {
+        self.surface_tool_identity
+            .extend(std::slice::from_ref(&item));
         self.surface.push(item);
         self.surface_ids.push(source);
         self.surface_revision = self.surface_revision.saturating_add(1);
@@ -5188,6 +5293,7 @@ impl Timeline {
     fn append_surface_items(&mut self, event_seq: EventSeq, items: &[ConversationItem]) {
         let item_count = u32::try_from(items.len())
             .expect("surface item capacity was checked during validation");
+        self.surface_tool_identity.extend(items);
         self.surface.extend(items.iter().cloned());
         self.surface_ids
             .extend((0..item_count).map(|item| SurfaceId {
@@ -7943,6 +8049,18 @@ mod tests {
     fn assert_same_fold(replay: &Timeline, transactional: &Timeline) {
         assert_eq!(replay.surface_ids, transactional.surface_ids);
         assert_eq!(replay.surface_revision, transactional.surface_revision);
+        assert_eq!(
+            replay.latest_completed_attempts,
+            transactional.latest_completed_attempts
+        );
+        assert_eq!(
+            replay.response_admission_identities,
+            transactional.response_admission_identities
+        );
+        assert_eq!(
+            replay.surface_tool_identity,
+            transactional.surface_tool_identity
+        );
         assert_eq!(replay.next_prompt_index, transactional.next_prompt_index);
         assert_eq!(
             serde_json::to_value(&replay.surface).unwrap(),
@@ -7979,6 +8097,16 @@ mod tests {
         assert_eq!(
             format!("{:?}", replay.pending_notifications),
             format!("{:?}", transactional.pending_notifications)
+        );
+    }
+
+    fn assert_active_tool_identity_matches_surface(timeline: &Timeline) {
+        let mut expected = SurfaceToolIdentitySummary::default();
+        expected.extend(timeline.surface());
+        assert_eq!(timeline.surface_tool_identity, expected);
+        assert_eq!(
+            timeline.surface_tool_identity.malformed_assistants,
+            crate::compaction_utils::malformed_tool_exchange_ranges(timeline.surface()).len(),
         );
     }
 
@@ -8305,6 +8433,95 @@ mod tests {
             baseline.as_secs_f64() / optimized.as_secs_f64()
         );
         assert_same_fold(&replay, &reference);
+    }
+
+    #[test]
+    #[ignore = "cold response-admission replay baseline; fixture generation is excluded; run alone with --test-threads=1"]
+    fn benchmark_timeline_response_admission_validation() {
+        use std::time::Instant;
+
+        for response_count in [128_u64, 512, 2048] {
+            let mut fixture = Timeline::default();
+            for ordinal in 1..=response_count {
+                record_admitted_response(
+                    &mut fixture,
+                    ordinal,
+                    vec![ConversationItem::assistant(format!("answer-{ordinal}"))],
+                    0,
+                );
+            }
+
+            let expected_surface = fixture.surface.clone();
+            let expected_events = fixture.events.len();
+            let replay_events = fixture.events.clone();
+            let start = Instant::now();
+            let restored = Timeline::from_events(replay_events).unwrap();
+            let elapsed = start.elapsed();
+
+            assert_eq!(
+                serde_json::to_value(&restored.surface).unwrap(),
+                serde_json::to_value(&expected_surface).unwrap(),
+            );
+            assert_same_fold(&restored, &fixture);
+            eprintln!(
+                "response_admissions={response_count}, events={expected_events}, surface_items={}, cold_from_events={elapsed:?}",
+                restored.surface.len(),
+            );
+
+            let mut wrong_attempt = fixture.events.clone();
+            let response_index = wrong_attempt
+                .iter()
+                .rposition(|event| {
+                    matches!(
+                        &event.kind,
+                        TimelineEventKind::Messages(MessageEvent {
+                            response_admission: Some(_),
+                            ..
+                        })
+                    )
+                })
+                .unwrap();
+            let TimelineEventKind::Messages(message) = &mut wrong_attempt[response_index].kind
+            else {
+                unreachable!();
+            };
+            message
+                .response_admission
+                .as_mut()
+                .unwrap()
+                .identity
+                .attempt += 1;
+            assert!(matches!(
+                Timeline::from_events(wrong_attempt),
+                Err(TimelineError::InvalidResponseAdmissionIdentity)
+            ));
+
+            let mut wrong_quarantine_count = fixture.events.clone();
+            let TimelineEventKind::Messages(message) =
+                &mut wrong_quarantine_count[response_index].kind
+            else {
+                unreachable!();
+            };
+            message
+                .response_admission
+                .as_mut()
+                .unwrap()
+                .quarantined_tool_exchanges += 1;
+            assert!(matches!(
+                Timeline::from_events(wrong_quarantine_count),
+                Err(TimelineError::InvalidResponseAdmissionResult)
+            ));
+
+            let mut duplicate_identity = fixture.events.clone();
+            let mut duplicate = duplicate_identity[response_index].clone();
+            let last_seq = duplicate_identity.last().unwrap().seq;
+            duplicate.seq = EventSeq::new(last_seq.get() + 1);
+            duplicate_identity.push(duplicate);
+            assert!(matches!(
+                Timeline::from_events(duplicate_identity),
+                Err(TimelineError::DuplicateResponseAdmissionIdentity)
+            ));
+        }
     }
 
     #[test]
@@ -14857,6 +15074,46 @@ mod tests {
     }
 
     #[test]
+    fn wire_decoder_preserves_field_order_and_rejects_duplicate_typed_fields() {
+        let event = Timeline::default()
+            .record(TimelineEventKind::Observation(ObservationEvent {
+                scope: "wire-probe".into(),
+                name: "decoder".into(),
+                turn: None,
+                step: None,
+                data: None,
+            }))
+            .unwrap();
+        let value = serde_json::to_value(&event).unwrap();
+        let reordered = format!(
+            "{{\"event\":{},\"type\":{},\"at_ms\":{},\"seq\":{},\"version\":{}}}",
+            value["event"], value["type"], value["at_ms"], value["seq"], value["version"],
+        );
+        for decoded in [
+            serde_json::from_str::<TimelineEvent>(&reordered).unwrap(),
+            serde_json::from_slice::<TimelineEvent>(reordered.as_bytes()).unwrap(),
+            serde_json::from_value::<TimelineEvent>(value.clone()).unwrap(),
+        ] {
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+        let canonical = serde_json::to_string(&event).unwrap();
+        let ambiguous = [
+            canonical.replacen("\"version\":", "\"version\":1,\"version\":", 1),
+            canonical.replacen("\"type\":", "\"type\":\"observation\",\"type\":", 1),
+            canonical.replacen(
+                "\"scope\":\"wire-probe\"",
+                "\"scope\":\"shadow\",\"scope\":\"wire-probe\"",
+                1,
+            ),
+        ];
+        for raw in ambiguous {
+            assert_ne!(raw, canonical);
+            let error = serde_json::from_str::<TimelineEvent>(&raw).unwrap_err();
+            assert!(error.to_string().contains("duplicate field"), "{error}");
+        }
+    }
+
+    #[test]
     fn schema_v5_rejects_unknown_event_fields() {
         let event = Timeline::default()
             .record(TimelineEventKind::Observation(ObservationEvent {
@@ -15904,7 +16161,7 @@ mod tests {
                     quarantined_tool_exchanges,
                 }),
             }))
-            .unwrap();
+            .unwrap_or_else(|error| panic!("response {ordinal} admission rejected: {error:?}"));
         timeline
             .record(TimelineEventKind::Step(StepEvent::Ended {
                 id: step,
@@ -15924,6 +16181,47 @@ mod tests {
             }))
             .unwrap();
         event.seq
+    }
+
+    #[test]
+    fn borrowed_admitted_responses_share_the_event_items_and_follow_rewind() {
+        let mut timeline = Timeline::default();
+        record_prompt(&mut timeline, 1, 0, "prompt");
+        let seq = record_admitted_response(
+            &mut timeline,
+            10,
+            vec![ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: "tool-1".into(),
+                    name: "tool".into(),
+                    arguments: "{\"large\":\"payload\"}".into(),
+                },
+            ])],
+            0,
+        );
+        let views = timeline.admitted_response_views();
+        assert_eq!(views.len(), 1);
+        let event = timeline
+            .events()
+            .iter()
+            .find(|event| event.seq == seq)
+            .unwrap();
+        let message = event.messages().unwrap();
+        assert!(std::ptr::eq(
+            views[0].items.as_ptr(),
+            message.items.as_ptr()
+        ));
+        assert!(std::ptr::eq(
+            views[0].identity,
+            &message.response_admission.as_ref().unwrap().identity
+        ));
+        assert_eq!(
+            serde_json::to_value(views[0].items).unwrap(),
+            serde_json::to_value(&timeline.admitted_responses()[0].items).unwrap()
+        );
+        let rewound = timeline.rewind_surface(0).unwrap();
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        assert!(timeline.admitted_response_views().is_empty());
     }
 
     #[test]
@@ -16266,6 +16564,29 @@ mod tests {
             })),
             Err(TimelineError::InvalidResponseAdmissionResult)
         ));
+        let before_rejected_accept = timeline.clone();
+        let rejected = TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: timeline.next_seq(),
+            at_ms: 0,
+            kind: TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Assistant,
+                items: items.clone(),
+                surface: SurfaceOp::Append,
+                response_admission: Some(ResponseAdmission {
+                    identity: ResponseAdmissionIdentity {
+                        request_id: "req-99".into(),
+                        attempt: 2,
+                    },
+                    quarantined_tool_exchanges: 1,
+                }),
+            }),
+        };
+        assert!(matches!(
+            timeline.accept(rejected),
+            Err(TimelineError::InvalidResponseAdmissionResult)
+        ));
+        assert_same_fold(&timeline, &before_rejected_accept);
         timeline
             .record(TimelineEventKind::Messages(MessageEvent {
                 cause: MessageCause::Assistant,
@@ -16284,6 +16605,132 @@ mod tests {
             duplicate,
             Err(TimelineError::DuplicateResponseAdmissionIdentity)
         ));
+        assert_active_tool_identity_matches_surface(&timeline);
+        assert_bulk_matches(&timeline);
+    }
+
+    #[test]
+    fn response_admission_tool_identity_summary_tracks_append_compaction_and_rewind() {
+        fn call(id: &str, name: &str) -> sampling_types::ToolCall {
+            sampling_types::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments: "{}".into(),
+            }
+        }
+        fn assert_old_quarantine_oracle(
+            timeline: &Timeline,
+            items: &[ConversationItem],
+            expected: usize,
+        ) {
+            let mut candidate = timeline.surface.clone();
+            candidate.extend_from_slice(items);
+            let actual =
+                crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut candidate);
+            assert_eq!(actual, expected, "legacy quarantine oracle count");
+        }
+
+        let mut timeline = Timeline::default();
+        record_prompt(&mut timeline, 1, 0, "initial prompt");
+        let first_items = vec![ConversationItem::assistant_tool_calls(vec![call(
+            "shared-call",
+            "test_tool",
+        )])];
+        assert_old_quarantine_oracle(&timeline, &first_items, 0);
+        record_admitted_response(&mut timeline, 10, first_items, 0);
+
+        // Empty IDs and names are not inserted into the seen set. A malformed
+        // assistant still contributes only one quarantine range even when it
+        // contains several bad calls.
+        let malformed_items = vec![ConversationItem::assistant_tool_calls(vec![
+            call("shared-call", "test_tool"),
+            call("", "test_tool"),
+            call("reusable-call", "  "),
+            call("reusable-call", "test_tool"),
+            call("reusable-call", "test_tool"),
+        ])];
+        assert_old_quarantine_oracle(&timeline, &malformed_items, 1);
+        record_admitted_response(&mut timeline, 11, malformed_items, 1);
+        assert_eq!(timeline.surface_tool_identity.malformed_assistants, 1);
+        assert_active_tool_identity_matches_surface(&timeline);
+
+        // A later healthy assistant adds no quarantine, but the prior
+        // malformed assistant remains part of the current Surface count.
+        let healthy_items = vec![ConversationItem::assistant("healthy")];
+        assert_old_quarantine_oracle(&timeline, &healthy_items, 1);
+        record_admitted_response(&mut timeline, 12, healthy_items, 1);
+        assert_eq!(timeline.surface_tool_identity.malformed_assistants, 1);
+
+        let source_items = timeline.surface_len();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: CompactionMode::Foreground,
+                id: "admission-summary-rebuild".into(),
+                source_items,
+                prompt_index: 1,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "admission-summary-rebuild");
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "admission-summary-rebuild".into(),
+                source_items,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+        assert!(timeline.surface_tool_identity.seen_ids.is_empty());
+        assert_eq!(timeline.surface_tool_identity.malformed_assistants, 0);
+
+        // Compaction removed the old active tool identity; it remains in
+        // immutable events but cannot make a current-branch response malformed.
+        let post_compaction_items = vec![ConversationItem::assistant_tool_calls(vec![call(
+            "shared-call",
+            "test_tool",
+        )])];
+        assert_old_quarantine_oracle(&timeline, &post_compaction_items, 0);
+        record_admitted_response(&mut timeline, 13, post_compaction_items, 0);
+        assert_active_tool_identity_matches_surface(&timeline);
+
+        record_prompt(&mut timeline, 20, 1, "second prompt");
+        let rewound_items = vec![ConversationItem::assistant_tool_calls(vec![call(
+            "rewound-call",
+            "test_tool",
+        )])];
+        assert_old_quarantine_oracle(&timeline, &rewound_items, 0);
+        record_admitted_response(&mut timeline, 21, rewound_items, 0);
+        let rewound = timeline.rewind_surface(1).unwrap();
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        assert!(
+            !timeline
+                .surface_tool_identity
+                .seen_ids
+                .contains("rewound-call")
+        );
+        assert!(
+            timeline
+                .surface_tool_identity
+                .seen_ids
+                .contains("shared-call")
+        );
+        // Rewind reconstructs the uncompressed branch. It can therefore bring
+        // malformed assistant history back into the active Surface after the
+        // compaction summary had hidden it.
+        assert_active_tool_identity_matches_surface(&timeline);
+
+        // Rewind drops the later call from the active Surface but does not
+        // release its durable response-admission identity. The legacy oracle
+        // says this candidate brings the active quarantine total to two.
+        let reused_rewound_items = vec![ConversationItem::assistant_tool_calls(vec![call(
+            "rewound-call",
+            "test_tool",
+        )])];
+        assert_old_quarantine_oracle(&timeline, &reused_rewound_items, 2);
+        record_admitted_response(&mut timeline, 22, reused_rewound_items, 2);
+        assert_active_tool_identity_matches_surface(&timeline);
         assert_bulk_matches(&timeline);
     }
 

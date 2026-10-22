@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::info::Info;
 use crate::session::persistence::default_model_id;
-use crate::session::storage::{SessionUpdate, StorageAdapter};
+use crate::session::storage::{SessionUpdate, StorageAdapter, TIMELINE_FILE};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -35,6 +35,16 @@ fn timeline_event(name: &str, timeline: &mut chat_state::Timeline) -> chat_state
             },
         ))
         .unwrap()
+}
+
+fn encode_journal(events: &[chat_state::TimelineEvent]) -> Vec<u8> {
+    JsonlStorageAdapter::encode_journal(events, &[]).unwrap()
+}
+
+fn decode_journal(path: &Path) -> io::Result<super::ledger::JournalData> {
+    let text = std::fs::read_to_string(path)?;
+    let lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
+    JsonlStorageAdapter::decode_journal_lines(&lines)
 }
 
 fn projection(
@@ -80,10 +90,12 @@ fn prefix_validation_hashes_exact_bounded_bytes_and_validates_each_event() {
     let mut timeline = chat_state::Timeline::default();
     let mut bytes = Vec::new();
     for index in 0..300 {
-        let event = timeline_event(&format!("event-{index}"), &mut timeline);
-        serde_json::to_writer(&mut bytes, &event).unwrap();
+        timeline_event(&format!("event-{index}"), &mut timeline);
+    }
+    for line in encode_journal(timeline.events()).split_inclusive(|byte| *byte == b'\n') {
         // Whitespace is semantically insignificant, but must be included in
         // the immutable prefix digest just like the old whole-file reader.
+        bytes.extend_from_slice(line.strip_suffix(b"\n").unwrap_or(line));
         bytes.extend_from_slice(b" \r\n");
     }
     file.write_all(&bytes).unwrap();
@@ -94,6 +106,33 @@ fn prefix_validation_hashes_exact_bounded_bytes_and_validates_each_event() {
     extended.update(b"next");
     bytes.extend_from_slice(b"next");
     assert_eq!(extended.finalize(), blake3::hash(&bytes));
+}
+
+#[test]
+fn prefix_validation_rejects_complete_json_with_invalid_lifecycle() {
+    let mut timeline = chat_state::Timeline::default();
+    let valid = timeline_event("valid", &mut timeline);
+    let mut invalid = timeline_event("invalid", &mut timeline);
+    invalid.kind = chat_state::TimelineEventKind::Step(chat_state::StepEvent::Started {
+        id: chat_state::StepId {
+            turn: chat_state::TurnId(1),
+            index: 0,
+        },
+    });
+    let bytes = encode_journal(&[valid, invalid]);
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&bytes).unwrap();
+    assert_eq!(
+        JsonlStorageAdapter::load_timeline_prefix(&mut file, bytes.len() as u64)
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    file.seek(io::SeekFrom::Start(0)).unwrap();
+    let mut after = Vec::new();
+    file.read_to_end(&mut after).unwrap();
+    assert_eq!(after, bytes, "a rejected prefix must remain untouched");
 }
 
 #[test]
@@ -445,12 +484,10 @@ fn timeline_append_rejects_same_length_interior_replacement() {
     let original_len = std::fs::metadata(&path).unwrap().len();
     let mut replacement_timeline = chat_state::Timeline::default();
     let replacement = timeline_event("other", &mut replacement_timeline);
-    let original_line = serde_json::to_vec(&first).unwrap();
-    let replacement_line = serde_json::to_vec(&replacement).unwrap();
-    assert_eq!(original_line.len(), replacement_line.len());
-    let mut bytes = std::fs::read(&path).unwrap();
-    bytes[..replacement_line.len()].copy_from_slice(&replacement_line);
-    std::fs::write(&path, bytes).unwrap();
+    let original_bytes = encode_journal(&[first.clone(), second.clone()]);
+    let replacement_bytes = encode_journal(&[replacement, second]);
+    assert_eq!(original_bytes.len(), replacement_bytes.len());
+    std::fs::write(&path, replacement_bytes).unwrap();
 
     let error = append_timeline_with_prefix_state(&directory, &path, &prefix_state, &third)
         .expect_err("interior replacement must invalidate the committed prefix");
@@ -527,12 +564,8 @@ fn timeline_append_retries_are_idempotent_and_truncate_only_an_incomplete_tail()
     )
     .unwrap();
 
-    let lines = std::fs::read_to_string(path).unwrap();
-    assert_eq!(lines.lines().count(), 2);
-    let events = lines
-        .lines()
-        .map(|line| serde_json::from_str::<chat_state::TimelineEvent>(line).unwrap())
-        .collect::<Vec<_>>();
+    let events = decode_journal(&path).unwrap().events;
+    assert_eq!(events.len(), 2);
     assert_eq!(events[0].seq.get(), 0);
     assert_eq!(events[1].seq.get(), 1);
 }
@@ -579,27 +612,33 @@ fn timeline_append_rejects_symlinked_ledger_and_lock_targets() {
 
 #[cfg(unix)]
 #[test]
-fn update_append_and_replay_reject_symlinked_ledgers() {
+fn timeline_append_and_replay_reject_symlinked_ledgers() {
     use std::os::unix::fs::symlink;
 
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("outside.jsonl");
-    let path = dir.path().join("updates.jsonl");
+    let path = dir.path().join("timeline.jsonl");
     std::fs::write(&target, b"outside\n").unwrap();
     symlink(&target, &path).unwrap();
 
-    let error = JsonlStorageAdapter::append_jsonl_line_sync(
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline_event("symlink", &mut timeline);
+    let mut line = serde_json::to_vec(&event).unwrap();
+    line.push(b'\n');
+    let error = JsonlStorageAdapter::append_timeline_line_sync(
         &path,
-        b"{\"record\":1}\n".to_vec(),
+        line,
+        event.seq.get(),
         AppendDurability::Buffered,
     )
-    .expect_err("updates append must not follow a ledger symlink");
+    .expect_err("Timeline append must not follow a ledger symlink");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read(&target).unwrap(), b"outside\n");
 
-    let Err(error) = crate::session::storage::UpdatesIterator::open(&path) else {
-        panic!("updates replay must not follow a ledger symlink");
-    };
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let error = adapter
+        .read_timeline(path)
+        .expect_err("Timeline replay must not follow a ledger symlink");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
 
@@ -610,8 +649,8 @@ fn timeline_reader_ignores_only_the_uncommitted_final_fragment() {
     let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
     let mut timeline = chat_state::Timeline::default();
     let event = timeline_event("complete", &mut timeline);
-    let mut bytes = serde_json::to_vec(&event).unwrap();
-    bytes.extend_from_slice(b"\n{\"version\":");
+    let mut bytes = encode_journal(&[event]);
+    bytes.extend_from_slice(b"{\"version\":");
     bytes.extend_from_slice(&[0xe2, 0x82]);
     std::fs::write(&path, bytes).unwrap();
 
@@ -695,14 +734,9 @@ async fn ordinary_and_durable_appends_keep_every_physical_line_parseable() {
     ordinary.await.unwrap();
     durable.await.unwrap();
 
-    let bytes = std::fs::read(adapter.session_dir(&info).join("updates.jsonl")).unwrap();
-    let parsed = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<SessionUpdateEnvelope>)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(parsed.len(), N * 2);
+    let journal = decode_journal(&adapter.session_dir(&info).join(TIMELINE_FILE)).unwrap();
+    assert!(journal.events.is_empty());
+    assert_eq!(journal.history.sources.len(), N * 2);
 }
 
 #[tokio::test]
@@ -725,220 +759,27 @@ async fn append_commit_is_reported_when_bookkeeping_fails() {
         Err(crate::session::storage::AppendUpdateError::Committed(_))
     ));
     assert_eq!(
-        std::fs::read_to_string(adapter.session_dir(&info).join("updates.jsonl"))
+        decode_journal(&adapter.session_dir(&info).join(TIMELINE_FILE))
             .unwrap()
-            .lines()
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn directory_barrier_failure_is_retried_even_after_file_exists() {
-    let mut attempts = 0;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("updates.jsonl");
-    let mut flaky_parent = || {
-        attempts += 1;
-        if attempts == 1 {
-            Err(io::Error::other("directory barrier failed"))
-        } else {
-            Ok(())
-        }
-    };
-    assert!(
-        JsonlStorageAdapter::append_jsonl_line_sync_with(
-            &path,
-            b"{\"record\":1}\n".to_vec(),
-            AppendDurability::Durable,
-            std::fs::File::sync_all,
-            &mut flaky_parent,
-        )
-        .is_err()
-    );
-    JsonlStorageAdapter::append_jsonl_line_sync_with(
-        &path,
-        b"{\"record\":1}\n".to_vec(),
-        AppendDurability::Durable,
-        std::fs::File::sync_all,
-        &mut flaky_parent,
-    )
-    .unwrap();
-    assert_eq!(attempts, 2);
-}
-
-#[test]
-fn file_barrier_error_propagates() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("updates.jsonl");
-    let error = JsonlStorageAdapter::append_jsonl_line_sync_with(
-        &path,
-        b"{\"record\":1}\n".to_vec(),
-        AppendDurability::Durable,
-        |_| Err(io::Error::other("file barrier failed")),
-        || Ok(()),
-    )
-    .unwrap_err();
-    assert_eq!(error.to_string(), "file barrier failed");
-}
-
-#[tokio::test]
-async fn exact_projection_is_physically_idempotent_and_conflicts_on_payload() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = info();
-    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
-    adapter
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    let first = projection(&info, "answer");
-
-    adapter
-        .commit_response_projection(&info, &first)
-        .await
-        .unwrap();
-    adapter
-        .commit_response_projection(&info, &first)
-        .await
-        .unwrap();
-    let path = adapter.session_dir(&info).join("updates.jsonl");
-    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
-
-    let mut conflict = first.clone();
-    conflict.timeline_event += 1;
-    let error = adapter
-        .commit_response_projection(&info, &conflict)
-        .await
-        .unwrap_err()
-        .into_io_error();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
-
-    let conflict = projection(&info, "different answer");
-    let error = adapter
-        .commit_response_projection(&info, &conflict)
-        .await
-        .unwrap_err()
-        .into_io_error();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
-}
-
-#[tokio::test]
-async fn exact_projection_reconciles_a_post_commit_bookkeeping_failure() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = info();
-    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
-    adapter
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    let expected = projection(&info, "answer");
-    let summary = adapter.session_dir(&info).join("summary.json");
-    std::fs::remove_file(&summary).unwrap();
-    std::fs::create_dir(&summary).unwrap();
-
-    adapter
-        .commit_response_projection(&info, &expected)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(adapter.session_dir(&info).join("updates.jsonl"))
-            .unwrap()
-            .lines()
-            .count(),
-        1
-    );
-    adapter
-        .commit_response_projection(&info, &expected)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(adapter.session_dir(&info).join("updates.jsonl"))
-            .unwrap()
-            .lines()
-            .count(),
+            .history
+            .sources
+            .len(),
         1
     );
 }
 
 #[tokio::test]
-async fn exact_projection_pre_commit_append_failure_is_not_committed() {
+async fn directory_barrier_failure_is_retried_even_after_file_exists() {
     let dir = tempfile::tempdir().unwrap();
     let info = info();
-    let session_dir = dir.path().join("session");
-    let adapter = JsonlStorageAdapter::with_update_append_probe(session_dir, |_| {
-        Err(io::Error::other("append failed before commit"))
-    });
-    adapter
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-
-    let error = adapter
-        .commit_response_projection(&info, &projection(&info, "answer"))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        crate::session::storage::AppendUpdateError::NotCommitted(_)
-    ));
-    let path = adapter.session_dir(&info).join("updates.jsonl");
-    let physical_lines = match std::fs::read_to_string(path) {
-        Ok(contents) => contents.lines().count(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-        Err(error) => panic!("failed to inspect updates ledger: {error}"),
-    };
-    assert_eq!(physical_lines, 0);
-}
-
-#[tokio::test]
-async fn exact_acp_event_is_physically_idempotent_and_conflicts_on_payload() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = info();
-    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
-    adapter
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    let mut first = match update(&info, "answer".into()) {
-        SessionUpdate::Acp(notification) => *notification,
-        _ => unreachable!(),
-    };
-    first.meta = Some(
-        serde_json::json!({"eventId": "event-1"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-
-    adapter.append_acp_event_exact(&info, &first).await.unwrap();
-    adapter.append_acp_event_exact(&info, &first).await.unwrap();
-    let path = adapter.session_dir(&info).join("updates.jsonl");
-    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
-
-    let mut conflict = first.clone();
-    conflict.update = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-        acp::ContentBlock::Text(acp::TextContent::new("different")),
-    ));
-    let error = adapter
-        .append_acp_event_exact(&info, &conflict)
-        .await
-        .unwrap_err()
-        .into_io_error();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
-}
-
-async fn exact_projection_retries_after_sync_failure(point: UpdateSyncPoint) {
-    let dir = tempfile::tempdir().unwrap();
-    let info = info();
-    let fail_sync = Arc::new(AtomicBool::new(true));
-    let probe_state = Arc::clone(&fail_sync);
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_attempts = Arc::clone(&attempts);
     let adapter =
-        JsonlStorageAdapter::with_update_sync_probe(dir.path().join("session"), move |observed| {
-            if observed == point && probe_state.load(Ordering::SeqCst) {
-                Err(io::Error::other("injected update sync failure"))
+        JsonlStorageAdapter::with_timeline_sync_probe(dir.path().to_path_buf(), move |point| {
+            if point == TimelineSyncPoint::Directory
+                && probe_attempts.fetch_add(1, Ordering::AcqRel) == 0
+            {
+                Err(io::Error::other("directory barrier failed"))
             } else {
                 Ok(())
             }
@@ -947,43 +788,190 @@ async fn exact_projection_retries_after_sync_failure(point: UpdateSyncPoint) {
         .init_session(&info, default_model_id())
         .await
         .unwrap();
-    let expected = projection(&info, "answer");
-
-    assert!(matches!(
-        adapter.commit_response_projection(&info, &expected).await,
-        Err(crate::session::storage::AppendUpdateError::NotCommitted(_))
-    ));
-    let path = adapter.session_dir(&info).join("updates.jsonl");
-    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
-
-    fail_sync.store(false, Ordering::SeqCst);
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline_event("directory-retry", &mut timeline);
+    assert!(
+        adapter
+            .append_timeline_event_durable(&info, &event)
+            .await
+            .is_err()
+    );
     adapter
-        .commit_response_projection(&info, &expected)
+        .append_timeline_event_durable(&info, &event)
         .await
         .unwrap();
-    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
-
-    fail_sync.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        adapter.commit_response_projection(&info, &expected).await,
-        Err(crate::session::storage::AppendUpdateError::NotCommitted(_))
-    ));
-    fail_sync.store(false, Ordering::SeqCst);
-    adapter
-        .commit_response_projection(&info, &expected)
-        .await
-        .unwrap();
-    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+    assert_eq!(
+        decode_journal(&adapter.timeline_file(&info))
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn exact_projection_file_sync_failure_is_not_acknowledged_and_retries() {
-    exact_projection_retries_after_sync_failure(UpdateSyncPoint::File).await;
+async fn file_barrier_error_propagates() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter =
+        JsonlStorageAdapter::with_timeline_sync_probe(dir.path().to_path_buf(), |point| {
+            if point == TimelineSyncPoint::File {
+                Err(io::Error::other("file barrier failed"))
+            } else {
+                Ok(())
+            }
+        });
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline_event("file-barrier", &mut timeline);
+    let error = adapter
+        .append_timeline_event_durable(&info, &event)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "file barrier failed");
 }
 
 #[tokio::test]
-async fn exact_projection_directory_sync_failure_is_not_acknowledged_and_retries() {
-    exact_projection_retries_after_sync_failure(UpdateSyncPoint::Directory).await;
+async fn unified_admission_owns_one_body_and_preserves_candidate_order() {
+    let root = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let timeline =
+        super::tests::response_projection_production_timeline("request", 1, "only canonical body");
+    for event in &timeline.events()[..4] {
+        adapter
+            .append_timeline_event_durable(&info, event)
+            .await
+            .unwrap();
+    }
+    let mut candidate = acp_event(&info, "provisional body must not be stored");
+    candidate.meta.as_mut().unwrap().extend(
+        serde_json::json!({"samplingRequestId":"request","samplingAttempt":1})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    adapter
+        .append_acp_event_exact(&info, &candidate)
+        .await
+        .unwrap();
+    let notice = acp_event(&info, "independent after anchor");
+    let mut notice = notice;
+    notice
+        .meta
+        .as_mut()
+        .unwrap()
+        .insert("eventId".into(), "independent".into());
+    adapter
+        .append_acp_event_exact(&info, &notice)
+        .await
+        .unwrap();
+    let admission = timeline.events().last().unwrap();
+    adapter
+        .append_timeline_event_durable(&info, admission)
+        .await
+        .unwrap();
+    adapter
+        .append_timeline_event_durable(&info, admission)
+        .await
+        .unwrap();
+    let path = adapter.session_dir(&info).join("timeline.jsonl");
+    let bytes = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(bytes.matches("only canonical body").count(), 1);
+    assert!(!bytes.contains("provisional body"));
+    assert!(!adapter.session_dir(&info).join("updates.jsonl").exists());
+    let loaded = adapter.load_session(&info).await.unwrap();
+    let texts = loaded
+        .updates
+        .into_iter()
+        .filter_map(|value| match value {
+            SessionUpdate::Acp(value) => match value.update {
+                acp::SessionUpdate::AgentMessageChunk(chunk) => match chunk.content {
+                    acp::ContentBlock::Text(value) => Some(value.text),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["only canonical body", "independent after anchor"]);
+    let conflict =
+        super::tests::response_projection_production_timeline("request", 1, "conflicting body");
+    assert_eq!(
+        adapter
+            .append_timeline_event_durable(&info, conflict.events().last().unwrap())
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn unified_presentation_exact_retry_rejects_conflicts_and_foreign_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let event = acp_event(&info, "original");
+    adapter.append_acp_event_exact(&info, &event).await.unwrap();
+    adapter.append_acp_event_exact(&info, &event).await.unwrap();
+    let before = std::fs::read(adapter.session_dir(&info).join("timeline.jsonl")).unwrap();
+    let conflict = acp_event(&info, "different");
+    assert!(
+        adapter
+            .append_acp_event_exact(&info, &conflict)
+            .await
+            .is_err()
+    );
+    let mut foreign = event;
+    foreign.session_id = acp::SessionId::new("foreign");
+    assert!(
+        adapter
+            .append_acp_event_exact(&info, &foreign)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(adapter.session_dir(&info).join("timeline.jsonl")).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn unified_presentation_resolves_post_commit_bookkeeping_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let summary = adapter.session_dir(&info).join("summary.json");
+    std::fs::remove_file(&summary).unwrap();
+    std::fs::create_dir(&summary).unwrap();
+    let event = acp_event(&info, "committed");
+    assert!(matches!(
+        adapter.append_acp_event_exact(&info, &event).await,
+        Err(super::super::AppendUpdateError::Committed(_))
+    ));
+    let path = adapter.session_dir(&info).join("timeline.jsonl");
+    let before = std::fs::read(&path).unwrap();
+    adapter.append_acp_event_exact(&info, &event).await.unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 fn acp_event(info: &Info, text: &str) -> acp::SessionNotification {
@@ -1000,19 +988,21 @@ fn acp_event(info: &Info, text: &str) -> acp::SessionNotification {
     notification
 }
 
-async fn exact_acp_retries_after_sync_failure(point: UpdateSyncPoint) {
+async fn exact_acp_retries_after_sync_failure(point: TimelineSyncPoint) {
     let dir = tempfile::tempdir().unwrap();
     let info = info();
     let fail_sync = Arc::new(AtomicBool::new(true));
     let probe_state = Arc::clone(&fail_sync);
-    let adapter =
-        JsonlStorageAdapter::with_update_sync_probe(dir.path().join("session"), move |observed| {
+    let adapter = JsonlStorageAdapter::with_timeline_sync_probe(
+        dir.path().join("session"),
+        move |observed| {
             if observed == point && probe_state.load(Ordering::SeqCst) {
                 Err(io::Error::other("injected update sync failure"))
             } else {
                 Ok(())
             }
-        });
+        },
+    );
     adapter
         .init_session(&info, default_model_id())
         .await
@@ -1023,7 +1013,7 @@ async fn exact_acp_retries_after_sync_failure(point: UpdateSyncPoint) {
         adapter.append_acp_event_exact(&info, &expected).await,
         Err(crate::session::storage::AppendUpdateError::NotCommitted(_))
     ));
-    let path = adapter.session_dir(&info).join("updates.jsonl");
+    let path = adapter.session_dir(&info).join("timeline.jsonl");
     assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
 
     fail_sync.store(false, Ordering::SeqCst);
@@ -1048,12 +1038,12 @@ async fn exact_acp_retries_after_sync_failure(point: UpdateSyncPoint) {
 
 #[tokio::test]
 async fn exact_acp_file_sync_failure_is_not_acknowledged_and_retries() {
-    exact_acp_retries_after_sync_failure(UpdateSyncPoint::File).await;
+    exact_acp_retries_after_sync_failure(TimelineSyncPoint::File).await;
 }
 
 #[tokio::test]
 async fn exact_acp_directory_sync_failure_is_not_acknowledged_and_retries() {
-    exact_acp_retries_after_sync_failure(UpdateSyncPoint::Directory).await;
+    exact_acp_retries_after_sync_failure(TimelineSyncPoint::Directory).await;
 }
 
 #[cfg(target_os = "macos")]
@@ -1067,7 +1057,7 @@ fn append_lock_wait_is_bounded() {
     use fs2::FileExt as _;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("updates.jsonl");
+    let path = dir.path().join("timeline.jsonl");
     let lock_path = path.with_extension("jsonl.lock");
     let held = std::fs::OpenOptions::new()
         .read(true)
@@ -1085,4 +1075,488 @@ fn append_lock_wait_is_bounded() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     held.unlock().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writer_load_reuses_only_its_fully_validated_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let info = info();
+    let creator = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    creator
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let first = timeline_event("first", &mut timeline);
+    creator
+        .append_timeline_event_durable(&info, &first)
+        .await
+        .unwrap();
+    drop(creator);
+
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.load_session_without_updates(&info).await.unwrap();
+    assert!(
+        writer
+            .timeline_prefix_state(&info)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+    writer
+        .load_session_for_write_without_updates(&info)
+        .await
+        .unwrap();
+    writer
+        .load_session_for_write_without_updates(&info)
+        .await
+        .unwrap();
+    let state = writer.timeline_prefix_state(&info).unwrap();
+    let prefix = state.lock().unwrap().clone().unwrap();
+    let path = writer.timeline_file(&info);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(prefix.hash, blake3::hash(&bytes));
+    assert_eq!(prefix.len, bytes.len() as u64);
+    let second = timeline_event("second", &mut timeline);
+    writer
+        .append_timeline_event_durable(&info, &second)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.lock().unwrap().as_ref().unwrap().hash,
+        blake3::hash(&std::fs::read(&path).unwrap())
+    );
+
+    // A valid same-length rewrite must not be blessed by a repeated load.
+    let mut replacement_timeline = chat_state::Timeline::default();
+    let replacement = timeline_event("other", &mut replacement_timeline);
+    let replacement_bytes = encode_journal(&[replacement, second.clone()]);
+    assert_eq!(
+        replacement_bytes.len(),
+        std::fs::metadata(&path).unwrap().len() as usize
+    );
+    std::fs::write(&path, replacement_bytes).unwrap();
+    assert_eq!(
+        writer
+            .load_session_for_write_without_updates(&info)
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writer_load_does_not_install_prefix_when_prompt_validation_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let info = info();
+    let creator = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    creator
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let body = b"required prompt";
+    let hash = blake3::hash(body).to_hex().to_string();
+    let reference = format!(
+        "{}{hash}",
+        crate::session::persistence::PROMPT_BLOB_REF_PREFIX
+    );
+    let timeline =
+        chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user(reference)])
+            .unwrap();
+    for event in timeline.events() {
+        creator
+            .append_timeline_event_durable(&info, event)
+            .await
+            .unwrap();
+    }
+    drop(creator);
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert!(
+        writer
+            .load_session_for_write_without_updates(&info)
+            .await
+            .is_err()
+    );
+    assert!(
+        writer
+            .timeline_prefix_state(&info)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+    crate::session::persistence::write_immutable_blob(
+        &writer.session_dir(&info),
+        &Path::new("prompts").join(format!("{hash}.txt")),
+        body,
+    )
+    .unwrap();
+    writer
+        .load_session_for_write_without_updates(&info)
+        .await
+        .unwrap();
+    assert!(
+        writer
+            .timeline_prefix_state(&info)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writer_load_candidate_rejects_rewrite_replacement_and_truncation_before_install() {
+    for mutation in ["rewrite", "replace", "truncate"] {
+        let root = tempfile::tempdir().unwrap();
+        let info = info();
+        let creator = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        creator
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
+        let mut timeline = chat_state::Timeline::default();
+        let event = timeline_event("first", &mut timeline);
+        creator
+            .append_timeline_event_durable(&info, &event)
+            .await
+            .unwrap();
+        drop(creator);
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        writer.ensure_writer_lease(&info).unwrap();
+        let opened = writer.open_session(&info).unwrap();
+        let (_, prefix) = writer
+            .load_validated_writer_timeline(&opened, &info)
+            .unwrap();
+        let path = writer.timeline_file(&info);
+        let bytes = std::fs::read(&path).unwrap();
+        match mutation {
+            "rewrite" => {
+                let mut replacement_timeline = chat_state::Timeline::default();
+                let replacement = timeline_event("other", &mut replacement_timeline);
+                std::fs::write(&path, encode_journal(&[replacement])).unwrap();
+            }
+            "replace" => {
+                let replacement = path.with_extension("replacement");
+                std::fs::write(&replacement, bytes).unwrap();
+                std::fs::rename(replacement, &path).unwrap();
+            }
+            "truncate" => std::fs::write(&path, b"").unwrap(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            writer
+                .install_validated_writer_prefix(&opened, &info, prefix.unwrap())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData,
+            "{mutation}"
+        );
+        assert!(
+            writer
+                .timeline_prefix_state(&info)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writer_load_torn_tail_and_same_bytes_replacement_keep_append_validation() {
+    for replace in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let info = info();
+        let creator = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        creator
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
+        let mut timeline = chat_state::Timeline::default();
+        let first = timeline_event("first", &mut timeline);
+        creator
+            .append_timeline_event_durable(&info, &first)
+            .await
+            .unwrap();
+        let path = creator.timeline_file(&info);
+        let committed = std::fs::read(&path).unwrap();
+        if !replace {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"{partial")
+                .unwrap();
+        }
+        drop(creator);
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        writer
+            .load_session_for_write_without_updates(&info)
+            .await
+            .unwrap();
+        assert_eq!(
+            writer
+                .timeline_prefix_state(&info)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .len,
+            committed.len() as u64
+        );
+        if replace {
+            let replacement = path.with_extension("replacement");
+            std::fs::write(&replacement, &committed).unwrap();
+            std::fs::rename(replacement, &path).unwrap();
+        }
+        let second = timeline_event("second", &mut timeline);
+        writer
+            .append_timeline_event_durable(&info, &second)
+            .await
+            .unwrap();
+        let events = writer
+            .open_session(&info)
+            .unwrap()
+            .timeline_events()
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            serde_json::to_value(events).unwrap(),
+            serde_json::to_value([first, second]).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn notice_reference_validates_body_and_source_before_discarding_payload() {
+    use crate::extensions::notification::{
+        AgentMessageNotice, SessionNotification, SessionUpdate as GrowUpdate,
+    };
+    use chat_state::{
+        NotificationEvent, NotificationSource, NotificationSourceVersion, TimelineEventKind,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let opened = adapter.open_session(&info).unwrap();
+    let body = "the canonical parent message";
+    let payload_ref =
+        crate::session::notification_inbox::write_payload(opened.directory(), body).unwrap();
+    let source = NotificationSource::ParentMessage {
+        parent_session_id: "parent".into(),
+        message_id: "message".into(),
+        interrupt: true,
+    };
+    let source_version = NotificationSourceVersion::Ordinal {
+        value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let id = chat_state::notification_id(info.id.0.as_ref(), &source, &source_version).unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let receipt = timeline
+        .record(TimelineEventKind::Notification(
+            NotificationEvent::Received {
+                id,
+                owner_session_id: info.id.0.to_string(),
+                source,
+                source_version,
+                payload_ref,
+            },
+        ))
+        .unwrap();
+    adapter
+        .append_timeline_event_durable(&info, &receipt)
+        .await
+        .unwrap();
+    let notice =
+        crate::session::notification_inbox::parent_message_notice(&receipt, Some(body.into()))
+            .unwrap();
+    let wrap = |notice, event_id: &str| {
+        SessionUpdate::Grow(Box::new(SessionNotification {
+            session_id: info.id.clone(),
+            update: GrowUpdate::UiNotice(notice),
+            meta: Some(serde_json::json!({"eventId":event_id})),
+        }))
+    };
+    let valid = wrap(notice.clone(), "notice-exact");
+    adapter
+        .append_update_durable_commit_aware(&info, &valid)
+        .await
+        .unwrap();
+    adapter
+        .append_update_durable_commit_aware(&info, &valid)
+        .await
+        .unwrap();
+    let path = adapter.session_dir(&info).join(TIMELINE_FILE);
+    let before = std::fs::read(&path).unwrap();
+    for mutation in ["body", "source", "display"] {
+        let mut wrong = notice.clone();
+        let mut details = AgentMessageNotice::from_notice(&wrong).unwrap();
+        match mutation {
+            "body" => details.message = Some("different body".into()),
+            "source" => details.source_session_id = "wrong-parent".into(),
+            "display" => wrong.description = Some("different display".into()),
+            _ => unreachable!(),
+        }
+        wrong.details = Some(serde_json::to_string(&details).unwrap());
+        for event_id in ["notice-exact", "new-invalid-notice"] {
+            assert!(
+                adapter
+                    .append_update_durable_commit_aware(&info, &wrap(wrong.clone(), event_id))
+                    .await
+                    .is_err(),
+                "{mutation} must not be erased by conversion to a source reference"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+    let loaded = adapter.load_session(&info).await.unwrap();
+    let notices = loaded.updates.iter().filter(|update| matches!(update, SessionUpdate::Grow(notification) if matches!(&notification.update, GrowUpdate::UiNotice(_)))).count();
+    assert_eq!(
+        notices, 1,
+        "one canonical receipt at its original presentation position"
+    );
+}
+
+#[tokio::test]
+async fn incoming_inquiry_notices_are_bound_to_typed_source_facts() {
+    use crate::coordination::{IncomingInquiryAudit, InquiryDirection, InquiryEvent};
+    use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+
+    let root = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let path = adapter.session_dir(&info).join(TIMELINE_FILE);
+    let mut timeline = chat_state::Timeline::default();
+
+    let incoming = |source_peer_id: &str, source_session_id: &str| InquiryEvent::Incoming {
+        inquiry_id: "shared-inquiry".into(),
+        audit: IncomingInquiryAudit {
+            direction: InquiryDirection::ParentToChild,
+            source_peer_id: source_peer_id.into(),
+            source_session_id: source_session_id.into(),
+            source_cwd: "/source/workspace".into(),
+            delegated_subagent_task_name: None,
+            question: "Can you inspect this?".into(),
+            approval: None,
+            outcome: None,
+        },
+    };
+    let wrap = |notice, event_id: &str| {
+        SessionUpdate::Grow(Box::new(SessionNotification {
+            session_id: info.id.clone(),
+            update: GrowUpdate::UiNotice(notice),
+            meta: Some(serde_json::json!({"eventId": event_id})),
+        }))
+    };
+    let mut stored_notices = Vec::new();
+    for (peer, source_session, event_id) in [
+        ("peer-a", "source-session-a", "inquiry-notice-a"),
+        ("peer-b", "source-session-b", "inquiry-notice-b"),
+    ] {
+        let fact = incoming(peer, source_session);
+        let event = timeline.record(fact.timeline_kind()).unwrap();
+        adapter
+            .append_timeline_event_durable(&info, &event)
+            .await
+            .unwrap();
+        let notice = fact.notice();
+        adapter
+            .append_update_durable_commit_aware(&info, &wrap(notice.clone(), event_id))
+            .await
+            .unwrap();
+        stored_notices.push(notice);
+    }
+
+    let loaded = adapter.load_session(&info).await.unwrap();
+    let notices = loaded
+        .updates
+        .iter()
+        .filter_map(|update| {
+            let SessionUpdate::Grow(notification) = update else {
+                return None;
+            };
+            let GrowUpdate::UiNotice(notice) = &notification.update else {
+                return None;
+            };
+            Some(notice)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| {
+                IncomingInquiryAudit::from_notice(notice)
+                    .unwrap()
+                    .source_session_id
+            })
+            .collect::<Vec<_>>(),
+        ["source-session-a", "source-session-b"]
+    );
+
+    let before_invalid = std::fs::read(&path).unwrap();
+    let mut unknown_source = stored_notices[0].clone();
+    let mut audit = IncomingInquiryAudit::from_notice(&unknown_source).unwrap();
+    audit.source_session_id = "no-domain-source".into();
+    unknown_source.details = Some(serde_json::to_string(&audit).unwrap());
+    assert!(
+        adapter
+            .append_update_durable_commit_aware(
+                &info,
+                &wrap(unknown_source, "unknown-source-event"),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before_invalid);
+
+    let mut malformed = stored_notices[0].clone();
+    malformed.details = Some("{malformed details".into());
+    for event_id in ["malformed-new-event", "inquiry-notice-a"] {
+        assert!(
+            adapter
+                .append_update_durable_commit_aware(&info, &wrap(malformed.clone(), event_id))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before_invalid);
+    }
+
+    // Transport peer identity may change while the source session and inquiry
+    // phase are the same; this must not create a second display phase.
+    let duplicate = incoming("reconnected-peer", "source-session-a");
+    let duplicate_event = timeline.record(duplicate.timeline_kind()).unwrap();
+    adapter
+        .append_timeline_event_durable(&info, &duplicate_event)
+        .await
+        .unwrap();
+    let exact_retry = wrap(stored_notices[0].clone(), "inquiry-notice-a");
+    adapter
+        .append_update_durable_commit_aware(&info, &exact_retry)
+        .await
+        .unwrap();
+
+    let loaded = adapter.load_session(&info).await.unwrap();
+    let notices = loaded
+        .updates
+        .iter()
+        .filter(|update| matches!(update, SessionUpdate::Grow(notification) if matches!(&notification.update, GrowUpdate::UiNotice(_))))
+        .count();
+    assert_eq!(notices, 2, "the repeated source phase remains one notice");
 }

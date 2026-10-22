@@ -1,0 +1,629 @@
+{
+  "schema_version": 1,
+  "turns": 512,
+  "modern": true,
+  "dense_tools": false,
+  "raw_window": "PTY spawn through stable ready prompt, before ready-key injection",
+  "clocks": {
+    "process_elapsed_origin": "immediately before PTY spawn call",
+    "pty_received_cast_clock": "PtyHarness spawn instant; timestamps are PTY chunk receipt, not application write completion",
+    "pty_clock_origin_offset_ms_from_process_elapsed": {
+      "lower_bound": 0.0,
+      "upper_bound": 6.611708,
+      "reason": "PtyHarness records spawned_at inside spawn before the call returns"
+    }
+  },
+  "loading_window": "instrumentation rows timestamp-clipped through legacy pager.replay.end_batch proxy",
+  "source": {
+    "timeline_bytes": 18694991,
+    "updates_bytes": 0,
+    "timeline_and_updates_bytes": 18694991,
+    "counted_files": [
+      "timeline.jsonl",
+      "updates.jsonl"
+    ],
+    "excluded_source_files": [
+      "summary and other session files"
+    ],
+    "source_file_count": 1,
+    "history_body": {
+      "notifications": 1025,
+      "notification_types": {
+        "agent_message_chunk": 513,
+        "user_message_chunk": 512
+      },
+      "canonical_turns_by_fixture_sequence_marker": 512,
+      "assistant_message_notifications": 513,
+      "message_blocks": 1025,
+      "block_types": {
+        "text": 1025
+      },
+      "text_bytes": 16797602,
+      "scope": "typed_projector_output",
+      "matches_runtime_notification_input": true
+    }
+  },
+  "slow_replay_progress": {
+    "first_history_marker_visible_ms": 287.279791,
+    "history_complete_visible_ms": 551.2977500000001,
+    "advances": 3,
+    "highest_sequence": 512,
+    "visible_maxima": [
+      {
+        "elapsed_ms": 287.279791,
+        "sequence": 237
+      },
+      {
+        "elapsed_ms": 430.895791,
+        "sequence": 509
+      },
+      {
+        "elapsed_ms": 551.278041,
+        "sequence": 512
+      }
+    ],
+    "max_content_gap_ms": 143.61599999999999
+  },
+  "loading": {
+    "events": [
+      {
+        "kind": "process_started",
+        "elapsed_ms": 0.0
+      },
+      {
+        "kind": "first_sequence_marker_pty_received",
+        "marker": "GROW_SEQ_000237",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 278.998583
+      },
+      {
+        "kind": "last_history_marker_pty_received",
+        "marker": "RESUME_READY_512",
+        "clock": "pty_received_cast_clock",
+        "elapsed_ms": 530.041958
+      },
+      {
+        "kind": "first_sequence_marker_visible",
+        "marker": "GROW_SEQ_000237",
+        "elapsed_ms": 287.279791
+      },
+      {
+        "kind": "last_history_marker_visible",
+        "marker": "RESUME_READY_512",
+        "elapsed_ms": 551.2977500000001
+      },
+      {
+        "kind": "replay_completion_observed",
+        "timer": "pager.replay.end_batch",
+        "legacy_proxy": true,
+        "elapsed_ms": 551.5600000000001
+      },
+      {
+        "kind": "ready_prompt_stable",
+        "elapsed_ms": 1086.5830409999999
+      }
+    ],
+    "instrumentation_prefix_through_completion": [
+      {
+        "timestamp": "2026-10-22T01:48:51.765261Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.render",
+          "elapsed_us": 335
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.765528Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.diff",
+          "elapsed_us": 252
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.765544Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.queue",
+          "elapsed_us": 5
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.766423Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "plugin_discovery",
+          "elapsed_us": 82
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.766618Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "mcp_merge",
+          "elapsed_us": 182
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.767162Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load.open_session",
+          "elapsed_us": 203
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.808709Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.write",
+          "elapsed_us": 100,
+          "fields": "Object {\"bytes\": Number(9777)}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "term-writer",
+        "threadId": "ThreadId(15)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.809186Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.render",
+          "elapsed_us": 436
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.809322Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.diff",
+          "elapsed_us": 129
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.809333Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.queue",
+          "elapsed_us": 2
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.818635Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load.timeline_read_decode",
+          "elapsed_us": 51410
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.819441Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load.timeline_fold",
+          "elapsed_us": 795
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.820549Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load.timeline_evidence",
+          "elapsed_us": 1036
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.820759Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load.state_projections",
+          "elapsed_us": 78
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.820931Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load_light",
+          "elapsed_us": 54085,
+          "fields": "Object {\"session_id\": String(\"f292e05c-caa2-4b65-9629-7f8b53d53568\")}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.820975Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load.model_route_reconcile",
+          "elapsed_us": 7
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.823491Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load.history_projection",
+          "elapsed_us": 2508
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.854414Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.write",
+          "elapsed_us": 56,
+          "fields": "Object {\"bytes\": Number(6404)}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "term-writer",
+        "threadId": "ThreadId(15)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.949392Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.render",
+          "elapsed_us": 8440
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.949539Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.diff",
+          "elapsed_us": 131
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.949551Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.queue",
+          "elapsed_us": 2
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:51.994619Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.write",
+          "elapsed_us": 45,
+          "fields": "Object {\"bytes\": Number(4014)}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "term-writer",
+        "threadId": "ThreadId(15)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.083649Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.render",
+          "elapsed_us": 7993
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.083742Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.diff",
+          "elapsed_us": 82
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.083753Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.queue",
+          "elapsed_us": 2
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.084732Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load_session_replay",
+          "elapsed_us": 263746,
+          "fields": "Object {\"session_id\": String(\"f292e05c-caa2-4b65-9629-7f8b53d53568\"), \"cwd\": String(\"/private/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmpRoUeVm\"), \"updates_count\": Number(1025)}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.084746Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.delta_drain_completions",
+          "elapsed_us": 0
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.084917Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.reconcile_stale_tasks",
+          "elapsed_us": 169
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.084922Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.stale_tasks_drain_completions",
+          "elapsed_us": 0
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.085671Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "plugin_discovery",
+          "elapsed_us": 46
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.085751Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.spawn.prepare",
+          "elapsed_us": 602
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.087195Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "skill_discovery",
+          "elapsed_us": 116
+        },
+        "target": "grow_instrumentation",
+        "threadName": "ses-f292e05c",
+        "threadId": "ThreadId(35)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.109155Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.spawn_actor_call",
+          "elapsed_us": 23397
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.113775Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.spawn.install_coordination_backend",
+          "elapsed_us": 4595
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.114011Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "skill_discovery",
+          "elapsed_us": 153
+        },
+        "target": "grow_instrumentation",
+        "threadName": "ses-f292e05c",
+        "threadId": "ThreadId(35)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.114255Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.spawn.publish_coordination",
+          "elapsed_us": 364
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.11426Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.spawn_and_register",
+          "elapsed_us": 29112
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.114262Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.spawn_and_register_session",
+          "elapsed_us": 29151,
+          "fields": "Object {\"session_id\": String(\"f292e05c-caa2-4b65-9629-7f8b53d53568\")}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.11943Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.fs_notify_start",
+          "elapsed_us": 5364,
+          "fields": "Object {\"cwd\": String(\"/private/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmpRoUeVm\"), \"live_watchers\": Number(1), \"watchers_created_total\": Number(1), \"watchers_reused_total\": Number(0)}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "ses-f292e05c",
+        "threadId": "ThreadId(35)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.128811Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.frame.write",
+          "elapsed_us": 27,
+          "fields": "Object {\"bytes\": Number(189)}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "term-writer",
+        "threadId": "ThreadId(15)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.144538Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "session.load_session",
+          "elapsed_us": 377729,
+          "fields": "Object {\"session_id\": String(\"f292e05c-caa2-4b65-9629-7f8b53d53568\"), \"cwd\": String(\"/private/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmpRoUeVm\")}"
+        },
+        "target": "grow_instrumentation",
+        "threadName": "acp-agent-worker",
+        "threadId": "ThreadId(17)"
+      },
+      {
+        "timestamp": "2026-10-22T01:48:52.144657Z",
+        "level": "INFO",
+        "fields": {
+          "event": "timing",
+          "name": "pager.replay.end_batch",
+          "elapsed_us": 46
+        },
+        "target": "grow_instrumentation",
+        "threadName": "main",
+        "threadId": "ThreadId(1)"
+      }
+    ],
+    "completion_timestamp": "2026-10-22T01:48:52.144657Z",
+    "instrumentation_file": "run-modern-512-89785-1792633732795720000-loading.jsonl"
+  },
+  "raw_files": {
+    "cast": "run-modern-512-89785-1792633732795720000-pre-key.cast",
+    "instrumentation": "run-modern-512-89785-1792633732795720000-pre-key.jsonl",
+    "frames_before_keys": 5
+  }
+}

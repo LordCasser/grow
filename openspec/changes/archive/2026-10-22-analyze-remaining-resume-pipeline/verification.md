@@ -1,0 +1,11 @@
+# 验证范围
+
+本项只增加分析文档和读取既有 trace 的标准库 Python 脚本。没有实施所提优化、修改运行代码、编译或新增 release benchmark。
+
+- 归档前后各执行一次 `reanalyse.py`，均成功；三个普通 2048 轮 paint 代理、两个工作负载汇总与九个热点源 SHA256 匹配通过。原始数据保持在 P2 归档，未复制大日志或二进制。
+- 自我对抗性分析覆盖负筛选漏裸路径、斜杠密集文本回退成本、图片文件观察时机、版本错误优先级/重复字段、raw checksum/身份/prefix 的不同语义、rewind/cursor/多 part、子会话权威和 replay-only backpressure 风险，详见 analysis。
+- Luna 独立只读复核了文档、P2 验证、三份 after 2048 PTY trace、汇总及关键实现。没有发现需修正的数值或结论性错误；确认五次重叠解析、marker 代理口径、嵌套计时、图片 header 尺寸探测和理论收益边界。该复核没有编译或执行运行测试。
+- 归档前 `openspec validate --all --strict --no-interactive` 为 17/17；归档后为 16/16，`--archived --strict --no-interactive` 为 690/690，均零失败。归档时唯一未完成 checkbox 是归档行政步骤本身，归档后已完成并校验。
+- 链接按最终归档目录组织；归档不合并任何 delta specs。本项不将共享 checkout 的既有改动纳入，也不提交或清理它们。前项专用 target 不存在，本项没有 Cargo 残留。
+
+运行正确性与新性能收益仍须在每个后续实现 change 中重新验证；本项的文档校验不替代它们。

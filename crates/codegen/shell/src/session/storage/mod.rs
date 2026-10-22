@@ -22,6 +22,25 @@ use sampling_types::ReasoningEffort;
 use workspace::session::file_state::RewindPoint;
 
 pub(crate) mod communication_history;
+#[cfg(any(test, feature = "test-support"))]
+mod legacy_replay_oracle;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use legacy_replay_oracle::{
+    PreparedReconciledReplay, RawReconciliation, ReconciledReplayLine, UPDATE_KEY,
+    collect_subagent_projection_state, filter_delta_replay_lines,
+    line_is_available_commands_update, prepare_reconciled_delta_lines,
+    prepare_reconciled_replay_lines, projection_envelope, reconcile_raw_replay_lines,
+    reconcile_replay_snapshot, reseed_event_counter_from_projection_expectations,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use legacy_replay_oracle::{PreparedReplay, prepare_replay_lines};
+
+mod descendant_recovery;
+pub use descendant_recovery::{
+    ChildReplaySpawn, DescendantOwnership, DESCENDANT_OWNERSHIP_META_KEY,
+    load_descendant_ownership_at, load_descendant_replay_at,
+};
+
 pub mod jsonl;
 pub mod search;
 pub mod search_fts;
@@ -1743,11 +1762,18 @@ pub fn load_timeline_by_id_at(
     session_id: &str,
     grow_home: &Path,
 ) -> io::Result<Option<chat_state::Timeline>> {
+    Ok(load_validated_session_at(session_id, grow_home)?.map(|snapshot| snapshot.timeline))
+}
+
+fn load_validated_session_at(
+    session_id: &str,
+    grow_home: &Path,
+) -> io::Result<Option<jsonl::ValidatedTimeline>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
     let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
         return Ok(None);
     };
-    Ok(Some(opened.validated_timeline(session_id)?.timeline))
+    Ok(Some(opened.validated_timeline(session_id)?))
 }
 
 pub fn load_timeline_by_id(session_id: &str) -> io::Result<Option<chat_state::Timeline>> {
@@ -2712,12 +2738,14 @@ pub(crate) async fn write_jsonl_atomic_async<T: serde::Serialize>(
     write_bytes_atomic_async(path, to_jsonl_bytes(items)?).await
 }
 
-/// Iterator that streams session updates from a JSONL file without loading all into memory.
+/// Iterator that streams legacy session-update JSONL for tests and test-support tooling.
 /// Each call to `next()` reads and parses one line.
+#[cfg(any(test, feature = "test-support"))]
 pub struct UpdatesIterator {
     lines: CommittedJsonlLines,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl UpdatesIterator {
     pub(crate) fn from_file(file: std::fs::File, path: PathBuf) -> Self {
         Self {
@@ -2759,6 +2787,7 @@ impl UpdatesIterator {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Iterator for UpdatesIterator {
     type Item = io::Result<SessionUpdate>;
 
@@ -2803,6 +2832,7 @@ pub enum SessionUpdate {
     /// Storage-only canonical response replay cache record. Replay readers
     /// expand it to ACP notifications; it is never forwarded as a public
     /// SamplingAttempt lifecycle notification.
+    #[cfg(any(test, feature = "test-support"))]
     ResponseReplayProjection(Box<crate::session::response_projection::ResponseReplayProjection>),
 }
 
@@ -2823,6 +2853,7 @@ impl serde::Serialize for SessionUpdate {
                 map.serialize_entry("method", GROW_SESSION_UPDATE_METHOD)?;
                 map.serialize_entry("params", notification)?;
             }
+            #[cfg(any(test, feature = "test-support"))]
             SessionUpdate::ResponseReplayProjection(projection) => {
                 map.serialize_entry(
                     "method",
@@ -2840,21 +2871,21 @@ impl<'de> serde::Deserialize<'de> for SessionUpdate {
     where
         D: serde::Deserializer<'de>,
     {
-        // `updates.jsonl` and wire consumers share one method/params envelope.
+        // Wire consumers share the method/params envelope; journal facts use a separate codec.
         let value = serde_json::Value::deserialize(deserializer)?;
         SessionUpdateEnvelope::from_value(value).map_err(serde::de::Error::custom)
     }
 }
 
 /// The serialized envelope for a session update, including metadata for debugging.
-/// This is the typed structure that gets written to updates.jsonl (disk storage only).
+/// Used by wire/debug consumers and the test-only legacy oracle, never the journal.
 ///
 /// Note: This is separate from `SessionUpdate`'s own serialization to avoid affecting
 /// other consumers (e.g., network listeners) who don't need the timestamp metadata.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SessionUpdateEnvelope {
     /// Unix timestamp (seconds since epoch) when this update was written.
-    /// Useful for debugging timing issues in the updates.jsonl file.
+    /// Optional wire/debug timestamp; the journal owns its own source time.
     #[serde(default)]
     pub timestamp: u64,
     /// The method name identifying the update type.
@@ -2883,6 +2914,7 @@ impl SessionUpdateEnvelope {
                 method: GROW_SESSION_UPDATE_METHOD.to_string(),
                 params: serde_json::to_value(notification)?,
             }),
+            #[cfg(any(test, feature = "test-support"))]
             SessionUpdate::ResponseReplayProjection(projection) => Ok(Self {
                 timestamp,
                 method: crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD
@@ -2903,6 +2935,7 @@ impl SessionUpdateEnvelope {
                 let notification: acp::SessionNotification = serde_json::from_value(self.params)?;
                 Ok(SessionUpdate::Acp(Box::new(notification)))
             }
+            #[cfg(any(test, feature = "test-support"))]
             crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD => {
                 let projection = serde_json::from_value(self.params)?;
                 Ok(SessionUpdate::ResponseReplayProjection(Box::new(
@@ -2945,6 +2978,7 @@ impl SessionUpdateEnvelope {
                 let notification: acp::SessionNotification = serde_json::from_str(raw_params)?;
                 Ok(SessionUpdate::Acp(Box::new(notification)))
             }
+            #[cfg(any(test, feature = "test-support"))]
             crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD => {
                 let projection = serde_json::from_str(raw_params)?;
                 Ok(SessionUpdate::ResponseReplayProjection(Box::new(
@@ -2984,9 +3018,12 @@ pub struct PersistedData {
 /// Persisted data WITHOUT updates - for memory-efficient session loading
 #[derive(Debug, Clone)]
 pub struct PersistedDataLight {
+    pub(crate) history: crate::session::history::HistorySnapshot,
     pub summary: Summary,
     /// Validated once at the pinned storage boundary, then moved into bootstrap.
     pub timeline: chat_state::Timeline,
+    /// Writer planning's full canonical set for this exact validated Timeline.
+    /// Ephemeral: only the same load's initial replay may reuse it.
     pub control_snapshot: Option<crate::session::control::SessionControlSnapshot>,
     // No `rewind_points` field: the resume path defers them (loaded lazily by
     // `FileStateTracker`). Use `load_session` for the eager set.
@@ -3015,6 +3052,7 @@ pub(crate) fn max_event_id_suffix(updates: &[SessionUpdate]) -> Option<u64> {
                     .as_ref()
                     .and_then(|meta| meta.get("eventId"))
                     .and_then(serde_json::Value::as_str),
+                #[cfg(any(test, feature = "test-support"))]
                 SessionUpdate::ResponseReplayProjection(_) => None,
             }?;
             event_id
@@ -3310,20 +3348,6 @@ pub trait StorageAdapter: Send + Sync {
         )))
     }
 
-    /// Exact key+payload commit for a storage-only response projection.
-    /// Backends must inspect their physical replay ledger rather than a
-    /// reconciled logical load.
-    async fn commit_response_projection(
-        &self,
-        _info: &Info,
-        _projection: &crate::session::response_projection::ResponseReplayProjection,
-    ) -> Result<(), AppendUpdateError> {
-        Err(AppendUpdateError::NotCommitted(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "exact response projection append is unsupported",
-        )))
-    }
-
     /// Append one immutable conversation event without rewriting prior facts.
     async fn append_timeline_event(
         &self,
@@ -3490,28 +3514,14 @@ impl TimelineLedgerReader {
     }
 
     pub(crate) fn read_events(self) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        let mut lines = CommittedJsonlLines::from_file(
+        let mut remaining = usize::MAX;
+        jsonl::JsonlStorageAdapter::read_journal_at_frontier(
             self.file,
-            self.label.clone(),
-            "mandatory Timeline ledger".to_owned(),
-            MAX_JSONL_ENTRY_BYTES,
-        );
-        let mut events = Vec::new();
-        while let Some(line) = lines.next() {
-            let line = line?;
-            if lines.stream_position()? > self.snapshot_len {
-                break;
-            }
-            let line_number = lines.line_number();
-            let event = serde_json::from_slice(&line).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{}:{line_number}: {error}", self.label.display()),
-                )
-            })?;
-            events.push(event);
-        }
-        Ok(events)
+            self.label,
+            self.snapshot_len,
+            &mut remaining,
+        )
+        .map(|journal| journal.events)
     }
 }
 
@@ -3709,19 +3719,15 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
     acp::SessionUpdate::UserMessageChunk(chunk)
 }
 
-// Replay-loader family, all resolving an identity-checked session and reading
-// its pinned updates handle through `for_each_replay_update`. Pick by need:
-//   - production, current grow home:   `load_updates_for_replay`
-//   - production child history:       `stream_session_history_at` (ACP + notices)
-//   - ACP-only streaming:             `stream_replay_updates_at`
-//   - tests, explicit grow home:       `load_updates_for_replay_at` (typed reference)
+// Replay-loader family derives presentation updates from the validated
+// physical Timeline journal via HistorySnapshot::prepare.
 
 /// Load replay-ready typed ACP updates for a session, or `None` when the
-/// session or its `updates.jsonl` is missing.
+/// session is missing.
 pub fn load_updates_for_replay(
     session_id: &str,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    load_reconciled_updates_for_replay(session_id, &crate::util::grow_home::grow_home())
+    load_prepared_updates_for_replay(session_id, &crate::util::grow_home::grow_home())
 }
 
 /// Like [`load_updates_for_replay`], but resolves the session under a specific
@@ -3735,56 +3741,44 @@ pub fn load_updates_for_replay_at(
     session_id: &str,
     grow_home: &std::path::Path,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    load_reconciled_updates_for_replay(session_id, grow_home)
+    load_prepared_updates_for_replay(session_id, grow_home)
 }
 
-fn with_reconciled_replay_lines<R>(
+fn with_prepared_history<R>(
     session_id: &str,
     grow_home: &std::path::Path,
-    f: impl for<'a> FnOnce(&[ReconciledReplayLine<'a>]) -> io::Result<R>,
-) -> std::io::Result<Option<R>> {
+    f: impl FnOnce(&[SessionUpdate]) -> io::Result<R>,
+) -> io::Result<Option<R>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
     let Some(opened) = storage.open_session_by_id(session_id)? else {
         return Ok(None);
     };
-    let timeline = chat_state::Timeline::from_events(opened.timeline_events()?)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let lines = match opened
-        .directory()
-        .open_regular(std::ffi::OsStr::new(UPDATES_FILE), "session updates ledger")
-    {
-        Ok(file) => read_committed_jsonl_text_lines_from_file(
-            file,
-            opened.directory().display_path().join(UPDATES_FILE),
-            "session updates ledger",
-        )?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error),
-    };
-    let filtered = filter_rewind_lines(lines.iter().map(String::as_str).collect());
-    let reconciled = reconcile_raw_replay_lines(&opened.summary().info.id, &timeline, filtered)?;
-    let reconciled = communication_history::restore(
-        &opened.summary().info.id,
-        &timeline,
-        reconciled,
-        |event| communication_history::read_notice(opened.directory(), event),
-    )?;
-    Ok(Some(f(&reconciled.lines)?))
+    let identity = opened.summary().info.id.clone();
+    let validated = opened.validated_timeline(session_id)?;
+    let prepared = validated
+        .history
+        .into_prepare(&identity, &validated.timeline, None)?;
+    Ok(Some(f(&prepared.updates)?))
 }
 
-fn load_reconciled_updates_for_replay(
+fn load_prepared_updates_for_replay(
     session_id: &str,
     grow_home: &std::path::Path,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    with_reconciled_replay_lines(session_id, grow_home, |lines| {
-        let mut result = Vec::new();
-        for line in lines {
-            for_each_reconciled_replay_line(line.as_str(), &mut |update| result.push(update))?;
-        }
-        Ok(result)
+    with_prepared_history(session_id, grow_home, |updates| {
+        Ok(updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::Acp(notification) => {
+                    Some(strip_context_wrappers(notification.update.clone()))
+                }
+                _ => None,
+            })
+            .collect())
     })
 }
 
+#[cfg(test)]
 fn for_each_reconciled_replay_line<F: FnMut(acp::SessionUpdate)>(
     reconciled: &str,
     f: &mut F,
@@ -3803,6 +3797,7 @@ fn for_each_reconciled_replay_line<F: FnMut(acp::SessionUpdate)>(
                 emitted = true;
                 f(strip_context_wrappers(notification.update));
             }
+            #[cfg(any(test, feature = "test-support"))]
             SessionUpdate::ResponseReplayProjection(projection) => {
                 for notification in projection.into_notifications() {
                     emitted = true;
@@ -3815,59 +3810,6 @@ fn for_each_reconciled_replay_line<F: FnMut(acp::SessionUpdate)>(
     Ok(emitted)
 }
 
-/// Collect every replay-ready ACP update from a pinned ledger into a `Vec`, the
-/// materializing counterpart of the streaming [`for_each_replay_update`].
-fn collect_replay_updates(reader: CommittedJsonlLines) -> std::io::Result<Vec<acp::SessionUpdate>> {
-    let mut acp_updates: Vec<acp::SessionUpdate> = Vec::new();
-    for_each_replay_update(reader, |u| acp_updates.push(u))?;
-    Ok(acp_updates)
-}
-
-/// Resolve and pin `updates.jsonl` for `session_id` under `grow_home`.
-/// Summary identity and the file handle are selected by the same storage
-/// capability; no authoritative path escapes this boundary.
-fn open_replay_updates_reader(
-    session_id: &str,
-    grow_home: &std::path::Path,
-) -> std::io::Result<Option<CommittedJsonlLines>> {
-    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
-    let Some(opened) = storage.open_session_by_id(session_id)? else {
-        return Ok(None);
-    };
-    let file = match opened
-        .directory()
-        .open_regular(std::ffi::OsStr::new(UPDATES_FILE), "session updates ledger")
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    Ok(Some(CommittedJsonlLines::from_open_file_at(
-        file,
-        opened.directory().display_path().join(UPDATES_FILE),
-        "session updates ledger",
-        0,
-    )?))
-}
-
-fn open_replay_updates_reader_in(
-    directory: &ContainedDirectory,
-) -> std::io::Result<Option<CommittedJsonlLines>> {
-    let file = match directory
-        .open_regular(std::ffi::OsStr::new(UPDATES_FILE), "session updates ledger")
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    Ok(Some(CommittedJsonlLines::from_open_file_at(
-        file,
-        directory.display_path().join(UPDATES_FILE),
-        "session updates ledger",
-        0,
-    )?))
-}
-
 /// Whether a replay stream forwarded any update. Gates the caller's
 /// post-replay memory purge: `Empty` means nothing was reclaimable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3877,17 +3819,11 @@ pub enum ReplayEmission {
     Empty,
 }
 
-/// Invoke `f` once per replay-ready ACP update for a session under `grow_home`,
-/// never building the full typed `Vec`. Reads the session's JSONL transcript
-/// directly; a non-JSONL backend would need its own bounded replay.
+/// Invoke `f` for replay-ready ACP updates derived from the validated physical
+/// session journal. The history projector owns physical ordering and response
+/// admission reconstruction.
 ///
-/// Forking or resuming replays the inherited transcript. The typed load parsed
-/// the whole file and copied it several times, so a large session briefly held
-/// several times its size in live heap and a per-user memory cgroup OOM-killed
-/// it. Streaming holds one typed update at a time, so peak drops to about the
-/// file size.
-///
-/// `Empty` folds the missing-session, missing-file, and no-ACP-updates cases;
+/// `Empty` folds the missing-session and no-ACP-updates cases;
 /// the typed `load_updates_for_replay_at` keeps them distinct (`Ok(None)` vs
 /// `Ok(Some(vec![]))`) since it returns the parsed contents rather than a purge
 /// signal.
@@ -3901,12 +3837,15 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     grow_home: &std::path::Path,
     mut f: F,
 ) -> std::io::Result<ReplayEmission> {
-    let Some(emitted) = with_reconciled_replay_lines(session_id, grow_home, |lines| {
+    let Some(emitted) = with_prepared_history(session_id, grow_home, |updates| {
         let mut emitted = false;
-        for line in lines {
-            emitted |= for_each_reconciled_replay_line(line.as_str(), &mut f)?;
+        for update in updates {
+            if let SessionUpdate::Acp(notification) = update {
+                f(strip_context_wrappers(notification.update.clone()));
+                emitted = true;
+            }
         }
-        Ok(emitted)
+        Ok::<_, io::Error>(emitted)
     })?
     else {
         return Ok(ReplayEmission::Empty);
@@ -3926,34 +3865,25 @@ pub fn stream_session_history_at(
     grow_home: &Path,
     mut emit: impl FnMut(SessionUpdate),
 ) -> io::Result<ReplayEmission> {
-    let Some(emitted) = with_reconciled_replay_lines(session_id, grow_home, |lines| {
+    let Some(emitted) = with_prepared_history(session_id, grow_home, |updates| {
         let mut emitted = false;
-        for line in lines {
-            let Ok(update) = SessionUpdateEnvelope::from_str(line.as_str()) else {
-                continue;
-            };
+        for update in updates {
             match update {
-                SessionUpdate::Acp(mut n) => {
+                SessionUpdate::Acp(n) => {
+                    let mut n = (**n).clone();
                     n.update = strip_context_wrappers(n.update);
-                    emit(SessionUpdate::Acp(n));
+                    emit(SessionUpdate::Acp(Box::new(n)));
                     emitted = true;
-                }
-                SessionUpdate::ResponseReplayProjection(p) => {
-                    for mut n in p.into_notifications() {
-                        n.update = strip_context_wrappers(n.update);
-                        emit(SessionUpdate::Acp(Box::new(n)));
-                        emitted = true;
-                    }
                 }
                 SessionUpdate::Grow(n)
                     if matches!(
-                        n.update,
+                        &n.update,
                         crate::extensions::notification::SessionUpdate::UiNotice(_)
                             | crate::extensions::notification::SessionUpdate::ImageRecoveryOperation { .. }
                             | crate::extensions::notification::SessionUpdate::TurnCompleted { .. }
                     ) =>
                 {
-                    emit(SessionUpdate::Grow(n));
+                    emit(SessionUpdate::Grow(n.clone()));
                     emitted = true;
                 }
                 _ => {}
@@ -3985,29 +3915,29 @@ pub fn stream_replay_grow_notifications_at<
 >(
     session_id: &str,
     grow_home: &std::path::Path,
-    f: F,
+    mut f: F,
 ) -> std::io::Result<ReplayEmission> {
-    let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
+    let Some(emitted) = with_prepared_history(session_id, grow_home, |updates| {
+        let mut emitted = false;
+        for update in updates {
+            if let SessionUpdate::Grow(notification) = update {
+                f(*notification.clone());
+                emitted = true;
+            }
+        }
+        Ok::<_, io::Error>(emitted)
+    })?
+    else {
         return Ok(ReplayEmission::Empty);
     };
-    for_each_replay_grow_notification(reader, f)
+    Ok(if emitted {
+        ReplayEmission::Emitted
+    } else {
+        ReplayEmission::Empty
+    })
 }
 
-/// Fold Grow-only durable facts while constructing a SessionActor from its
-/// already pinned directory. This avoids ambient path resolution and lets
-/// actor state recover protocol receipts before accepting reconnect traffic.
-pub(crate) fn stream_replay_grow_notifications_in<
-    F: FnMut(crate::extensions::notification::SessionNotification),
->(
-    directory: &ContainedDirectory,
-    f: F,
-) -> std::io::Result<ReplayEmission> {
-    let Some(reader) = open_replay_updates_reader_in(directory)? else {
-        return Ok(ReplayEmission::Empty);
-    };
-    for_each_replay_grow_notification(reader, f)
-}
-
+#[cfg(test)]
 fn for_each_replay_grow_notification<F: FnMut(SessionNotification)>(
     reader: CommittedJsonlLines,
     mut f: F,
@@ -4047,6 +3977,7 @@ fn for_each_replay_grow_notification<F: FnMut(SessionNotification)>(
 // the file. The reader allocates at most one bounded record at a time, while
 // this projection retains only decoded lines needed for branch filtering.
 // Output matches the typed load. Returns whether any ACP update was forwarded.
+#[cfg(test)]
 fn for_each_replay_update<F: FnMut(acp::SessionUpdate)>(
     reader: CommittedJsonlLines,
     mut f: F,
@@ -4064,6 +3995,7 @@ fn for_each_replay_update<F: FnMut(acp::SessionUpdate)>(
             // Grow extensions (rewind markers, compaction signals) are consumed
             // by the filter and intentionally dropped (matching the typed load).
             Ok(SessionUpdate::Grow(_)) => {}
+            #[cfg(any(test, feature = "test-support"))]
             Ok(SessionUpdate::ResponseReplayProjection(projection)) => {
                 for notification in projection.into_notifications() {
                     forwarded = true;
@@ -4079,6 +4011,7 @@ fn for_each_replay_update<F: FnMut(acp::SessionUpdate)>(
     Ok(forwarded)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn read_committed_jsonl_text_lines(
     path: &Path,
     description: &str,
@@ -4089,6 +4022,7 @@ pub(crate) fn read_committed_jsonl_text_lines(
     read_committed_jsonl_text_lines_from_reader(lines)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn read_committed_jsonl_text_lines_from_reader(
     lines: CommittedJsonlLines,
 ) -> io::Result<Vec<String>> {
@@ -4104,542 +4038,10 @@ pub(crate) fn read_committed_jsonl_text_lines_from_reader(
     Ok(decoded)
 }
 
-pub(crate) fn read_committed_jsonl_text_lines_from_file(
-    file: std::fs::File,
-    label: PathBuf,
-    description: &str,
-) -> io::Result<Vec<String>> {
-    read_committed_jsonl_text_lines_from_reader(CommittedJsonlLines::from_open_file_at(
-        file,
-        label,
-        description,
-        0,
-    )?)
-}
-
-#[doc(hidden)]
-pub struct PreparedReplay<'a> {
-    /// Rewind-filtered replay lines, each borrowed from the input transcript.
-    pub lines: Vec<&'a str>,
-    pub(crate) mark_replay: bool,
-    /// Highest `eventId` counter across all live (rewind-filtered) lines, used
-    /// to re-seed the process-global event counter on resume so post-load live
-    /// events keep monotonically increasing ids (see
-    /// [`crate::util::event_id::ensure_event_counter_at_least`]). `None` when no
-    /// line carried a parseable `eventId`.
-    pub(crate) max_event_seq: Option<u64>,
-    pub(crate) total_live: usize,
-    /// UI cache coverage for canonical subagent lifecycle facts.
-    pub(crate) subagent_projections: SubagentProjectionState,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentProjectionState {
     pub spawned: std::collections::BTreeSet<String>,
     pub finished: std::collections::BTreeSet<String>,
-}
-
-/// Coverage of canonical lifecycle facts already present in the replay cache.
-fn collect_subagent_projection_state(filtered: &[&str]) -> SubagentProjectionState {
-    use crate::extensions::notification::SessionUpdate as Update;
-    let mut state = SubagentProjectionState::default();
-    for line in filtered {
-        if !line.contains("subagent_spawned") && !line.contains("subagent_finished") {
-            continue;
-        }
-        let Ok(envelope) = serde_json::from_str::<RawLinePeek<'_>>(line) else {
-            continue;
-        };
-        if envelope.method != GROW_SESSION_UPDATE_METHOD {
-            continue;
-        }
-        let Ok(notification) = serde_json::from_str::<SessionNotification>(envelope.params.get())
-        else {
-            continue;
-        };
-        match notification.update {
-            Update::SubagentSpawned { subagent_id, .. } => {
-                state.spawned.insert(subagent_id);
-            }
-            Update::SubagentFinished { subagent_id, .. } => {
-                state.finished.insert(subagent_id);
-            }
-            _ => {}
-        }
-    }
-    state
-}
-
-/// The raw `_meta` object of a canonical persisted envelope, if any, without
-/// allocating a `serde_json::Value`.
-fn line_meta(line: &str) -> Option<&serde_json::value::RawValue> {
-    let env = serde_json::from_str::<RawLinePeek<'_>>(line).ok()?;
-    if !matches!(
-        env.method,
-        ACP_SESSION_UPDATE_METHOD | GROW_SESSION_UPDATE_METHOD
-    ) {
-        return None;
-    }
-    serde_json::from_str::<RawParamsPeek<'_>>(env.params.get())
-        .ok()?
-        .meta
-}
-
-/// The `"update":` object key (a protocol key, not an enum discriminant). The
-/// structural `params.update` is the FIRST occurrence in a persisted line: the
-/// envelope prefix has no `"update":`, and any nested `"update"` (in `_meta` or a
-/// tool's `rawInput`/`rawOutput`) is serialized after it, so the first match delimits it.
-const UPDATE_KEY: &str = r#""update":"#;
-
-/// Is this persisted line an `available_commands_update`?
-///
-/// The slash-command catalog is re-advertised in full after every `session/load`,
-/// so the historical copies in `updates.jsonl` are redundant on replay and
-/// dominate large sessions (~51% of bytes in pathological cases). The lines stay
-/// on disk; this only skips forwarding them to the client.
-///
-/// A cheap [`AVAILABLE_COMMANDS_UPDATE_PREFIX`] substring pre-filter, then a
-/// positional confirm that the value at the first [`UPDATE_KEY`] begins with the
-/// ACU discriminant. Reads only the prefix (never the huge `availableCommands`
-/// array), so it can't be fooled by the discriminant embedded in `_meta` or a
-/// tool payload (never the first `"update":`).
-pub(crate) fn line_is_available_commands_update(line: &str) -> bool {
-    if !line.contains(&*AVAILABLE_COMMANDS_UPDATE_PREFIX) {
-        return false;
-    }
-    line.find(UPDATE_KEY)
-        .map(|pos| {
-            line[pos + UPDATE_KEY.len()..]
-                .trim_start()
-                .starts_with(&*AVAILABLE_COMMANDS_UPDATE_PREFIX)
-        })
-        .unwrap_or(false)
-}
-
-// `_meta` protocol field names (not enum discriminants).
-/// `_meta` key holding the per-event id used for cursor-based reconnect.
-const EVENT_ID_KEY: &str = "eventId";
-
-/// This line's `_meta.eventId`, if any. Cheap peek (no `Value`).
-fn line_event_id(line: &str) -> Option<std::borrow::Cow<'_, str>> {
-    if !line.contains(EVENT_ID_KEY) {
-        return None;
-    }
-    #[derive(serde::Deserialize)]
-    struct EventIdPeek<'a> {
-        // `Cow` so an escaped eventId still parses and compares equal
-        // (`Option<Cow>` always deserializes owned; `&str` would error).
-        #[serde(rename = "eventId", borrow)]
-        event_id: Option<std::borrow::Cow<'a, str>>,
-    }
-    serde_json::from_str::<EventIdPeek<'_>>(line_meta(line)?.get())
-        .ok()
-        .and_then(|e| e.event_id)
-}
-
-/// Does this line's `_meta.eventId` equal `cursor_id`?
-fn line_has_event_id(line: &str, cursor_id: &str) -> bool {
-    line_event_id(line).as_deref() == Some(cursor_id)
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum ReconciledReplayLine<'a> {
-    Borrowed(&'a str),
-    Owned(String),
-}
-
-impl ReconciledReplayLine<'_> {
-    pub(crate) fn as_str(&self) -> &str {
-        match self {
-            Self::Borrowed(line) => line,
-            Self::Owned(line) => line,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct RawReconciliation<'a> {
-    pub(crate) lines: Vec<ReconciledReplayLine<'a>>,
-    pub(crate) changed: bool,
-}
-
-fn projection_envelope(
-    projection: &crate::session::response_projection::ResponseReplayProjection,
-) -> io::Result<String> {
-    let update = SessionUpdate::ResponseReplayProjection(Box::new(projection.clone()));
-    let envelope = SessionUpdateEnvelope::from_update(&update)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    serde_json::to_string(&envelope)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
-/// Rewind-filtered raw JSONL reconciliation. Ordinary ACP/Grow payloads are
-/// only classified by peeks; projection records are the sole typed decode.
-pub(crate) fn reconcile_raw_replay_lines<'a>(
-    session_id: &acp::SessionId,
-    timeline: &chat_state::Timeline,
-    lines: Vec<&'a str>,
-) -> io::Result<RawReconciliation<'a>> {
-    reconcile_raw_replay_lines_with_mode(
-        session_id,
-        timeline,
-        lines,
-        crate::session::response_projection::ProjectionPlanningMode::Reconcile,
-    )
-}
-
-fn reconcile_raw_replay_lines_with_mode<'a>(
-    session_id: &acp::SessionId,
-    timeline: &chat_state::Timeline,
-    lines: Vec<&'a str>,
-    mode: crate::session::response_projection::ProjectionPlanningMode,
-) -> io::Result<RawReconciliation<'a>> {
-    use crate::session::response_projection::{
-        PlannedProjection, ProjectionObservation, plan_response_projections,
-        project_admitted_response,
-    };
-    let canonicals = timeline
-        .admitted_responses()
-        .iter()
-        .map(|response| {
-            project_admitted_response(session_id, response)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut candidate_ids = Vec::with_capacity(lines.len());
-    let mut projections = Vec::new();
-    let mut kinds = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let Some((kind, candidate)) = raw_projection_observation(line, &mut projections) else {
-            kinds.push(RawObservationKind::Other);
-            candidate_ids.push(None);
-            continue;
-        };
-        kinds.push(kind);
-        candidate_ids.push(candidate);
-    }
-    let observations = kinds
-        .iter()
-        .enumerate()
-        .map(|(index, kind)| match kind {
-            RawObservationKind::Candidate => ProjectionObservation::Candidate(
-                candidate_ids[index]
-                    .as_ref()
-                    .expect("candidate observation identity"),
-            ),
-            RawObservationKind::Projection(projection) => {
-                ProjectionObservation::Projection(&projections[*projection])
-            }
-            RawObservationKind::MalformedProjection => ProjectionObservation::MalformedProjection,
-            RawObservationKind::Other => ProjectionObservation::Other,
-        })
-        .collect::<Vec<_>>();
-    let plan = plan_response_projections(timeline, &canonicals, &observations, mode)?;
-    let mut result = Vec::with_capacity(plan.entries.len());
-    for entry in plan.entries {
-        match entry {
-            PlannedProjection::Existing(index) => {
-                result.push(ReconciledReplayLine::Borrowed(lines[index]))
-            }
-            PlannedProjection::Canonical(index) => result.push(ReconciledReplayLine::Owned(
-                projection_envelope(&canonicals[index])?,
-            )),
-        }
-    }
-    Ok(RawReconciliation {
-        lines: result,
-        changed: plan.changed,
-    })
-}
-
-enum RawObservationKind {
-    Candidate,
-    Projection(usize),
-    MalformedProjection,
-    Other,
-}
-
-fn raw_projection_observation(
-    line: &str,
-    projections: &mut Vec<crate::session::response_projection::ResponseReplayProjection>,
-) -> Option<(RawObservationKind, Option<(String, u32)>)> {
-    let env = serde_json::from_str::<RawLinePeek<'_>>(line).ok()?;
-    if env.method == crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD {
-        let Ok(projection) = serde_json::from_str(env.params.get()) else {
-            return Some((RawObservationKind::MalformedProjection, None));
-        };
-        projections.push(projection);
-        return Some((RawObservationKind::Projection(projections.len() - 1), None));
-    }
-    if env.method != ACP_SESSION_UPDATE_METHOD {
-        return None;
-    }
-    let params = serde_json::from_str::<RawParamsPeek<'_>>(env.params.get()).ok()?;
-    let meta = params.meta?;
-    #[derive(serde::Deserialize)]
-    struct CandidateMeta<'a> {
-        #[serde(rename = "samplingRequestId", borrow)]
-        request_id: Option<&'a str>,
-        #[serde(rename = "samplingAttempt")]
-        attempt: Option<u64>,
-    }
-    let meta = serde_json::from_str::<CandidateMeta<'_>>(meta.get()).ok()?;
-    Some((
-        RawObservationKind::Candidate,
-        Some((
-            meta.request_id?.to_owned(),
-            u32::try_from(meta.attempt?).ok()?,
-        )),
-    ))
-}
-
-pub(crate) struct PreparedReconciledReplay<'a> {
-    pub(crate) lines: Vec<ReconciledReplayLine<'a>>,
-    pub(crate) mark_replay: bool,
-    pub(crate) max_event_seq: Option<u64>,
-    pub(crate) total_live: usize,
-    pub(crate) subagent_projections: SubagentProjectionState,
-}
-
-/// Seed the process-wide event counter from durable projection identities
-/// before a loaded session actor can publish new persistent rows. A Timeline
-/// expectation may have reached disk immediately before a crash that prevented
-/// its cache row from being appended, so cache-only replay reseeding is too
-/// late (and can be skipped entirely by no-replay loads).
-pub(crate) fn reseed_event_counter_from_projection_expectations(
-    timeline: &chat_state::Timeline,
-) -> Option<u64> {
-    let max = timeline
-        .events()
-        .iter()
-        .filter_map(|event| match &event.kind {
-            chat_state::TimelineEventKind::DisplayProjectionExpected(projection) => projection
-                .event_id
-                .rsplit_once('-')
-                .and_then(|(_, suffix)| suffix.parse::<u64>().ok()),
-            _ => None,
-        })
-        .max();
-    if let Some(max) = max {
-        crate::util::event_id::ensure_event_counter_at_least(max.saturating_add(1));
-    }
-    max
-}
-
-/// Prepare the replay directly from the one physical snapshot. Canonical
-/// projection rows are owned only when synthesized; physical rows remain
-/// borrowed from `contents`.
-pub(crate) fn prepare_reconciled_replay_lines<'a>(
-    session_id: &acp::SessionId,
-    timeline: &chat_state::Timeline,
-    contents: &'a str,
-    cursor: Option<&str>,
-    read_notice: impl FnMut(
-        &chat_state::TimelineEvent,
-    ) -> io::Result<Option<crate::extensions::notification::UiNotice>>,
-) -> io::Result<PreparedReconciledReplay<'a>> {
-    let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
-    let max_event_seq = max_event_seq(&filtered);
-    let total_live = filtered
-        .iter()
-        .filter(|line| !line_is_available_commands_update(line))
-        .count();
-    let subagent_projections = collect_subagent_projection_state(&filtered);
-    let reconciled = reconcile_raw_replay_lines(session_id, timeline, filtered.clone())?;
-    let reconciled = communication_history::restore(session_id, timeline, reconciled, read_notice)?;
-    let cursor_pos = cursor
-        .and_then(|id| {
-            filtered
-                .iter()
-                .rposition(|line| line_has_event_id(line, id))
-        })
-        .filter(|&pos| {
-            let bounded = filtered[pos + 1..].iter().all(|line| {
-                line_is_available_commands_update(line) || line_event_id(line).is_some()
-            });
-            if !bounded {
-                tracing::warn!(
-                    "replay: post-cursor tail contains eventId-less lines; full replay instead"
-                );
-            }
-            bounded
-        });
-    let mark_replay = cursor_pos.is_none() || (cursor.is_some() && reconciled.changed);
-    // ACUs participate in cursor resolution and physical positions, but are
-    // never forwarded. This mirrors `prepare_replay_lines` without building a
-    // second whole contents String.
-    let reconciled_lines = reconciled
-        .lines
-        .into_iter()
-        .filter(|line| !line_is_available_commands_update(line.as_str()));
-    let lines = if mark_replay {
-        reconciled_lines.collect()
-    } else {
-        let cursor_pos = cursor_pos.expect("incremental replay has a cursor");
-        // `mark_replay == false` implies `reconciled.changed == false`, so the
-        // plan contains only borrowed physical rows. Never use a pointer lookup
-        // for an owned synthesized line; the map is explicitly scoped to this
-        // unchanged reconciliation path.
-        let physical_positions = filtered
-            .iter()
-            .enumerate()
-            .map(|(position, line)| (((*line).as_ptr(), line.len()), position))
-            .collect::<std::collections::HashMap<(*const u8, usize), usize>>();
-        reconciled_lines
-            .filter(|line| match line {
-                ReconciledReplayLine::Borrowed(line) => physical_positions
-                    .get(&(line.as_ptr(), line.len()))
-                    .is_some_and(|&position| position > cursor_pos),
-                ReconciledReplayLine::Owned(_) => false,
-            })
-            .collect()
-    };
-    Ok(PreparedReconciledReplay {
-        lines,
-        mark_replay,
-        max_event_seq,
-        total_live,
-        subagent_projections,
-    })
-}
-
-/// Rewind-filter and reconcile the response-projection cache in memory.
-/// Storage-only projection records are synthesized from validated Timeline
-/// authority and candidate rows for the exact admitted attempt are removed.
-pub(crate) fn reconcile_replay_snapshot(
-    session_id: &acp::SessionId,
-    timeline: &chat_state::Timeline,
-    contents: &str,
-) -> io::Result<String> {
-    let filtered = filter_rewind_lines(
-        contents
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect(),
-    );
-    let reconciled = reconcile_raw_replay_lines(session_id, timeline, filtered)?;
-    let mut output = String::new();
-    for line in reconciled.lines {
-        output.push_str(line.as_str());
-        output.push('\n');
-    }
-    Ok(output)
-}
-
-fn max_event_seq(filtered: &[&str]) -> Option<u64> {
-    let mut max_event_seq: Option<u64> = None;
-    for line in filtered {
-        if line.contains("eventId")
-            && let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line)
-            && matches!(
-                env.method,
-                ACP_SESSION_UPDATE_METHOD | GROW_SESSION_UPDATE_METHOD
-            )
-            && let Ok(pp) = serde_json::from_str::<RawParamsPeek<'_>>(env.params.get())
-            && let Some(meta_raw) = pp.meta
-            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_raw.get())
-            && let Some(seq) = meta
-                .get("eventId")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.rsplit('-').next())
-                .and_then(|c| c.parse::<u64>().ok())
-        {
-            max_event_seq = Some(max_event_seq.map_or(seq, |m| m.max(seq)));
-        }
-    }
-    max_event_seq
-}
-
-/// Rewind-filter, resolve the reconnect cursor, and drop redundant command
-/// catalogs. Pure UI replay processing, no agent-state recovery.
-///
-/// The cursor is resolved before dropping ACUs, because an idle client often
-/// reconnects with an ACU's `eventId` as its cursor; resolving against the
-/// ACU-inclusive set keeps reconnect incremental instead of a full replay.
-///
-/// `#[doc(hidden)] pub` (not stable API): production replay uses it, and the
-/// session-load memory test drives it to check the peek stays zero-copy.
-#[doc(hidden)]
-pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> PreparedReplay<'a> {
-    let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
-
-    // Highest event counter across all live rewind-filtered lines.
-    let max_event_seq = max_event_seq(&filtered);
-
-    // Resolve the reconnect cursor against the ACU-inclusive set. `mark_replay`
-    // is true for a full historical replay (no cursor, or cursor not found).
-    //
-    // The cursor is refused when a FORWARDED tail line lacks an `eventId`:
-    // such a line cannot be covered by a future cursor and has no client-side
-    // dedup, so re-delivering it as live would re-apply it. Full replay is
-    // the safe fallback — the client swaps it in wholesale. Id-less lines
-    // come from older binaries or any emitter outside the stamping
-    // chokepoints (see `ensure_event_id_meta`). ACU lines are exempt: they
-    // are dropped below, never forwarded.
-    let cursor_pos = cursor
-        .and_then(|id| filtered.iter().rposition(|l| line_has_event_id(l, id)))
-        .filter(|&pos| {
-            let bounded = filtered[pos + 1..]
-                .iter()
-                .all(|l| line_is_available_commands_update(l) || line_event_id(l).is_some());
-            if !bounded {
-                tracing::warn!(
-                    "replay: post-cursor tail contains eventId-less lines; full replay instead"
-                );
-            }
-            bounded
-        });
-    let mark_replay = cursor_pos.is_none();
-    let start = cursor_pos.map_or(0, |pos| pos + 1);
-
-    // Single pass: drop ACUs (kept on disk), collect the post-cursor tail to
-    // forward, and count the full ACU-free live set for the skip log.
-    let mut lines: Vec<&str> = Vec::with_capacity(filtered.len().saturating_sub(start));
-    let mut total_live = 0usize;
-    for (i, &line) in filtered.iter().enumerate() {
-        if line_is_available_commands_update(line) {
-            continue;
-        }
-        total_live += 1;
-        if i >= start {
-            lines.push(line);
-        }
-    }
-
-    PreparedReplay {
-        lines,
-        mark_replay,
-        max_event_seq,
-        total_live,
-        subagent_projections: collect_subagent_projection_state(&filtered),
-    }
-}
-
-/// Blank-strip, drop redundant command catalogs, and rewind-filter a raw
-/// `updates.jsonl` segment. Shared by the delta-replay path (which has no
-/// reconnect cursor); the initial replay path is [`prepare_replay_lines`], which
-/// additionally resolves a cursor (and so must see ACUs) before dropping them.
-pub(crate) fn filter_delta_replay_lines(lines: Vec<&str>) -> Vec<&str> {
-    let live: Vec<&str> = lines
-        .into_iter()
-        .filter(|l| !l.trim().is_empty() && !line_is_available_commands_update(l))
-        .collect();
-    filter_rewind_lines(live)
-}
-
-pub(crate) fn prepare_reconciled_delta_lines<'a>(
-    session_id: &acp::SessionId,
-    timeline: &chat_state::Timeline,
-    lines: Vec<&'a str>,
-) -> io::Result<Vec<ReconciledReplayLine<'a>>> {
-    let filtered = filter_delta_replay_lines(lines);
-    Ok(reconcile_raw_replay_lines_with_mode(
-        session_id,
-        timeline,
-        filtered,
-        crate::session::response_projection::ProjectionPlanningMode::AlreadyEmitted,
-    )?
-    .lines)
 }
 
 // ============================================================================
@@ -4774,6 +4176,125 @@ mod tests {
     }
 
     #[test]
+    fn reused_canonicals_borrow_exact_payload_at_anchor_and_keep_cursor_fallback() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let canonicals = timeline
+            .admitted_responses()
+            .iter()
+            .map(|response| {
+                crate::session::response_projection::project_admitted_response(
+                    &session_id,
+                    response,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        // Different key order and insignificant whitespace must survive. This
+        // proves borrowing, rather than merely equal re-encoded payloads.
+        let exact = format!(
+            " {{ \"params\": {}, \"timestamp\": 7, \"method\": \"_grow/response-replay-projection\" }} ",
+            serde_json::to_string(&canonicals[0]).unwrap(),
+        );
+        let candidate = candidate_replay_line("request-1", 2);
+        let middle = acp_replay_line("middle", Some("middle"));
+        let later = acp_replay_line("later", Some("later"));
+        let raw = format!("{candidate}\n{middle}\n{exact}\n{exact}\n{later}\n");
+        let prepared = prepare_reconciled_replay_lines(
+            &session_id,
+            &timeline,
+            &raw,
+            Some(&canonicals),
+            Some("middle"),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert!(
+            prepared.mark_replay,
+            "reordering still requires full replay"
+        );
+        assert_eq!(prepared.lines.len(), 3);
+        assert_eq!(prepared.lines[0].as_str(), exact);
+        assert!(
+            matches!(
+                &prepared.lines[0],
+                ReconciledReplayLine::Synthesized(std::borrow::Cow::Borrowed(_))
+            ),
+            "a borrowed canonical must retain its synthesized-source semantics"
+        );
+        assert_eq!(prepared.lines[1].as_str(), middle);
+        assert_eq!(prepared.lines[2].as_str(), later);
+    }
+
+    #[test]
+    fn reused_canonicals_reject_a_conflicting_duplicate_after_an_exact_row() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let canonical = crate::session::response_projection::project_admitted_response(
+            &session_id,
+            &timeline.admitted_responses()[0],
+        )
+        .unwrap();
+        let mut conflict = canonical.clone();
+        conflict.updates =
+            vec![crate::session::response_projection::ProjectedText::Assistant("tampered".into())];
+        // Identity and digest still match: payload equality cannot be skipped
+        // after the first healthy physical row was found.
+        let raw = format!(
+            "{}\n{}\n{}\n",
+            candidate_replay_line("request-1", 2),
+            projection_envelope(&canonical).unwrap(),
+            projection_envelope(&conflict).unwrap()
+        );
+        let error = prepare_reconciled_replay_lines(
+            &session_id,
+            &timeline,
+            &raw,
+            Some(&[canonical]),
+            None,
+            |_| Ok(None),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn reused_canonicals_still_synthesize_a_missing_physical_projection() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let canonicals = vec![
+            crate::session::response_projection::project_admitted_response(
+                &session_id,
+                &timeline.admitted_responses()[0],
+            )
+            .unwrap(),
+        ];
+        let raw = candidate_replay_line("request-1", 2);
+        let prepared = prepare_reconciled_replay_lines(
+            &session_id,
+            &timeline,
+            &raw,
+            Some(&canonicals),
+            None,
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert!(prepared.mark_replay);
+        assert_eq!(prepared.lines.len(), 1);
+        assert!(matches!(
+            &prepared.lines[0],
+            ReconciledReplayLine::Synthesized(std::borrow::Cow::Owned(_))
+        ));
+        let SessionUpdate::ResponseReplayProjection(actual) =
+            SessionUpdateEnvelope::from_str(prepared.lines[0].as_str()).unwrap()
+        else {
+            panic!("expected canonical projection")
+        };
+        assert!(actual.exact_match(&canonicals[0]));
+    }
+
+    #[test]
     fn reconciled_changed_before_cursor_forces_full_replay_without_candidate_or_acu() {
         let session_id = acp::SessionId::new("session-1");
         let timeline = replay_timeline("request-1", 2);
@@ -4783,11 +4304,15 @@ mod tests {
             acp_envelope(r#"{"sessionUpdate":"available_commands_update","availableCommands":[]}"#);
         let raw = format!("{candidate}\n{later}\n{acu}\n");
 
-        let prepared =
-            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("later"), |_| {
-                Ok(None)
-            })
-            .unwrap();
+        let prepared = prepare_reconciled_replay_lines(
+            &session_id,
+            &timeline,
+            &raw,
+            None,
+            Some("later"),
+            |_| Ok(None),
+        )
+        .unwrap();
         assert!(prepared.mark_replay);
         assert_eq!(prepared.lines.len(), 2);
         assert!(
@@ -4811,11 +4336,15 @@ mod tests {
         let later = acp_replay_line("later", Some("later"));
         let raw = format!("{projection}\n{seen}\n{later}\n");
 
-        let prepared =
-            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen"), |_| {
-                Ok(None)
-            })
-            .unwrap();
+        let prepared = prepare_reconciled_replay_lines(
+            &session_id,
+            &timeline,
+            &raw,
+            None,
+            Some("seen"),
+            |_| Ok(None),
+        )
+        .unwrap();
         assert!(!prepared.mark_replay);
         assert_eq!(prepared.lines.len(), 1);
         assert!(prepared.lines[0].as_str().contains("later"));
@@ -4829,11 +4358,15 @@ mod tests {
         let projection = projection_replay_line(&session_id, &timeline);
         let raw = format!("{seen}\n{projection}\n");
 
-        let prepared =
-            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen"), |_| {
-                Ok(None)
-            })
-            .unwrap();
+        let prepared = prepare_reconciled_replay_lines(
+            &session_id,
+            &timeline,
+            &raw,
+            None,
+            Some("seen"),
+            |_| Ok(None),
+        )
+        .unwrap();
         assert!(prepared.mark_replay);
         assert!(prepared.lines.iter().any(|line| {
             line.as_str()
@@ -5699,8 +5232,8 @@ mod tests {
         assert!(result[2].contains("p2"));
     }
 
-    /// A session with no `updates.jsonl` streams nothing, so the emission gate
-    /// reports `Empty` and forwards no updates.
+    /// An absent session has no Timeline journal to stream, so the emission
+    /// gate reports `Empty` and forwards no updates.
     #[test]
     fn stream_replay_updates_at_missing_session_is_empty() {
         let grow_home = tempfile::tempdir().unwrap();
@@ -5714,22 +5247,37 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    /// A resolvable session whose `updates.jsonl` cannot be read surfaces the
-    /// error rather than folding to `Empty`, so the caller logs a real fault
-    /// instead of mistaking it for an absent transcript. (The path is a
-    /// directory, which `read_to_string` rejects.)
+    /// A resolvable session whose mandatory Timeline journal is not a regular
+    /// file surfaces the storage error rather than folding to `Empty`.
     #[test]
     fn stream_replay_updates_at_surfaces_read_errors() {
         let grow_home = tempfile::tempdir().unwrap();
-        let session_dir = grow_home.path().join("sessions").join("cwd").join("sess");
+        let cwd = "/test";
+        let session_dir = grow_home
+            .path()
+            .join("sessions")
+            .join(crate::util::grow_home::encode_cwd_dirname(cwd))
+            .join("sess");
         std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(session_dir.join(SUMMARY_FILE), "{}").unwrap();
-        std::fs::create_dir(session_dir.join(UPDATES_FILE)).unwrap();
+        let info = Info {
+            id: acp::SessionId::new("sess"),
+            cwd: cwd.into(),
+        };
+        let summary = Summary::new(&info, crate::session::persistence::default_model_id()).unwrap();
+        std::fs::write(
+            session_dir.join(SUMMARY_FILE),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir(session_dir.join(TIMELINE_FILE)).unwrap();
 
         let result = stream_replay_updates_at("sess", grow_home.path(), |_| {});
+        let error = result.expect_err("read fault must surface, not fold to Empty");
         assert!(
-            result.is_err(),
-            "read fault must surface, not fold to Empty: {result:?}"
+            error
+                .to_string()
+                .contains("mandatory Timeline ledger is not a regular file"),
+            "expected the Timeline file-type error, got: {error}"
         );
     }
 

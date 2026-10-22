@@ -29,6 +29,8 @@ use markdown::StreamingMarkdownRenderer;
 #[derive(Debug, Clone)]
 struct RenderState {
     renderer: StreamingMarkdownRenderer,
+    deferred_stream: bool,
+    final_render_pending: bool,
     /// Cached word-wrap result keyed on `(width, generation, theme)`.
     cache_width: usize,
     cache_generation: u64,
@@ -41,6 +43,19 @@ struct RenderState {
     frozen_pre_wrap_count: usize,
     /// Number of post-wrap lines produced by the frozen prefix.
     frozen_wrapped_count: usize,
+}
+
+impl RenderState {
+    fn ensure_final_render(&mut self) {
+        if self.final_render_pending {
+            let mut timer = diagnostics::instrumentation::timer("pager.markdown.materialize");
+            self.renderer.finish(Some(get_syntect()));
+            timer.with_field("source_bytes", self.renderer.source().len() as u64);
+            self.final_render_pending = false;
+            self.frozen_pre_wrap_count = 0;
+            self.frozen_wrapped_count = 0;
+        }
+    }
 }
 
 /// Shared markdown content with generation-tracked word-wrap cache.
@@ -122,6 +137,8 @@ impl MarkdownContent {
         Self {
             state: RefCell::new(RenderState {
                 renderer,
+                deferred_stream: false,
+                final_render_pending: false,
                 cache_width: 0,
                 cache_generation: 0,
                 cache_theme: theme_cache::current_kind(),
@@ -140,6 +157,8 @@ impl MarkdownContent {
         Self {
             state: RefCell::new(RenderState {
                 renderer: StreamingMarkdownRenderer::new(md_style::style(), true),
+                deferred_stream: false,
+                final_render_pending: false,
                 cache_width: 0,
                 cache_generation: 0,
                 cache_theme: theme_cache::current_kind(),
@@ -156,8 +175,10 @@ impl MarkdownContent {
     /// Append a streaming chunk and re-render.
     pub fn push_chunk(&mut self, chunk: &str) {
         let expanded = expand_tabs(chunk);
-        self.state
-            .get_mut()
+        let state = self.state.get_mut();
+        state.ensure_final_render();
+        state.deferred_stream = false;
+        state
             .renderer
             .push_and_render(&expanded, Some(get_syntect()));
         self.generation += 1;
@@ -166,27 +187,51 @@ impl MarkdownContent {
     /// Append a chunk without rendering immediately.
     ///
     /// Used for historical replay during `session/load` so the pager can batch
-    /// markdown work and render once after replay completes.
+    /// source work and materialize completed off-screen presentation on demand.
     pub fn push_chunk_deferred(&mut self, chunk: &str) {
         let expanded = expand_tabs(chunk);
-        self.state.get_mut().renderer.push(&expanded);
+        let state = self.state.get_mut();
+        state.ensure_final_render();
+        state.deferred_stream = true;
+        state.renderer.push(&expanded);
         self.generation += 1;
     }
 
-    /// Finish streaming — full re-render for correctness.
+    /// Complete source; historical presentation is finalized on first use.
     pub fn finish(&mut self) {
         let state = self.state.get_mut();
-        state.renderer.finish(Some(get_syntect()));
-        // finish() does a full re-render; reset frozen tracking so the
-        // next ensure_wrapped re-wraps everything from the new output.
+        let mut timer = diagnostics::instrumentation::timer("pager.markdown.finish");
+        if state.deferred_stream {
+            state.renderer.finish_source();
+            state.final_render_pending = true;
+        } else {
+            state.renderer.finish(Some(get_syntect()));
+            state.final_render_pending = false;
+        }
+        timer.with_field("source_bytes", state.renderer.source().len() as u64);
+        // A completed view must be wrapped from its finalized output.
         state.frozen_pre_wrap_count = 0;
         state.frozen_wrapped_count = 0;
         self.generation += 1;
     }
 
+    fn ensure_final_render(&self) {
+        // Avoid a mutable borrow when a caller already holds a completed view.
+        let pending = self.state.borrow().final_render_pending;
+        if pending {
+            self.state.borrow_mut().ensure_final_render();
+        }
+    }
+
     /// Get the source markdown text.
     pub fn text(&self) -> String {
         self.state.borrow().renderer.source().to_string()
+    }
+
+    /// Read normalized source without copying or materializing presentation.
+    pub(crate) fn with_source<R>(&self, f: impl FnOnce(&str) -> R) -> R {
+        let state = self.state.borrow();
+        f(state.renderer.source())
     }
 
     /// Whether the source markdown is empty (zero-alloc, unlike `text()`).
@@ -200,6 +245,7 @@ impl MarkdownContent {
     /// producing a plain-text representation of the rendered content.
     /// Useful for copy-to-clipboard in pretty mode.
     pub fn rendered_plain_text(&self) -> String {
+        self.ensure_final_render();
         let state = self.state.borrow();
         let view = state.renderer.view();
         let mut result = String::new();
@@ -219,6 +265,7 @@ impl MarkdownContent {
     /// Each entry maps a pre-wrap rendered line to the source line it came from.
     /// Used for cursor stability when toggling raw/pretty mode.
     pub fn line_source_map(&self) -> Vec<usize> {
+        self.ensure_final_render();
         self.state.borrow().renderer.view().line_source_map.to_vec()
     }
 
@@ -228,11 +275,13 @@ impl MarkdownContent {
     /// These are styled `Line<'static>` objects at their natural width,
     /// suitable for feeding into a ListPane which handles its own wrapping.
     pub fn pre_wrap_lines(&self) -> Vec<Line<'static>> {
+        self.ensure_final_render();
         self.state.borrow().renderer.view().lines.to_vec()
     }
 
     /// Access the pre-wrap hyperlink targets via a closure, avoiding allocation.
     pub fn with_hyperlinks<R>(&self, f: impl FnOnce(&[markdown::HyperlinkTarget]) -> R) -> R {
+        self.ensure_final_render();
         let state = self.state.borrow();
         f(state.renderer.view().hyperlinks)
     }
@@ -241,6 +290,7 @@ impl MarkdownContent {
         &self,
         f: impl FnOnce(&[Line<'static>], &[markdown::HyperlinkTarget]) -> R,
     ) -> R {
+        self.ensure_final_render();
         let state = self.state.borrow();
         let view = state.renderer.view();
         f(view.lines, view.hyperlinks)
@@ -253,6 +303,7 @@ impl MarkdownContent {
     /// detection skeleton with the diagram source lives in
     /// [`mermaid_content`](Self::mermaid_content).
     pub fn mermaid_block_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        self.ensure_final_render();
         let state = self.state.borrow();
         super::mermaid_content::mermaid_block_ranges(&state.renderer.view())
     }
@@ -263,6 +314,24 @@ impl MarkdownContent {
     /// detected diagrams (detection only — rendering is lazy, driven by the
     /// affordance row on click).
     pub fn mermaid_content(&self) -> super::mermaid_content::MermaidContent {
+        {
+            let state = self.state.borrow();
+            // Actual diagrams still capture their skeleton at message finish.
+            // A conservative source check avoids parsing plain historical text.
+            let source = state.renderer.source();
+            // Match the previous ASCII fold without allocating the full body.
+            static MERMAID_CANDIDATE: std::sync::LazyLock<regex::bytes::Regex> =
+                std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"(?i-u:mermaid)").unwrap());
+            if state.final_render_pending
+                // CommonMark can decode character references in fence info.
+                // Keep those candidates eager rather than duplicate its parser.
+                && !source.contains('&')
+                && !MERMAID_CANDIDATE.is_match(source.as_bytes())
+            {
+                return super::mermaid_content::MermaidContent::default();
+            }
+        }
+        self.ensure_final_render();
         let state = self.state.borrow();
         super::mermaid_content::MermaidContent::from_view(&state.renderer.view())
     }
@@ -305,7 +374,9 @@ impl MarkdownContent {
             self.current_raw = raw;
             let state = self.state.get_mut();
             state.renderer.set_pretty(!raw);
-            state.renderer.render(Some(get_syntect()));
+            if !state.final_render_pending {
+                state.renderer.render(Some(get_syntect()));
+            }
             // set_pretty resets renderer frozen state
             state.frozen_pre_wrap_count = 0;
             state.frozen_wrapped_count = 0;
@@ -338,6 +409,10 @@ impl MarkdownContent {
             return;
         }
 
+        let mut timer = diagnostics::instrumentation::timer("pager.markdown.wrap");
+        timer.with_field("source_bytes", state.renderer.source().len() as u64);
+        timer.with_field("width", width as u64);
+
         // Width or theme changed → full re-wrap (frozen cache invalid)
         let width_changed = state.cache_width != width;
         if width_changed {
@@ -347,7 +422,11 @@ impl MarkdownContent {
 
         // Update table width and re-render (only re-renders tail internally).
         state.renderer.set_max_table_width(Some(width));
-        state.renderer.render(Some(get_syntect()));
+        if state.final_render_pending {
+            state.ensure_final_render();
+        } else {
+            state.renderer.render(Some(get_syntect()));
+        }
 
         let frozen_count = state.renderer.frozen_lines_count();
 
@@ -696,3 +775,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "markdown_content/replay_tests.rs"]
+mod replay_tests;

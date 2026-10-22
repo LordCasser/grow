@@ -1,0 +1,167 @@
+[
+  {
+    "case": "modern",
+    "repeat": 1,
+    "turns": 128,
+    "before_finish_count": 128,
+    "after_finish_count": 128,
+    "before_source_bytes": 4196368,
+    "after_source_bytes": 4196368,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 1,
+    "turns": 2048,
+    "before_finish_count": 2048,
+    "after_finish_count": 2048,
+    "before_source_bytes": 67141649,
+    "after_source_bytes": 67141649,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 1,
+    "turns": 512,
+    "before_finish_count": 512,
+    "after_finish_count": 512,
+    "before_source_bytes": 16785424,
+    "after_source_bytes": 16785424,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 2,
+    "turns": 128,
+    "before_finish_count": 128,
+    "after_finish_count": 128,
+    "before_source_bytes": 4196368,
+    "after_source_bytes": 4196368,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 2,
+    "turns": 2048,
+    "before_finish_count": 2048,
+    "after_finish_count": 2048,
+    "before_source_bytes": 67141649,
+    "after_source_bytes": 67141649,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 2,
+    "turns": 512,
+    "before_finish_count": 512,
+    "after_finish_count": 512,
+    "before_source_bytes": 16785424,
+    "after_source_bytes": 16785424,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 3,
+    "turns": 128,
+    "before_finish_count": 128,
+    "after_finish_count": 128,
+    "before_source_bytes": 4196368,
+    "after_source_bytes": 4196368,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 3,
+    "turns": 2048,
+    "before_finish_count": 2048,
+    "after_finish_count": 2048,
+    "before_source_bytes": 67141649,
+    "after_source_bytes": 67141649,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "modern",
+    "repeat": 3,
+    "turns": 512,
+    "before_finish_count": 512,
+    "after_finish_count": 512,
+    "before_source_bytes": 16785424,
+    "after_source_bytes": 16785424,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "slow",
+    "repeat": 1,
+    "turns": 2048,
+    "before_finish_count": 2048,
+    "after_finish_count": 2048,
+    "before_source_bytes": 67141649,
+    "after_source_bytes": 67141649,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "slow",
+    "repeat": 1,
+    "turns": 512,
+    "before_finish_count": 512,
+    "after_finish_count": 512,
+    "before_source_bytes": 16785424,
+    "after_source_bytes": 16785424,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "slow",
+    "repeat": 2,
+    "turns": 2048,
+    "before_finish_count": 2048,
+    "after_finish_count": 2048,
+    "before_source_bytes": 67141649,
+    "after_source_bytes": 67141649,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "slow",
+    "repeat": 2,
+    "turns": 512,
+    "before_finish_count": 512,
+    "after_finish_count": 512,
+    "before_source_bytes": 16785424,
+    "after_source_bytes": 16785424,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "slow",
+    "repeat": 3,
+    "turns": 2048,
+    "before_finish_count": 2048,
+    "after_finish_count": 2048,
+    "before_source_bytes": 67141649,
+    "after_source_bytes": 67141649,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  },
+  {
+    "case": "slow",
+    "repeat": 3,
+    "turns": 512,
+    "before_finish_count": 512,
+    "after_finish_count": 512,
+    "before_source_bytes": 16785424,
+    "after_source_bytes": 16785424,
+    "typed_source_counts_and_text_bytes_match": true,
+    "ok": true
+  }
+]

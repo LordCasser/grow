@@ -39,3 +39,8 @@ pub use tool::{
 };
 pub use user::UserPromptBlock;
 pub use workflow::{WorkflowBlock, WorkflowBlockPhase, WorkflowBlockStatus};
+
+#[cfg(test)]
+mod replay_media_tests;
+#[cfg(test)]
+mod source_scan_tests;

@@ -1,0 +1,236 @@
+   Compiling bitflags v2.13.1
+   Compiling value-bag v1.13.2
+   Compiling log v0.4.34
+   Compiling regex-automata v0.4.16
+   Compiling mio v1.2.2
+   Compiling rustix v1.1.4
+   Compiling bstr v1.13.1
+   Compiling tokio v1.53.1
+   Compiling tracing v0.1.44
+   Compiling gix-validate v0.11.3
+   Compiling gix-path v0.12.3
+   Compiling gix-utils v0.3.5
+   Compiling gix-features v0.49.0
+   Compiling tokio-util v0.7.19
+   Compiling gix-error v0.2.5
+   Compiling tempfile v3.27.0
+   Compiling num_threads v0.1.7
+   Compiling deranged v0.5.8
+   Compiling time v0.3.55
+   Compiling gix-hash v0.26.0
+   Compiling rustls v0.23.43
+   Compiling h2 v0.4.15
+   Compiling derive_more v2.1.1
+   Compiling gix-date v0.15.6
+   Compiling nix v0.31.3
+   Compiling gix-actor v0.41.2
+   Compiling hyper v1.11.0
+   Compiling hyper-util v0.1.20
+   Compiling tower v0.5.3
+   Compiling gix-hashtable v0.16.0
+   Compiling const-random v0.1.18
+   Compiling ahash v0.8.12
+   Compiling security-framework v3.7.0
+   Compiling gix-object v0.63.0
+   Compiling async-compression v0.4.43
+   Compiling tokio-rustls v0.26.4
+   Compiling bytemuck v1.25.2
+   Compiling regex v1.13.1
+   Compiling hyper-rustls v0.27.9
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling tower-http v0.6.11
+   Compiling reqwest v0.13.4
+   Compiling tty-utils v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tty-utils)
+   Compiling serde_spanned v1.1.1
+   Compiling gix-fs v0.22.0
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling gix-chunk v0.7.3
+   Compiling config v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config)
+   Compiling gix-tempfile v24.0.0
+   Compiling gix-quote v0.7.2
+   Compiling globset v0.4.19
+   Compiling ignore v0.4.32
+   Compiling gix-lock v24.0.0
+   Compiling gix-glob v0.27.0
+   Compiling tokio-stream v0.1.19
+   Compiling jsonschema-value v0.52.1
+   Compiling referencing v0.52.1
+   Compiling png v0.18.1
+   Compiling gix-commitgraph v0.38.0
+   Compiling markup5ever v0.38.0
+   Compiling fancy-regex v0.19.0
+   Compiling fs-set-times v0.20.3
+   Compiling async-openai v0.41.3 (https://github.com/LordCasser/async-openai.git?rev=a2bae9966f435bc343aa095065d96700bfb81aed#a2bae996)
+   Compiling jsonschema v0.52.1
+   Compiling gix-revwalk v0.34.0
+   Compiling env_filter v2.0.0
+   Compiling compaction v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/common/compaction)
+   Compiling polling v3.11.0
+   Compiling zopfli v0.8.3
+   Compiling lopdf v0.42.0
+   Compiling cap-primitives v4.0.3
+   Compiling async-io v2.6.0
+   Compiling sampling-types v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampling-types)
+   Compiling env_logger v0.11.11
+   Compiling xml5ever v0.38.0
+   Compiling html5ever v0.38.0
+   Compiling markup5ever v0.39.0
+   Compiling zip v8.6.0
+   Compiling pulldown-cmark v0.13.4
+   Compiling selectors v0.38.0
+   Compiling nono v0.53.0 (/Users/lordcasser/workspace/projects/grow/third_party/nono)
+   Compiling html5ever v0.39.0
+   Compiling markup5ever_rcdom v0.38.0+unofficial
+   Compiling async-signal v0.2.14
+   Compiling pdf-inspector v1.17.0
+   Compiling cap-std v4.0.3
+   Compiling gix-attributes v0.34.0
+   Compiling waitpid-any v0.3.0
+   Compiling gix-sec v0.14.2
+   Compiling similar v2.7.0
+   Compiling scraper v0.27.0
+   Compiling pdf v0.10.0
+   Compiling async-lsp v0.2.4
+   Compiling agent-client-protocol-schema v1.5.0
+   Compiling cap-fs-ext v4.0.3
+   Compiling async-process v2.5.0
+   Compiling htmd v0.5.5
+   Compiling sandbox v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sandbox)
+   Compiling image v0.25.10
+   Compiling tool-runtime v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-runtime)
+   Compiling gix-ref v0.66.0
+   Compiling command-fds v0.3.3
+   Compiling gix-config-value v0.19.0
+   Compiling agent-client-protocol v2.0.0
+   Compiling git2 v0.21.0
+   Compiling gix-traverse v0.60.0
+   Compiling gix-command v0.9.1
+   Compiling gix-packetline v0.22.0
+   Compiling gix-bitmap v0.3.3
+   Compiling tracing-log v0.2.0
+   Compiling matchers v0.2.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling gix-index v0.54.0
+   Compiling gix-pathspec v0.19.0
+   Compiling gix-ignore v0.22.0
+   Compiling gix-worktree v0.55.0
+   Compiling anydoc v0.2.4
+   Compiling tools v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tools)
+   Compiling itertools v0.14.0
+   Compiling gix-url v0.37.0
+   Compiling castaway v0.2.4
+   Compiling compact_str v0.9.1
+   Compiling unicode-truncate v2.0.1
+   Compiling gix-filter v0.33.0
+   Compiling config-types v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config-types)
+   Compiling gix-discover v0.54.0
+   Compiling gix-imara-diff v0.2.4
+   Compiling gix-revision v0.48.0
+   Compiling kasuari v0.4.12
+   Compiling lru v0.18.2
+   Compiling critical-section v1.2.0
+   Compiling ratatui-core v0.1.2
+   Compiling tracing-appender v0.2.5
+   Compiling gix-pack v0.73.0
+   Compiling gix-refspec v0.44.0
+   Compiling gix-diff v0.66.0
+   Compiling gix-dir v0.28.0
+   Compiling gix-transport v0.58.0
+   Compiling tracing-chrome v0.7.2
+   Compiling gix-config v0.59.0
+   Compiling gix-shallow v0.13.0
+   Compiling notify-types v2.1.0
+   Compiling notify v8.2.0
+   Compiling gix-protocol v0.64.0
+   Compiling gix-submodule v0.33.0
+   Compiling diagnostics v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/diagnostics)
+   Compiling gix-status v0.33.0
+   Compiling gix-odb v0.83.0
+   Compiling rusqlite v0.40.2
+   Compiling gix v0.86.0
+   Compiling signal-hook v0.3.18
+   Compiling tungstenite v0.29.0
+   Compiling tokio-tungstenite v0.29.0
+   Compiling signal-hook-mio v0.2.5
+   Compiling grow-gix-status v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/grow-gix-status)
+   Compiling sqlite-journal v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sqlite-journal)
+   Compiling hooks v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hooks)
+   Compiling reqwest-middleware v0.5.2
+   Compiling axum-core v0.5.6
+   Compiling line-clipping v0.3.8
+   Compiling axum v0.8.9
+   Compiling notify-debouncer-full v0.5.0
+   Compiling tree-sitter v0.26.9
+   Compiling ratatui-widgets v0.3.2
+   Compiling rmcp v3.5.1
+   Compiling auth v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/auth)
+   Compiling agent v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/agent)
+   Compiling client-support v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/client-support)
+   Compiling crossterm v0.29.0
+   Compiling font-types v0.12.4
+   Compiling xattr v1.6.1
+   Compiling float-cmp v0.9.0
+   Compiling rhai v1.26.0
+   Compiling strict-num v0.1.1
+   Compiling cached v0.56.0
+   Compiling codebase-graph v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/codebase-graph)
+   Compiling fast-worktree v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/fast-worktree)
+   Compiling pprof v0.15.0
+   Compiling tar v0.4.46
+   Compiling read-fonts v0.41.0
+   Compiling mcp v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/mcp)
+   Compiling ratatui-crossterm v0.1.2
+   Compiling grow-http v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/grow-http)
+   Compiling ratatui-macros v0.7.2
+   Compiling fsnotify v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/fsnotify)
+   Compiling hunk-tracker v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hunk-tracker)
+   Compiling acp-transport v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/acp-transport)
+   Compiling nix v0.28.0
+   Compiling plist v1.10.0
+   Compiling toml_edit v0.25.13+spec-1.1.0
+   Compiling fancy-regex v0.16.2
+   Compiling polycool v0.4.0
+   Compiling bincode v1.3.3
+   Compiling arrayref v0.3.9
+   Compiling bm25 v2.3.2
+   Compiling portable-pty v0.9.0
+   Compiling tiny-skia-path v0.12.0
+   Compiling workspace v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workspace)
+   Compiling plugin-marketplace v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/plugin-marketplace)
+   Compiling syntect v5.3.0
+   Compiling kurbo v0.13.1
+   Compiling memory v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/memory)
+   Compiling ratatui v0.30.2
+   Compiling shell-base v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell-base)
+   Compiling workflow v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workflow)
+   Compiling notify-debouncer-mini v0.6.0
+   Compiling sampler v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampler)
+   Compiling announcements v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/announcements)
+   Compiling slotmap v1.1.1
+   Compiling objc-sys v0.3.5
+   Compiling chat-state v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state)
+   Compiling process-wrap v9.1.0
+   Compiling backon v1.6.0
+   Compiling gethostname v1.1.0
+   Compiling smawk v0.3.3
+   Compiling unicode-linebreak v0.1.5
+   Compiling ordered_hashmap v0.0.3
+   Compiling shell v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+   Compiling graphlib_rust v0.0.2
+   Compiling textwrap v0.16.2
+   Compiling objc2 v0.5.2
+   Compiling fontdb v0.24.0
+   Compiling svgtypes v0.16.1
+   Compiling harfrust v0.12.0
+   Compiling skrifa v0.44.0
+   Compiling simplecss v0.2.2
+   Compiling roxmltree v0.21.1
+   Compiling pico-args v0.5.0
+   Compiling unicode-vo v0.1.0
+   Compiling is_ci v1.2.0
+   Compiling xmlwriter v0.1.0
+   Compiling data-url v0.3.2
+   Compiling unicode-script v0.5.8
+   Compiling imagesize v0.15.0
+error: could not compile `shell` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

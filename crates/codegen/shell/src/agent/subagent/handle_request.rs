@@ -1185,12 +1185,17 @@ async fn run_shell_child_inner(
     let mut restored_control = None;
     let mut restored_signals = None;
     let mut restored_workflow_runs = Vec::new();
-    let (persistence, child_timeline, child_session_directory) =
+    let (persistence, child_timeline, child_history, child_session_directory) =
         if let Some((loaded, persistence)) = restored_persistence.take() {
             restored_control = loaded.control_snapshot;
             restored_signals = loaded.signals;
             restored_workflow_runs = loaded.workflow_runs;
-            (persistence, loaded.timeline, loaded.session_directory)
+            (
+                persistence,
+                loaded.timeline,
+                loaded.history,
+                loaded.session_directory,
+            )
         } else {
             match session::persistence::new_child(
                 &child_session_info,
@@ -1212,7 +1217,12 @@ async fn run_shell_child_inner(
             )
             .await
             {
-                Ok(p) => p,
+                Ok((persistence, timeline, directory)) => (
+                    persistence,
+                    timeline,
+                    crate::session::history::HistorySnapshot::default(),
+                    directory,
+                ),
                 Err(e) => {
                     if chat_state::persistence_error_is_permanent(&e) {
                         ctx.storage_admission.record_failure(
@@ -1495,7 +1505,10 @@ async fn run_shell_child_inner(
         None,
         persistence,
         None,
-        crate::session::TimelineBootstrap::Existing(child_timeline),
+        crate::session::TimelineBootstrap::Existing {
+            timeline: child_timeline,
+            history: child_history,
+        },
         None,
         None,
         crate::session::StartupHints {
@@ -1768,6 +1781,7 @@ async fn run_shell_child_inner(
                 goal_id,
             },
             ctx.parent_cmd_tx.as_ref(),
+            false,
         );
     }
     completion_data.spawned_notification_emitted = true;

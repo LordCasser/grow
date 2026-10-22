@@ -114,31 +114,18 @@ mod tests {
             serde_json::to_vec(&summary).unwrap(),
         )
         .unwrap();
-        let timeline_json = timeline
-            .events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(
-            directory.join("timeline.jsonl"),
-            format!("{timeline_json}\n"),
-        )
-        .unwrap();
         let notification = acp::SessionNotification::new(
             acp::SessionId::new(id.to_owned()),
             acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
                 acp::TextContent::new(message),
             ))),
         );
-        let mut update = serde_json::to_value(shell::session::storage::SessionUpdate::Acp(
-            Box::new(notification),
-        ))
-        .unwrap();
-        update["timestamp"] = serde_json::json!(1_700_000_000);
-        std::fs::write(
-            directory.join("updates.jsonl"),
-            format!("{}\n", serde_json::to_string(&update).unwrap()),
+        shell::session::testkit::write_timeline_history_fixture(
+            &directory,
+            timeline.events(),
+            &[shell::session::storage::SessionUpdate::Acp(Box::new(
+                notification,
+            ))],
         )
         .unwrap();
     }

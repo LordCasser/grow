@@ -63,6 +63,13 @@ pub(crate) fn project_admitted_response(
     session_id: &SessionId,
     response: &AdmittedResponse,
 ) -> Result<ResponseReplayProjection, serde_json::Error> {
+    project_admitted_response_view(session_id, response.as_view())
+}
+
+pub(crate) fn project_admitted_response_view(
+    session_id: &SessionId,
+    response: chat_state::AdmittedResponseView<'_>,
+) -> Result<ResponseReplayProjection, serde_json::Error> {
     let mut digest_writer = Sha256Writer(Sha256::new());
     serde_json::to_writer(
         &mut digest_writer,
@@ -72,7 +79,7 @@ pub(crate) fn project_admitted_response(
             attempt: response.identity.attempt,
             timeline_event: response.event_seq.get(),
             quarantined_tool_exchanges: response.quarantined_tool_exchanges,
-            items: &response.items,
+            items: response.items,
         },
     )?;
     let digest = format!("{:x}", digest_writer.0.finalize());
@@ -83,7 +90,7 @@ pub(crate) fn project_admitted_response(
     };
     let mut updates = Vec::new();
     if disposition == ResponseReplayDisposition::Admitted {
-        for item in &response.items {
+        for item in response.items {
             let chunk = match item {
                 sampling_types::ConversationItem::Reasoning(reasoning) => {
                     ProjectedText::Reasoning(Arc::clone(&reasoning.text))
@@ -141,12 +148,22 @@ pub(crate) enum ProjectionPlanningMode {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PlannedProjection {
     Existing(usize),
-    Canonical(usize),
+    Canonical {
+        index: usize,
+        /// A fully verified physical row that can supply the same payload at
+        /// the canonical anchor without JSON re-encoding.
+        exact: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectionPlan {
     pub(crate) entries: Vec<PlannedProjection>,
+    /// Canonical projections absent from the physical snapshot. This is
+    /// deliberately derived from exact matches, not materialization entries:
+    /// a canonical may replace candidates or duplicate exact rows without
+    /// needing a durable append.
+    pub(crate) canonical_appends: Vec<usize>,
     pub(crate) changed: bool,
 }
 
@@ -156,7 +173,17 @@ pub(crate) fn plan_response_projections(
     observations: &[ProjectionObservation<'_>],
     mode: ProjectionPlanningMode,
 ) -> std::io::Result<ProjectionPlan> {
-    let admitted = timeline.admitted_responses();
+    let admitted = timeline.admitted_response_views();
+    plan_response_projections_for_admitted(timeline, &admitted, canonicals, observations, mode)
+}
+
+fn plan_response_projections_for_admitted(
+    timeline: &chat_state::Timeline,
+    admitted: &[chat_state::AdmittedResponseView<'_>],
+    canonicals: &[ResponseReplayProjection],
+    observations: &[ProjectionObservation<'_>],
+    mode: ProjectionPlanningMode,
+) -> std::io::Result<ProjectionPlan> {
     let active_by_identity = admitted
         .iter()
         .enumerate()
@@ -227,6 +254,7 @@ pub(crate) fn plan_response_projections(
                     (!suppressed[index]).then_some(PlannedProjection::Existing(index))
                 })
                 .collect(),
+            canonical_appends: Vec::new(),
             changed,
         });
     }
@@ -253,7 +281,10 @@ pub(crate) fn plan_response_projections(
             .push(if retain_physical {
                 PlannedProjection::Existing(exact[0])
             } else {
-                PlannedProjection::Canonical(canonical_index)
+                PlannedProjection::Canonical {
+                    index: canonical_index,
+                    exact: exact.first().copied(),
+                }
             });
     }
 
@@ -266,7 +297,36 @@ pub(crate) fn plan_response_projections(
             entries.push(PlannedProjection::Existing(physical_index));
         }
     }
-    Ok(ProjectionPlan { entries, changed })
+    let canonical_appends = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            PlannedProjection::Canonical { index, exact: None } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    Ok(ProjectionPlan {
+        entries,
+        canonical_appends,
+        changed,
+    })
+}
+
+/// Return only canonical projections that need a new physical append.
+/// Existing exact records need no new physical append even when replay
+/// planning chooses to materialize a canonical in place of candidates or
+/// duplicate records.
+#[cfg(test)]
+fn response_projection_append_plan(
+    session_id: &SessionId,
+    timeline: &chat_state::Timeline,
+    updates: &[crate::session::storage::SessionUpdate],
+) -> std::io::Result<Vec<ResponseReplayProjection>> {
+    let (canonicals, plan) = plan_updates_for_response_projections(session_id, timeline, updates)?;
+    Ok(plan
+        .canonical_appends
+        .into_iter()
+        .map(|index| canonicals[index].clone())
+        .collect())
 }
 
 pub(crate) fn reconcile_response_projections(
@@ -275,14 +335,37 @@ pub(crate) fn reconcile_response_projections(
     updates: Vec<crate::session::storage::SessionUpdate>,
 ) -> std::io::Result<Vec<crate::session::storage::SessionUpdate>> {
     use crate::session::storage::SessionUpdate;
-    let canonicals = timeline
-        .admitted_responses()
+
+    let (canonicals, plan) = plan_updates_for_response_projections(session_id, timeline, &updates)?;
+    Ok(plan
+        .entries
+        .into_iter()
+        .map(|entry| match entry {
+            PlannedProjection::Existing(index) => updates[index].clone(),
+            PlannedProjection::Canonical { index, .. } => {
+                SessionUpdate::ResponseReplayProjection(Box::new(canonicals[index].clone()))
+            }
+        })
+        .collect())
+}
+
+pub(crate) fn plan_updates_for_response_projections(
+    session_id: &SessionId,
+    timeline: &chat_state::Timeline,
+    updates: &[crate::session::storage::SessionUpdate],
+) -> std::io::Result<(Vec<ResponseReplayProjection>, ProjectionPlan)> {
+    use crate::session::storage::SessionUpdate;
+
+    let canonical_timer = crate::instrumentation_timer!("session.projection.typed_canonical");
+    let admitted = timeline.admitted_response_views();
+    let canonicals = admitted
         .iter()
         .map(|response| {
-            project_admitted_response(session_id, response)
+            project_admitted_response_view(session_id, *response)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    drop(canonical_timer);
     let identities = updates
         .iter()
         .map(|update| match update {
@@ -304,22 +387,14 @@ pub(crate) fn reconcile_response_projections(
             _ => ProjectionObservation::Other,
         })
         .collect::<Vec<_>>();
-    let plan = plan_response_projections(
+    let plan = plan_response_projections_for_admitted(
         timeline,
+        &admitted,
         &canonicals,
         &observations,
         ProjectionPlanningMode::Reconcile,
     )?;
-    Ok(plan
-        .entries
-        .into_iter()
-        .map(|entry| match entry {
-            PlannedProjection::Existing(index) => updates[index].clone(),
-            PlannedProjection::Canonical(index) => {
-                SessionUpdate::ResponseReplayProjection(Box::new(canonicals[index].clone()))
-            }
-        })
-        .collect())
+    Ok((canonicals, plan))
 }
 
 fn candidate_identity(notification: &acp::SessionNotification) -> Option<(String, u32)> {
@@ -722,6 +797,64 @@ mod tests {
     }
 
     #[test]
+    fn append_plan_uses_physical_exact_presence_not_materialized_entries() {
+        let session_id = SessionId::new("session-1");
+        let timeline = validated_timeline(
+            "request-1",
+            2,
+            vec![sampling_types::ConversationItem::assistant("answer")],
+            0,
+        );
+        let response = timeline.admitted_responses().pop().unwrap();
+        let projection = project_admitted_response(&session_id, &response).unwrap();
+        let updates = vec![
+            candidate_update(&session_id, "request-1", 2, "preview"),
+            response_projection_update(projection.clone()),
+            response_projection_update(projection),
+        ];
+
+        let reconciled =
+            reconcile_response_projections(&session_id, &timeline, updates.clone()).unwrap();
+        assert!(matches!(
+            reconciled.first(),
+            Some(crate::session::storage::SessionUpdate::ResponseReplayProjection(_))
+        ));
+        assert!(
+            response_projection_append_plan(&session_id, &timeline, &updates)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn append_plan_returns_only_missing_canonical_and_rejects_exact_conflict() {
+        let session_id = SessionId::new("session-1");
+        let timeline = validated_timeline(
+            "request-1",
+            2,
+            vec![sampling_types::ConversationItem::assistant("answer")],
+            0,
+        );
+        let response = timeline.admitted_responses().pop().unwrap();
+        let canonical = project_admitted_response(&session_id, &response).unwrap();
+        let updates = vec![candidate_update(&session_id, "request-1", 2, "preview")];
+        let append_plan =
+            response_projection_append_plan(&session_id, &timeline, &updates).unwrap();
+        assert_eq!(append_plan.len(), 1);
+        assert!(append_plan[0].exact_match(&canonical));
+
+        let mut conflict = canonical;
+        conflict.digest = "conflicting digest".into();
+        let error = response_projection_append_plan(
+            &session_id,
+            &timeline,
+            &[response_projection_update(conflict)],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn reconciliation_rejects_wrong_timeline_event() {
         let session_id = SessionId::new("session-1");
         let timeline = validated_timeline(
@@ -1005,7 +1138,163 @@ mod tests {
         assert!(result.changed);
         assert!(result.lines.iter().any(|line| matches!(
             line,
-            crate::session::storage::ReconciledReplayLine::Owned(_)
+            crate::session::storage::ReconciledReplayLine::Synthesized(_)
         )));
+    }
+
+    fn timeline_with_admitted_responses(count: usize) -> chat_state::Timeline {
+        use chat_state::{
+            MessageCause, MessageEvent, RequestEvent, RequestUsage, ResponseAdmissionIdentity,
+            StepEvent, TimelineEventKind, TurnEvent, TurnIdentity, TurnInputKind, TurnTerminal,
+            TurnTerminalSource,
+        };
+
+        let mut timeline = chat_state::Timeline::default();
+        for ordinal in 0..count {
+            let turn = chat_state::TurnId(ordinal as u64 + 1);
+            let step = chat_state::StepId { turn, index: 0 };
+            let request_id = format!("projection-bench-{ordinal}");
+            timeline
+                .record(TimelineEventKind::Turn(TurnEvent::Started {
+                    id: turn,
+                    prompt_id: format!("projection-bench-prompt-{ordinal}"),
+                    input_ids: Vec::new(),
+                    identity: TurnIdentity {
+                        origin: "user".into(),
+                        turn_kind: "internal".into(),
+                        goal_id: None,
+                        goal_definition_revision: None,
+                        stage_id: None,
+                    },
+                    model_id: "projection-bench-model".into(),
+                    input_message_count: timeline.surface_len(),
+                    prompt_index: ordinal,
+                    prompt_text: "projection benchmark".into(),
+                    input_kind: TurnInputKind::Prompt,
+                    redirect_kind: None,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Request(RequestEvent::Started {
+                    id: request_id.clone(),
+                    turn,
+                    step,
+                    model_id: "projection-bench-model".into(),
+                    input_message_count: timeline.surface_len(),
+                    tool_count: 0,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Request(RequestEvent::Completed {
+                    id: request_id.clone(),
+                    duration_ms: 1,
+                    time_to_first_token_ms: None,
+                    usage: RequestUsage::default(),
+                    response_message_count: 1,
+                    attempt: 1,
+                    provider_terminal: None,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Messages(MessageEvent {
+                    cause: MessageCause::Assistant,
+                    items: vec![sampling_types::ConversationItem::assistant(format!(
+                        "canonical response {ordinal}"
+                    ))],
+                    surface: chat_state::SurfaceOp::Append,
+                    response_admission: Some(chat_state::ResponseAdmission {
+                        identity: ResponseAdmissionIdentity {
+                            request_id,
+                            attempt: 1,
+                        },
+                        quarantined_tool_exchanges: 0,
+                    }),
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Ended {
+                    id: step,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                    id: turn,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                    tool_count: 0,
+                    terminal: TurnTerminal {
+                        source: TurnTerminalSource::Unknown,
+                        stop_reason: "completed".into(),
+                        completion_kind: "completed".into(),
+                    },
+                    cancellation_category: None,
+                    details: None,
+                }))
+                .unwrap();
+        }
+        timeline
+    }
+
+    #[test]
+    #[ignore = "repeatable baseline for full-existing response projection reconciliation"]
+    fn ignored_resume_projection_reconcile_baseline_scales_with_existing_projection_count() {
+        use crate::session::storage::SessionUpdate;
+        use std::time::Instant;
+
+        let session_id = SessionId::new("projection-bench-session");
+        for count in [128, 512, 2048] {
+            let timeline = timeline_with_admitted_responses(count);
+            let existing = timeline
+                .admitted_responses()
+                .iter()
+                .map(|response| {
+                    let projection = project_admitted_response(&session_id, response).unwrap();
+                    response_projection_update(projection)
+                })
+                .collect::<Vec<_>>();
+
+            let old_path_started = Instant::now();
+            let reconciled =
+                reconcile_response_projections(&session_id, &timeline, existing.clone()).unwrap();
+            let mut found_existing = 0;
+            let mut append_count = 0;
+            for update in &reconciled {
+                let SessionUpdate::ResponseReplayProjection(projection) = update else {
+                    continue;
+                };
+                let already_present = existing.iter().any(|update| {
+                    matches!(
+                        update,
+                        SessionUpdate::ResponseReplayProjection(current)
+                            if current.exact_match(projection)
+                    )
+                });
+                if already_present {
+                    found_existing += 1;
+                } else {
+                    append_count += 1;
+                }
+            }
+            let old_path_elapsed = old_path_started.elapsed();
+            let new_path_started = Instant::now();
+            let append_plan =
+                response_projection_append_plan(&session_id, &timeline, &existing).unwrap();
+            let new_path_elapsed = new_path_started.elapsed();
+
+            assert_eq!(timeline.admitted_responses().len(), count);
+            assert_eq!(reconciled.len(), count);
+            assert_eq!(found_existing, count);
+            assert_eq!(append_count, 0);
+            assert!(append_plan.is_empty());
+            eprintln!(
+                "resume projection reconcile: existing={count}, old_reconcile_plus_full_exact_scan={old_path_elapsed:?}, new_load_append_plan={new_path_elapsed:?}, planned_appends={}",
+                append_plan.len()
+            );
+        }
     }
 }

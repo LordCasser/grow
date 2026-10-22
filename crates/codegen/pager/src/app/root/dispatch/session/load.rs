@@ -563,6 +563,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
     code_restored: bool,
     restore_summary: Option<String>,
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
+    descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
@@ -573,6 +574,8 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
         }
+        let mut timer = diagnostics::instrumentation::timer("pager.replay.finalize");
+        timer.with_field("agent_id", agent_id.0);
         agent.load_return_view = None;
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
@@ -687,9 +690,12 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
-        crate::memory_release::release_retained_memory_with("session-load-replay");
+        {
+            let _timer = diagnostics::instrumentation::timer("pager.replay.release_memory");
+            crate::memory_release::release_retained_memory_with("session-load-replay");
+        }
         note_peek_page_flip(app, agent_id, page_flip_entry);
-        crate::app::subagent::restore_descendant_state(app, agent_id);
+        crate::app::subagent::restore_descendant_state(app, agent_id, descendant_ownership);
         return effects;
     }
     vec![]
@@ -713,6 +719,8 @@ pub(in crate::app::root::dispatch) fn handle_session_load_failed(
         agent.mark_turn_finished();
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
+        agent.session.replay_first_applied = None;
+        agent.session.replay_first_frame = false;
         agent.session.replay_live_cursor_seen = false;
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;

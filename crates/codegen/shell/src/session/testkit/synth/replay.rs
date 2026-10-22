@@ -1,6 +1,6 @@
-//! Session synthesis for replay/load tests: writes
-//! `updates.jsonl`/`rewind_points.jsonl` directly, for exact control over ACU
-//! redundancy and rewind points.
+//! Session synthesis for replay/load tests: builds legacy ACP input, then writes
+//! typed presentation facts to the unified Timeline journal. Rewind points
+//! remain directly synthesized for exact control.
 
 use std::path::{Path, PathBuf};
 
@@ -8,8 +8,9 @@ use acp_transport::protocol as acp;
 use paths::RelPathBuf;
 use workspace::session::file_state::{FileSnapshot, RewindPoint};
 
+use crate::session::history::HistoryFact;
 use crate::session::info::Info;
-use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
+use crate::session::storage::{JsonlStorageAdapter, SessionUpdateEnvelope, StorageAdapter};
 
 fn parse_or<T: std::str::FromStr>(key: &str, found: Option<String>, default: T) -> T {
     let Some(text) = found else {
@@ -41,8 +42,8 @@ pub struct SessionSpec {
 }
 
 impl Default for SessionSpec {
-    /// Baseline yielding a ~20 MB `updates.jsonl`; callers override the knobs
-    /// they scale up.
+    /// Baseline yielding a ~20 MB legacy update input before journal conversion;
+    /// callers override the knobs they scale up.
     fn default() -> Self {
         Self {
             turns: 60,
@@ -210,10 +211,50 @@ pub fn locate_session_dir(root: &Path, id: &str) -> PathBuf {
     );
 }
 
-/// Synthesize a session on disk under `root` for working dir `cwd`: the summary
-/// through the production storage adapter, then `updates.jsonl` and
-/// `rewind_points.jsonl` written directly. Returns the `Info` and its directory.
+/// Synthesize a session with typed presentation facts in its physical Timeline
+/// journal. Legacy ACP envelopes are an internal fixture-generation input only.
 pub async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, PathBuf) {
+    let (info, dir) = prepare_legacy_session(root, cwd, spec).await;
+    finish_legacy_fixture(&info, &dir);
+    (info, dir)
+}
+
+/// Convert a temporary legacy fixture into the current physical journal.
+/// This helper only prepares test data; runtime readers never accept it.
+#[doc(hidden)]
+pub fn finish_legacy_fixture(_info: &Info, directory: &Path) {
+    let updates_path = directory.join(crate::session::storage::UPDATES_FILE);
+    let updates = std::fs::read_to_string(&updates_path).expect("read generated legacy updates");
+    let facts = updates
+        .lines()
+        .map(|line| SessionUpdateEnvelope::from_str(line).expect("parse generated update"))
+        .filter_map(|update| HistoryFact::from_update(&update).expect("convert update to fact"))
+        .collect::<Vec<_>>();
+    let file = std::fs::File::open(directory.join(crate::session::storage::TIMELINE_FILE))
+        .expect("open initialized Timeline");
+    let events = JsonlStorageAdapter::read_journal_events(
+        file,
+        directory.join(crate::session::storage::TIMELINE_FILE),
+    )
+    .expect("read initialized Timeline");
+    let journal =
+        JsonlStorageAdapter::encode_journal(&events, &facts).expect("encode typed fixture journal");
+    std::fs::write(
+        directory.join(crate::session::storage::TIMELINE_FILE),
+        journal,
+    )
+    .expect("write typed fixture journal");
+    std::fs::remove_file(updates_path).expect("remove generated legacy updates");
+}
+
+/// Build the temporary legacy input consumed by public fixture constructors
+/// and by `write_admitted_history` before it replaces this journal.
+#[doc(hidden)]
+pub async fn prepare_legacy_session(
+    root: &Path,
+    cwd: &Path,
+    spec: &SessionSpec,
+) -> (Info, PathBuf) {
     let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
     let id = uuid::Uuid::new_v4().to_string();
     let info = Info {

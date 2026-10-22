@@ -112,6 +112,7 @@ struct AgentLoadOutcome {
     agent_name: Option<String>,
     /// Structured regular foreground owner from the reload response.
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
+    descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
 }
 
 /// Fields of the reconnect `session/load`, derived from the agent being
@@ -418,10 +419,49 @@ impl Presenter {
         let drew = self.try_present(
             queued_before,
             |force| {
+                let mut timer = diagnostics::instrumentation::timer("pager.frame.present");
+                timer.with_field(
+                    "loading",
+                    app.active_agent()
+                        .is_some_and(|agent| agent.session.loading_replay),
+                );
+                timer.with_field("queued_before", queued_before);
                 if force {
                     let _ = terminal.clear();
                 }
                 app.draw(terminal);
+                timer.with_field("queued_after", sync.queued());
+                // A frame after application can already show later history as
+                // replay scrolls. Its writer sequence, not this log timestamp,
+                // identifies successful output via the existing frame_ack.
+                if !app.is_scroll_blocking_modal_open()
+                    && let ActiveView::Agent(id) = app.active_view
+                    && let Some(agent) = app.agents.get_mut(&id)
+                    && agent.active_subagent.is_none()
+                    && agent.active_modal.is_none()
+                    && agent.agents_modal.is_none()
+                    && agent.line_viewer.is_none()
+                    && agent.image_viewer.is_none()
+                    && agent.block_viewer.is_none()
+                    && agent.plan_approval_view.is_none()
+                    && agent.question_view.is_none()
+                    && agent.permission_queue.is_empty()
+                    && agent.pane_areas.scrollback.width > 0
+                    && agent.pane_areas.scrollback.height > 0
+                    && !agent.scrollback.is_empty()
+                    && !agent.session.replay_first_frame
+                    && let Some(cursor) = agent.session.replay_first_applied.as_deref()
+                    && sync.queued() > queued_before
+                {
+                    let mut first = diagnostics::instrumentation::timer("pager.replay.first_frame");
+                    first.with_field(
+                        "session_id",
+                        agent.session.session_id.as_ref().map(|id| id.0.as_ref()),
+                    );
+                    first.with_field("cursor", cursor);
+                    first.with_field("writer_sequence", sync.queued());
+                    agent.session.replay_first_frame = true;
+                }
             },
             || sync.queued(),
         );
@@ -1627,6 +1667,12 @@ pub(crate) async fn run(
                 };
                 let sequence = writer_event_sequence(writer_event)
                     .context("terminal output failed")?;
+                if diagnostics::instrumentation::current_mode()
+                    != diagnostics::instrumentation::InstrumentationMode::Disabled
+                {
+                    tracing::info!(target: diagnostics::instrumentation::TARGET,
+                        event = "frame_ack", sequence);
+                }
                 presenter.acknowledge(sequence);
             }
 
@@ -1659,6 +1705,8 @@ pub(crate) async fn run(
             msg = acp_rx.recv(), if input_rx.is_empty()
                 && !pending_paste_deadline(&pending_paste).is_some_and(|at| at <= Instant::now()) => {
                 let Some(msg) = msg else { break };
+                let mut apply_timer = diagnostics::instrumentation::timer("pager.acp.apply_batch");
+                apply_timer.with_field("loading", app.active_agent().is_some_and(|agent| agent.session.loading_replay));
                 // A continuously-ready ACP stream must not outrank an expired
                 // animation deadline. Check once before every bounded batch.
                 if take_due_deadline(&mut animation_deadline, Instant::now()) {
@@ -1707,6 +1755,7 @@ pub(crate) async fn run(
                         }
                     }
                 }
+                apply_timer.with_field("count", drained as u64);
 
                 if state_changed {
                     schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
@@ -2150,7 +2199,7 @@ pub(crate) async fn run(
                                 for (agent_id, plan) in load_plans {
                                     let mcp_servers =
                                         shell::util::config::load_mcp_servers(&plan.cwd);
-                                    let load_req = acp::LoadSessionRequest::new(plan.session_id, plan.cwd).mcp_servers(mcp_servers).meta(plan.meta.as_object().cloned());
+                                    let load_req = acp::LoadSessionRequest::new(plan.session_id.clone(), plan.cwd).mcp_servers(mcp_servers).meta(plan.meta.as_object().cloned());
                                     match acp_send(load_req, &acp_tx).await {
                                         Ok(resp) => {
                                             let agent_name = resp
@@ -2166,6 +2215,9 @@ pub(crate) async fn run(
                                                     resp.config_options,
                                                 ),
                                                 agent_name,
+                                                descendant_ownership: crate::acp::meta::session_load_descendant_ownership(
+                                                    resp.meta.as_ref(), &plan.session_id,
+                                                ),
                                                 foreground:
                                                     effects::parse_session_load_foreground(
                                                         resp.meta.as_ref(),
@@ -2182,6 +2234,7 @@ pub(crate) async fn run(
                                                 models: None,
                                                 agent_name: None,
                                                 foreground: None,
+                                                descendant_ownership: None,
                                             });
                                         }
                                     }
@@ -2331,7 +2384,9 @@ pub(crate) async fn run(
                         // Root replay only contains direct-child birth facts;
                         // restore every descendant's later model/effort/Agent
                         // controls before reconciling local pending controls.
-                        crate::app::subagent::restore_descendant_state(&mut app, *id);
+                        crate::app::subagent::restore_descendant_state(
+                            &mut app, *id, load.and_then(|load| load.descendant_ownership),
+                        );
                         if let Some(agent) = app.agents.get_mut(id) {
                             reconnect_effects.extend(
                                 dispatch::reconcile_controls_after_reconnect(
@@ -3223,6 +3278,20 @@ fn process_effects(
                         )
                     })
                 {
+                    // Local drafts intentionally cannot serialize images. Retain
+                    // this explicit attachment request in RAM from its first send,
+                    // then use the same identity-checked readiness path as retries.
+                    let image_input = matches!(
+                        &eff,
+                        Effect::SendPromptBlocks { images, .. }
+                            | Effect::SendInterject { images, .. } if !images.is_empty()
+                    );
+                    if image_input {
+                        app.mark_input_ram_only(agent_id, prompt_id.clone());
+                        if let Some(agent) = app.agents.get_mut(&agent_id) {
+                            agent.show_toast("Image drafts cannot be restored after restart until the session accepts them.");
+                        }
+                    }
                     let binding_epoch = app
                         .agents
                         .get(&agent_id)
@@ -3230,7 +3299,11 @@ fn process_effects(
                         .unwrap_or_default();
                     let checkpoint_started = std::time::Instant::now();
                     crate::unified_log::info(
-                        "input_intent.checkpoint.start",
+                        if image_input {
+                            "input_intent.memory_only.start"
+                        } else {
+                            "input_intent.checkpoint.start"
+                        },
                         Some(&session_id.0),
                         Some(serde_json::json!({
                             "agent_id": agent_id.0,
@@ -3255,7 +3328,11 @@ fn process_effects(
                             Err(error) => Err(error.to_string()),
                         };
                         crate::unified_log::info(
-                            "input_intent.checkpoint.complete",
+                            if image_input {
+                                "input_intent.memory_only.complete"
+                            } else {
+                                "input_intent.checkpoint.complete"
+                            },
                             Some(&session_id.0),
                             Some(serde_json::json!({
                                 "agent_id": agent_id.0,
@@ -3336,6 +3413,225 @@ fn dispatch_os_quit(app: &mut AppView, tasks: &mut JoinSet<TaskResult>) -> bool 
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn image_first_send_reaches_acp_and_preserves_failed_request() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::image_first_send_reaches_acp_and_preserves_failed_request"
+        )) {
+            return;
+        }
+        for steer in [false, true] {
+            for fail in [false, true] {
+                let mut app = crate::app::root::tests::test_app_with_agent();
+                let id = crate::app::session::AgentId(0);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                app.acp_tx = tx;
+                let image =
+                    crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+                        data: vec![1, 2, 3, 4],
+                        mime_type: "image/png".into(),
+                    });
+                let agent = app.agents.get_mut(&id).unwrap();
+                let action = if steer {
+                    agent.session.state = crate::app::session::AgentState::TurnRunning;
+                    agent.session.current_prompt_id = Some("existing-turn".into());
+                    Action::SteerPrompt {
+                        text: "describe [Image #1]".into(),
+                        images: vec![image],
+                        expected_turn_id: None,
+                        prompt_id: None,
+                    }
+                } else {
+                    agent.prompt.set_text("describe ");
+                    agent.prompt.set_cursor(agent.prompt.text().len());
+                    agent.prompt.insert_image(image).unwrap();
+                    Action::SendPrompt(agent.prompt.text().to_owned())
+                };
+                let sends = super::super::dispatch::dispatch(action, &mut app);
+                assert_eq!(sends.len(), 1);
+                let (_, session, prompt, _) = sends[0].prompt_rpc_identity().unwrap();
+                let session = session.0.to_string();
+                let prompt = prompt.to_owned();
+                let mut tasks = JoinSet::new();
+                assert!(!process_effects(sends, &mut tasks, &mut app));
+                let prepared = tasks.join_next().await.unwrap().unwrap();
+                assert!(matches!(
+                    &prepared,
+                    TaskResult::InputIntentCheckpointed { result: Ok(()), .. }
+                ));
+                assert!(
+                    rx.try_recv().is_err(),
+                    "preparation still requires binding validation"
+                );
+                let ready =
+                    super::super::dispatch::dispatch(Action::TaskComplete(prepared), &mut app);
+                assert!(matches!(
+                    ready.as_slice(),
+                    [Effect::ReadyInputIntent { .. }]
+                ));
+                assert!(!process_effects(ready, &mut tasks, &mut app));
+                let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let content = match request {
+                    acp_transport::AcpAgentMessage::Prompt(args) if !steer => {
+                        assert_eq!(args.request.session_id.0.as_ref(), session);
+                        assert_eq!(args.request.meta.as_ref().unwrap()["promptId"], prompt);
+                        let content = serde_json::to_value(&args.request.prompt).unwrap();
+                        if !fail {
+                            args.response_tx
+                                .send(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
+                                .unwrap();
+                        }
+                        content
+                    }
+                    acp_transport::AcpAgentMessage::ExtMethod(args) if steer => {
+                        assert_eq!(args.request.method.as_ref(), "grow/steer");
+                        let payload: serde_json::Value =
+                            serde_json::from_str(args.request.params.get()).unwrap();
+                        assert_eq!(payload["sessionId"], session);
+                        assert_eq!(payload["expectedTurnId"], "existing-turn");
+                        assert_eq!(payload["interjectionId"], prompt);
+                        if !fail {
+                            args.response_tx
+                                .send(Ok(acp::ExtResponse::new(Arc::from(
+                                    serde_json::value::to_raw_value(&serde_json::json!({}))
+                                        .unwrap(),
+                                ))))
+                                .unwrap();
+                        }
+                        payload["content"].clone()
+                    }
+                    other => panic!("unexpected request: {other:?}"),
+                };
+                assert_eq!(content.as_array().unwrap().len(), 2);
+                assert!(content[0]["text"].as_str().unwrap().starts_with("describe"));
+                assert_eq!(content[1]["type"], "image");
+                assert_eq!(content[1]["data"], "AQIDBA==");
+                assert_eq!(content[1]["mimeType"], "image/png");
+                let response = tasks.join_next().await.unwrap().unwrap();
+                assert!(tasks.is_empty());
+                assert!(
+                    rx.try_recv().is_err(),
+                    "one explicit input sends only one request"
+                );
+                if fail {
+                    let recovery =
+                        super::super::dispatch::dispatch(Action::TaskComplete(response), &mut app);
+                    assert!(
+                        recovery.iter().all(|effect| matches!(
+                            effect,
+                            Effect::QueryInputAdmissionStatus { .. }
+                        ))
+                    );
+                    let agent = &app.agents[&id];
+                    if steer {
+                        let queued = agent.session.pending_prompts.front().unwrap();
+                        assert_eq!(queued.prompt_id.as_deref(), Some(prompt.as_str()));
+                        assert_eq!(
+                            queued.images[0].encoded_bytes.as_deref(),
+                            Some(&[1, 2, 3, 4][..])
+                        );
+                        assert!(queued.requires_review);
+                        assert_eq!(
+                            agent.session.current_prompt_id.as_deref(),
+                            Some("existing-turn")
+                        );
+                    } else {
+                        assert_eq!(
+                            agent.prompt.images[0].encoded_bytes.as_deref(),
+                            Some(&[1, 2, 3, 4][..])
+                        );
+                        assert_eq!(
+                            agent
+                                .session
+                                .in_flight_prompt
+                                .as_ref()
+                                .unwrap()
+                                .prompt_id
+                                .as_deref(),
+                            Some(prompt.as_str())
+                        );
+                    }
+                } else {
+                    assert!(matches!(
+                        response,
+                        TaskResult::PromptResponse { result: Ok(_), .. }
+                            | TaskResult::InterjectQueued { .. }
+                    ));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn image_first_send_preparation_rejects_a_changed_binding() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let id = crate::app::session::AgentId(0);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.acp_tx = tx;
+        let send = Effect::SendPromptBlocks {
+            agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            prompt_id: "image-before-rebind".into(),
+            blocks: Vec::new(),
+            images: vec![crate::prompt_images::from_clipboard_data(
+                &crate::clipboard::ImageData {
+                    data: vec![1, 2, 3, 4],
+                    mime_type: "image/png".into(),
+                },
+            )],
+        };
+        let mut tasks = JoinSet::new();
+        assert!(!process_effects(vec![send], &mut tasks, &mut app));
+        let prepared = tasks.join_next().await.unwrap().unwrap();
+        app.agents.get_mut(&id).unwrap().session_binding_epoch += 1;
+        assert!(
+            super::super::dispatch::dispatch(Action::TaskComplete(prepared), &mut app).is_empty()
+        );
+        assert!(tasks.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn text_first_send_checkpoint_io_failure_still_blocks_acp() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::text_first_send_checkpoint_io_failure_still_blocks_acp"
+        )) {
+            return;
+        }
+        // A regular file at the draft directory forces an actual filesystem
+        // error, independently of input capture or image policy.
+        std::fs::write(
+            tools::util::grow_home::grow_home().join("pager-drafts-v1"),
+            "blocked",
+        )
+        .unwrap();
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.acp_tx = tx;
+        let sends = super::super::dispatch::dispatch(
+            Action::SendPrompt("describe [Image #1: /tmp/not-an-attachment.png]".into()),
+            &mut app,
+        );
+        let mut tasks = JoinSet::new();
+        assert!(!process_effects(sends, &mut tasks, &mut app));
+        let failed = tasks.join_next().await.unwrap().unwrap();
+        assert!(matches!(
+            &failed,
+            TaskResult::InputIntentCheckpointed { result: Err(_), .. }
+        ));
+        assert!(
+            super::super::dispatch::dispatch(Action::TaskComplete(failed), &mut app).is_empty()
+        );
+        assert!(tasks.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn first_os_quit_signal_starts_session_suspension() {
@@ -3625,6 +3921,7 @@ mod tests {
                 models: None,
                 agent_name: None,
                 foreground: None,
+                descendant_ownership: None,
             },
         );
         loads.insert(
@@ -3635,6 +3932,7 @@ mod tests {
                 models: None,
                 agent_name: None,
                 foreground: None,
+                descendant_ownership: None,
             },
         );
         let pending = vec![active, background];
@@ -3667,6 +3965,7 @@ mod tests {
                 models: None,
                 agent_name: None,
                 foreground: None,
+                descendant_ownership: None,
             },
         );
         loads.insert(
@@ -3677,6 +3976,7 @@ mod tests {
                 models: None,
                 agent_name: None,
                 foreground: None,
+                descendant_ownership: None,
             },
         );
         let pending = vec![active, background];
@@ -3705,6 +4005,7 @@ mod tests {
                 models: None,
                 agent_name: None,
                 foreground: None,
+                descendant_ownership: None,
             },
         );
         let pending = vec![active];
@@ -3744,6 +4045,7 @@ mod tests {
                 models: None,
                 agent_name: None,
                 foreground: None,
+                descendant_ownership: None,
             },
         );
         let pending = vec![background];

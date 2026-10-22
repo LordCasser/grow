@@ -16,6 +16,7 @@ async fn leader_reattach_completion_roundtrips_durable_log() {
     let cluster = LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS)
         .await
         .expect("start leader cluster");
+    git2::Repository::init(cluster.content().home()).expect("initialize isolated project");
     cluster
         .content()
         .set_response(format!("{} completed turn payload.", turn_sentinel(1)));
@@ -24,10 +25,7 @@ async fn leader_reattach_completion_roundtrips_durable_log() {
     let mut a = cluster.spawn_leader(&[]).expect("spawn leader client A");
     a.wait_for_text(WELCOME_SCREEN_SENTINEL, LEADER_TIMEOUT)
         .expect("A welcome");
-    a.inject_keys(format!("{PROMPT}\r").as_bytes())
-        .expect("A submit turn");
-    a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT)
-        .expect("A turn rendered");
+    submit_turn(&mut a, PROMPT, &turn_sentinel(1), STREAM_TIMEOUT);
 
     // Attach the keep-alive viewer AFTER the turn so the leader survives A's
     // exit; waiting for it to replay the transcript proves it is attached.

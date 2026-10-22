@@ -1,0 +1,38 @@
+{
+  "changed": {
+    "crates/codegen/pager/src/scrollback/state/nav.rs": {
+      "before": "e5a17635d129f8dcf936e51d0f192657314b664318e4e66b3ca2866e47ddaabd",
+      "after": "06a17a27a3242280d1c9f1afe55345c722544eb6c213ba5df01ba2b73a83c84d"
+    },
+    "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs": {
+      "before": "aaef56ab8f4849bc2c291667f01dfe212b51b97c4807bb2e7c205cf8171e8739",
+      "after": "94e1e289d9f276d5366e2bd9675b898ea6ed5b6772971d306b9ad0818ee456c9"
+    },
+    "crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs": {
+      "before": "8d97b446ae270b0c314b82bc9bbf9b0d7d2045a74c318e0213a3f08c623748c5",
+      "after": "8a3fb099dd008111da09ea41a53a76ce2a05cdbd124a9aeef3c43e145274695c"
+    },
+    "crates/codegen/markdown/src/streaming.rs": {
+      "before": "e3288f389b87311c5c2ccc3cdafc9526c65d0121e8cf3dd36e29c6e7288065af",
+      "after": "7ef5584adf9aa6f78bd153e04105c23f9b6d329a21864c6fd06cc2e9e5bb7560"
+    },
+    "crates/codegen/pager/src/scrollback/blocks/mod.rs": {
+      "before": "41d35ee1cb6b1355bb7784ee0fc6dc59ff1e7caf9ee46ae0f91d52e4c5d8c0a9",
+      "after": "f491ad3ad236279f56726893d93745642e95387fab469aa815a73a9c0d3637f4"
+    },
+    "crates/codegen/pager/src/scrollback/entry.rs": {
+      "before": "27a080ecf5b3e07b996d3660f3ed2b49e3dfd558b0913f5418b092c6d6ad1df6",
+      "after": "d1ca4493bcffdb18b3c0fbe33ec86f701323755ebfe86e1cf90ea85cb8aa0981"
+    },
+    "crates/codegen/pager/src/scrollback/state/layout.rs": {
+      "before": "b4daff47879d8f9bdaa95d56b19717fc9e5dc07b4df3535996ccd1fdefd19a12",
+      "after": "977ed2f58a7ac39b5671c574c3fe2d19aeb6af697f93b5841310172e0549d6b5"
+    }
+  },
+  "added": {
+    "crates/codegen/pager/src/scrollback/blocks/replay_media_tests.rs": "da47d200f48f5015d9cf090c77e4cbb1d947522b7658acee7217af4cdfedc6d3",
+    "crates/codegen/pager/src/scrollback/blocks/markdown_content/replay_tests.rs": "6306553ad32d0bd0f16c156e4ec3f972bd3c5fcc9a46959fa9c84774b105d758",
+    "crates/codegen/pager/src/scrollback/state/layout/replay_tests.rs": "63171c2edb97f54281f958f5482ffffdd80d9150548b30d9730024a8074f2866"
+  },
+  "removed": {}
+}

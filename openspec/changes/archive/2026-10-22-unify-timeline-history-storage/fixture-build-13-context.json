@@ -1,0 +1,64 @@
+{
+  "started_utc": "2026-10-21T17:53:33.947155+00:00",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--release",
+    "-p",
+    "shell",
+    "-p",
+    "pager",
+    "-p",
+    "pager-pty-harness",
+    "--features",
+    "shell/test-support",
+    "--lib",
+    "--test",
+    "session_load_perf",
+    "--test",
+    "testkit_synth_roundtrip",
+    "--test",
+    "pty_e2e_persistence",
+    "--test",
+    "pty_e2e_minimal",
+    "--test",
+    "leader_pty_e2e",
+    "--test",
+    "test_subagent_orphan_reconcile",
+    "--test",
+    "test_tool_dispatch_duration_smoke",
+    "--test",
+    "session_fork_replay_memory",
+    "--test",
+    "test_session_load_memory",
+    "--no-run",
+    "--message-format=json"
+  ],
+  "purpose": "Rebuild five fixture-only changes after build12; production CLI3 and other unchanged build12 artifacts retained",
+  "source_hashes": {
+    "crates/codegen/shell/src/extensions/session_state.rs": {
+      "before": "45fd4ed16e4c69715cf8c8c5b237e4c0ba3aca0c2f9ebdc6ae17e3ef44b28b8b",
+      "after": "ab95b42cb809ef4af3cbb4eaf4aba365a246e00d80586fa79d67e62c2a1b7a87"
+    },
+    "crates/codegen/shell/src/session/actor/tests/truncation_recovery_tests.rs": {
+      "before": "e68019d8873bfaf5babbad46712c5e1d713d57807bccfb5ad7b5a54350f5eed3",
+      "after": "14b84452df694527b26be1c4016d9aebb29effbcaee9431e20e4f4aa957578be"
+    },
+    "crates/codegen/shell/tests/test_session_load_memory.rs": {
+      "before": "56b824c9dd2e73fdd4e924af97ac4b2c4e9472e44b46fcc56f53cbbe406e5278",
+      "after": "83effc304acbbf478e74bfb9e8292dca249c46381e2ab7b6dd85b2d4e2af27f4"
+    },
+    "crates/codegen/shell/tests/test_subagent_orphan_reconcile.rs": {
+      "before": "09306d193fc821b847d708ee5cbd86c658bc076152101c6d8d8c7d5a29b8a4b7",
+      "after": "981d05648f0d5de3a5aff8653b364682f9d75bf2c1f777f0c4f5d13e3c83df45"
+    },
+    "crates/codegen/shell/tests/test_tool_dispatch_duration_smoke.rs": {
+      "before": "d15b776735c3d19e71913a802afcefdb713a74d1b20d1010d8c2baf94eca1ce3",
+      "after": "3ca2307e4b41b9bd28aeeb0267cfdfa2e7a365c529d4c4719d55c55b4f5cbf1d"
+    }
+  },
+  "exit": 0,
+  "completed_utc": "2026-10-21T18:05:43.232620+00:00"
+}

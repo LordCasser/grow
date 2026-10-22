@@ -243,6 +243,7 @@ pub mod inference_metrics;
 pub mod timeline_persistence;
 pub mod trajectory;
 pub use client_support::session::info;
+pub(crate) mod history;
 pub mod mcp_catalog;
 pub mod mcp_dispatcher;
 #[cfg(test)]
@@ -251,6 +252,7 @@ pub mod mcp_restart;
 pub mod mcp_servers;
 pub mod memory;
 pub mod persistence;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod response_projection;
 pub use client_support::placeholder_images;
 pub mod behavior;

@@ -340,13 +340,18 @@ impl ScrollbackEntry {
     /// Cheap wrapped-line estimate for the block's source text at
     /// `content_width`.
     ///
-    /// An APPROXIMATION: it ignores word boundaries, and for a markdown block
-    /// it reflects the last rendered view. On-screen entries are always
-    /// measured exactly, so nothing depends on it being right.
+    /// An APPROXIMATION: it ignores word boundaries and uses markdown source,
+    /// independent of whether presentation has been materialized. On-screen
+    /// entries are always measured exactly.
     pub fn estimate_source_lines(&self, content_width: u16) -> u16 {
         let mut slot = self.cached_line_widths.borrow_mut();
         let widths = slot.get_or_insert_with(|| {
-            let Some(text) = self.block.searchable_text() else {
+            let text = match &self.block {
+                RenderBlock::AgentMessage(block) => Some(block.text()),
+                RenderBlock::Thinking(block) => Some(block.text()),
+                _ => self.block.searchable_text(),
+            };
+            let Some(text) = text else {
                 return Vec::new();
             };
             // Renderers drop a single trailing newline.
@@ -726,6 +731,35 @@ mod tests {
         assert_eq!(entry.estimate_source_lines(10), 5);
         assert_eq!(entry.estimate_source_lines(5), 8);
         assert_eq!(entry.estimate_source_lines(100), 3);
+    }
+
+    #[test]
+    fn markdown_height_estimates_depend_on_source_not_presentation_cache() {
+        let source = "## heading\n\n**bold** and [link](https://example.test)\n\n| a | b |\n| --- | --- |\n| one | two |";
+        let mut agent = super::super::blocks::AgentMessageBlock::streaming();
+        agent.push_chunk_deferred(source);
+        agent.finish();
+        let mut thinking = super::super::blocks::ThinkingBlock::streaming_replay();
+        thinking.push_chunk_deferred(source);
+        thinking.finish();
+        for block in [
+            RenderBlock::AgentMessage(agent),
+            RenderBlock::Thinking(thinking),
+        ] {
+            let mut entry = ScrollbackEntry::new(block);
+            let cold = [17, 40, 80].map(|width| entry.estimate_source_lines(width));
+            assert!(!entry.has_cached_output());
+            assert!(entry.block.searchable_text().is_some());
+            entry.invalidate_cache();
+            let warm = [17, 40, 80].map(|width| entry.estimate_source_lines(width));
+            assert_eq!(cold, warm);
+            entry.block.set_raw_mode(true);
+            entry.invalidate_cache();
+            assert_eq!(
+                cold,
+                [17, 40, 80].map(|width| entry.estimate_source_lines(width))
+            );
+        }
     }
 
     #[test]

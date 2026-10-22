@@ -1,0 +1,9 @@
+{
+  "r6": {
+    "binary": "target/debug/deps/session_load_perf-c1951fcebb27b71d",
+    "sha256": "fb3db1645baee84537b70214c82b3f83363ccec62c4a2352dbec695a52d70309",
+    "compiler": "Homebrew rustc 1.99.1",
+    "state": "R5 + R6; full benchmark constructed before pinned-toolchain verification",
+    "cli_sha256": "d96da3382afb58af0fda5a08e4bb09370460f0deb984c54179323c4f61c93b65"
+  }
+}

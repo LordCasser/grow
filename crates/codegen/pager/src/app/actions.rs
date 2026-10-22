@@ -2301,6 +2301,7 @@ pub enum TaskResult {
         /// loader adopts its opaque id without reconstructing lifecycle
         /// semantics from the id spelling.
         foreground: Option<prompt_queue::ForegroundSnapshot>,
+        descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
     },
     /// Session load (resume) failed.
     SessionLoadFailed {
@@ -2313,6 +2314,7 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         generation: u64,
         result: Result<Option<crate::app::prompt_queue::ForegroundSnapshot>, String>,
+        descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
     },
     /// Local `summary.json` title read for [`Effect::HydrateSessionTitleFromDisk`].
     SessionTitleFromDisk {

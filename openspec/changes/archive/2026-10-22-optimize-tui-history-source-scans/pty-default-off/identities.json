@@ -1,0 +1,10 @@
+{
+  "before": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-grow",
+    "sha256": "5b9d92adf9a9386a4d0f2ea789512e490e9834f4012350dae927bb6335e233ad"
+  },
+  "after": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/after-grow",
+    "sha256": "b6a7c6b2fbf184e7807b7ddf1767fc15a6f1282f858c9058a0b6c1cb46b9da7f"
+  }
+}

@@ -35,12 +35,10 @@
 //!
 //! Metadata columns and cross-host import live in [`crate::extensions::session_state`].
 
-use std::io;
-
 use acp_transport::protocol as acp;
 
 use super::ExtResult;
-use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK_PREFIX};
+use crate::session::wire_tags::USER_MESSAGE_CHUNK_PREFIX;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,53 +116,17 @@ fn compute_prompt_starts<T: AsRef<str>>(lines: &[T]) -> Vec<usize> {
     starts
 }
 
-fn try_stream_tail_page(
-    request: &Request,
-    reader: crate::session::storage::CommittedJsonlLines,
-) -> io::Result<Option<TailPage>> {
+fn try_stream_tail_page(request: &Request, all_lines: &[String]) -> Option<TailPage> {
     let is_negative_offset = request.offset.is_some_and(|o| o < 0);
     let is_turn_index = request.turn_index.filter(|&n| n > 0).is_some() && request.offset.is_none();
 
     if !is_negative_offset && !is_turn_index {
-        return Ok(None);
+        return None;
     }
 
+    let total_count = all_lines.len();
     if is_turn_index {
-        // Single-pass scan: read lines, detect rewinds, and compute prompt
-        // boundaries in one pass to avoid a second traversal.
-        let mut has_rewinds = false;
-        let mut all_lines = Vec::new();
-        let mut prompt_starts = Vec::new();
-        let mut in_user = false;
-
-        for line in reader {
-            let line = String::from_utf8(line?)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            has_rewinds |= line.contains(&*REWIND_MARKER);
-            let is_user = is_user_message_chunk(&line);
-            if is_user && !in_user {
-                prompt_starts.push(all_lines.len());
-            }
-            in_user = is_user;
-            all_lines.push(line);
-        }
-
-        // If rewinds are present, filter dead branches and recompute
-        // prompt boundaries over the live lines.
-        let (all_lines, prompt_starts) = if has_rewinds {
-            let refs: Vec<&str> = all_lines.iter().map(|s| s.as_str()).collect();
-            let live = crate::session::storage::filter_rewind_lines(refs);
-            let owned: Vec<String> = live.into_iter().map(|s| s.to_owned()).collect();
-            let ps = compute_prompt_starts(&owned);
-            (owned, ps)
-        } else {
-            (all_lines, prompt_starts)
-        };
-        let total_count = all_lines.len();
-
+        let prompt_starts = compute_prompt_starts(all_lines);
         let tail_n = request.turn_index.unwrap();
         let start = if tail_n >= prompt_starts.len() {
             0
@@ -175,74 +137,21 @@ fn try_stream_tail_page(
             Some(lim) => (start + lim).min(total_count),
             None => total_count,
         };
-        let has_more = start > 0;
-        let lines = all_lines[start..end].to_vec();
-        Ok(Some(TailPage {
-            lines,
+        Some(TailPage {
+            lines: all_lines[start..end].to_vec(),
             total_count,
-            has_more,
+            has_more: start > 0,
             prompt_starts,
-        }))
+        })
     } else {
-        // Negative-offset path: ring buffer, only keep last N lines in memory.
-        let tail_n = (-request.offset.unwrap()) as usize;
-        let mut total_count = 0usize;
-        let mut has_rewinds = false;
-        let mut tail = std::collections::VecDeque::new();
-
-        for line in reader {
-            let line = String::from_utf8(line?)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            has_rewinds |= line.contains(&*REWIND_MARKER);
-            total_count += 1;
-            tail.push_back(line);
-            if tail.len() > tail_n {
-                tail.pop_front();
-            }
-        }
-
-        if has_rewinds {
-            return Ok(None);
-        }
-
         let bounds = page_bounds(request, total_count);
-        let retained_start = total_count.saturating_sub(tail.len());
-        let local_start = bounds.start.saturating_sub(retained_start);
-        let page_len = bounds.end.saturating_sub(bounds.start);
-        let lines: Vec<String> = tail.into_iter().skip(local_start).take(page_len).collect();
-        Ok(Some(TailPage {
-            lines,
+        Some(TailPage {
+            lines: all_lines[bounds.start..bounds.end].to_vec(),
             total_count,
             has_more: bounds.end < total_count,
             prompt_starts: vec![],
-        }))
+        })
     }
-}
-
-fn open_updates_reader(
-    session: &crate::session::storage::ContainedDirectory,
-) -> io::Result<Option<crate::session::storage::CommittedJsonlLines>> {
-    let file = match session.open_regular(
-        std::ffi::OsStr::new(crate::session::storage::UPDATES_FILE),
-        "session updates ledger",
-    ) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    Ok(Some(
-        crate::session::storage::CommittedJsonlLines::from_open_file_at(
-            file,
-            session
-                .display_path()
-                .join(crate::session::storage::UPDATES_FILE),
-            "session updates ledger",
-            0,
-        )?,
-    ))
 }
 
 fn response_from_page<T: AsRef<str>>(
@@ -384,18 +293,24 @@ async fn handle_with_storage(
         }
         Err(error) => return Err(acp::Error::internal_error().data(error.to_string())),
     };
-    let Some(reader) = open_updates_reader(opened.directory())
-        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
-    else {
-        if request.stream {
-            return streamed_metadata_response(0, None, 0, &[]);
-        }
-        return empty_response(0);
-    };
+    let validated = opened
+        .validated_timeline(&request.session_id)
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+    let prepared = validated
+        .history
+        .prepare(&opened.summary().info.id, &validated.timeline, None)
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+    let lines: Vec<String> = prepared
+        .updates
+        .iter()
+        .map(|update| {
+            let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(update)?;
+            serde_json::to_string(&envelope)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
 
-    if let Some(tail_page) = try_stream_tail_page(&request, reader)
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?
-    {
+    if let Some(tail_page) = try_stream_tail_page(&request, &lines) {
         if request.stream {
             let chunk_size = request.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1);
             let last_event_id = extract_last_event_id(&tail_page.lines);
@@ -422,17 +337,8 @@ async fn handle_with_storage(
         );
     }
 
-    let Some(reader) = open_updates_reader(opened.directory())
-        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
-    else {
-        return empty_response(0);
-    };
-    let lines = crate::session::storage::read_committed_jsonl_text_lines_from_reader(reader)
-        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-    let live_lines =
-        crate::session::storage::filter_rewind_lines(lines.iter().map(String::as_str).collect());
-    let total_count = live_lines.len();
-    let prompt_starts = compute_prompt_starts(&live_lines);
+    let total_count = lines.len();
+    let prompt_starts = compute_prompt_starts(&lines);
 
     // turn_index with rewinds: resolve start from prompt boundaries
     let (bounds, has_more) = if let Some(tail_n) = request
@@ -454,7 +360,7 @@ async fn handle_with_storage(
         let b = page_bounds(&request, total_count);
         (b, b.end < total_count)
     };
-    let page = &live_lines[bounds.start..bounds.end];
+    let page = &lines[bounds.start..bounds.end];
 
     if request.stream {
         let chunk_size = request.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1);
@@ -560,36 +466,30 @@ mod tests {
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-equivalence";
-        let (_root, storage) = write_session(
-            session_id,
-            &cwd,
-            &[
-                r#"{"timestamp":1,"method":"session/update","params":{"seq":1}}"#,
-                r#"{"timestamp":2,"method":"session/update","params":{"seq":2}}"#,
-                r#"{"timestamp":3,"method":"session/update","params":{"seq":3}}"#,
-                r#"{"timestamp":4,"method":"session/update","params":{"seq":4}}"#,
-                r#"{"timestamp":5,"method":"session/update","params":{"seq":5}}"#,
-                r#"{"timestamp":6,"method":"session/update","params":{"seq":6}}"#,
-            ]
-            .map(str::to_owned),
-        )
-        .await;
-
-        let gw = dummy_gateway();
+        let lines = vec![
+            user_chunk("one"),
+            agent_chunk("two"),
+            user_chunk("three"),
+            agent_chunk("four"),
+            user_chunk("five"),
+            agent_chunk("six"),
+        ];
+        let (_root, storage) = write_session(session_id, &cwd, &lines).await;
         let response = handle_with_storage(
             &make_request(session_id, &cwd, Some(-3), Some(2)),
-            &gw,
+            &dummy_gateway(),
             &storage,
         )
         .await
         .unwrap();
         let json = parse_response(response);
+        let updates = json["updates"].as_array().unwrap();
 
         assert_eq!(json["totalCount"], 6);
         assert_eq!(json["hasMore"], true);
-        assert_eq!(json["updates"].as_array().unwrap().len(), 2);
-        assert_eq!(json["updates"][0]["params"]["seq"], 4);
-        assert_eq!(json["updates"][1]["params"]["seq"], 5);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0]["params"]["update"]["content"]["text"], "four");
+        assert_eq!(updates[1]["params"]["update"]["content"]["text"], "five");
     }
 
     #[tokio::test]
@@ -605,7 +505,7 @@ mod tests {
                 r#"{"timestamp":2,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp1"}}}}"#,
                 r#"{"timestamp":3,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"dead-branch"}}}}"#,
                 r#"{"timestamp":4,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"dead-resp"}}}}"#,
-                r#"{"timestamp":5,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"rewind_marker","target_prompt_index":1}}}"#,
+                r#"{"timestamp":5,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2026-10-19"}}}"#,
                 r#"{"timestamp":6,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"replacement"}}}}"#,
                 r#"{"timestamp":7,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replacement-resp"}}}}"#,
             ]
@@ -647,11 +547,7 @@ mod tests {
         let (_root, storage) = write_session(
             session_id,
             &child_cwd,
-            &[
-                r#"{"timestamp":1,"method":"session/update","params":{"seq":1}}"#,
-                r#"{"timestamp":2,"method":"session/update","params":{"seq":2}}"#,
-            ]
-            .map(str::to_owned),
+            &[user_chunk("first"), agent_chunk("second")],
         )
         .await;
 
@@ -742,13 +638,12 @@ mod tests {
             session_id,
             &cwd,
             &[
-                r#"{"timestamp":1,"method":"session/update","params":{"seq":1}}"#,
-                r#"{"timestamp":2,"method":"session/update","params":{"seq":2}}"#,
-                r#"{"timestamp":3,"method":"session/update","params":{"seq":3}}"#,
-                r#"{"timestamp":4,"method":"session/update","params":{"seq":4}}"#,
-                r#"{"timestamp":5,"method":"session/update","params":{"seq":5}}"#,
-            ]
-            .map(str::to_owned),
+                user_chunk("one"),
+                agent_chunk("two"),
+                user_chunk("three"),
+                agent_chunk("four"),
+                user_chunk("five"),
+            ],
         )
         .await;
 
@@ -841,7 +736,7 @@ mod tests {
 
     fn grow_rewind(target: usize) -> String {
         format!(
-            r#"{{"timestamp":0,"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"rewind_marker","target_prompt_index":{target}}}}}}}"#
+            r#"{{"timestamp":0,"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"rewind_marker","target_prompt_index":{target},"created_at":"2026-10-19"}}}}}}"#
         )
     }
 
@@ -868,11 +763,35 @@ mod tests {
             .await
             .unwrap();
         let opened = storage.open_session(&session_info).unwrap();
+        let mut facts = Vec::with_capacity(lines.len());
+        for line in lines {
+            let envelope: serde_json::Value = serde_json::from_str(line).unwrap();
+            let method = envelope["method"].as_str().unwrap();
+            let params = envelope["params"].clone();
+            let update = match method {
+                "session/update" => crate::session::storage::SessionUpdate::Acp(Box::new(
+                    serde_json::from_value::<acp::SessionNotification>(params).unwrap(),
+                )),
+                crate::session::storage::GROW_SESSION_UPDATE_METHOD => {
+                    crate::session::storage::SessionUpdate::Grow(Box::new(
+                        serde_json::from_value::<
+                            crate::extensions::notification::SessionNotification,
+                        >(params)
+                        .unwrap(),
+                    ))
+                }
+                _ => panic!("unexpected session update method: {method}"),
+            };
+            if let Some(fact) = crate::session::history::HistoryFact::from_update(&update).unwrap()
+            {
+                facts.push(fact);
+            }
+        }
         opened
             .directory()
             .write_atomic(
-                std::ffi::OsStr::new(crate::session::storage::UPDATES_FILE),
-                format!("{}\n", lines.join("\n")).as_bytes(),
+                std::ffi::OsStr::new(crate::session::storage::TIMELINE_FILE),
+                &crate::session::storage::JsonlStorageAdapter::encode_journal(&[], &facts).unwrap(),
                 false,
                 true,
             )

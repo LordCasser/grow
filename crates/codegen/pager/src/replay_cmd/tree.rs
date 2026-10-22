@@ -75,7 +75,8 @@ fn activity_marker(event: &shell::session::storage::transcript::TranscriptEvent)
                 | GrowUpdate::ControlStateUpdate(_)
                 | GrowUpdate::UiNotice(_)
         ),
-        SessionUpdate::ResponseReplayProjection(_) => true,
+        #[allow(unreachable_patterns)] // Only the test-support legacy oracle adds another variant.
+        _ => true,
     }
 }
 

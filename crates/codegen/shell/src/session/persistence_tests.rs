@@ -263,11 +263,21 @@ fn response_projection(
 }
 
 fn physical_updates(path: &std::path::Path) -> Vec<SessionUpdate> {
-    std::fs::read_to_string(path)
+    let adapter =
+        JsonlStorageAdapter::with_explicit_session_dir(path.parent().unwrap().to_path_buf());
+    let summary: crate::session::persistence::Summary = serde_json::from_slice(
+        &std::fs::read(path.parent().unwrap().join("summary.json")).unwrap(),
+    )
+    .unwrap();
+    let opened = adapter.open_session(&summary.info).unwrap();
+    let snapshot = opened
+        .validated_timeline(summary.info.id.0.as_ref())
+        .unwrap();
+    snapshot
+        .history
+        .prepare(&summary.info.id, &snapshot.timeline, None)
         .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+        .updates
 }
 
 fn projected_replay_texts(updates: &[SessionUpdate]) -> Vec<String> {
@@ -333,25 +343,53 @@ fn break_summary_writes(dir: &std::path::Path) {
     std::fs::create_dir(summary).unwrap();
 }
 
-#[test]
-fn retryable_projection_error_classifies_io_kinds() {
-    use crate::session::storage::AppendUpdateError;
-
-    let invalid_data = AppendUpdateError::NotCommitted(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "invalid projection",
-    ));
-    let unsupported =
-        AppendUpdateError::Committed(io::Error::new(io::ErrorKind::Unsupported, "unsupported"));
-    let ordinary = AppendUpdateError::NotCommitted(io::Error::other("temporary failure"));
-
-    assert!(!SessionPersistence::retryable_projection_error(
-        &invalid_data
-    ));
-    assert!(!SessionPersistence::retryable_projection_error(
-        &unsupported
-    ));
-    assert!(SessionPersistence::retryable_projection_error(&ordinary));
+#[tokio::test]
+async fn replay_barrier_holds_new_appends_and_cancellation_releases_them() {
+    let root = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("barrier"),
+        cwd: root.path().to_string_lossy().into_owned(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(root.path().to_path_buf()));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage.clone());
+    append_buffered_and_ack(
+        &actor.handle.tx,
+        neutral_update_with_event(&info, "before", "before"),
+    )
+    .await
+    .unwrap();
+    let barrier = replay_barrier(&actor.handle.tx).await.unwrap();
+    let prefix = storage
+        .open_session(&info)
+        .unwrap()
+        .validated_timeline(info.id.0.as_ref())
+        .unwrap();
+    let tx = actor.handle.tx.clone();
+    let update = neutral_update_with_event(&info, "after", "after");
+    let append = tokio::spawn(async move { append_buffered_and_ack(&tx, update).await });
+    tokio::task::yield_now().await;
+    assert!(!append.is_finished());
+    assert_eq!(
+        prefix
+            .history
+            .prepare(&info.id, &prefix.timeline, None)
+            .unwrap()
+            .updates
+            .len(),
+        1
+    );
+    drop(barrier);
+    tokio::time::timeout(std::time::Duration::from_secs(2), append)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    actor.stop_gracefully().await;
+    assert_eq!(storage.load_session(&info).await.unwrap().updates.len(), 2);
 }
 
 #[test]
@@ -575,16 +613,50 @@ async fn commit_projection_request(
     actor: &ActorGuard,
     projection: crate::session::response_projection::ResponseReplayProjection,
 ) -> Result<(), crate::session::storage::AppendUpdateError> {
+    let items = projection
+        .updates
+        .into_iter()
+        .map(|value| match value {
+            crate::session::response_projection::ProjectedText::Assistant(text) => {
+                sampling_types::ConversationItem::assistant(text.to_string())
+            }
+            crate::session::response_projection::ProjectedText::Reasoning(text) => {
+                sampling_types::ConversationItem::Reasoning(
+                    sampling_types::synthesized_reasoning_item(text.to_string()),
+                )
+            }
+        })
+        .collect();
+    let timeline =
+        crate::session::storage::jsonl::tests::response_projection_production_timeline_with_items(
+            &projection.request_id,
+            projection.attempt,
+            items,
+            0,
+        );
     let (respond_to, response) = tokio::sync::oneshot::channel();
     actor
         .handle
         .tx
-        .send(PersistenceMsg::CommitResponseProjection {
-            projection,
+        .send(PersistenceMsg::TimelineDurablyAndAck {
+            event: timeline.events().last().unwrap().clone(),
             respond_to,
         })
         .unwrap();
-    response.await.unwrap()
+    response
+        .await
+        .unwrap()
+        .map_err(crate::session::storage::AppendUpdateError::NotCommitted)?;
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            &projection.request_id,
+            projection.attempt,
+            crate::extensions::notification::SamplingAttemptState::Accepted,
+        ))
+        .unwrap();
+    Ok(())
 }
 
 async fn sampling_barrier(actor: &ActorGuard, request_id: &str, attempt: u32) -> io::Result<()> {
@@ -603,6 +675,23 @@ async fn sampling_barrier(actor: &ActorGuard, request_id: &str, attempt: u32) ->
 
 async fn stage_projection_window(actor: &ActorGuard, info: &Info, request_id: &str) {
     use crate::extensions::notification::SamplingAttemptState;
+    let timeline = crate::session::storage::jsonl::tests::response_projection_production_timeline(
+        request_id,
+        1,
+        "canonical",
+    );
+    for event in &timeline.events()[..4] {
+        let (respond_to, ack) = tokio::sync::oneshot::channel();
+        actor
+            .handle
+            .tx
+            .send(PersistenceMsg::TimelineDurablyAndAck {
+                event: event.clone(),
+                respond_to,
+            })
+            .unwrap();
+        ack.await.unwrap().unwrap();
+    }
     actor
         .handle
         .tx
@@ -681,20 +770,16 @@ async fn projected_sampling_window_replaces_first_candidate_anchor() {
     assert!(
         matches!(&updates[2], SessionUpdate::Acp(notification) if notification.meta.as_ref().and_then(|m| m.get("eventId")).and_then(serde_json::Value::as_str) == Some("event-post"))
     );
-    assert!(matches!(
-        &updates[3],
-        SessionUpdate::ResponseReplayProjection(_)
-    ));
-    assert_eq!(updates.len(), 4);
+    assert_eq!(updates.len(), 3);
     assert_eq!(storage.load_summary(&info).await.unwrap().num_messages, 3);
     assert_eq!(
         projected_replay_texts(&updates),
-        ["pre", "", "post", "canonical"]
+        ["pre", "canonical", "post"]
     );
 }
 
 #[tokio::test]
-async fn projected_sampling_window_retries_projection_without_duplicates() {
+async fn admitted_response_adds_no_presentation_write_after_anchor_retries() {
     let dir = tempfile::tempdir().unwrap();
     let info = Info {
         id: acp::SessionId::new("sampling-projection-retry"),
@@ -705,8 +790,10 @@ async fn projected_sampling_window_retries_projection_without_duplicates() {
     let storage = JsonlStorageAdapter::with_update_append_probe(
         dir.path().join("sampling-projection-retry"),
         move |_| {
-            if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 3 {
-                Err(io::Error::other("projection append failed"))
+            if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 4 {
+                Err(io::Error::other(
+                    "unexpected presentation append after admission",
+                ))
             } else {
                 Ok(())
             }
@@ -732,11 +819,13 @@ async fn projected_sampling_window_retries_projection_without_duplicates() {
             .join("sampling-projection-retry")
             .join("updates.jsonl"),
     );
-    assert_eq!(updates.len(), 4);
-    assert!(matches!(
-        updates[3],
-        SessionUpdate::ResponseReplayProjection(_)
-    ));
+    // pre + two exact anchor submissions + post; admission adds no presentation.
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(updates.len(), 3);
+    assert_eq!(
+        projected_replay_texts(&updates),
+        ["pre", "canonical", "post"]
+    );
 }
 
 #[tokio::test]
@@ -751,7 +840,7 @@ async fn failed_independent_update_blocks_sampling_admission() {
     let storage = JsonlStorageAdapter::with_update_append_probe(
         dir.path().join("sampling-post-retry"),
         move |_| {
-            if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+            if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 3 {
                 Err(io::Error::other("post append failed"))
             } else {
                 Ok(())
@@ -768,8 +857,8 @@ async fn failed_independent_update_blocks_sampling_admission() {
     assert!(sampling_barrier(&actor, "request", 1).await.is_err());
     actor.stop_gracefully().await;
     let updates = physical_updates(&dir.path().join("sampling-post-retry").join("updates.jsonl"));
-    assert_eq!(updates.len(), 2);
-    assert_eq!(projected_replay_texts(&updates), ["pre", ""]);
+    assert_eq!(updates.len(), 1);
+    assert_eq!(projected_replay_texts(&updates), ["pre"]);
 }
 
 #[tokio::test]
@@ -898,6 +987,7 @@ async fn failed_auxiliary_grow_append_blocks_sampling_admission() {
             },
             permit,
             preview: Some(("request".into(), 1)),
+            delivery: None,
             respond_to: Some(respond_to),
         })
         .unwrap();
@@ -1145,75 +1235,9 @@ async fn superseded_attempt_cannot_pass_the_preview_barrier() {
     actor.stop_gracefully().await;
 }
 
-#[tokio::test]
-async fn failed_projection_commit_keeps_anchor_state_for_idempotent_retry() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = Info {
-        id: acp::SessionId::new("sampling-projection-restore"),
-        cwd: dir.path().to_string_lossy().into_owned(),
-    };
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed = calls.clone();
-    let fail_projection_writes = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let fail_writes = fail_projection_writes.clone();
-    let session_dir = dir.path().join("sampling-projection-restore");
-    let storage = JsonlStorageAdapter::with_update_append_probe(session_dir.clone(), move |_| {
-        let call = observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if fail_writes.load(std::sync::atomic::Ordering::SeqCst) && matches!(call, 0 | 1) {
-            Err(io::Error::other("projection append failed"))
-        } else {
-            Ok(())
-        }
-    });
-    storage
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-
-    let (_tx, rx) = mpsc::unbounded_channel();
-    let mut persistence = SessionPersistence {
-        info: info.clone(),
-        storage: Arc::new(storage),
-        pending_notification: None,
-        sampling_anchor: None,
-        sampling_attempt: None,
-        terminal_sampling_attempt: None,
-        rx,
-        gateway: None,
-    };
-    let key = SamplingAttemptKey {
-        request_id: "request".into(),
-        attempt: 1,
-    };
-    persistence.mark_sampling_anchor(key);
-
-    let projection = response_projection(&info, "request", 1, "canonical");
-    assert!(
-        persistence
-            .commit_response_projection(projection.clone())
-            .await
-            .is_err()
-    );
-    let restored = persistence.sampling_anchor.as_ref().unwrap();
-    assert_eq!(restored.key.request_id, "request");
-    assert!(restored.write_error.is_none());
-
-    fail_projection_writes.store(false, std::sync::atomic::Ordering::SeqCst);
-    persistence
-        .commit_response_projection(projection)
-        .await
-        .unwrap();
-    assert!(persistence.sampling_anchor.is_none());
-    assert!(persistence.terminal_sampling_attempt.is_some());
-
-    let updates = physical_updates(&session_dir.join("updates.jsonl"));
-    assert_eq!(updates.len(), 1);
-    assert!(matches!(
-        updates[0],
-        SessionUpdate::ResponseReplayProjection(_)
-    ));
-    assert_eq!(projected_replay_texts(&updates), ["canonical"]);
-}
+// Response commit retry and sync failure now use the unified Timeline
+// seam in storage::jsonl::durable_tests. There is no second projection commit
+// whose failure may clear or retain the admission window.
 
 #[tokio::test]
 async fn unaccepted_sampling_candidate_is_absent_after_shutdown() {

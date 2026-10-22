@@ -1,0 +1,7 @@
+{
+  "date": "2026-10-22 09:06:03.314297+08:00",
+  "head": "0091c8a3db79e0a5c60322b62e03b61b9b29c33e",
+  "rust": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Homebrew)",
+  "target": "target/resume-attribution-release",
+  "baseline": "pre-P0 current checkout; normal release/default features; incremental=0 jobs=4; build before source instrumentation changes"
+}

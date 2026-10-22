@@ -1,0 +1,19 @@
+✓ change/add-mcp-multi-round-elicitation
+✓ spec/behavior-goal
+✓ spec/client-surfaces
+✓ spec/configuration-rules
+✓ spec/context-compaction
+✓ spec/development-workflow
+✓ spec/extension-runtime
+✓ spec/input-admission
+✓ spec/local-coordination
+✓ spec/memory-search
+✓ spec/model-sampling
+✓ change/profile-release-resume-first-history
+✓ spec/sandbox-boundary
+✓ spec/session-timeline
+✓ spec/task-planning
+✓ spec/tool-authorization
+✓ change/unify-timeline-history-storage
+✓ spec/workflow-execution
+Totals: 18 passed, 0 failed (18 items)

@@ -1,0 +1,7 @@
+{
+  "binary": "/Users/lordcasser/workspace/projects/grow/target/descendant-recovery-release/binaries/after-session_load_perf",
+  "sha256": "6af5d9c7bbc3441e32ef9549868661fca453996b6f923f1877ef35938817b831",
+  "profile": "release",
+  "fixture": "cold process; warm page cache; setup outside RPC",
+  "rss_scope": "whole test process including fixture, not isolated load peak"
+}

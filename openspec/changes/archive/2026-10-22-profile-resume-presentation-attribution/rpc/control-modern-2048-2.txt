@@ -1,0 +1,74 @@
+
+running 1 test
+test full_session_load_e2e ... [testkit] admitted history: turns=2048 admissions=2048 missing_projections=2048 updates=0B timeline=74843515B rewind=5482B total=74848997B
+
+[perf] e2e session: timeline=74.8 MB rewind=0.0 MB
+
+[perf] e2e: Timeline journal composition (74.8 MB total):
+  physical fact kind                  count         MB       %
+  domain/messages                      4097       68.9   92.0%
+  domain/turn                          4096        1.8    2.4%
+  domain/request                       4096        1.6    2.1%
+  domain/step                          4096        1.1    1.5%
+  presentation/candidate               2048        0.9    1.2%
+  presentation/user                    2048        0.5    0.7%
+  domain/observation                      1        0.0    0.0%
+
+[perf] ===== END-TO-END session/load (what the pager waits on) =====
+  total session/load round-trip :     387.0 ms
+  notifications replayed         :      4100
+  available_commands_update      :         1 replayed / 0 on disk
+  live catalog reached          :      true
+  time-to-first notification     :     223.8 ms
+  time-to-last notification      :     387.0 ms
+  first historical text          :     223.8 ms
+  last historical text           :     368.4 ms
+  historical text chunks / bytes : 4096 / 67191722
+  ---- shell-side nested/inclusive timers (not additive) ----
+  session.load_session                                 386.0 ms count=1
+  session.load_light                                   206.1 ms count=1
+  session.load.timeline_read_decode                    198.1 ms count=1
+  session.load_session_replay                           69.6 ms count=1
+  session.spawn_and_register_session                    69.1 ms count=1
+  session.spawn_and_register                            69.1 ms count=1
+  session.spawn_actor_call                              55.1 ms count=1
+  skill_discovery                                       12.3 ms count=2
+  session.spawn.install_coordination_backend             9.3 ms count=1
+  session.load.history_projection                        7.6 ms count=1
+  session.spawn.publish_coordination                     4.2 ms count=1
+  session.load.timeline_evidence                         3.8 ms count=1
+  session.load.timeline_fold                             3.1 ms count=1
+  session.reconcile_stale_tasks                          0.6 ms count=1
+  session.spawn.prepare                                  0.4 ms count=1
+  plugin_discovery                                       0.3 ms count=2
+  session.load.state_projections                         0.1 ms count=1
+  session.load.open_session                              0.1 ms count=1
+  mcp_merge                                              0.1 ms count=1
+  session.load.model_route_reconcile                     0.0 ms count=1
+  session.stale_tasks_drain_completions                  0.0 ms count=1
+  session.delta_drain_completions                        0.0 ms count=1
+================================================================
+
+PERF_RESUME {"format":"modern","turns":2048,"missing_every":"0","route_seeded":true,"timeline_bytes":74843515,"updates_bytes":0,"directory_bytes":74849404,"directory_files":4,"directory_after_load":[74852768,5],"load_ms":386.958125,"first_notification_ms":223.795583,"first_history_ms":223.795583,"last_history_ms":368.404,"max_history_gap_ms":15.368875000000001,"history_count":4096,"history_bytes":67191722,"phases":[{"name":"session.load_session","count":1,"ms":385.981},{"name":"session.load_light","count":1,"ms":206.122},{"name":"session.load.timeline_read_decode","count":1,"ms":198.081},{"name":"session.load_session_replay","count":1,"ms":69.604},{"name":"session.spawn_and_register_session","count":1,"ms":69.149},{"name":"session.spawn_and_register","count":1,"ms":69.082},{"name":"session.spawn_actor_call","count":1,"ms":55.073},{"name":"skill_discovery","count":2,"ms":12.251},{"name":"session.spawn.install_coordination_backend","count":1,"ms":9.319},{"name":"session.load.history_projection","count":1,"ms":7.565},{"name":"session.spawn.publish_coordination","count":1,"ms":4.204},{"name":"session.load.timeline_evidence","count":1,"ms":3.802},{"name":"session.load.timeline_fold","count":1,"ms":3.092},{"name":"session.reconcile_stale_tasks","count":1,"ms":0.56},{"name":"session.spawn.prepare","count":1,"ms":0.402},{"name":"plugin_discovery","count":2,"ms":0.269},{"name":"session.load.state_projections","count":1,"ms":0.141},{"name":"session.load.open_session","count":1,"ms":0.084},{"name":"mcp_merge","count":1,"ms":0.079},{"name":"session.load.model_route_reconcile","count":1,"ms":0.014},{"name":"session.stale_tasks_drain_completions","count":1,"ms":0.001},{"name":"session.delta_drain_completions","count":1,"ms":0.0}]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.75s
+
+        2.76 real         2.62 user         0.23 sys
+           674250752  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               79073  page reclaims
+                  29  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   2  messages sent
+                   2  messages received
+                  31  signals received
+                 303  voluntary context switches
+                1387  involuntary context switches
+         51674802682  instructions retired
+         11016676275  cycles elapsed
+           586794328  peak memory footprint

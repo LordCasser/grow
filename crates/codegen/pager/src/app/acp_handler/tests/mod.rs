@@ -1122,20 +1122,34 @@ pub(super) fn with_replay_disk_home<R>(f: impl FnOnce(&std::path::Path) -> R) ->
     let _guard = ReplayGrowHomeGuard;
     f(home.path())
 }
-pub(super) fn write_child_updates_jsonl(
+pub(super) fn write_child_history_fixture(
     grow_home: &std::path::Path,
     child_sid: &str,
     content: &str,
 ) {
     let sessions_dir = write_session_summary(grow_home, "/tmp", child_sid, Some("subagent"));
-    // Replay validates the Timeline even when this fixture only has ACP history.
-    std::fs::write(sessions_dir.join("timeline.jsonl"), "").unwrap();
-    let committed = if content.ends_with('\n') {
-        content.to_owned()
-    } else {
-        format!("{content}\n")
-    };
-    std::fs::write(sessions_dir.join("updates.jsonl"), committed).unwrap();
+    let updates = content
+        .lines()
+        .map(|line| {
+            let envelope: serde_json::Value = serde_json::from_str(line).unwrap();
+            let params = envelope["params"].clone();
+            match envelope["method"].as_str().unwrap() {
+                "session/update" => shell::session::storage::SessionUpdate::Acp(Box::new(
+                    serde_json::from_value::<acp::SessionNotification>(params).unwrap(),
+                )),
+                "_grow/session/update" => shell::session::storage::SessionUpdate::Grow(Box::new(
+                    serde_json::from_value::<shell::extensions::notification::SessionNotification>(
+                        params,
+                    )
+                    .unwrap(),
+                )),
+                method => panic!("unsupported test history notification method {method}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    shell::session::testkit::write_timeline_history_fixture(&sessions_dir, &[], &updates)
+        .expect("write typed child history fixture");
+    assert!(!sessions_dir.join("updates.jsonl").exists());
 }
 pub(super) fn child_scrollback_tool_call_count(
     agent: &AgentView,
@@ -1206,12 +1220,12 @@ pub(super) fn write_subagent_spawn_timeline(
             }),
         ))
         .unwrap();
-    let mut bytes = Vec::new();
-    for event in timeline.events() {
-        serde_json::to_writer(&mut bytes, event).unwrap();
-        bytes.push(b'\n');
-    }
-    std::fs::write(session_dir.join("timeline.jsonl"), bytes).unwrap();
+    shell::session::testkit::write_timeline_history_fixture(
+        &session_dir,
+        timeline.events(),
+        &[],
+    )
+    .expect("write typed parent Timeline fixture");
 }
 
 fn write_session_summary(
@@ -1266,14 +1280,14 @@ pub(super) fn child_scrollback_matching_prompt_count(
         })
         .count()
 }
-pub(super) fn spawn_subagent_with_optional_updates(
+pub(super) fn spawn_subagent_with_optional_history(
     grow_home: &std::path::Path,
     app: &mut AppView,
     child_sid: &str,
     updates: Option<&str>,
 ) {
     if let Some(content) = updates {
-        write_child_updates_jsonl(grow_home, child_sid, content);
+        write_child_history_fixture(grow_home, child_sid, content);
     }
     let _ = handle(
         make_ext_session_notification_with_method(
@@ -1778,6 +1792,9 @@ pub(super) fn make_mcp_initialized_notif_for(session_id: &str) -> acp::ExtNotifi
 }
 mod permissions;
 mod session_events;
+mod semantic_replay_bench;
+mod descendant_recovery_bench;
+mod descendant_recovery;
 mod command_feedback;
 mod coordination;
 mod follow_ups;

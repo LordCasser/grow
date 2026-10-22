@@ -24,13 +24,12 @@ headless SHALL 按 OutputFormat 区分 JSON、StreamingJson 与 StreamingMessage
 证据：`crates/codegen/pager/src/headless.rs` — `HeadlessEmitter`。
 
 ### Requirement: Session storage separation
-会话存储 SHALL 区分 summary.json、updates.jsonl、timeline.jsonl 与 sidebands。
+
+会话存储 SHALL 区分 summary、权威 Timeline、Sideband 与既有 artifacts/rewind 资源。持久展示历史 SHALL 从 Timeline 事实及其来源引用重建，不再读写独立 updates.jsonl。实时 ACP/Grow session/update 协议保持。
 
 #### Scenario: 恢复本地会话
-- **WHEN** 读取会话目录
-- **THEN** 使用对应存储适配器读取摘要、展示更新、Timeline 及旁路账本，展示更新不替代 Timeline 事实。
-
-证据：`crates/codegen/shell/src/session/storage/mod.rs` — `TIMELINE_FILE`。
+- **WHEN** 读取新格式会话
+- **THEN** 校验 Timeline 与必要引用，从同一事实派生模型上下文和完整历史；summary 不替代权威事实，目录不需要 updates.jsonl。
 
 ### Requirement: Update version probe process lifetime
 自更新的目标版本探测和候选二进制冒烟检查 SHALL 将直接校验子进程的生命周期绑定到本次等待；超时或取消等待后 SHALL 请求终止该直接子进程，避免校验失败后继续后台运行。
@@ -1907,21 +1906,19 @@ Pager 在前台等待工具或子 Agent 而采用 parked 显示时，SHALL 继�
 #### Scenario: Fork excludes discarded response history
 
 - **WHEN** 父会话含 rewound、quarantined response 或 fork 指定截断点
-- **THEN** 子会话只继承所选历史，不复活被排除的 raw candidate；fork_filter 继续清除展示缓存。
+- **THEN** 子会话只继承所选历史，不复活被排除的 raw candidate；子 lineage 不携带父展示游标或执行资格。
 
 ### Requirement: Resident replay preserves the physical snapshot frontier
 
-Resident reconnect SHALL 不越过尚未由其 Timeline snapshot 覆盖的 response projection 后再丢弃该记录。初次回放和后续增量 SHALL 共享准确的物理截点，保持 response 和后继更新的顺序及恰好一次交付。
+Resident reconnect SHALL 以同一会话 owner 捕获的 Timeline 完整前缀与事实截点作为初始历史和 delta 的共同边界，保持 response、工具和独立事件顺序及恰好一次交付；不使用已删除的 updates offset。Cursor SHALL 绑定 session/lineage、projector 版本、事实覆盖及展开位置，不能把较早 display anchor 当作交付进度。原 live gate 和 load 完成屏障保持。
 
 #### Scenario: Response completes between authority and cache snapshots
-
-- **WHEN** resident actor 在 load 取得 Timeline snapshot 之后、读取 updates snapshot 之前提交新 response projection
-- **THEN** 初次回放在该物理记录之前截止，delta 在 load 完成前交付该响应和后继工具一次。
+- **WHEN** 采样在 resident 恢复屏障期间产生 response 或后继工具事实
+- **THEN** 原 writer 暂缓其提交，初始历史只消费完整截点；恢复 live gate 后再放行后续提交，屏障期间活动 attempt 的完整正文仍可交付，不丢失被 mute 的片段。
 
 #### Scenario: Already synthesized response reaches the physical cache
-
-- **WHEN** Timeline snapshot 已包含 response，初次回放合成它，而物理 projection 稍后追加
-- **THEN** delta 不重复展示该 response，后继独立更新仍交付。
+- **WHEN** 同一来源事实已在 snapshot 展示，随后出现在 buffered live
+- **THEN** 去重该事实并继续交付后继独立更新，不重排或丢失。
 
 ### Requirement: Communication bodies support Markdown and lossless source access
 
@@ -1965,52 +1962,43 @@ Resident reconnect SHALL 不越过尚未由其 Timeline snapshot 覆盖的 respo
 
 ### Requirement: Accepted response history is rebuilt from Timeline authority
 
-每个带 response admission identity 的 canonical assistant response SHALL 具有 versioned、可校验、可重建的 replay projection。`updates.jsonl` SHALL 只保存该 projection 的 cache record，不得把 provisional provider chunks 或 public SamplingAttempt lifecycle 当作第二份 response authority。所有 production replay 入口 SHALL 在建立 replay snapshot、cursor cutoff 或释放 buffered live events前，以 Timeline identity、event 与 digest 校验并补齐缺失 projection。
+所有 production replay 入口 SHALL 从已完整校验的 Timeline 和选定 branch 派生确定性的 response history；canonical 正文、identity、quarantine 与 anchor 以该事实为准，不保存或对账第二份 response projection。建立 cursor cutoff 或释放 buffered live 前 SHALL 确认同一截点内的历史覆盖与顺序。全量历史加载完成后才允许普通输入；不引入分页、提前 ready 或倒序事件回放。
 
 #### Scenario: Process stops after Timeline admission
-
-- **WHEN** Timeline 已 durable 接纳 response，但进程在 projection record 提交或 public Accepted 前停止
-- **THEN** cold load 从同一 Timeline response 合成并展示恰好一份 accepted history；不得调用 provider、继续 truncation/pause-turn 或执行工具。
+- **WHEN** durable admission 后、public Accepted 交付前退出
+- **THEN** cold load 派生恰好一份历史，不调用 provider、继续 truncation/pause-turn 或执行工具。
 
 #### Scenario: Projection append acknowledgment is lost
-
-- **WHEN** projection record 可能已提交但 ACK 丢失
-- **THEN** 系统按 response identity、Timeline event、digest 和 projection version exact reconcile；同内容不重复，不同内容 typed conflict 并 fail closed。
-
-#### Scenario: Candidate output precedes durable projection
-
-- **WHEN** text、reasoning 或 fallback candidate 已向支持撤回的 live client 发布，但 projection durable ACK 尚未返回
-- **THEN** candidate 仍可撤回且不作为 accepted cache；ACK 前不发布 Accepted，不开始后续 provider request、工具或 Turn success。
-
-#### Scenario: Quarantined response is replayed
-
-- **WHEN** Timeline admission 的 deterministic quarantine result 非零
-- **THEN** projection 记录已处理/Discarded disposition，不把 raw malformed tool preview 重建成 accepted 或 executable history；现有安全 repair/diagnostic 语义保持。
-
-#### Scenario: Tool-bearing response has later tool history
-
-- **WHEN** accepted response 包含工具调用且 cache 中存在后续 ToolCall/ToolCallUpdate 或 tool result 展示
-- **THEN** response projection boundary 在这些记录之前恢复，reconciliation 不重新 dispatch 工具，既有工具结果只显示一次。
+- **WHEN** 某项历史展示的唯一 Timeline 来源可能已提交但 durable ACK 丢失
+- **THEN** 按该来源的原 identity/payload exact 核对并同步，相同内容不重复、不同内容拒绝；不存在另一个 projection 文件的成功条件。
 
 #### Scenario: Earlier attempt was discarded
+- **WHEN** 较早 attempt 只有 transient candidate，较后 attempt 已接纳
+- **THEN** 只展示 exact request/attempt 的已接纳 response，不通过文本或邻近记录认领候选。
 
-- **WHEN** 同一 request 的较早 attempt 只有 transient candidate，而较后 attempt 具有 Timeline response admission
-- **THEN** 只按 exact `{request_id, attempt}` 重建较后 response；较早 candidate 不进入 replay。
+#### Scenario: Candidate output precedes durable projection
+- **WHEN** candidate 已向可撤回 live client 展示，Timeline durable ACK 尚未确认
+- **THEN** candidate 仍可撤回，不提前发布 Accepted、后继 provider/工具或成功 terminal。
+
+#### Scenario: Quarantined response is replayed
+- **WHEN** 确定性 quarantine 非零，或早期 attempt 没有 admission
+- **THEN** 不将其 candidate 变为 accepted/executable history；按 exact request/attempt 选择有效 response，保留原 diagnostic 语义。
+
+#### Scenario: Tool-bearing response has later tool history
+- **WHEN** response 后存在工具调用、结果及独立事件
+- **THEN** canonical response 在其 anchor 和依赖边界恢复，工具历史只显示一次且不重新派发。
 
 #### Scenario: Rewind or legacy response
-
-- **WHEN** identity-bearing response 已被 rewind 切出当前 branch，或历史 response 没有 admission identity
-- **THEN** reconciliation 不复活 rewound response，也不通过文本、位置或邻近 request 猜测 legacy projection。
+- **WHEN** 当前分支经过 rewind 或 Surface 已 compaction，或读取无可验证 admission 归属的来源
+- **THEN** 不复活被 rewind 的正文，也不从已压缩 Surface 反推 transcript；所选完整历史与原来源顺序一致，不猜测缺失 admission 归属，旧 schema 明确拒绝。
 
 #### Scenario: Direct replay without writer authority
-
-- **WHEN** 子任务视图、导出或其他 read-only production reader 读取存在缺失 projection 的会话
-- **THEN** 使用同一 Timeline-derived projector 在内存中返回完整去重历史，不获取 writer lease或修改持久数据。
+- **WHEN** child view、export 或 read-only reader 读取会话
+- **THEN** 使用同一纯 projector，不取 writer lease、不写磁盘、不触发执行。
 
 #### Scenario: Cursor intersects one projection record
-
-- **WHEN** reconnect cursor 位于一个可展开为多条 ACP update 的 response projection 内部，且无法证明其余 update 已应用
-- **THEN** replay 回退为完整历史替换，不跳过半个 response，也不在 later event 之后补发缺失前件。
+- **WHEN** cursor 无法证明某个事实展开的全部通知已应用，或 lineage/projector 版本不匹配
+- **THEN** 完整替换历史，不跳半个 response，也不在后继事件之后补前件。
 
 ### Requirement: Minimal native scrollback preserves semantic lines and links
 
@@ -2844,19 +2832,23 @@ Pager SHALL perform inline-media filesystem reads and image preparation off the 
 - **THEN** the completion remains in the detached old mailbox and cannot populate the replacement session cache
 
 ### Requirement: Cold replay paint work is bounded by a visible progress cadence
-While a visible session is replaying historical notifications, Pager SHALL apply a minimum 100 ms interval between automatically requested paints from ACP replay, animation deadlines, and periodic UI maintenance, unless the configured interval is slower. Explicit user input and other direct UI actions SHALL retain their existing immediate redraw behavior. When the session-loaded boundary arrives, Pager SHALL return to the normal configured cadence and show the final replay state and prompt without waiting for another replay interval. The paint policy SHALL NOT drop notifications, reorder replay, or admit a prompt before the existing load barrier.
+While a visible session is replaying historical notifications, Pager SHALL apply a minimum 100 ms interval between automatically requested paints from ACP replay, animation deadlines, and periodic UI maintenance, unless the configured interval is slower. History SHALL be consumed in order as quickly as processing allows and SHALL become visible at the eligible paint boundaries without simulated playback delays. During the visible session's loading window, ordinary keys, paste and mouse input SHALL NOT edit the composer, submit or queue prompts, invoke commands or change the followed scroll position. The existing global Quit shortcut (Ctrl+D by default) SHALL remain available through its existing confirmation and suspension path, and terminal resize SHALL continue to update layout. An existing draft SHALL survive the loading window. When the session-loaded boundary arrives, Pager SHALL return to normal input and configured paint cadence and show the final replay state and prompt without waiting for another replay interval. The paint policy SHALL NOT drop notifications, reorder replay, or admit a prompt before the existing load barrier.
 
 #### Scenario: Long history streams faster than painting
 - **WHEN** a visible cold session receives many historical notifications while `loading_replay` is true
-- **THEN** automatic ACP, animation, and periodic maintenance paints use at least a 100 ms interval while notifications continue to be processed in order.
+- **THEN** notifications continue to be processed in order without playback delays and eligible automatic paints show the advancing history with at least a 100 ms interval.
 
 #### Scenario: User types during replay
-- **WHEN** terminal input arrives during a replay interval
-- **THEN** its existing immediate handling and redraw are not delayed by the automatic paint cadence, and the draft remains until the load barrier permits submission.
+- **WHEN** ordinary keys, Enter, paste or mouse input arrive while the visible session is loading
+- **THEN** the input is ignored without editing an existing draft, queuing a prompt, dispatching a command or changing the followed history position.
+
+#### Scenario: User quits or resizes during replay
+- **WHEN** the user presses the global Quit shortcut during loading or the terminal is resized
+- **THEN** Quit uses its existing confirmation and suspension path, and resize updates the layout without enabling ordinary input.
 
 #### Scenario: Replay completes
 - **WHEN** the session-loaded boundary ends `loading_replay`
-- **THEN** the final history and prompt use the normal configured paint cadence rather than waiting for a pending replay-only interval.
+- **THEN** the final history and preserved draft use the normal configured paint cadence rather than waiting for a pending replay-only interval, and ordinary input becomes available again.
 
 ### Requirement: macOS clipboard transfer files have a per-file write budget
 macOS clipboard AppleScript subprocesses SHALL inherit a regular-file size limit no greater than 50,000,000 bytes. Format fallback SHALL catch image coercion failures only; once coercion succeeds, transfer-file open/write/close failures SHALL propagate as an image-read error and the owned private temporary directory SHALL be cleaned. This bounds each file, not aggregate temporary storage, helper/AppKit memory, or later image decoding.
@@ -3074,8 +3066,8 @@ Pager SHALL render non-empty freeform notes from an accepted `ask_user_question`
 - **THEN** 导出保留相应用户展示，父级生命周期不代替完整 child transcript，历史 Hook 不重新执行。
 
 #### Scenario: Response cache is incomplete or stale
-- **WHEN** canonical response 需要从 Timeline 补投影，或存在 discarded/quarantined/rewound candidate
-- **THEN** 与现有 reconciliation 一致地重建去重历史，不复活排除内容、不猜测无法证明的响应位置。
+- **WHEN** canonical response 需要从 Timeline 派生历史，或存在 discarded/quarantined/rewound candidate
+- **THEN** 使用与 resume 相同的 projector 重建去重历史，不复活排除内容、不猜测无法证明的响应位置。
 
 #### Scenario: Optional display material is unavailable
 - **WHEN** 已记录的附件引用或截断结果缺少可选展示材料
@@ -3362,7 +3354,7 @@ Export 与 replay SHALL 展示已记录的 Behavior identity、Plan phase 与控
 来源 reader SHALL 校验捕获 Timeline 中的 Control snapshot，并在必要的只读末尾投影保留最新 Behavior/Goal 状态。该 snapshot SHALL 明确表示截点状态，未知中间事件顺序 SHALL 保持估计，不用当前机器时间伪造历史。
 
 #### Scenario: Display cache omits the last Goal transition
-- **WHEN** 捕获 Timeline 已提交退出/clear Goal，而 updates 中最后状态仍为 active
+- **WHEN** 捕获 Timeline 已提交退出/clear Goal，且其前一历史状态为 active
 - **THEN** 结尾 snapshot 恢复已提交模式/Goal 截点，既有历史正文顺序不被猜测重排，来源文件不变。
 
 #### Scenario: Control is invalid
@@ -3628,31 +3620,31 @@ Replay SHALL 用当前节点已交付事件构造普通被动 task/status 展示
 
 ### Requirement: Resume restores ordered communication history
 
-Resume SHALL 恢复普通会话的原历史展示，不把历史恢复当作新对话或 Replay 播放页面。Timeline-only 通信回执 SHALL 与既有正文按可验证因果锚点合并，保留稳定 receipt identity、原正文/通信样式和来源时间；加载后 SHALL NOT 把全部历史回执重新追加到最新输入后。内部 `isReplay` 表示历史加载，不生成播放器文案、新的请求、通知消费或 Hook。
+Resume SHALL 从同一 Timeline 截点恢复通信与普通正文，保留稳定 receipt/source/phase identity、原正文、来源时间和可验证锚点；历史恢复不得变成新对话或播放页面，不重新请求、消费通知、运行 Hook 或集中追加全部 receipt 到末尾。
 
 #### Scenario: Reply is absent from display cache
-- **WHEN** Timeline 已收到 Agent 回复、可关联已记录通信请求/response，而 updates 没有该 receipt projection
-- **THEN** full resume 将回复恢复在对应历史区间，后续已记录正文仍在其后，不集中追加到历史尾部。
+- **WHEN** 历史含可验证请求/回复锚点和后继正文
+- **THEN** 回复处于原历史区间，后继正文仍在其后，不依赖 updates cache。
 
 #### Scenario: Reply already has a historical position
-- **WHEN** display cache 已含同一 receipt，或者 reconnect 保留已显示记录
-- **THEN** 保留其原位置并只展示一次，不由 load 后 snapshot 追加副本。
+- **WHEN** reconnect 已保留同一 receipt
+- **THEN** 原位保留一次，load 后不再追加副本。
 
 #### Scenario: Child history is opened after resume
-- **WHEN** 用户在恢复父页面后首次打开 child
-- **THEN** child 使用同一有序历史规则，已有 request/reply 的样式和身份与正常显示一致，不将通信单独移到末尾。
+- **WHEN** 首次打开 child 历史
+- **THEN** 使用相同顺序、样式与身份规则，不把通信另移到末尾。
 
 #### Scenario: Incoming inquiry cache omits a phase
-- **WHEN** 接收方 inquiry 的缓存缺少 received、approval 或 completed 阶段，或不同 source peer 使用相同 inquiry ID
-- **THEN** 仅按 source peer、inquiry ID 和 phase 补齐缺失事实，已有阶段原位保留并可作为经 Timeline 身份核对的锚点，不跨 peer 去重，不创建新 inquiry 或审批请求。
+- **WHEN** 多个 source peer 使用相同 inquiry ID 或已有部分 phase
+- **THEN** 按 peer、inquiry ID、phase 选择各自事实，不跨 peer 去重，不新建询问/审批。
 
 #### Scenario: Historical anchor or body is absent
-- **WHEN** receipt 无可验证定位锚点，或已保存 payload 缺失/校验失败
-- **THEN** 使用明确且有界的降级位置或既有缺失说明，不以文本、当前时间或执行历史来补齐，不伪造精确顺序。
+- **WHEN** receipt 无可验证锚点或其正文不可读取
+- **THEN** 沿既有明确有界降级/缺失说明处理，不以文本、当前时间或重新执行伪造精确历史。
 
 #### Scenario: Reconnect cursor crosses synthesized history
-- **WHEN** 本次恢复需合成不在 physical cache 中的历史记录，不能证明当前 cursor 已涵盖它
-- **THEN** 按既有完整替换规则重建有序历史；合成记录不充当源缓存 cursor，重复 reload 不重复显示。
+- **WHEN** 当前 cursor 不能证明同一 Timeline 截点的 receipt 已完整应用
+- **THEN** 按原完整替换规则重建，不能因 display anchor 较早跳过该事实，重复 reload 不重复显示。
 
 ### Requirement: Agent tree status reconciliation preserves freshness and binding
 
@@ -3777,66 +3769,60 @@ Plan-mode `Chat about this` and `Skip interview` responses SHALL preserve non-em
 - **THEN** no notes annotation is emitted for that question.
 
 ### Requirement: Offline transcript reads detect missing committed user echoes
-The offline transcript reader MUST detect when the selected Timeline branch contains a committed user item with a persisted prompt index but the rewind-filtered display ledger contains no complete ACP user echo for that input's exact message identity. Completeness includes the ordered block count and digest committed with the consumed input. It MUST fail the read with an explicit incomplete-cache error and MUST NOT assign a nearby update by timestamp or synthesize a replacement row.
 
-For each eligible durably ended Timeline turn, the offline transcript reader MUST find a cached `TurnCompleted` with the exact ACP prompt identity persisted on `TurnStarted`. If the mapping or row is absent, it MUST report an incomplete cache and MUST NOT invent a completion result or stop reason. Recovery-only terminal records that do not represent a user-facing completion are excluded.
+Offline transcript SHALL 从已验证输入事实及其原始 display 来源重建用户 echo，保持 exact message/prompt identity、块顺序、display text 和 hide 语义；必要 display 来源缺失或损坏 SHALL 明确失败，不用模型包装后的文本替代。符合条件的 turn terminal SHALL 从对应 durable 事实与原 prompt identity 重建，不猜测 stop reason；recovery-only terminal 不伪装用户完成。
 
 #### Scenario: A committed user echo is missing
-- **WHEN** an offline read contains a current-branch committed user item with prompt index `n`
-- **AND** the captured display ledger has no ACP user chunk with prompt index `n`
-- **THEN** the read fails with an explicit incomplete-cache error naming `n`
+- **WHEN** 输入已提交且无独立展示缓存
+- **THEN** 原 display 来源完整时直接重建；必要来源缺失则明确失败，不从模型包装文本或相邻消息补齐。
 
 #### Scenario: A matching complete echo exists
-- **WHEN** the captured display ledger contains all ACP user chunks for the exact committed message identity
-- **AND** their ordered block count and digest match the consumed input's display fingerprint
-- **THEN** the offline read proceeds without changing the source ledger
+- **WHEN** 输入事实含完整 display 来源及可验证身份
+- **THEN** 只派生一份正确 echo，不需要磁盘展示缓存，也不修改来源。
 
 #### Scenario: A user echo is truncated or missing a block
-- **WHEN** a matching prompt identity exists in the display ledger
-- **AND** its ordered chunks are truncated or do not match the committed block count or digest
-- **THEN** the read fails with an explicit incomplete-cache error
+- **WHEN** 原 display 来源缺块、损坏或与身份/指纹不符
+- **THEN** 明确报错，不按邻近消息、时间或当前模型上下文补齐。
 
 #### Scenario: A terminal row is missing
-- **WHEN** an eligible Timeline turn has a durable `TurnStarted` prompt identity and a durable terminal event
-- **AND** the display ledger has no `TurnCompleted` with that exact prompt identity
-- **THEN** the read fails with an explicit incomplete-cache error without synthesizing a completion
+- **WHEN** 可展示的 terminal 无法关联原 prompt 或缺少必需终态数据
+- **THEN** 不虚构完成或原因，读取明确失败。
 
 #### Scenario: A prompt was removed by rewind
-- **WHEN** a committed user item exists only on a discarded branch
-- **THEN** its absent display echo does not fail the selected-branch read
+- **WHEN** prompt 只在被舍弃分支中
+- **THEN** 不展示它，其无展示 echo 不构成当前分支缺失。
 
 ### Requirement: Offline transcript reads detect missing durable Workflow and Control projections
-Before publishing a durable Workflow, Goal, Control, or CurrentMode display row, the producer MUST durably record a bounded Timeline expectation that binds the exact UI event identity, source family and identity, source revision captured with the update, and serialized payload digest. Offline transcript reads MUST compare each expectation visible through the captured Timeline frontier with the captured display-ledger frontier and fail with an explicit incomplete-cache error if the row is absent or its digest differs. Expectations MUST NOT contain display bodies or grant execution authority. Ephemeral updates and updates coalesced before durable publication MUST NOT create expectations. Readers MUST NOT infer a missing row from timestamps, mutable manifests, neighboring rows, or current runtime state, and MUST NOT rewrite the cache.
+
+Workflow、Goal、Control、CurrentMode 的持久展示 SHALL 由捕获截点内对应版本的 typed 事实或不可变引用完整重建，来源绑定 identity、revision 与展示位置，不再要求独立展示账本或只有 digest 的 expectation。必要来源缺失、损坏或冲突 SHALL 明确失败；不得借用邻近 revision、可变 manifest 或当前 runtime。观察不修复磁盘、不授予执行权威。
 
 #### Scenario: Durable Workflow row is missing
-- **WHEN** the captured Timeline contains a Workflow projection expectation for event ID `e`
-- **AND** the captured display ledger contains no row with event ID `e`
-- **THEN** the offline read fails with an incomplete-cache error identifying the missing projection
-
-#### Scenario: Durable Control row has changed
-- **WHEN** the captured display ledger contains the expected event ID but its serialized payload digest differs from the Timeline expectation
-- **THEN** the offline read fails with an incomplete-cache error and does not use a nearby revision as a replacement
-
-#### Scenario: Ephemeral Workflow or Control snapshot
-- **WHEN** a Workflow or Control snapshot is sent only as an ephemeral or coalesced update
-- **THEN** no durable projection expectation is required and its absence from the captured display ledger does not fail the read
+- **WHEN** 捕获 Timeline 含完整合法的 Workflow/Goal/Control/CurrentMode 事实及来源
+- **THEN** 离线读者直接派生对应历史，即使不存在 updates 文件也成功。
 
 #### Scenario: Durable Goal or CurrentMode row is missing
-- **WHEN** the captured Timeline contains a Goal or CurrentMode projection expectation
-- **AND** the captured display ledger contains no row with that exact event ID
-- **THEN** the offline read fails with an incomplete-cache error naming the missing projection
-
-#### Scenario: Captured frontiers exclude a later projection
-- **WHEN** a projection expectation or display row is appended after the read's captured Timeline or display-ledger frontier
-- **THEN** the read does not mix that later fact into its fixed snapshot
-
-#### Scenario: A cache-missing expectation still reserves its event identity
-- **WHEN** a cold load has a validated Timeline expectation whose cache append was interrupted, or whose row belongs to a rewind-discarded branch
-- **THEN** the process event counter is seeded past that expectation before the session actor can publish another row, so the missing identity is not reused
+- **WHEN** Goal/CurrentMode 事实已提交且未交付展示
+- **THEN** 必要版本来源完整时直接重建；来源缺失或损坏则明确失败，不以当前 runtime 状态代替。
 
 #### Scenario: Existing history has no projection expectation
-- **WHEN** a current-format history contains Workflow or Control rows but predates projection expectation facts
-- **THEN** the reader does not infer missing expectations or reconstruct absent rows; unsupported older Timeline formats follow schema-version rejection
+- **WHEN** 新格式历史使用完整 typed 来源而不含旧 expectation，或读到不支持的旧格式
+- **THEN** 前者按新格式校验并派生，后者明确 schema 拒绝；不猜测缺失事实、不双读旧 updates。
+
+#### Scenario: Durable Control row has changed
+- **WHEN** 需要的版本来源缺失、checksum 错误或身份/revision 冲突
+- **THEN** 明确拒绝，不以其他版本替换。
+
+#### Scenario: Ephemeral Workflow or Control snapshot
+- **WHEN** 纯瞬时/coalesced 更新未获持久展示义务
+- **THEN** 其缺失不使读取失败，也不新增永久事实。
+
+#### Scenario: Captured frontiers exclude a later projection
+- **WHEN** 捕获后发生新状态提交
+- **THEN** 不混入本次历史，固定截点保持不变。
+
+#### Scenario: A cache-missing expectation still reserves its event identity
+- **WHEN** durable 事实尚未交付或已被 rewind 隐藏
+- **THEN** 身份仍占用，cold writer 不复用该 identity。
 
 ### Requirement: Resume displays and restores suspended work
 
@@ -4145,7 +4131,7 @@ When a text-only model requires image recovery, the client SHALL render the reco
 
 #### Scenario: Child history replay preserves durable recovery order
 - **WHEN** Pager 从 child 的持久化 history 恢复 ImageRecovery lifecycle 与 ACP 输出
-- **THEN** 两类事件按 updates.jsonl 原始顺序投影，recovery 行处在其原始会话位置，并按随后匹配的 prompt terminal 收尾。
+- **THEN** 两类事件按 Timeline 的来源/展示锚点顺序投影，recovery 行处在其原始会话位置，并按随后匹配的 prompt terminal 收尾。
 
 ### Requirement: Unchanged Agent and Sampling selections do not claim a switch
 
@@ -4253,3 +4239,75 @@ Settings 保存与失败回滚 SHALL 对 show_tips 使用 false、对 auto_updat
 #### Scenario: First preference write fails
 - **WHEN** show_tips 或 auto_update 未配置，首次修改保存失败
 - **THEN** 分别恢复显示 false 或 true，再次选择失败的目标值能重新保存。
+
+### Requirement: Failed local input checkpoints release their submitting placeholder
+
+Pager SHALL 在发送前本地 checkpoint 失败时释放该请求仍占有的 submitting 占位与状态查询计时，保留原请求身份、可用图片及草稿，等待显式重试。SHALL NOT 自动派发或生成服务端完成事实，也不得关闭其他请求或已确认运行的前台。
+
+#### Scenario: Image checkpoint fails before dispatch
+- **WHEN** 图片提交的本地 checkpoint 失败且前台仍是该请求的 submitting 占位
+- **THEN** 页面退出 Sending、停止该占位的 watchdog，恢复完整草稿；显式原样重试使用原身份及图片且可通过既有 RAM-only gate。
+
+#### Scenario: User edits while checkpoint is pending
+- **WHEN** checkpoint 失败前用户已输入新草稿
+- **THEN** 保留新编辑，将原请求完整保留为需审阅队列项，不自动重发。
+
+#### Scenario: Foreground ownership changes before failure
+- **WHEN** checkpoint 失败到达时前台已运行或属于另一个 prompt
+- **THEN** 不清除该前台身份、状态或观察计时。
+
+### Requirement: Explicit image submissions do not require text-only draft persistence
+
+Pager SHALL 对携带显式图片附件的普通及 steer 输入在首次发送时保留内存请求身份与附件，并沿正常 ACP 提交路径派发，不以不支持图片的本地文本草稿 checkpoint 为前提。SHALL 展示本地图片草稿无法跨重启恢复的限制，不宣称本地已持久化。图片加载验证、服务端接纳及不明结果的原身份恢复规则继续适用；其他请求的 checkpoint 失败 SHALL NOT 被自动绕过。
+
+#### Scenario: First image prompt submission
+- **WHEN** 用户首次发送携带有效显式图片的输入
+- **THEN** 正常发送包含原图片字节、正文和 prompt identity 的 ACP 请求，无需因本地草稿不支持图片而再按一次发送。
+
+#### Scenario: First image steering submission
+- **WHEN** 用户向既有前台插入携带显式图片的输入
+- **THEN** 正常派发 grow/steer，保留目标 turn、interjection identity 与图片，不新增前台回合。
+
+#### Scenario: Image request cannot be delivered
+- **WHEN** 图片读取或 ACP 请求失败
+- **THEN** 现有失败路径保留可用原图片和身份，允许用户审阅重试，不自动重复发送。
+
+#### Scenario: Text checkpoint fails
+- **WHEN** 无显式图片的请求发生本地 checkpoint 错误
+- **THEN** 保持原错误恢复流程，本次不派发 ACP 请求；文字图片占位符不授权跳过 gate 或读取文件。
+
+### Requirement: Historical Markdown defers only derived presentation work
+
+Pager SHALL complete every delivered historical assistant/thinking source, including pending normalizer bytes and existing terminal lifecycle/timing, before crossing the existing full-history load barrier. It MAY defer rebuildable final Markdown presentation for offscreen content. Raw and pretty copy, hyperlinks, source maps, diagrams and visible layout SHALL return complete results equivalent to eager finalization before those results are used. Image-reference filesystem observation SHALL remain at the existing message completion boundary. Offscreen estimates SHALL NOT depend on cache warmth; exact viewport layout and source/entry anchors SHALL remain consistent after materialization, resize and raw/pretty changes. This SHALL NOT introduce pagination, early readiness or background history restoration.
+
+#### Scenario: Offscreen source completes before first drawing
+- **WHEN** historical source ends with buffered normalization bytes and its message remains offscreen
+- **THEN** source/timing/order are complete at the existing load barrier, while first pretty copy or drawing materializes the complete final presentation without missing text or stale maps.
+
+#### Scenario: Media and diagram observations survive deferred presentation
+- **WHEN** a historical message references an image or contains a Mermaid fence, and image files later change before its first drawing
+- **THEN** message-completion image reference discovery/validation retains its existing observation, and Mermaid source/affordance rows match eager output; deferred pure presentation does not postpone filesystem observation.
+
+#### Scenario: Materialization preserves display and source anchors
+- **WHEN** a user scrolls to a formerly offscreen historical block, copies it, changes width/raw mode or later receives another chunk
+- **THEN** rendered content, links, source maps and logical selection/entry anchors stay equivalent to eager processing; estimates do not change merely because a cache was warmed, and normal input remains governed by the existing full-history load boundary.
+
+### Requirement: Descendant restoration reuses only boundary-bound validated facts
+
+Session load MAY reuse root child-ownership facts already validated for the same session and history frontier, and MAY derive descendant ownership and ordered lifecycle/control presentation from the same validated read. Reuse SHALL NOT infer authority from UI rows, cross session/load boundaries or bypass storage identity, complete record validation and child ownership checks. Missing reuse data SHALL NOT establish an empty verified tree. Restoration SHALL preserve source-local replay identities, child identity/CWD/worktree/control semantics, history order and the existing full-history readiness barrier without pagination or background history restoration.
+
+#### Scenario: Root history is reused at its captured frontier
+- **WHEN** a successful load supplies validated ownership facts for its exact root session and emitted history frontier
+- **THEN** descendant restoration uses those facts without rereading the root, and later appends cannot enter that earlier boundary or be confused with an empty result.
+
+#### Scenario: Descendant ownership and control share one read
+- **WHEN** recovery visits a valid child parent containing nested lifecycle and model/Agent control facts
+- **THEN** one complete validated read supplies ownership/enrichment and the ordered source-local projection, preserving identity and preventing duplicate live/replay rows.
+
+#### Scenario: Reuse is absent, stale or foreign
+- **WHEN** ownership data belongs to another session/load boundary, is malformed, or a required child read/link is missing or conflicting
+- **THEN** recovery does not accept that data as ownership authority or a verified empty tree; it validates through the existing fallback or rejects the affected recovery without fabricating success or releasing input before required history and checks finish.
+
+#### Scenario: Optional ownership exceeds the response budget
+- **WHEN** the root ownership projection would exceed the bounded optional response payload
+- **THEN** the server omits the whole optimization and restoration uses the independently validated fallback, without truncating ownership into an incomplete or empty verified tree.

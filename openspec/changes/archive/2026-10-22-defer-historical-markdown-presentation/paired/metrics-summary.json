@@ -1,0 +1,2802 @@
+[
+  {
+    "stage": "after",
+    "case": "modern",
+    "turns": 128,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 24.0,
+        "range": [
+          24.0,
+          25.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 24.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=184.0 ready_ms=184.1 instrumentation=true ready_echo_p95_ms=8.0 ready_echo_max_ms=11.2 frames=24"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 24.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.7 ready_ms=162.8 instrumentation=true ready_echo_p95_ms=4.7 ready_echo_max_ms=6.0 frames=24"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=246.6 ready_ms=289.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.3 frames=25"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 184.0,
+        "range": [
+          162.7,
+          246.6
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 184.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=184.0 ready_ms=184.1 instrumentation=true ready_echo_p95_ms=8.0 ready_echo_max_ms=11.2 frames=24"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 162.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.7 ready_ms=162.8 instrumentation=true ready_echo_p95_ms=4.7 ready_echo_max_ms=6.0 frames=24"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 246.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=246.6 ready_ms=289.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.3 frames=25"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 6.0,
+        "range": [
+          4.3,
+          11.2
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 11.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=184.0 ready_ms=184.1 instrumentation=true ready_echo_p95_ms=8.0 ready_echo_max_ms=11.2 frames=24"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 6.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.7 ready_ms=162.8 instrumentation=true ready_echo_p95_ms=4.7 ready_echo_max_ms=6.0 frames=24"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 4.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=246.6 ready_ms=289.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.3 frames=25"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 4.7,
+        "range": [
+          4.1,
+          8.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 8.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=184.0 ready_ms=184.1 instrumentation=true ready_echo_p95_ms=8.0 ready_echo_max_ms=11.2 frames=24"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 4.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.7 ready_ms=162.8 instrumentation=true ready_echo_p95_ms=4.7 ready_echo_max_ms=6.0 frames=24"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=246.6 ready_ms=289.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.3 frames=25"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 184.1,
+        "range": [
+          162.8,
+          289.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 184.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=184.0 ready_ms=184.1 instrumentation=true ready_echo_p95_ms=8.0 ready_echo_max_ms=11.2 frames=24"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 162.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.7 ready_ms=162.8 instrumentation=true ready_echo_p95_ms=4.7 ready_echo_max_ms=6.0 frames=24"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 289.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=246.6 ready_ms=289.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.3 frames=25"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=184.0 ready_ms=184.1 instrumentation=true ready_echo_p95_ms=8.0 ready_echo_max_ms=11.2 frames=24"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.7 ready_ms=162.8 instrumentation=true ready_echo_p95_ms=4.7 ready_echo_max_ms=6.0 frames=24"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=246.6 ready_ms=289.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.3 frames=25"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "turns": 512,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 25.0,
+        "range": [
+          25.0,
+          25.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=171.8 ready_ms=288.0 instrumentation=true ready_echo_p95_ms=4.5 ready_echo_max_ms=4.6 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=175.4 ready_ms=295.7 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.3 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=178.8 ready_ms=298.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=25"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 175.4,
+        "range": [
+          171.8,
+          178.8
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 171.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=171.8 ready_ms=288.0 instrumentation=true ready_echo_p95_ms=4.5 ready_echo_max_ms=4.6 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 175.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=175.4 ready_ms=295.7 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.3 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 178.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=178.8 ready_ms=298.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=25"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 4.3,
+        "range": [
+          4.0,
+          4.6
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 4.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=171.8 ready_ms=288.0 instrumentation=true ready_echo_p95_ms=4.5 ready_echo_max_ms=4.6 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 4.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=175.4 ready_ms=295.7 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.3 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 4.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=178.8 ready_ms=298.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=25"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 4.2,
+        "range": [
+          3.9,
+          4.5
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 4.5,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=171.8 ready_ms=288.0 instrumentation=true ready_echo_p95_ms=4.5 ready_echo_max_ms=4.6 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 4.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=175.4 ready_ms=295.7 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.3 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 3.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=178.8 ready_ms=298.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=25"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 295.7,
+        "range": [
+          288.0,
+          298.7
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 288.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=171.8 ready_ms=288.0 instrumentation=true ready_echo_p95_ms=4.5 ready_echo_max_ms=4.6 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 295.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=175.4 ready_ms=295.7 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.3 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 298.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=178.8 ready_ms=298.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=25"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=171.8 ready_ms=288.0 instrumentation=true ready_echo_p95_ms=4.5 ready_echo_max_ms=4.6 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=175.4 ready_ms=295.7 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.3 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=178.8 ready_ms=298.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=25"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "turns": 2048,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 29.0,
+        "range": [
+          28.0,
+          29.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 29.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=669.6 ready_ms=961.5 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=29"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 28.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=562.6 ready_ms=878.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 29.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=674.9 ready_ms=938.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=29"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 669.6,
+        "range": [
+          562.6,
+          674.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 669.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=669.6 ready_ms=961.5 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=29"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 562.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=562.6 ready_ms=878.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 674.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=674.9 ready_ms=938.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=29"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 4.1,
+        "range": [
+          4.0,
+          4.1
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=669.6 ready_ms=961.5 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=29"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=562.6 ready_ms=878.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 4.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=674.9 ready_ms=938.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=29"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 4.1,
+        "range": [
+          3.9,
+          4.1
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=669.6 ready_ms=961.5 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=29"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=562.6 ready_ms=878.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 3.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=674.9 ready_ms=938.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=29"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 938.7,
+        "range": [
+          878.9,
+          961.5
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 961.5,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=669.6 ready_ms=961.5 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=29"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 878.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=562.6 ready_ms=878.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 938.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=674.9 ready_ms=938.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=29"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-modern-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=669.6 ready_ms=961.5 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=29"
+          },
+          {
+            "repeat": 2,
+            "source": "after-modern-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=562.6 ready_ms=878.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-modern-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=674.9 ready_ms=938.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=29"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "turns": 512,
+    "metric_type": "resume-progress",
+    "metrics": {
+      "advances": {
+        "median": 1.0,
+        "range": [
+          1.0,
+          1.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 1.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=289.1 advances=1 highest=Some(512) visible_maxima=[(289.054917ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=143.5"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 1.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=281.1 history_visible_ms=281.1 advances=1 highest=Some(512) visible_maxima=[(281.12725ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=141.5"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 1.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=354.4 history_visible_ms=354.4 advances=1 highest=Some(512) visible_maxima=[(354.397458ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=140.5"
+          }
+        ]
+      },
+      "first_history_ms": {
+        "median": 289.1,
+        "range": [
+          281.1,
+          354.4
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 289.1,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=289.1 advances=1 highest=Some(512) visible_maxima=[(289.054917ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=143.5"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 281.1,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=281.1 history_visible_ms=281.1 advances=1 highest=Some(512) visible_maxima=[(281.12725ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=141.5"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 354.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=354.4 history_visible_ms=354.4 advances=1 highest=Some(512) visible_maxima=[(354.397458ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=140.5"
+          }
+        ]
+      },
+      "highest": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 512.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=289.1 advances=1 highest=Some(512) visible_maxima=[(289.054917ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=143.5"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 512.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=281.1 history_visible_ms=281.1 advances=1 highest=Some(512) visible_maxima=[(281.12725ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=141.5"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 512.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=354.4 history_visible_ms=354.4 advances=1 highest=Some(512) visible_maxima=[(354.397458ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=140.5"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 289.1,
+        "range": [
+          281.1,
+          354.4
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 289.1,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=289.1 advances=1 highest=Some(512) visible_maxima=[(289.054917ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=143.5"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 281.1,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=281.1 history_visible_ms=281.1 advances=1 highest=Some(512) visible_maxima=[(281.12725ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=141.5"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 354.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=354.4 history_visible_ms=354.4 advances=1 highest=Some(512) visible_maxima=[(354.397458ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=140.5"
+          }
+        ]
+      },
+      "max_content_gap_ms": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=289.1 advances=1 highest=Some(512) visible_maxima=[(289.054917ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=143.5"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=281.1 history_visible_ms=281.1 advances=1 highest=Some(512) visible_maxima=[(281.12725ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=141.5"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=354.4 history_visible_ms=354.4 advances=1 highest=Some(512) visible_maxima=[(354.397458ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=140.5"
+          }
+        ]
+      },
+      "observed_loading_window_ms": {
+        "median": 141.5,
+        "range": [
+          140.5,
+          143.5
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 143.5,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=289.1 advances=1 highest=Some(512) visible_maxima=[(289.054917ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=143.5"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 141.5,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=281.1 history_visible_ms=281.1 advances=1 highest=Some(512) visible_maxima=[(281.12725ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=141.5"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 140.5,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=354.4 history_visible_ms=354.4 advances=1 highest=Some(512) visible_maxima=[(354.397458ms, 512)] max_content_gap_ms=0.0 observed_loading_window_ms=140.5"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "turns": 512,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 25.0,
+        "range": [
+          25.0,
+          25.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=289.3 ready_ms=289.4 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=281.3 ready_ms=281.4 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=354.7 ready_ms=421.8 instrumentation=true ready_echo_p95_ms=49.7 ready_echo_max_ms=50.9 frames=25"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 289.3,
+        "range": [
+          281.3,
+          354.7
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 289.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=289.3 ready_ms=289.4 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 281.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=281.3 ready_ms=281.4 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 354.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=354.7 ready_ms=421.8 instrumentation=true ready_echo_p95_ms=49.7 ready_echo_max_ms=50.9 frames=25"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 49.9,
+        "range": [
+          49.1,
+          50.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 49.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=289.3 ready_ms=289.4 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 49.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=281.3 ready_ms=281.4 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 50.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=354.7 ready_ms=421.8 instrumentation=true ready_echo_p95_ms=49.7 ready_echo_max_ms=50.9 frames=25"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 49.7,
+        "range": [
+          49.0,
+          49.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 49.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=289.3 ready_ms=289.4 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 49.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=281.3 ready_ms=281.4 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 49.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=354.7 ready_ms=421.8 instrumentation=true ready_echo_p95_ms=49.7 ready_echo_max_ms=50.9 frames=25"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 289.4,
+        "range": [
+          281.4,
+          421.8
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 289.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=289.3 ready_ms=289.4 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 281.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=281.3 ready_ms=281.4 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 421.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=354.7 ready_ms=421.8 instrumentation=true ready_echo_p95_ms=49.7 ready_echo_max_ms=50.9 frames=25"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=289.3 ready_ms=289.4 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=281.3 ready_ms=281.4 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=354.7 ready_ms=421.8 instrumentation=true ready_echo_p95_ms=49.7 ready_echo_max_ms=50.9 frames=25"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "turns": 2048,
+    "metric_type": "resume-progress",
+    "metrics": {
+      "advances": {
+        "median": 3.0,
+        "range": [
+          3.0,
+          3.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 3.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=391.9 history_visible_ms=666.7 advances=3 highest=Some(2048) visible_maxima=[(391.934625ms, 288), (550.815083ms, 1584), (666.7105ms, 2048)] max_content_gap_ms=158.9 observed_loading_window_ms=505.4"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 3.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=392.0 history_visible_ms=677.1 advances=3 highest=Some(2048) visible_maxima=[(391.970416ms, 224), (558.409541ms, 1552), (677.0805ms, 2048)] max_content_gap_ms=166.4 observed_loading_window_ms=517.9"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 3.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=403.2 history_visible_ms=690.1 advances=3 highest=Some(2048) visible_maxima=[(403.150083ms, 384), (573.59875ms, 1600), (690.097875ms, 2048)] max_content_gap_ms=170.4 observed_loading_window_ms=523.3"
+          }
+        ]
+      },
+      "first_history_ms": {
+        "median": 392.0,
+        "range": [
+          391.9,
+          403.2
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 391.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=391.9 history_visible_ms=666.7 advances=3 highest=Some(2048) visible_maxima=[(391.934625ms, 288), (550.815083ms, 1584), (666.7105ms, 2048)] max_content_gap_ms=158.9 observed_loading_window_ms=505.4"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 392.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=392.0 history_visible_ms=677.1 advances=3 highest=Some(2048) visible_maxima=[(391.970416ms, 224), (558.409541ms, 1552), (677.0805ms, 2048)] max_content_gap_ms=166.4 observed_loading_window_ms=517.9"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 403.2,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=403.2 history_visible_ms=690.1 advances=3 highest=Some(2048) visible_maxima=[(403.150083ms, 384), (573.59875ms, 1600), (690.097875ms, 2048)] max_content_gap_ms=170.4 observed_loading_window_ms=523.3"
+          }
+        ]
+      },
+      "highest": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 2048.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=391.9 history_visible_ms=666.7 advances=3 highest=Some(2048) visible_maxima=[(391.934625ms, 288), (550.815083ms, 1584), (666.7105ms, 2048)] max_content_gap_ms=158.9 observed_loading_window_ms=505.4"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 2048.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=392.0 history_visible_ms=677.1 advances=3 highest=Some(2048) visible_maxima=[(391.970416ms, 224), (558.409541ms, 1552), (677.0805ms, 2048)] max_content_gap_ms=166.4 observed_loading_window_ms=517.9"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 2048.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=403.2 history_visible_ms=690.1 advances=3 highest=Some(2048) visible_maxima=[(403.150083ms, 384), (573.59875ms, 1600), (690.097875ms, 2048)] max_content_gap_ms=170.4 observed_loading_window_ms=523.3"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 677.1,
+        "range": [
+          666.7,
+          690.1
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 666.7,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=391.9 history_visible_ms=666.7 advances=3 highest=Some(2048) visible_maxima=[(391.934625ms, 288), (550.815083ms, 1584), (666.7105ms, 2048)] max_content_gap_ms=158.9 observed_loading_window_ms=505.4"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 677.1,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=392.0 history_visible_ms=677.1 advances=3 highest=Some(2048) visible_maxima=[(391.970416ms, 224), (558.409541ms, 1552), (677.0805ms, 2048)] max_content_gap_ms=166.4 observed_loading_window_ms=517.9"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 690.1,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=403.2 history_visible_ms=690.1 advances=3 highest=Some(2048) visible_maxima=[(403.150083ms, 384), (573.59875ms, 1600), (690.097875ms, 2048)] max_content_gap_ms=170.4 observed_loading_window_ms=523.3"
+          }
+        ]
+      },
+      "max_content_gap_ms": {
+        "median": 166.4,
+        "range": [
+          158.9,
+          170.4
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 158.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=391.9 history_visible_ms=666.7 advances=3 highest=Some(2048) visible_maxima=[(391.934625ms, 288), (550.815083ms, 1584), (666.7105ms, 2048)] max_content_gap_ms=158.9 observed_loading_window_ms=505.4"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 166.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=392.0 history_visible_ms=677.1 advances=3 highest=Some(2048) visible_maxima=[(391.970416ms, 224), (558.409541ms, 1552), (677.0805ms, 2048)] max_content_gap_ms=166.4 observed_loading_window_ms=517.9"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 170.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=403.2 history_visible_ms=690.1 advances=3 highest=Some(2048) visible_maxima=[(403.150083ms, 384), (573.59875ms, 1600), (690.097875ms, 2048)] max_content_gap_ms=170.4 observed_loading_window_ms=523.3"
+          }
+        ]
+      },
+      "observed_loading_window_ms": {
+        "median": 517.9,
+        "range": [
+          505.4,
+          523.3
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 505.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=391.9 history_visible_ms=666.7 advances=3 highest=Some(2048) visible_maxima=[(391.934625ms, 288), (550.815083ms, 1584), (666.7105ms, 2048)] max_content_gap_ms=158.9 observed_loading_window_ms=505.4"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 517.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=392.0 history_visible_ms=677.1 advances=3 highest=Some(2048) visible_maxima=[(391.970416ms, 224), (558.409541ms, 1552), (677.0805ms, 2048)] max_content_gap_ms=166.4 observed_loading_window_ms=517.9"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 523.3,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=403.2 history_visible_ms=690.1 advances=3 highest=Some(2048) visible_maxima=[(403.150083ms, 384), (573.59875ms, 1600), (690.097875ms, 2048)] max_content_gap_ms=170.4 observed_loading_window_ms=523.3"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "turns": 2048,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 28.0,
+        "range": [
+          28.0,
+          28.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 28.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=667.0 ready_ms=903.0 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.2 frames=28"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 28.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=677.3 ready_ms=893.4 instrumentation=true ready_echo_p95_ms=54.6 ready_echo_max_ms=57.4 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 28.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=692.4 ready_ms=947.7 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=28"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 677.3,
+        "range": [
+          667.0,
+          692.4
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 667.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=667.0 ready_ms=903.0 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.2 frames=28"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 677.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=677.3 ready_ms=893.4 instrumentation=true ready_echo_p95_ms=54.6 ready_echo_max_ms=57.4 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 692.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=692.4 ready_ms=947.7 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=28"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 49.9,
+        "range": [
+          49.2,
+          57.4
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 49.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=667.0 ready_ms=903.0 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.2 frames=28"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 57.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=677.3 ready_ms=893.4 instrumentation=true ready_echo_p95_ms=54.6 ready_echo_max_ms=57.4 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 49.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=692.4 ready_ms=947.7 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=28"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 49.9,
+        "range": [
+          49.1,
+          54.6
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 49.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=667.0 ready_ms=903.0 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.2 frames=28"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 54.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=677.3 ready_ms=893.4 instrumentation=true ready_echo_p95_ms=54.6 ready_echo_max_ms=57.4 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 49.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=692.4 ready_ms=947.7 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=28"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 903.0,
+        "range": [
+          893.4,
+          947.7
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 903.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=667.0 ready_ms=903.0 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.2 frames=28"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 893.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=677.3 ready_ms=893.4 instrumentation=true ready_echo_p95_ms=54.6 ready_echo_max_ms=57.4 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 947.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=692.4 ready_ms=947.7 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=28"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "after-slow-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=667.0 ready_ms=903.0 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.2 frames=28"
+          },
+          {
+            "repeat": 2,
+            "source": "after-slow-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=677.3 ready_ms=893.4 instrumentation=true ready_echo_p95_ms=54.6 ready_echo_max_ms=57.4 frames=28"
+          },
+          {
+            "repeat": 3,
+            "source": "after-slow-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=692.4 ready_ms=947.7 instrumentation=true ready_echo_p95_ms=49.9 ready_echo_max_ms=49.9 frames=28"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 128,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 25.0,
+        "range": [
+          25.0,
+          25.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=166.8 ready_ms=211.0 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=261.6 ready_ms=356.5 instrumentation=true ready_echo_p95_ms=4.8 ready_echo_max_ms=4.8 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 25.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=167.8 ready_ms=258.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=25"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 167.8,
+        "range": [
+          166.8,
+          261.6
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 166.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=166.8 ready_ms=211.0 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 261.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=261.6 ready_ms=356.5 instrumentation=true ready_echo_p95_ms=4.8 ready_echo_max_ms=4.8 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 167.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=167.8 ready_ms=258.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=25"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 4.1,
+        "range": [
+          3.9,
+          4.8
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=166.8 ready_ms=211.0 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 4.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=261.6 ready_ms=356.5 instrumentation=true ready_echo_p95_ms=4.8 ready_echo_max_ms=4.8 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 3.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=167.8 ready_ms=258.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=25"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 4.1,
+        "range": [
+          3.9,
+          4.8
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=166.8 ready_ms=211.0 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 4.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=261.6 ready_ms=356.5 instrumentation=true ready_echo_p95_ms=4.8 ready_echo_max_ms=4.8 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 3.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=167.8 ready_ms=258.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=25"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 258.0,
+        "range": [
+          211.0,
+          356.5
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 211.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=166.8 ready_ms=211.0 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 356.5,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=261.6 ready_ms=356.5 instrumentation=true ready_echo_p95_ms=4.8 ready_echo_max_ms=4.8 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 258.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=167.8 ready_ms=258.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=25"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=166.8 ready_ms=211.0 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.1 frames=25"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=261.6 ready_ms=356.5 instrumentation=true ready_echo_p95_ms=4.8 ready_echo_max_ms=4.8 frames=25"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=167.8 ready_ms=258.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=25"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 512,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 27.0,
+        "range": [
+          27.0,
+          27.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 27.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=462.6 ready_ms=579.5 instrumentation=true ready_echo_p95_ms=4.3 ready_echo_max_ms=4.3 frames=27"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 27.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=413.5 ready_ms=487.4 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.2 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 27.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=414.4 ready_ms=511.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=27"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 414.4,
+        "range": [
+          413.5,
+          462.6
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 462.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=462.6 ready_ms=579.5 instrumentation=true ready_echo_p95_ms=4.3 ready_echo_max_ms=4.3 frames=27"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 413.5,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=413.5 ready_ms=487.4 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.2 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 414.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=414.4 ready_ms=511.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=27"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 4.2,
+        "range": [
+          4.0,
+          4.3
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 4.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=462.6 ready_ms=579.5 instrumentation=true ready_echo_p95_ms=4.3 ready_echo_max_ms=4.3 frames=27"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 4.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=413.5 ready_ms=487.4 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.2 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 4.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=414.4 ready_ms=511.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=27"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 4.2,
+        "range": [
+          3.9,
+          4.3
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 4.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=462.6 ready_ms=579.5 instrumentation=true ready_echo_p95_ms=4.3 ready_echo_max_ms=4.3 frames=27"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 4.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=413.5 ready_ms=487.4 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.2 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 3.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=414.4 ready_ms=511.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=27"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 511.7,
+        "range": [
+          487.4,
+          579.5
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 579.5,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=462.6 ready_ms=579.5 instrumentation=true ready_echo_p95_ms=4.3 ready_echo_max_ms=4.3 frames=27"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 487.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=413.5 ready_ms=487.4 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.2 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 511.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=414.4 ready_ms=511.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=27"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=462.6 ready_ms=579.5 instrumentation=true ready_echo_p95_ms=4.3 ready_echo_max_ms=4.3 frames=27"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=413.5 ready_ms=487.4 instrumentation=true ready_echo_p95_ms=4.2 ready_echo_max_ms=4.2 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=414.4 ready_ms=511.7 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=27"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 2048,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 35.0,
+        "range": [
+          35.0,
+          35.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 35.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1394.9 ready_ms=1725.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.2 frames=35"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 35.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1402.7 ready_ms=1696.4 instrumentation=true ready_echo_p95_ms=4.0 ready_echo_max_ms=4.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 35.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1411.0 ready_ms=1749.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=35"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 1402.7,
+        "range": [
+          1394.9,
+          1411.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 1394.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1394.9 ready_ms=1725.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.2 frames=35"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 1402.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1402.7 ready_ms=1696.4 instrumentation=true ready_echo_p95_ms=4.0 ready_echo_max_ms=4.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 1411.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1411.0 ready_ms=1749.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=35"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 4.0,
+        "range": [
+          3.9,
+          4.2
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 4.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1394.9 ready_ms=1725.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.2 frames=35"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 4.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1402.7 ready_ms=1696.4 instrumentation=true ready_echo_p95_ms=4.0 ready_echo_max_ms=4.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 3.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1411.0 ready_ms=1749.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=35"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 4.0,
+        "range": [
+          3.9,
+          4.1
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 4.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1394.9 ready_ms=1725.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.2 frames=35"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 4.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1402.7 ready_ms=1696.4 instrumentation=true ready_echo_p95_ms=4.0 ready_echo_max_ms=4.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 3.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1411.0 ready_ms=1749.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=35"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 1725.9,
+        "range": [
+          1696.4,
+          1749.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 1725.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1394.9 ready_ms=1725.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.2 frames=35"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 1696.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1402.7 ready_ms=1696.4 instrumentation=true ready_echo_p95_ms=4.0 ready_echo_max_ms=4.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 1749.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1411.0 ready_ms=1749.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=35"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-modern-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1394.9 ready_ms=1725.9 instrumentation=true ready_echo_p95_ms=4.1 ready_echo_max_ms=4.2 frames=35"
+          },
+          {
+            "repeat": 2,
+            "source": "before-modern-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1402.7 ready_ms=1696.4 instrumentation=true ready_echo_p95_ms=4.0 ready_echo_max_ms=4.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-modern-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1411.0 ready_ms=1749.0 instrumentation=true ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=35"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 512,
+    "metric_type": "resume-progress",
+    "metrics": {
+      "advances": {
+        "median": 3.0,
+        "range": [
+          3.0,
+          3.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 3.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=292.6 history_visible_ms=553.6 advances=3 highest=Some(512) visible_maxima=[(292.566958ms, 228), (435.104125ms, 500), (553.53675ms, 512)] max_content_gap_ms=142.5 observed_loading_window_ms=407.9"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 3.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=371.3 history_visible_ms=626.9 advances=3 highest=Some(512) visible_maxima=[(371.349917ms, 204), (510.094334ms, 476), (626.833917ms, 512)] max_content_gap_ms=138.7 observed_loading_window_ms=396.6"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 3.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.1 history_visible_ms=548.8 advances=3 highest=Some(512) visible_maxima=[(287.081542ms, 236), (429.329333ms, 492), (548.79375ms, 512)] max_content_gap_ms=142.2 observed_loading_window_ms=405.3"
+          }
+        ]
+      },
+      "first_history_ms": {
+        "median": 292.6,
+        "range": [
+          287.1,
+          371.3
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 292.6,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=292.6 history_visible_ms=553.6 advances=3 highest=Some(512) visible_maxima=[(292.566958ms, 228), (435.104125ms, 500), (553.53675ms, 512)] max_content_gap_ms=142.5 observed_loading_window_ms=407.9"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 371.3,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=371.3 history_visible_ms=626.9 advances=3 highest=Some(512) visible_maxima=[(371.349917ms, 204), (510.094334ms, 476), (626.833917ms, 512)] max_content_gap_ms=138.7 observed_loading_window_ms=396.6"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 287.1,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.1 history_visible_ms=548.8 advances=3 highest=Some(512) visible_maxima=[(287.081542ms, 236), (429.329333ms, 492), (548.79375ms, 512)] max_content_gap_ms=142.2 observed_loading_window_ms=405.3"
+          }
+        ]
+      },
+      "highest": {
+        "median": 512.0,
+        "range": [
+          512.0,
+          512.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 512.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=292.6 history_visible_ms=553.6 advances=3 highest=Some(512) visible_maxima=[(292.566958ms, 228), (435.104125ms, 500), (553.53675ms, 512)] max_content_gap_ms=142.5 observed_loading_window_ms=407.9"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 512.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=371.3 history_visible_ms=626.9 advances=3 highest=Some(512) visible_maxima=[(371.349917ms, 204), (510.094334ms, 476), (626.833917ms, 512)] max_content_gap_ms=138.7 observed_loading_window_ms=396.6"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 512.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.1 history_visible_ms=548.8 advances=3 highest=Some(512) visible_maxima=[(287.081542ms, 236), (429.329333ms, 492), (548.79375ms, 512)] max_content_gap_ms=142.2 observed_loading_window_ms=405.3"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 553.6,
+        "range": [
+          548.8,
+          626.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 553.6,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=292.6 history_visible_ms=553.6 advances=3 highest=Some(512) visible_maxima=[(292.566958ms, 228), (435.104125ms, 500), (553.53675ms, 512)] max_content_gap_ms=142.5 observed_loading_window_ms=407.9"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 626.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=371.3 history_visible_ms=626.9 advances=3 highest=Some(512) visible_maxima=[(371.349917ms, 204), (510.094334ms, 476), (626.833917ms, 512)] max_content_gap_ms=138.7 observed_loading_window_ms=396.6"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 548.8,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.1 history_visible_ms=548.8 advances=3 highest=Some(512) visible_maxima=[(287.081542ms, 236), (429.329333ms, 492), (548.79375ms, 512)] max_content_gap_ms=142.2 observed_loading_window_ms=405.3"
+          }
+        ]
+      },
+      "max_content_gap_ms": {
+        "median": 142.2,
+        "range": [
+          138.7,
+          142.5
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 142.5,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=292.6 history_visible_ms=553.6 advances=3 highest=Some(512) visible_maxima=[(292.566958ms, 228), (435.104125ms, 500), (553.53675ms, 512)] max_content_gap_ms=142.5 observed_loading_window_ms=407.9"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 138.7,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=371.3 history_visible_ms=626.9 advances=3 highest=Some(512) visible_maxima=[(371.349917ms, 204), (510.094334ms, 476), (626.833917ms, 512)] max_content_gap_ms=138.7 observed_loading_window_ms=396.6"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 142.2,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.1 history_visible_ms=548.8 advances=3 highest=Some(512) visible_maxima=[(287.081542ms, 236), (429.329333ms, 492), (548.79375ms, 512)] max_content_gap_ms=142.2 observed_loading_window_ms=405.3"
+          }
+        ]
+      },
+      "observed_loading_window_ms": {
+        "median": 405.3,
+        "range": [
+          396.6,
+          407.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 407.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=292.6 history_visible_ms=553.6 advances=3 highest=Some(512) visible_maxima=[(292.566958ms, 228), (435.104125ms, 500), (553.53675ms, 512)] max_content_gap_ms=142.5 observed_loading_window_ms=407.9"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 396.6,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=371.3 history_visible_ms=626.9 advances=3 highest=Some(512) visible_maxima=[(371.349917ms, 204), (510.094334ms, 476), (626.833917ms, 512)] max_content_gap_ms=138.7 observed_loading_window_ms=396.6"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 405.3,
+            "unavailable": false,
+            "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.1 history_visible_ms=548.8 advances=3 highest=Some(512) visible_maxima=[(287.081542ms, 236), (429.329333ms, 492), (548.79375ms, 512)] max_content_gap_ms=142.2 observed_loading_window_ms=405.3"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 512,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 26.0,
+        "range": [
+          26.0,
+          27.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 26.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=553.8 ready_ms=554.0 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.2 frames=26"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 27.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=627.1 ready_ms=652.4 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=53.6 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 26.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=549.1 ready_ms=549.2 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=50.9 frames=26"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 553.8,
+        "range": [
+          549.1,
+          627.1
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 553.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=553.8 ready_ms=554.0 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.2 frames=26"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 627.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=627.1 ready_ms=652.4 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=53.6 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 549.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=549.1 ready_ms=549.2 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=50.9 frames=26"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 50.9,
+        "range": [
+          49.2,
+          53.6
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 49.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=553.8 ready_ms=554.0 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.2 frames=26"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 53.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=627.1 ready_ms=652.4 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=53.6 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 50.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=549.1 ready_ms=549.2 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=50.9 frames=26"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 50.2,
+        "range": [
+          49.0,
+          50.2
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 49.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=553.8 ready_ms=554.0 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.2 frames=26"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 50.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=627.1 ready_ms=652.4 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=53.6 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 50.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=549.1 ready_ms=549.2 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=50.9 frames=26"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 554.0,
+        "range": [
+          549.2,
+          652.4
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 554.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=553.8 ready_ms=554.0 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.2 frames=26"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 652.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=627.1 ready_ms=652.4 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=53.6 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 549.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=549.1 ready_ms=549.2 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=50.9 frames=26"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=553.8 ready_ms=554.0 instrumentation=true ready_echo_p95_ms=49.0 ready_echo_max_ms=49.2 frames=26"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=627.1 ready_ms=652.4 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=53.6 frames=27"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=549.1 ready_ms=549.2 instrumentation=true ready_echo_p95_ms=50.2 ready_echo_max_ms=50.9 frames=26"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 2048,
+    "metric_type": "resume-progress",
+    "metrics": {
+      "advances": {
+        "median": 10.0,
+        "range": [
+          9.0,
+          10.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 9.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=402.4 history_visible_ms=1392.9 advances=9 highest=Some(2048) visible_maxima=[(402.417666ms, 96), (545.883583ms, 368), (663.346708ms, 624), (779.923833ms, 864), (923.191291ms, 1104), (1.043508375s, 1344), (1.164111458s, 1584), (1.27475025s, 1824), (1.39283175s, 2048)] max_content_gap_ms=143.5 observed_loading_window_ms=1234.6"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 10.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=406.4 history_visible_ms=1549.6 advances=10 highest=Some(2048) visible_maxima=[(406.371917ms, 96), (548.622875ms, 368), (664.034292ms, 624), (809.980584ms, 848), (928.609959ms, 1008), (1.075528417s, 1248), (1.194930709s, 1488), (1.316697375s, 1728), (1.430213084s, 1952), (1.549555584s, 2048)] max_content_gap_ms=146.9 observed_loading_window_ms=1387.9"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 10.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=420.0 history_visible_ms=1486.3 advances=10 highest=Some(2048) visible_maxima=[(420.025709ms, 96), (533.260667ms, 352), (667.507834ms, 608), (785.180375ms, 848), (904.954917ms, 1088), (1.025650542s, 1328), (1.171044959s, 1568), (1.268147959s, 1792), (1.388291042s, 2016), (1.486274167s, 2048)] max_content_gap_ms=145.4 observed_loading_window_ms=1327.4"
+          }
+        ]
+      },
+      "first_history_ms": {
+        "median": 406.4,
+        "range": [
+          402.4,
+          420.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 402.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=402.4 history_visible_ms=1392.9 advances=9 highest=Some(2048) visible_maxima=[(402.417666ms, 96), (545.883583ms, 368), (663.346708ms, 624), (779.923833ms, 864), (923.191291ms, 1104), (1.043508375s, 1344), (1.164111458s, 1584), (1.27475025s, 1824), (1.39283175s, 2048)] max_content_gap_ms=143.5 observed_loading_window_ms=1234.6"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 406.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=406.4 history_visible_ms=1549.6 advances=10 highest=Some(2048) visible_maxima=[(406.371917ms, 96), (548.622875ms, 368), (664.034292ms, 624), (809.980584ms, 848), (928.609959ms, 1008), (1.075528417s, 1248), (1.194930709s, 1488), (1.316697375s, 1728), (1.430213084s, 1952), (1.549555584s, 2048)] max_content_gap_ms=146.9 observed_loading_window_ms=1387.9"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 420.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=420.0 history_visible_ms=1486.3 advances=10 highest=Some(2048) visible_maxima=[(420.025709ms, 96), (533.260667ms, 352), (667.507834ms, 608), (785.180375ms, 848), (904.954917ms, 1088), (1.025650542s, 1328), (1.171044959s, 1568), (1.268147959s, 1792), (1.388291042s, 2016), (1.486274167s, 2048)] max_content_gap_ms=145.4 observed_loading_window_ms=1327.4"
+          }
+        ]
+      },
+      "highest": {
+        "median": 2048.0,
+        "range": [
+          2048.0,
+          2048.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 2048.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=402.4 history_visible_ms=1392.9 advances=9 highest=Some(2048) visible_maxima=[(402.417666ms, 96), (545.883583ms, 368), (663.346708ms, 624), (779.923833ms, 864), (923.191291ms, 1104), (1.043508375s, 1344), (1.164111458s, 1584), (1.27475025s, 1824), (1.39283175s, 2048)] max_content_gap_ms=143.5 observed_loading_window_ms=1234.6"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 2048.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=406.4 history_visible_ms=1549.6 advances=10 highest=Some(2048) visible_maxima=[(406.371917ms, 96), (548.622875ms, 368), (664.034292ms, 624), (809.980584ms, 848), (928.609959ms, 1008), (1.075528417s, 1248), (1.194930709s, 1488), (1.316697375s, 1728), (1.430213084s, 1952), (1.549555584s, 2048)] max_content_gap_ms=146.9 observed_loading_window_ms=1387.9"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 2048.0,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=420.0 history_visible_ms=1486.3 advances=10 highest=Some(2048) visible_maxima=[(420.025709ms, 96), (533.260667ms, 352), (667.507834ms, 608), (785.180375ms, 848), (904.954917ms, 1088), (1.025650542s, 1328), (1.171044959s, 1568), (1.268147959s, 1792), (1.388291042s, 2016), (1.486274167s, 2048)] max_content_gap_ms=145.4 observed_loading_window_ms=1327.4"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 1486.3,
+        "range": [
+          1392.9,
+          1549.6
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 1392.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=402.4 history_visible_ms=1392.9 advances=9 highest=Some(2048) visible_maxima=[(402.417666ms, 96), (545.883583ms, 368), (663.346708ms, 624), (779.923833ms, 864), (923.191291ms, 1104), (1.043508375s, 1344), (1.164111458s, 1584), (1.27475025s, 1824), (1.39283175s, 2048)] max_content_gap_ms=143.5 observed_loading_window_ms=1234.6"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 1549.6,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=406.4 history_visible_ms=1549.6 advances=10 highest=Some(2048) visible_maxima=[(406.371917ms, 96), (548.622875ms, 368), (664.034292ms, 624), (809.980584ms, 848), (928.609959ms, 1008), (1.075528417s, 1248), (1.194930709s, 1488), (1.316697375s, 1728), (1.430213084s, 1952), (1.549555584s, 2048)] max_content_gap_ms=146.9 observed_loading_window_ms=1387.9"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 1486.3,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=420.0 history_visible_ms=1486.3 advances=10 highest=Some(2048) visible_maxima=[(420.025709ms, 96), (533.260667ms, 352), (667.507834ms, 608), (785.180375ms, 848), (904.954917ms, 1088), (1.025650542s, 1328), (1.171044959s, 1568), (1.268147959s, 1792), (1.388291042s, 2016), (1.486274167s, 2048)] max_content_gap_ms=145.4 observed_loading_window_ms=1327.4"
+          }
+        ]
+      },
+      "max_content_gap_ms": {
+        "median": 145.4,
+        "range": [
+          143.5,
+          146.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 143.5,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=402.4 history_visible_ms=1392.9 advances=9 highest=Some(2048) visible_maxima=[(402.417666ms, 96), (545.883583ms, 368), (663.346708ms, 624), (779.923833ms, 864), (923.191291ms, 1104), (1.043508375s, 1344), (1.164111458s, 1584), (1.27475025s, 1824), (1.39283175s, 2048)] max_content_gap_ms=143.5 observed_loading_window_ms=1234.6"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 146.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=406.4 history_visible_ms=1549.6 advances=10 highest=Some(2048) visible_maxima=[(406.371917ms, 96), (548.622875ms, 368), (664.034292ms, 624), (809.980584ms, 848), (928.609959ms, 1008), (1.075528417s, 1248), (1.194930709s, 1488), (1.316697375s, 1728), (1.430213084s, 1952), (1.549555584s, 2048)] max_content_gap_ms=146.9 observed_loading_window_ms=1387.9"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 145.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=420.0 history_visible_ms=1486.3 advances=10 highest=Some(2048) visible_maxima=[(420.025709ms, 96), (533.260667ms, 352), (667.507834ms, 608), (785.180375ms, 848), (904.954917ms, 1088), (1.025650542s, 1328), (1.171044959s, 1568), (1.268147959s, 1792), (1.388291042s, 2016), (1.486274167s, 2048)] max_content_gap_ms=145.4 observed_loading_window_ms=1327.4"
+          }
+        ]
+      },
+      "observed_loading_window_ms": {
+        "median": 1327.4,
+        "range": [
+          1234.6,
+          1387.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 1234.6,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=402.4 history_visible_ms=1392.9 advances=9 highest=Some(2048) visible_maxima=[(402.417666ms, 96), (545.883583ms, 368), (663.346708ms, 624), (779.923833ms, 864), (923.191291ms, 1104), (1.043508375s, 1344), (1.164111458s, 1584), (1.27475025s, 1824), (1.39283175s, 2048)] max_content_gap_ms=143.5 observed_loading_window_ms=1234.6"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 1387.9,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=406.4 history_visible_ms=1549.6 advances=10 highest=Some(2048) visible_maxima=[(406.371917ms, 96), (548.622875ms, 368), (664.034292ms, 624), (809.980584ms, 848), (928.609959ms, 1008), (1.075528417s, 1248), (1.194930709s, 1488), (1.316697375s, 1728), (1.430213084s, 1952), (1.549555584s, 2048)] max_content_gap_ms=146.9 observed_loading_window_ms=1387.9"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 1327.4,
+            "unavailable": false,
+            "line": "[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=420.0 history_visible_ms=1486.3 advances=10 highest=Some(2048) visible_maxima=[(420.025709ms, 96), (533.260667ms, 352), (667.507834ms, 608), (785.180375ms, 848), (904.954917ms, 1088), (1.025650542s, 1328), (1.171044959s, 1568), (1.268147959s, 1792), (1.388291042s, 2016), (1.486274167s, 2048)] max_content_gap_ms=145.4 observed_loading_window_ms=1327.4"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 2048,
+    "metric_type": "resume-pty",
+    "metrics": {
+      "frames": {
+        "median": 35.0,
+        "range": [
+          34.0,
+          35.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 34.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1401.2 ready_ms=1830.7 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.1 frames=34"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 35.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1549.9 ready_ms=1791.8 instrumentation=true ready_echo_p95_ms=50.9 ready_echo_max_ms=51.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 35.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1486.6 ready_ms=1706.4 instrumentation=true ready_echo_p95_ms=51.1 ready_echo_max_ms=51.3 frames=35"
+          }
+        ]
+      },
+      "history_visible_ms": {
+        "median": 1486.6,
+        "range": [
+          1401.2,
+          1549.9
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 1401.2,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1401.2 ready_ms=1830.7 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.1 frames=34"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 1549.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1549.9 ready_ms=1791.8 instrumentation=true ready_echo_p95_ms=50.9 ready_echo_max_ms=51.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 1486.6,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1486.6 ready_ms=1706.4 instrumentation=true ready_echo_p95_ms=51.1 ready_echo_max_ms=51.3 frames=35"
+          }
+        ]
+      },
+      "ready_echo_max_ms": {
+        "median": 51.0,
+        "range": [
+          49.1,
+          51.3
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 49.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1401.2 ready_ms=1830.7 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.1 frames=34"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 51.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1549.9 ready_ms=1791.8 instrumentation=true ready_echo_p95_ms=50.9 ready_echo_max_ms=51.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 51.3,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1486.6 ready_ms=1706.4 instrumentation=true ready_echo_p95_ms=51.1 ready_echo_max_ms=51.3 frames=35"
+          }
+        ]
+      },
+      "ready_echo_p95_ms": {
+        "median": 50.9,
+        "range": [
+          49.1,
+          51.1
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 49.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1401.2 ready_ms=1830.7 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.1 frames=34"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 50.9,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1549.9 ready_ms=1791.8 instrumentation=true ready_echo_p95_ms=50.9 ready_echo_max_ms=51.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 51.1,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1486.6 ready_ms=1706.4 instrumentation=true ready_echo_p95_ms=51.1 ready_echo_max_ms=51.3 frames=35"
+          }
+        ]
+      },
+      "ready_ms": {
+        "median": 1791.8,
+        "range": [
+          1706.4,
+          1830.7
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 1830.7,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1401.2 ready_ms=1830.7 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.1 frames=34"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 1791.8,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1549.9 ready_ms=1791.8 instrumentation=true ready_echo_p95_ms=50.9 ready_echo_max_ms=51.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 1706.4,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1486.6 ready_ms=1706.4 instrumentation=true ready_echo_p95_ms=51.1 ready_echo_max_ms=51.3 frames=35"
+          }
+        ]
+      },
+      "update_bytes": {
+        "median": 0.0,
+        "range": [
+          0.0,
+          0.0
+        ],
+        "runs": 3,
+        "unavailable_runs": 0,
+        "observations": [
+          {
+            "repeat": 1,
+            "source": "before-slow-1.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1401.2 ready_ms=1830.7 instrumentation=true ready_echo_p95_ms=49.1 ready_echo_max_ms=49.1 frames=34"
+          },
+          {
+            "repeat": 2,
+            "source": "before-slow-2.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1549.9 ready_ms=1791.8 instrumentation=true ready_echo_p95_ms=50.9 ready_echo_max_ms=51.0 frames=35"
+          },
+          {
+            "repeat": 3,
+            "source": "before-slow-3.txt",
+            "value": 0.0,
+            "unavailable": false,
+            "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1486.6 ready_ms=1706.4 instrumentation=true ready_echo_p95_ms=51.1 ready_echo_max_ms=51.3 frames=35"
+          }
+        ]
+      }
+    }
+  }
+]

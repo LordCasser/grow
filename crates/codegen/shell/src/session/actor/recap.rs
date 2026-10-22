@@ -66,6 +66,12 @@ impl SessionActor {
     ) -> Result<String, SideQuestionError> {
         let prepared = self.prepare_chat_completion_config(false).await;
         let model = prepared.model.clone();
+        let image_key = sampling_types::model_image_input_key_from_parts(
+            &prepared.model,
+            &prepared.api_backend,
+            &prepared.base_url,
+            &prepared.query_params,
+        );
         let sampling_client = sampler::SamplingClient::new(prepared)
             .map_err(|e| SideQuestionError::PrepareClient(e.to_string()))?;
 
@@ -76,135 +82,173 @@ impl SessionActor {
             }
         });
 
-        // Freeze the committed context and its source reference together.
-        let materialized = self
-            .chat_state_handle
-            .materialize_timeline(self.session_info.id.to_string())
-            .await
-            .ok_or_else(|| SideQuestionError::Sideband("chat-state actor is unavailable".into()))?;
-        let input_ref = materialized.input_ref;
-        // Mid-turn snapshots can contain unanswered calls. The shared portable
-        // projection omits those protocols and reasoning while retaining real
-        // results (including partially completed batches) and assistant text.
-        // Trimming by tail item type would also erase completed tool evidence.
-        let mut items = sampling_types::project_portable_history(&materialized.surface);
-
-        // Wrap the question in a <system-reminder> user message.
-        let tag = self.reminder_wrapper_tag();
-        let wrapped_question = format!(
-            "<{tag}>This is a side question from the user. \
-             You must answer this question directly in a single response.\n\n\
-             IMPORTANT CONTEXT:\n\
-             - You are a separate, lightweight agent spawned to answer this one question\n\
-             - The main agent is NOT interrupted - it continues working independently in the background\n\
-             - You share the conversation context but are a completely separate instance\n\
-             - Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\n\
-             CRITICAL CONSTRAINTS:\n\
-             - You have NO tools available - you cannot read files, run commands, search, or take any actions\n\
-             - This is a one-off response - there will be no follow-up turns\n\
-             - You can ONLY provide information based on what you already know from the conversation context\n\
-             - NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n\
-             - If you don't know the answer, say so - do not offer to look it up or investigate\n\n\
-             Simply answer the question with the information you have.</{tag}>\n\n\
-             {question}"
-        );
-        items.push(ConversationItem::user(wrapped_question.clone()));
-
-        // Don't set temperature explicitly — cli-chat-proxy may inject
-        // `thinking` config via request_defaults for thinking-enabled models,
-        // Anthropic requires temperature == 1 when thinking is enabled.
-        // Leaving it None lets the provider defaults apply correctly.
-        //
-        // Built once; each attempt clones it and stamps a fresh req_id (the
-        // per-attempt clone is the cost of the owned-request API — retries
-        // are rare, so the success path pays exactly one clone).
-        let base_request = ConversationRequest {
-            items,
-            model: Some(model.clone()),
-            temperature: None,
-            ..Default::default()
-        };
-
-        let mut sideband = self
-            .begin_sideband(
-                chat_state::SidebandPurpose::SideQuestion,
-                wrapped_question,
-                SidebandSource::Frozen(vec![input_ref]),
-                chat_state::SidebandBudgetPolicy::for_request(&base_request, 3),
-                chat_state::SidebandRoute {
-                    model: model.clone(),
-                    backend: sampling_client.api_backend(),
-                },
-                None,
-            )
-            .await
-            .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-
-        // conversation_collect is one-shot (no sampler-actor retry); /btw adds
-        // its own bounded overload-only retry. Every attempt is durable before
-        // the provider request leaves the process.
+        let mut text_only = self.model_image_input_is_unsupported(&image_key).await;
+        if text_only {
+            self.project_conversation_images_for_text_model(&image_key)
+                .await
+                .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+        }
         let mut backoff = side_question_retry_policy().build();
-        let mut feedback = None;
-        let result = loop {
-            sideband
-                .attempt_all_sources(
-                    &base_request,
-                    sampling_client.api_backend(),
-                    feedback.take(),
+        loop {
+            // Freeze the committed context and its source reference together.
+            let materialized = self
+                .chat_state_handle
+                .materialize_timeline(self.session_info.id.to_string())
+                .await
+                .ok_or_else(|| {
+                    SideQuestionError::Sideband("chat-state actor is unavailable".into())
+                })?;
+            let source_revision = materialized.surface_revision;
+            let input_ref = materialized.input_ref;
+            // Mid-turn snapshots can contain unanswered calls. The shared portable
+            // projection omits those protocols and reasoning while retaining real
+            // results (including partially completed batches) and assistant text.
+            // Trimming by tail item type would also erase completed tool evidence.
+            let mut surface = materialized.surface;
+            if text_only {
+                sampling_types::conversation::select_image_descriptions(&mut surface)
+                    .map_err(|error| SideQuestionError::Sideband(error.into()))?;
+            }
+            let mut items = sampling_types::project_portable_history(&surface);
+
+            // Wrap the question in a <system-reminder> user message.
+            let tag = self.reminder_wrapper_tag();
+            let wrapped_question = format!(
+                "<{tag}>This is a side question from the user. \
+                 You must answer this question directly in a single response.\n\n\
+                 IMPORTANT CONTEXT:\n\
+                 - You are a separate, lightweight agent spawned to answer this one question\n\
+                 - The main agent is NOT interrupted - it continues working independently in the background\n\
+                 - You share the conversation context but are a completely separate instance\n\
+                 - Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\n\
+                 CRITICAL CONSTRAINTS:\n\
+                 - You have NO tools available - you cannot read files, run commands, search, or take any actions\n\
+                 - This is a one-off response - there will be no follow-up turns\n\
+                 - You can ONLY provide information based on what you already know from the conversation context\n\
+                 - NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n\
+                 - If you don't know the answer, say so - do not offer to look it up or investigate\n\n\
+                 Simply answer the question with the information you have.</{tag}>\n\n\
+                 {question}"
+            );
+            items.push(ConversationItem::user(wrapped_question.clone()));
+
+            // Don't set temperature explicitly — cli-chat-proxy may inject
+            // `thinking` config via request_defaults for thinking-enabled models,
+            // Anthropic requires temperature == 1 when thinking is enabled.
+            // Leaving it None lets the provider defaults apply correctly.
+            //
+            // Built once; each attempt clones it and stamps a fresh req_id (the
+            // per-attempt clone is the cost of the owned-request API — retries
+            // are rare, so the success path pays exactly one clone).
+            let base_request = ConversationRequest {
+                items,
+                model: Some(model.clone()),
+                temperature: None,
+                ..Default::default()
+            };
+
+            let mut sideband = self
+                .begin_sideband(
+                    chat_state::SidebandPurpose::SideQuestion,
+                    wrapped_question,
+                    SidebandSource::Frozen(vec![input_ref]),
+                    chat_state::SidebandBudgetPolicy::for_request(&base_request, 3),
+                    chat_state::SidebandRoute {
+                        model: model.clone(),
+                        backend: sampling_client.api_backend(),
+                    },
+                    None,
                 )
                 .await
                 .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-            let settled = sideband
-                .run_provider(sampling_client.conversation_collect(base_request.clone()))
-                .await
-                .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-            match settled {
-                Err(error) if should_retry_side_question(&error) => {
-                    let Some(delay) = backoff.next() else {
-                        break Err(error);
-                    };
-                    feedback = Some(error.to_string());
-                    tracing::warn!(
-                        backoff_ms = delay.as_millis() as u64,
-                        error = %error,
-                        "side question overload; retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                settled => break settled,
-            }
-        };
 
-        match result {
-            Ok(response) => {
-                let usage = self
-                    .settle_sideband_response_usage(&mut sideband, &response)
+            // conversation_collect is one-shot (no sampler-actor retry); /btw adds
+            // its own bounded overload-only retry. Every attempt is durable before
+            // the provider request leaves the process.
+            let mut feedback = None;
+            let result = loop {
+                sideband
+                    .attempt_all_sources(
+                        &base_request,
+                        sampling_client.api_backend(),
+                        feedback.take(),
+                    )
                     .await
                     .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-                let content = response.assistant_text();
-                if content.is_empty() {
-                    let err = SideQuestionError::EmptyResponse;
+                let settled = sideband
+                    .run_provider(sampling_client.conversation_collect(base_request.clone()))
+                    .await
+                    .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+                match settled {
+                    Err(error) if should_retry_side_question(&error) => {
+                        let Some(delay) = backoff.next() else {
+                            break Err(error);
+                        };
+                        feedback = Some(error.to_string());
+                        tracing::warn!(
+                            backoff_ms = delay.as_millis() as u64,
+                            error = %error,
+                            "side question overload; retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    settled => break settled,
+                }
+            };
+
+            return match result {
+                Ok(response) => {
+                    let usage = self
+                        .settle_sideband_response_usage(&mut sideband, &response)
+                        .await
+                        .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+                    let content = response.assistant_text();
+                    if content.is_empty() {
+                        let err = SideQuestionError::EmptyResponse;
+                        sideband
+                            .fail(chat_state::SidebandOutcome::Failed, err.to_string())
+                            .await
+                            .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+                        return Err(err);
+                    }
+                    let finish = sideband_finish(&response);
+                    sideband
+                        .complete(content.clone(), None, usage, finish, Vec::new())
+                        .await
+                        .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+                    Ok(content)
+                }
+                Err(e) => {
+                    let err = SideQuestionError::from(e.clone());
                     sideband
                         .fail(chat_state::SidebandOutcome::Failed, err.to_string())
                         .await
                         .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-                    return Err(err);
+                    if !text_only
+                        && let SamplingError::Api {
+                            status, message, ..
+                        } = &e
+                        && sampling_types::is_unconditional_image_input_unsupported(
+                            Some(status.as_u16()),
+                            message,
+                            base_request.image_count(),
+                        )
+                    {
+                        self.record_unsupported_model_image_input(image_key.clone())
+                            .await
+                            .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+                        self.project_conversation_images_for_text_model_at_revision(
+                            &image_key,
+                            Some(source_revision),
+                        )
+                        .await
+                        .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+                        text_only = true;
+                        continue;
+                    }
+                    Err(err)
                 }
-                let finish = sideband_finish(&response);
-                sideband
-                    .complete(content.clone(), None, usage, finish, Vec::new())
-                    .await
-                    .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-                Ok(content)
-            }
-            Err(e) => {
-                let err = SideQuestionError::from(e);
-                sideband
-                    .fail(chat_state::SidebandOutcome::Failed, err.to_string())
-                    .await
-                    .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-                Err(err)
-            }
+            };
         }
     }
 

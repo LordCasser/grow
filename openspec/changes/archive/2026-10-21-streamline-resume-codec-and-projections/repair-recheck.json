@@ -1,0 +1,50 @@
+[
+  {
+    "stage": "before",
+    "pair": 1,
+    "load_ms": 491.671292,
+    "first_history_ms": 354.324917,
+    "appends_ms": 220.636,
+    "source": "repair-recheck-before-1-modern-repair-512-1.txt"
+  },
+  {
+    "stage": "after",
+    "pair": 1,
+    "load_ms": 581.5038340000001,
+    "first_history_ms": 443.60587499999997,
+    "appends_ms": 331.064,
+    "source": "repair-recheck-after-1-modern-repair-512-1.txt"
+  },
+  {
+    "stage": "before",
+    "pair": 2,
+    "load_ms": 452.792542,
+    "first_history_ms": 329.39579200000003,
+    "appends_ms": 196.575,
+    "source": "repair-recheck-before-2-modern-repair-512-1.txt"
+  },
+  {
+    "stage": "after",
+    "pair": 2,
+    "load_ms": 458.775291,
+    "first_history_ms": 329.388458,
+    "appends_ms": 210.421,
+    "source": "repair-recheck-after-2-modern-repair-512-1.txt"
+  },
+  {
+    "stage": "before",
+    "pair": 3,
+    "load_ms": 437.313875,
+    "first_history_ms": 313.412083,
+    "appends_ms": 177.828,
+    "source": "repair-recheck-before-3-modern-repair-512-1.txt"
+  },
+  {
+    "stage": "after",
+    "pair": 3,
+    "load_ms": 683.858125,
+    "first_history_ms": 554.5207909999999,
+    "appends_ms": 417.831,
+    "source": "repair-recheck-after-3-modern-repair-512-1.txt"
+  }
+]

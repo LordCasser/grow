@@ -42,21 +42,69 @@ async fn actor_with_sampler_and_storage(
     let sideband_storage = storage.clone();
     tokio::task::spawn_local(async move {
         while let Some(message) = persistence_rx.recv().await {
-            if let PersistenceMsg::SidebandDurablyAndAck { event, respond_to } = message {
-                if let Some(storage) = &sideband_storage {
-                    use crate::session::storage::StorageAdapter as _;
-                    storage
-                        .append_sideband_event_durable(
-                            &SessionInfo {
-                                id: acp::SessionId::new("test-actor"),
-                                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
-                            },
-                            &event,
-                        )
-                        .await
-                        .unwrap();
+            use crate::session::storage::StorageAdapter as _;
+            let info = SessionInfo {
+                id: acp::SessionId::new("test-actor"),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            };
+            match message {
+                PersistenceMsg::SidebandDurablyAndAck { event, respond_to } => {
+                    let result = if let Some(storage) = &sideband_storage {
+                        storage.append_sideband_event_durable(&info, &event).await
+                    } else {
+                        Ok(())
+                    };
+                    let _ = respond_to.send(result);
                 }
-                let _ = respond_to.send(Ok(()));
+                PersistenceMsg::Update(update) => {
+                    if let Some(storage) = &sideband_storage {
+                        storage
+                            .append_update_durable_commit_aware(&info, &update)
+                            .await
+                            .expect("persist the image fixture's original display fact");
+                    }
+                }
+                PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to }
+                | PersistenceMsg::AppendUpdateBufferedAndAck { update, respond_to } => {
+                    let result = if let Some(storage) = &sideband_storage {
+                        storage
+                            .append_update_durable_commit_aware(&info, &update)
+                            .await
+                    } else {
+                        Ok(())
+                    };
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::AuxiliaryGrow {
+                    notification,
+                    delivery,
+                    respond_to,
+                    ..
+                } => {
+                    let result = if let Some(storage) = &sideband_storage {
+                        storage
+                            .append_update_durable_commit_aware(
+                                &info,
+                                &crate::session::storage::SessionUpdate::Grow(Box::new(
+                                    notification,
+                                )),
+                            )
+                            .await
+                    } else {
+                        Ok(())
+                    };
+                    if matches!(
+                        &result,
+                        Ok(()) | Err(crate::session::storage::AppendUpdateError::Committed(_))
+                    ) && let Some(delivery) = delivery
+                    {
+                        delivery.publish();
+                    }
+                    if let Some(respond_to) = respond_to {
+                        let _ = respond_to.send(result);
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -1910,15 +1958,33 @@ fn assert_image_fallback_cold_restore(
                 assert!(turn.await.unwrap_err().is_cancelled());
             }
             // Wait for the real Sideband ledger, not the test channel's observed ACK.
+            let mut last_validation_error = None;
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
-                    if storage.open_session(&info).unwrap().validated_timeline(&info.id.to_string()).is_ok_and(|validated| {
-                        validated.sidebands.values().any(|events| events.last().is_some_and(|event| matches!(&event.kind,
-                            chat_state::SidebandEventKind::End(end) if from_ocr || end.outcome == chat_state::SidebandOutcome::Completed)))
-                    }) { break; }
+                    match storage
+                        .open_session(&info)
+                        .unwrap()
+                        .validated_timeline(&info.id.to_string())
+                    {
+                        Ok(validated) => {
+                            if validated.sidebands.values().any(|events| {
+                                events.last().is_some_and(|event| matches!(&event.kind,
+                                    chat_state::SidebandEventKind::End(end) if from_ocr || end.outcome == chat_state::SidebandOutcome::Completed))
+                            }) {
+                                break;
+                            }
+                        }
+                        Err(error) => last_validation_error = Some(error.to_string()),
+                    }
                     tokio::task::yield_now().await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for the expected Sideband End; last validated_timeline error: {last_validation_error:?}"
+                )
+            });
             if legacy_prompt {
                 // A completed v1 Sideband used to include source text in its
                 // prompt. It must not satisfy the fixed-prompt lookup after
@@ -2096,4 +2162,164 @@ fn cancelling_image_fallback_during_ocr_reaps_process_without_resubmission() {
             );
         }));
     });
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_recovers_images_on_all_backends_and_reuses_text() {
+    tokio::task::LocalSet::new().run_until(async {
+        for backend in [sampling_types::ApiBackend::Messages, sampling_types::ApiBackend::ChatCompletions, sampling_types::ApiBackend::Responses] {
+            for tool_image in [false, true] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let path = match backend {
+                    sampling_types::ApiBackend::Messages => "/v1/messages",
+                    sampling_types::ApiBackend::ChatCompletions => "/v1/chat/completions",
+                    sampling_types::ApiBackend::Responses => "/v1/responses",
+                };
+                server.enqueue_response(path, ScriptedResponse::json(400, json!({
+                    "error": {"type": "invalid_request_error", "message": "1210: messages.content.type 参数非法，取值范围 ['text']"}
+                })));
+                server.enqueue_response("/v1/messages", messages_text_turn("Screenshot error E42.", "vision-model"));
+                server.set_response("The screenshot shows E42.");
+                let (actor, _gateway, _) = actor_with_sampler_and_persistence(&server, Some("vision")).await;
+                let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                config.api_backend = backend.clone();
+                actor.chat_state_handle.replace_sampling_route(config);
+                let image = inline_data_uri(&test_image_content());
+                let history = if tool_image {
+                    vec![ConversationItem::user("source context"), ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                        id: "read_image".into(), name: "read_file".into(), arguments: "{}".into(),
+                    }]), ConversationItem::tool_result_with_images("read_image", "tool evidence", vec![sampling_types::ContentPart::Image { url: image.into(), description: None }])]
+                } else {
+                    let mut user = ConversationItem::user("source context");
+                    user.add_image(image);
+                    vec![user]
+                };
+                replace_test_surface(&actor.chat_state_handle, history).await;
+                assert_eq!(actor.handle_side_question("What happened?").await.unwrap(), "The screenshot shows E42.");
+                assert_eq!(actor.handle_side_question("Explain E42").await.unwrap(), "The screenshot shows E42.");
+                let requests = server.requests();
+                assert_eq!(requests.len(), 4, "{backend:?}, tool={tool_image}");
+                assert_eq!(count_wire_images(requests[0].body.as_ref().unwrap()), 1);
+                let auxiliary = requests[1].body.as_ref().unwrap();
+                assert_eq!(auxiliary["model"], "vision-model");
+                assert_eq!(count_wire_images(auxiliary), 1);
+                assert!(!auxiliary.to_string().contains("source context"));
+                assert!(!auxiliary.to_string().contains("What happened?"));
+                for request in &requests[2..] {
+                    let body = request.body.as_ref().unwrap();
+                    assert_eq!(count_wire_images(body), 0);
+                    assert!(body.to_string().contains("Screenshot error E42."));
+                    if tool_image { assert!(body.to_string().contains("tool evidence")); }
+                }
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                let wire = serde_json::to_string(&conversation).unwrap();
+                assert!(!wire.contains("What happened?"));
+                assert!(!wire.contains("The screenshot shows E42."));
+                assert_eq!(sampling_types::conversation::conversation_image_groups(&conversation).len(), 1, "description retains original media");
+            }
+        }
+    }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_image_failure_does_not_send_unacknowledged_or_unrelated_retries() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for projection_failure in [false, true] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let message = if projection_failure {
+                    "1210: messages.content.type 参数非法，取值范围 ['text']"
+                } else {
+                    "invalid image dimensions"
+                };
+                server.enqueue_response(
+                    "/v1/messages",
+                    ScriptedResponse::json(
+                        400,
+                        json!({"error": {"type": "invalid_request_error", "message": message}}),
+                    ),
+                );
+                server.enqueue_response(
+                    "/v1/messages",
+                    messages_text_turn("Screenshot E42", "vision-model"),
+                );
+                let (actor, _gateway, persistence) =
+                    actor_with_sampler_and_persistence(&server, Some("vision")).await;
+                let mut user = ConversationItem::user("source context");
+                user.add_image(inline_data_uri(&test_image_content()));
+                replace_test_surface(&actor.chat_state_handle, vec![user]).await;
+                let before =
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
+                let prepared = actor.prepare_chat_completion_config(false).await;
+                let prepared_key = sampling_types::model_image_input_key_from_parts(
+                    &prepared.model,
+                    &prepared.api_backend,
+                    &prepared.base_url,
+                    &prepared.query_params,
+                );
+                if projection_failure {
+                    persistence.fail_projection_commits();
+                }
+                assert!(actor.handle_side_question("What happened?").await.is_err());
+                assert_eq!(
+                    server.requests().len(),
+                    if projection_failure { 2 } else { 1 }
+                );
+                assert_eq!(
+                    actor.model_image_input_is_unsupported(&prepared_key).await,
+                    projection_failure
+                );
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                if projection_failure {
+                    assert!(
+                        conversation.is_empty(),
+                        "failed durable write closes chat-state reads"
+                    );
+                } else {
+                    assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_image_rejection_does_not_project_a_newer_surface() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", multimodal_capability_rejection());
+            let (actor, _gateway, persistence) =
+                actor_with_sampler_and_persistence(&server, Some("vision")).await;
+            let mut user = ConversationItem::user("first image");
+            user.add_image(inline_data_uri(&test_image_content()));
+            replace_test_surface(&actor.chat_state_handle, vec![user.clone()]).await;
+            persistence.hold_next_sideband_attempt();
+            let task_actor = actor.clone();
+            let question = tokio::task::spawn_local(async move {
+                task_actor.handle_side_question("Explain").await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !persistence.sideband_ack_is_pending() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let mut new_image = ConversationItem::user("new image outside frozen request");
+            new_image.add_image(inline_data_uri(&test_image_content()));
+            replace_test_surface(&actor.chat_state_handle, vec![user, new_image]).await;
+            persistence.release_sideband_ack();
+            assert!(question.await.unwrap().is_err());
+            assert_eq!(server.requests().len(), 1);
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                2
+            );
+            assert!(conversation.iter().all(|item| {
+                sampling_types::conversation::item_image_description(item).is_none()
+            }));
+        })
+        .await;
 }

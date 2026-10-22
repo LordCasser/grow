@@ -1,0 +1,163 @@
+Enumerated 150 tests for agent::mvp_agent::
+
+running 150 tests
+test agent::mvp_agent::prompt_response_meta_tests::cancel_trigger_lands_as_camelcase_meta_key ... ok
+test agent::mvp_agent::prompt_response_meta_tests::enriches_meta_with_camelcase_token_keys ... ok
+test agent::mvp_agent::prompt_response_meta_tests::includes_baseline_keys_without_usage ... ok
+test agent::mvp_agent::prompt_response_meta_tests::preserves_zero_token_values ... ok
+test agent::mvp_agent::prompt_response_meta_tests::structured_output_maps_to_camelcase_meta_keys ... ok
+test agent::mvp_agent::prompt_response_meta_tests::suspended_prompt_response_meta_carries_operation_and_checkpoint_identity ... ok
+test agent::mvp_agent::prompt_response_meta_tests::usage_object_lands_on_meta ... ok
+test agent::mvp_agent::runtime_handoff::tests::canonical_child_facts_owned_read_matches_borrowed_clone_path ... ignored, local clone-versus-owned Timeline measurement; no timing threshold
+test agent::mvp_agent::runtime_handoff::tests::canonical_child_facts_reject_damaged_timeline_sequence ... ok
+test agent::mvp_agent::runtime_handoff::tests::canonical_child_facts_reject_duplicate_spawn ... ok
+test agent::mvp_agent::runtime_handoff::tests::canonical_child_facts_reject_terminal_for_another_child_session ... ok
+test agent::mvp_agent::runtime_handoff::tests::partial_barrier_can_be_reconstructed_from_all_settled_direct_children ... ok
+test agent::mvp_agent::runtime_handoff::tests::partial_barrier_rejects_missing_checkpoint_and_invalid_parent_topology ... ok
+test agent::mvp_agent::runtime_handoff::tests::partial_recovery_cannot_claim_a_child_with_a_live_writer ... ok
+test agent::mvp_agent::runtime_handoff::tests::restoration_ignores_checkpoint_for_durably_ended_child ... ok
+test agent::mvp_agent::runtime_handoff::tests::restoration_rejects_missing_open_checkpoint_and_unlinked_tree_node ... ok
+test agent::mvp_agent::subagent_coordinator::interaction::tests::durable_ack_wins_ready_cancellation_but_absence_stays_unknown ... ok
+test agent::mvp_agent::subagent_coordinator::interaction::tests::reply_authority_requires_own_receipt_and_exact_original_sender ... ok
+test agent::mvp_agent::tests::agent_drop_aborts_owned_local_tasks ... ok
+test agent::mvp_agent::tests::agent_drop_requests_primary_and_child_shutdown ... ok
+test agent::mvp_agent::tests::allocate_turn_number_advances_counter ... ok
+test agent::mvp_agent::tests::broadcast_refresh_skill_baseline_sends_one_message_per_sender ... ok
+test agent::mvp_agent::tests::broadcast_refresh_skill_baseline_tolerates_dropped_receiver ... ok
+test agent::mvp_agent::tests::cancel_does_not_forward_to_bridge_in_local_mode ... ok
+test agent::mvp_agent::tests::cancel_forwards_pause_goal_meta ... ok
+test agent::mvp_agent::tests::cancel_never_overtakes_in_flight_prompt_intake ... ok
+test agent::mvp_agent::tests::cancelled_later_load_keeps_the_earlier_marker_alive ... ok
+test agent::mvp_agent::tests::cancelled_rebuild_releases_nonresident_config_watch ... ok
+test agent::mvp_agent::tests::catalog_failure_cannot_evict_a_new_actor_incarnation ... ok
+test agent::mvp_agent::tests::catalog_failure_cannot_evict_after_a_newer_publication ... ok
+test agent::mvp_agent::tests::cold_resume_preserves_durable_effort_chain ... ok
+test agent::mvp_agent::tests::cold_resume_records_catalog_route_rebind ... ok
+test agent::mvp_agent::tests::commands_list_keeps_chat_and_session_requests_off_pre_session_discovery ... ok
+test agent::mvp_agent::tests::compact_extension_preserves_actor_error_outcomes ... ok
+test agent::mvp_agent::tests::complete_jsonl_snapshot_never_returns_a_partial_record_offset ... ok
+test agent::mvp_agent::tests::concurrent_load_guards_do_not_clobber_each_other ... ok
+test agent::mvp_agent::tests::coordination_extensions_reject_forged_source_sessions ... ok
+test agent::mvp_agent::tests::coordination_tool::ask_session_tool_blank_ids_create_inquiries_and_explicit_ids_remain_strict ... ok
+test agent::mvp_agent::tests::disconnect_keeps_live_session_resident_without_finalize ... ok
+test agent::mvp_agent::tests::disconnect_keeps_resident_when_actor_is_unreachable ... ok
+test agent::mvp_agent::tests::disconnect_keeps_resident_when_actor_reports_busy ... ok
+test agent::mvp_agent::tests::disconnect_keeps_resident_when_plan_approval_parked ... ok
+test agent::mvp_agent::tests::disconnect_mixed_batch_keeps_busy_unloads_idle ... ok
+test agent::mvp_agent::tests::disconnect_unload_serializes_a_replacement_incarnation ... ok
+test agent::mvp_agent::tests::disconnect_unloads_before_slow_actor_teardown_finishes ... ok
+test agent::mvp_agent::tests::disconnect_unloads_idle_session_without_finalize ... ok
+test agent::mvp_agent::tests::drain_finished_thread_returns_immediately ... ok
+test agent::mvp_agent::tests::drain_respects_deadline ... ok
+test agent::mvp_agent::tests::drain_waits_for_slow_thread ... ok
+test agent::mvp_agent::tests::eligibility_gates::non_web_client_rejected ... ok
+test agent::mvp_agent::tests::eligibility_gates::tui_client_rejected ... ok
+test agent::mvp_agent::tests::eligibility_gates::web_client_no_capability_rejected ... ok
+test agent::mvp_agent::tests::eligibility_gates::web_client_with_capability_and_config_passes_first_three_gates ... ok
+test agent::mvp_agent::tests::eligibility_gates::web_client_with_capability_config_disabled_rejected ... ok
+test agent::mvp_agent::tests::ensure_plugin_registry_lazily_populates_snapshot ... ok
+test agent::mvp_agent::tests::ensure_session_supervisor_is_idempotent ... ok
+test agent::mvp_agent::tests::explicit_close_removes_the_local_session ... ok
+test agent::mvp_agent::tests::explicit_close_reports_panicked_writer_as_failed ... 
+thread '<unnamed>' (36088643) panicked at crates/codegen/shell/src/agent/mvp_agent/tests.rs:3298:44:
+injected writer panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test agent::mvp_agent::tests::ext_method_rewind_uses_local_dispatch_without_bridge ... ok
+test agent::mvp_agent::tests::file_toolset_override_e2e_to_finalized_toolset ... ok
+test agent::mvp_agent::tests::file_toolset_override_invalid_config_returns_error ... ok
+test agent::mvp_agent::tests::find_model_by_catalog_id_never_matches_routing_slug ... ok
+test agent::mvp_agent::tests::hunk_tracking_mode::matching_is_case_insensitive_and_trimmed ... ok
+test agent::mvp_agent::tests::hunk_tracking_mode::off_and_disabled_disable_tracking ... ok
+test agent::mvp_agent::tests::hunk_tracking_mode::parser_absent_returns_none_policy_defaults_in_plan ... ok
+test agent::mvp_agent::tests::hunk_tracking_mode::plan_disables_actor_forward_and_loc_together ... ok
+test agent::mvp_agent::tests::hunk_tracking_mode::plan_enables_actor_and_forward_for_active_modes ... ok
+test agent::mvp_agent::tests::hunk_tracking_mode::recognized_modes_parse ... ok
+test agent::mvp_agent::tests::initialize_advertises_stable_v1_coordination_capability ... ok
+test agent::mvp_agent::tests::local_announcement_reload_updates_config_and_clients ... ok
+test agent::mvp_agent::tests::lookup_session_model_fallback_no_session ... ok
+test agent::mvp_agent::tests::lookup_session_model_returns_per_session_model ... ok
+test agent::mvp_agent::tests::mcp_catalog::accepted_client_mcp_intent_is_visible_to_concurrent_catalog_reload ... ok
+test agent::mvp_agent::tests::mcp_catalog::mcp_server_validation::duplicate_update_mcp_servers_is_rejected_without_mutating_session ... ok
+test agent::mvp_agent::tests::mcp_child_policy_reload_tests::internal_reload_fans_out_policy_only_command_to_matching_child ... ok
+test agent::mvp_agent::tests::model_state_prefers_session_reasoning_effort_over_model_default ... ok
+test agent::mvp_agent::tests::orphaned_tasks_captures_command_and_cwd ... ok
+test agent::mvp_agent::tests::orphaned_tasks_filters_rewind_dead_branches ... ok
+test agent::mvp_agent::tests::orphaned_tasks_ignores_unrelated_updates ... ok
+test agent::mvp_agent::tests::orphaned_tasks_returns_empty_for_no_file ... ok
+test agent::mvp_agent::tests::orphaned_tasks_returns_empty_when_all_completed ... ok
+test agent::mvp_agent::tests::orphaned_tasks_returns_multiple_uncompleted ... ok
+test agent::mvp_agent::tests::orphaned_tasks_returns_uncompleted ... ok
+test agent::mvp_agent::tests::orphaned_tasks_skips_malformed_lines ... ok
+test agent::mvp_agent::tests::parse_code_nav_capability_absent_returns_false ... ok
+test agent::mvp_agent::tests::parse_code_nav_capability_false_returns_false ... ok
+test agent::mvp_agent::tests::parse_code_nav_capability_present_and_true ... ok
+test agent::mvp_agent::tests::parse_json_object_env_tests::invalid_json_returns_none ... ok
+test agent::mvp_agent::tests::parse_json_object_env_tests::non_object_json_returns_none ... ok
+test agent::mvp_agent::tests::parse_json_object_env_tests::unset_var_returns_none ... ok
+test agent::mvp_agent::tests::parse_json_object_env_tests::valid_json_object_returns_some ... ok
+test agent::mvp_agent::tests::parse_session_plugin_dirs_filters_and_dedupes ... ok
+test agent::mvp_agent::tests::persistence_drain_timeout_retains_incarnation ... ok
+test agent::mvp_agent::tests::plan_decision_status_tests::plan_decision_status_is_unconfirmed_until_control_ack_commits ... ok
+test agent::mvp_agent::tests::process_scope_reclaim::close_is_isolated_across_sessions ... ok
+test agent::mvp_agent::tests::process_scope_reclaim::close_reaps_enrolled_session_child ... ok
+test agent::mvp_agent::tests::push_roster_activity_delta_broadcasts_overridden_activity ... ok
+test agent::mvp_agent::tests::queue_control_ext_request_returns_actor_acknowledgement ... ok
+test agent::mvp_agent::tests::read_session_or_init_meta_str_falls_back_to_init_meta ... ok
+test agent::mvp_agent::tests::read_session_or_init_meta_str_ignores_non_string_values ... ok
+test agent::mvp_agent::tests::read_session_or_init_meta_str_prefers_session_meta ... ok
+test agent::mvp_agent::tests::read_session_or_init_meta_str_returns_none_when_absent ... ok
+test agent::mvp_agent::tests::recap_extension_acknowledges_only_enqueued_commands ... ok
+test agent::mvp_agent::tests::recap_extension_rejects_auto_without_away_period ... ok
+test agent::mvp_agent::tests::reconnect_gateway_mute_restores_only_the_captured_incarnation ... ok
+test agent::mvp_agent::tests::reload_after_terminal_removal_starts_clean ... ok
+test agent::mvp_agent::tests::remove_session_releases_workspace_binding_and_side_maps ... ok
+test agent::mvp_agent::tests::resident_activity_reports_needs_input_when_pending ... ok
+test agent::mvp_agent::tests::resident_config_watch_registration_follows_resource_lifetime ... ok
+test agent::mvp_agent::tests::resident_response_snapshot_delivers_future_projection_once_before_tools ... ok
+test agent::mvp_agent::tests::resolve_agent_definition_acp_profile_wins_for_new_session ... ok
+test agent::mvp_agent::tests::resolve_agent_definition_cli_agent_profile_wins_for_new_session ... ok
+test agent::mvp_agent::tests::resolve_agent_definition_defaults_to_grow_build ... ok
+test agent::mvp_agent::tests::resolve_agent_definition_restores_persisted_agent ... ok
+test agent::mvp_agent::tests::resolve_agent_definition_restores_qualified_plugin_agent ... ok
+test agent::mvp_agent::tests::retained_plan_review_waits_for_cold_load_release_before_actor_dispatch ... ok
+test agent::mvp_agent::tests::rewind_points_metadata_failure_reaches_client ... ok
+test agent::mvp_agent::tests::rewind_points_waits_for_in_flight_session_load ... ok
+test agent::mvp_agent::tests::session_control_lookup_addresses_live_child_without_promoting_it_to_roster ... ok
+test agent::mvp_agent::tests::session_control_lookup_waits_for_load_after_actor_registration ... ok
+test agent::mvp_agent::tests::session_delete_tears_down_resident_actor_before_releasing_lifecycle ... ok
+test agent::mvp_agent::tests::session_lifecycle_gate_serializes_close_behind_load_incarnation ... ok
+test agent::mvp_agent::tests::session_live_state_map_is_bounded_across_cycles ... ok
+test agent::mvp_agent::tests::session_rename_lifecycle_is_serialized ... ok
+test agent::mvp_agent::tests::session_rules_are_separate_from_the_system_head ... ok
+test agent::mvp_agent::tests::session_usage_dead_chat_state_actor_fails_closed ... ok
+test agent::mvp_agent::tests::session_usage_unknown_session_is_resource_not_found ... ok
+test agent::mvp_agent::tests::set_session_mode_routes_to_a_live_child_actor ... ok
+test agent::mvp_agent::tests::set_session_model_does_not_cross_contaminate ... ok
+test agent::mvp_agent::tests::soft_default_settings_emit::emit_settings_update_carries_permission_mode_from_cfg ... ok
+test agent::mvp_agent::tests::subagent_spawn_context_tests::nested_spawn_context_uses_immediate_parent_workspace_and_route ... ok
+test agent::mvp_agent::tests::subagent_spawn_context_tests::subagent_spawn_context_inherits_parent_permission_handle ... ok
+test agent::mvp_agent::tests::subagent_spawn_context_tests::subagent_spawn_context_inherits_parent_process_scope ... ok
+test agent::mvp_agent::tests::supervisor_reaps_panicked_resident_actor ... 
+thread '<unnamed>' (36088785) panicked at crates/codegen/shell/src/agent/mvp_agent/tests.rs:3346:50:
+injected actor panic
+ok
+test agent::mvp_agent::tests::suspension_admission_tests::tree_freeze_initializer_timeout_retries_durable_owner ... ok
+test agent::mvp_agent::tests::suspension_admission_tests::tree_freeze_lost_ack_retries_durable_owner ... ok
+test agent::mvp_agent::tests::suspension_runtime_observation_avoids_discarded_long_history_copy ... ignored, local long-history suspension observation measurement
+test agent::mvp_agent::tests::test_leader_mode_two_sessions_stay_isolated ... ok
+test agent::mvp_agent::tests::test_per_session_code_nav_isolation ... ok
+test agent::mvp_agent::tests::test_sessionless_request_requires_session_id ... ok
+test agent::mvp_agent::tests::test_tui_session_is_rejected ... ok
+test agent::mvp_agent::tests::test_unknown_session_id_returns_session_required ... ok
+test agent::mvp_agent::tests::test_web_session_with_capability_is_eligible ... ok
+test agent::mvp_agent::tests::test_web_session_without_capability_is_rejected ... ok
+test agent::mvp_agent::tests::trace_turn_to_i32_saturates_at_max ... ok
+test agent::mvp_agent::tests::wait_for_in_flight_load_returns_immediately_when_idle ... ok
+test agent::mvp_agent::tests::wait_for_in_flight_load_wakes_on_failed_load ... ok
+test agent::mvp_agent::tests::warn_on_missing_parent_session_emits_when_session_absent ... ok
+test agent::mvp_agent::tests::warn_on_missing_parent_session_silent_when_session_present ... ok
+test agent::mvp_agent::tests::workflow_child_switch_uses_frozen_model_after_live_catalog_removal ... ok
+
+test result: ok. 148 passed; 0 failed; 2 ignored; 0 measured; 4181 filtered out; finished in 11.33s
+

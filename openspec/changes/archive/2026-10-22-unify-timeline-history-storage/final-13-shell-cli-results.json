@@ -1,0 +1,22 @@
+[
+  {
+    "binary": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/test_subagent_orphan_reconcile-b84d731995f9ac20",
+    "sha256": "015d365d3717c897134ab5b04c913e29cc8041d6147622ed6c9dd20f5992baea",
+    "test": "resume_reconciles_orphaned_running_subagent",
+    "ok": false,
+    "exit": 101,
+    "elapsed_seconds": 1.630510332994163,
+    "log": "final-13-cli-test_subagent_orphan_reconcile.log",
+    "scope": "build13 fixtures; default production CLI3"
+  },
+  {
+    "binary": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/test_tool_dispatch_duration_smoke-8a9eba687b03ea7f",
+    "sha256": "4f75384c0d1e4c4dde95c87173557d0f15e28e9be284c11de3d0c345638ed6be",
+    "test": "sleep_tool_records_multi_second_dispatch_duration",
+    "ok": true,
+    "exit": 0,
+    "elapsed_seconds": 4.174449790967628,
+    "log": "final-13-cli-test_tool_dispatch_duration_smoke.log",
+    "scope": "build13 fixtures; default production CLI3"
+  }
+]

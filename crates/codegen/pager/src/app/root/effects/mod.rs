@@ -934,6 +934,9 @@ pub(crate) fn execute(
                             let foreground = parse_session_load_foreground(resp.meta.as_ref());
                             TaskResult::SessionLoaded {
                                 agent_id,
+                                descendant_ownership: crate::acp::meta::session_load_descendant_ownership(
+                                    resp.meta.as_ref(), &loaded_session_id,
+                                ),
                                 session_id: loaded_session_id,
                                 models: shell::agent::models::SessionModelState::from_config_options(
                                     resp.config_options,
@@ -978,10 +981,19 @@ pub(crate) fn execute(
                 .map_err(|_| "Session resync timed out".to_owned())
                 .and_then(|result| {
                     result
-                        .map(|response| parse_session_load_foreground(response.meta.as_ref()))
+                        .map(|response| (
+                            parse_session_load_foreground(response.meta.as_ref()),
+                            crate::acp::meta::session_load_descendant_ownership(
+                                response.meta.as_ref(), &session_id,
+                            ),
+                        ))
                         .map_err(|error| sanitize_user_error(&error.to_string()))
                 });
-                TaskResult::SessionResynced { agent_id, session_id, generation, result }
+                let (result, descendant_ownership) = match result {
+                    Ok((foreground, ownership)) => (Ok(foreground), ownership),
+                    Err(error) => (Err(error), None),
+                };
+                TaskResult::SessionResynced { agent_id, session_id, generation, result, descendant_ownership }
             });
         }
         Effect::FetchSessionList { cwd, query, seq, .. } => {

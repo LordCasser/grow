@@ -1,0 +1,164 @@
+[
+  {
+    "filter": "session::history::tests",
+    "exit": 0,
+    "log": "final-10-session-history-tests.log",
+    "passed": 9,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "session::storage::jsonl::",
+    "exit": 0,
+    "log": "final-10-session-storage-jsonl.log",
+    "passed": 181,
+    "failed": 0,
+    "ignored": 1,
+    "ok": true
+  },
+  {
+    "filter": "session::persistence::",
+    "exit": 0,
+    "log": "final-10-session-persistence.log",
+    "passed": 81,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "session::trajectory::",
+    "exit": 0,
+    "log": "final-10-session-trajectory.log",
+    "passed": 41,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "session::image_describe::",
+    "exit": 0,
+    "log": "final-10-session-image_describe.log",
+    "passed": 26,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "session::storage::search::",
+    "exit": 0,
+    "log": "final-10-session-storage-search.log",
+    "passed": 37,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "session::storage::tests",
+    "exit": 0,
+    "log": "final-10-session-storage-tests.log",
+    "passed": 57,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "session::storage::communication_history::",
+    "exit": 101,
+    "log": "final-10-session-storage-communication_history.log",
+    "passed": 8,
+    "failed": 2,
+    "ignored": 1,
+    "ok": false
+  },
+  {
+    "filter": "session::storage::transcript::",
+    "exit": 101,
+    "log": "final-10-session-storage-transcript.log",
+    "passed": 43,
+    "failed": 1,
+    "ignored": 0,
+    "ok": false
+  },
+  {
+    "filter": "agent::mvp_agent::tests",
+    "exit": 0,
+    "log": "final-10-agent-mvp_agent-tests.log",
+    "passed": 132,
+    "failed": 0,
+    "ignored": 1,
+    "ok": true
+  },
+  {
+    "filter": "extensions::session_state::tests",
+    "exit": 101,
+    "log": "final-10-extensions-session_state-tests.log",
+    "passed": 9,
+    "failed": 1,
+    "ignored": 0,
+    "ok": false
+  },
+  {
+    "filter": "extensions::session_updates::tests",
+    "exit": 101,
+    "log": "final-10-extensions-session_updates-tests.log",
+    "passed": 10,
+    "failed": 1,
+    "ignored": 0,
+    "ok": false
+  },
+  {
+    "filter": "session::notifications::tests",
+    "exit": 101,
+    "log": "final-10-session-notifications-tests.log",
+    "passed": 1,
+    "failed": 1,
+    "ignored": 0,
+    "ok": false
+  },
+  {
+    "filter": "session::goal_notification::tests",
+    "exit": 0,
+    "log": "final-10-session-goal_notification-tests.log",
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "session::actor::tests",
+    "exit": 101,
+    "log": "final-10-session-actor-tests.log",
+    "passed": 432,
+    "failed": 10,
+    "ignored": 1,
+    "ok": false
+  },
+  {
+    "filter": "session::actor::updates::",
+    "exit": -15,
+    "log": "final-10-session-actor-updates.log",
+    "passed": 0,
+    "failed": null,
+    "ignored": null,
+    "ok": false
+  },
+  {
+    "filter": "session::actor::spawn::",
+    "exit": 0,
+    "log": "final-10-session-actor-spawn.log",
+    "passed": 27,
+    "failed": 0,
+    "ignored": 0,
+    "ok": true
+  },
+  {
+    "filter": "tools::notification_bridge::tests",
+    "exit": 101,
+    "log": "final-10-tools-notification_bridge-tests.log",
+    "passed": 25,
+    "failed": 8,
+    "ignored": 0,
+    "ok": false
+  }
+]

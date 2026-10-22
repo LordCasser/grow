@@ -1,0 +1,10 @@
+{
+  "before": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p0-grow",
+    "sha256": "f6ecedff6b19d9693071d16900aeee25f3541f2318cd0a53d1e0f30956b64f0d"
+  },
+  "after": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release/binaries/p1-grow",
+    "sha256": "dcd4aebfa016de6d3828d49e8e8a2cc1081669da277eca3abbf0ede2bb615785"
+  }
+}

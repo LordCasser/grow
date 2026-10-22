@@ -446,6 +446,10 @@ impl ScrollbackState {
             return;
         }
         self.ensure_layout_cache(self.last_width);
+        // Paging may reveal source-estimated Markdown. Resolve this viewport
+        // before choosing its edge, so the next draw cannot expose a later
+        // entry below the selection as estimates become exact.
+        self.settle_visible_measurements(self.last_width);
         let range = self.visible_entry_range();
         if range.is_empty() {
             return;

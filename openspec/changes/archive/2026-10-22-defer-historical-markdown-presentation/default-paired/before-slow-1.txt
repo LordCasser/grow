@@ -1,0 +1,14 @@
+
+running 1 test
+test resume_input_latency::resume_modern_history_progress_with_slow_writer ... [testkit] admitted history: turns=512 admissions=512 missing_projections=512 updates=0B timeline=18694733B rewind=3434B total=18698167B
+[resume-source] turns=512 instrumentation=false stats={"timeline_bytes":18694991,"updates_bytes":0,"timeline_and_updates_bytes":18694991,"counted_files":["timeline.jsonl","updates.jsonl"],"excluded_source_files":["summary and other session files"],"source_file_count":1,"history_body":{"notifications":1025,"notification_types":{"agent_message_chunk":513,"user_message_chunk":512},"canonical_turns_by_fixture_sequence_marker":512,"assistant_message_notifications":513,"message_blocks":1025,"block_types":{"text":1025},"text_bytes":16797602,"scope":"typed_projector_output","matches_runtime_notification_input":true}}
+[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.7 history_visible_ms=542.3 advances=3 highest=Some(512) visible_maxima=[(287.700292ms, 230), (425.3715ms, 502), (542.321584ms, 512)] max_content_gap_ms=137.7 observed_loading_window_ms=396.6
+[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=542.6 ready_ms=unavailable instrumentation=false ready_echo_p95_ms=49.1 ready_echo_max_ms=49.2 frames=26
+[testkit] admitted history: turns=2048 admissions=2048 missing_projections=2048 updates=0B timeline=74819525B rewind=3434B total=74822959B
+[resume-source] turns=2048 instrumentation=false stats={"timeline_bytes":74819785,"updates_bytes":0,"timeline_and_updates_bytes":74819785,"counted_files":["timeline.jsonl","updates.jsonl"],"excluded_source_files":["summary and other session files"],"source_file_count":1,"history_body":{"notifications":4097,"notification_types":{"agent_message_chunk":2049,"user_message_chunk":2048},"canonical_turns_by_fixture_sequence_marker":2048,"assistant_message_notifications":2049,"message_blocks":4097,"block_types":{"text":4097},"text_bytes":67191739,"scope":"typed_projector_output","matches_runtime_notification_input":true}}
+[resume-progress] turns=2048 modern=true dense_tools=false first_history_ms=496.0 history_visible_ms=1476.6 advances=9 highest=Some(2048) visible_maxima=[(495.996875ms, 272), (636.260042ms, 528), (772.696292ms, 800), (885.166459ms, 1040), (999.022ms, 1280), (1.116582959s, 1520), (1.251956209s, 1760), (1.367909125s, 2000), (1.476591167s, 2048)] max_content_gap_ms=140.3 observed_loading_window_ms=1317.3
+[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1482.0 ready_ms=unavailable instrumentation=false ready_echo_p95_ms=51.0 ready_echo_max_ms=51.2 frames=35
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 8.58s
+

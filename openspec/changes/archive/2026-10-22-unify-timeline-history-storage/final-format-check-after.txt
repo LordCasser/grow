@@ -1,0 +1,81 @@
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state/src/actor/mod.rs:858:
+                     sampling_types::ApiBackend::Responses => portable
+                         .iter()
+                         .any(|item| matches!(item, ConversationItem::Reasoning(_))),
+-                    sampling_types::ApiBackend::ChatCompletions => portable
+-                        .iter()
+-                        .any(|item| matches!(item, ConversationItem::Assistant(_)))
+-                        || surface.iter().any(|item| match item {
+-                            ConversationItem::AgentMessage(batch) => !batch.messages.is_empty(),
+-                            ConversationItem::SkillLoad(skill) => {
+-                                skill.source == sampling_types::SkillLoadSource::User
+-                            }
+-                            _ => false,
+-                        })
+-                        || projection.spans.iter().any(|span| {
++                    sampling_types::ApiBackend::ChatCompletions => {
++                        portable
++                            .iter()
++                            .any(|item| matches!(item, ConversationItem::Assistant(_)))
++                            || surface.iter().any(|item| match item {
++                                ConversationItem::AgentMessage(batch) => !batch.messages.is_empty(),
++                                ConversationItem::SkillLoad(skill) => {
++                                    skill.source == sampling_types::SkillLoadSource::User
++                                }
++                                _ => false,
++                            }) || projection.spans.iter().any(|span| {
+                             matches!(
+                                 &span.fragment,
+                                 sampling_types::NativeContinuationFragment::ChatCompletions(message)
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state/src/actor/mod.rs:875:
+                                     if message.reasoning_content.is_none()
+                             )
+-                        }),
++                        })
++                    }
+                     sampling_types::ApiBackend::Messages => false,
+                 };
+                 let changed = self
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/mcp/src/servers.rs:2534:
+ 
+     loop {
+         let result = peer
+-            .list_tools(Some(
+-                PaginatedRequestParams::default().with_cursor(cursor),
+-            ))
++            .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+             .await?;
+         let next_cursor = result.next_cursor;
+         if let Some(next) = next_cursor.as_ref()
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/tools/src/registry/types.rs:1431:
+         let tid = tool_protocol::ToolId::new(tool_name)
+             .unwrap_or_else(|_| tool_protocol::ToolId::new("unknown").expect("valid"));
+         let detail = if tool_name.contains("__") {
+-            format!("MCP tool is not registered in this session: {tool_name}. Refresh search_tool to check the current catalog; this error does not establish whether the remote tool exists or the server is connected.")
++            format!(
++                "MCP tool is not registered in this session: {tool_name}. Refresh search_tool to check the current catalog; this error does not establish whether the remote tool exists or the server is connected."
++            )
+         } else {
+             format!("Tool not found: {tool_name}")
+         };
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/tools/src/registry/types.rs:2288:
+         let toolset = ToolRegistryBuilder::new()
+             .finalize(ToolServerConfig::default(), test_session_context(&tmp))
+             .unwrap();
+-        let error = toolset.try_parse("demo__missing", &serde_json::json!({})).await.unwrap_err();
++        let error = toolset
++            .try_parse("demo__missing", &serde_json::json!({}))
++            .await
++            .unwrap_err();
+         assert!(error.detail.contains("not registered in this session"));
+         assert!(error.detail.contains("Refresh search_tool"));
+         assert!(matches!(error.kind, tool_runtime::ToolErrorKind::NotFound));
+Diff in /Users/lordcasser/workspace/projects/grow/crates/codegen/tools/src/registry/types.rs:2295:
+-        let native = toolset.try_parse("missing", &serde_json::json!({})).await.unwrap_err();
++        let native = toolset
++            .try_parse("missing", &serde_json::json!({}))
++            .await
++            .unwrap_err();
+         assert_eq!(native.detail, "Tool not found: missing");
+     }
+ 

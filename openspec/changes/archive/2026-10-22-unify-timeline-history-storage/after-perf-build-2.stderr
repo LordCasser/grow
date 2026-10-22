@@ -1,0 +1,75 @@
+   Compiling shell v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+   Compiling nucleo v0.5.0 (https://github.com/helix-editor/nucleo.git?rev=5b74652#5b74652e)
+   Compiling zstd v0.13.3
+   Compiling grow-http v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/grow-http)
+   Compiling fsnotify v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/fsnotify)
+   Compiling client-support v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/client-support)
+   Compiling hunk-tracker v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hunk-tracker)
+   Compiling stop-words v0.9.0
+   Compiling tree-sitter-bash v0.25.1
+   Compiling sqlite-vec v0.1.10-alpha.4 (/Users/lordcasser/workspace/projects/grow/third_party/sqlite-vec)
+   Compiling prometheus v0.14.0
+   Compiling fxhash v0.2.1
+   Compiling xattr v1.6.1
+   Compiling extension-types v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/extension-types)
+   Compiling rust-stemmers v1.2.0
+   Compiling wait-timeout v0.2.1
+   Compiling deunicode v1.6.2
+   Compiling glob v0.3.4
+   Compiling tagptr v0.2.0
+   Compiling cast v0.3.0
+   Compiling criterion-plot v0.8.2
+   Compiling dtor v0.0.6
+   Compiling moka v0.12.16
+   Compiling workspace v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workspace)
+   Compiling bm25 v2.3.2
+   Compiling plugin-marketplace v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/plugin-marketplace)
+   Compiling tar v0.4.46
+   Compiling memory v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/memory)
+   Compiling shell-base v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell-base)
+   Compiling workflow v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workflow)
+   Compiling alloca v0.4.0
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling notify-debouncer-mini v0.6.0
+   Compiling sampler v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampler)
+   Compiling announcements v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/announcements)
+   Compiling chat-state v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state)
+warning: type `ReplayBarrierGuard` is more private than the item `session::commands::SessionCommand::PauseForReplay::respond_to`
+    --> crates/codegen/shell/src/session/commands.rs:684:9
+     |
+ 684 |         respond_to: oneshot::Sender<std::io::Result<super::persistence::ReplayBarrierGuard>>,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `session::commands::SessionCommand::PauseForReplay::respond_to` is reachable at visibility `pub`
+     |
+note: but type `ReplayBarrierGuard` is only usable at visibility `pub(crate)`
+    --> crates/codegen/shell/src/session/persistence.rs:1908:1
+     |
+1908 | pub(crate) struct ReplayBarrierGuard {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+   Compiling toml_edit v0.25.13+spec-1.1.0
+   Compiling process-wrap v9.1.0
+   Compiling gethostname v1.1.0
+   Compiling backon v1.6.0
+   Compiling tinytemplate v1.2.1
+   Compiling prompt-queue v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/prompt-queue)
+   Compiling kanal v0.1.1
+   Compiling serde_ignored v0.1.14
+   Compiling page_size v0.6.0
+   Compiling oorandom v11.1.5
+   Compiling diff v0.1.13
+   Compiling tracing-macros v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tracing-macros)
+   Compiling shlex v1.3.0
+   Compiling anes v0.1.6
+   Compiling yansi v1.0.1
+   Compiling tdigests v1.0.1
+   Compiling pretty_assertions v1.4.1
+   Compiling criterion v0.8.2
+   Compiling ctor v0.4.3
+   Compiling serial_test v4.0.1
+   Compiling test-support v2.4.3 (/Users/lordcasser/workspace/projects/grow/crates/codegen/test-support)
+   Compiling test-utils v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/test-utils)
+warning: `shell` (lib) generated 1 warning
+warning: `shell` (lib) generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 5m 54s

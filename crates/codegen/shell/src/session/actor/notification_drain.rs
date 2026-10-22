@@ -1841,6 +1841,7 @@ mod tests {
                     &timeline,
                     "",
                     None,
+                    None,
                     |event| {
                         Ok(
                             crate::session::notification_inbox::read_parent_message_notice(

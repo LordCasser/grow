@@ -1,0 +1,288 @@
+[
+  {
+    "format": "modern",
+    "turns": 128,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 4673368,
+    "updates_bytes": 0,
+    "directory_bytes": 4679257,
+    "directory_files": 4,
+    "directory_after_load": [
+      4682610,
+      5
+    ],
+    "load_ms": 93.075041,
+    "first_notification_ms": 20.717833000000002,
+    "first_history_ms": 20.717833000000002,
+    "last_history_ms": 24.058625,
+    "max_history_gap_ms": 1.302416,
+    "history_count": 256,
+    "history_bytes": 4199314,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 92.056
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 40.831
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 40.773
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 32.066
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 13.356
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 12.385
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 11.975
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 7.925
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 2.221
+      },
+      {
+        "name": "session.load.history_projection",
+        "count": 1,
+        "ms": 0.398
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.393
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 0.288
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 0.241
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.215
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 0.139
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.09
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.078
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.063
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 0.023
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.004
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.replay.first_send",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-128",
+    "run": 1,
+    "stage": "before-3-correctness",
+    "source": "before-3-correctness-modern-128-1.txt",
+    "process_peak_rss_bytes": 112115712
+  },
+  {
+    "format": "modern",
+    "turns": 2048,
+    "missing_every": "0",
+    "route_seeded": true,
+    "timeline_bytes": 74843515,
+    "updates_bytes": 0,
+    "directory_bytes": 74849404,
+    "directory_files": 4,
+    "directory_after_load": [
+      74852768,
+      5
+    ],
+    "load_ms": 392.22112500000003,
+    "first_notification_ms": 227.342625,
+    "first_history_ms": 227.342625,
+    "last_history_ms": 378.850834,
+    "max_history_gap_ms": 29.339917,
+    "history_count": 4096,
+    "history_bytes": 67191722,
+    "phases": [
+      {
+        "name": "session.load_session",
+        "count": 1,
+        "ms": 391.307
+      },
+      {
+        "name": "session.load_light",
+        "count": 1,
+        "ms": 206.932
+      },
+      {
+        "name": "session.load.timeline_read_decode",
+        "count": 1,
+        "ms": 198.807
+      },
+      {
+        "name": "session.spawn_and_register_session",
+        "count": 1,
+        "ms": 77.828
+      },
+      {
+        "name": "session.spawn_and_register",
+        "count": 1,
+        "ms": 77.766
+      },
+      {
+        "name": "session.load_session_replay",
+        "count": 1,
+        "ms": 72.68
+      },
+      {
+        "name": "session.spawn_actor_call",
+        "count": 1,
+        "ms": 63.867
+      },
+      {
+        "name": "skill_discovery",
+        "count": 2,
+        "ms": 12.052
+      },
+      {
+        "name": "session.load.history_projection",
+        "count": 1,
+        "ms": 10.335
+      },
+      {
+        "name": "session.spawn.install_coordination_backend",
+        "count": 1,
+        "ms": 8.749
+      },
+      {
+        "name": "session.spawn.publish_coordination",
+        "count": 1,
+        "ms": 4.654
+      },
+      {
+        "name": "session.load.timeline_evidence",
+        "count": 1,
+        "ms": 3.851
+      },
+      {
+        "name": "session.load.timeline_fold",
+        "count": 1,
+        "ms": 2.97
+      },
+      {
+        "name": "session.reconcile_stale_tasks",
+        "count": 1,
+        "ms": 0.539
+      },
+      {
+        "name": "session.spawn.prepare",
+        "count": 1,
+        "ms": 0.4
+      },
+      {
+        "name": "plugin_discovery",
+        "count": 2,
+        "ms": 0.183
+      },
+      {
+        "name": "session.load.state_projections",
+        "count": 1,
+        "ms": 0.153
+      },
+      {
+        "name": "session.load.open_session",
+        "count": 1,
+        "ms": 0.102
+      },
+      {
+        "name": "mcp_merge",
+        "count": 1,
+        "ms": 0.091
+      },
+      {
+        "name": "session.load.model_route_reconcile",
+        "count": 1,
+        "ms": 0.015
+      },
+      {
+        "name": "session.delta_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.replay.first_send",
+        "count": 1,
+        "ms": 0.0
+      },
+      {
+        "name": "session.stale_tasks_drain_completions",
+        "count": 1,
+        "ms": 0.0
+      }
+    ],
+    "profile": "modern-2048",
+    "run": 1,
+    "stage": "before-3-correctness",
+    "source": "before-3-correctness-modern-2048-1.txt",
+    "process_peak_rss_bytes": 905445376
+  }
+]

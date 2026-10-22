@@ -85,6 +85,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
                 "checked out abc12345, staged: true, unstaged: false, untracked: 3".into(),
             ),
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -139,6 +140,7 @@ fn session_loaded_models_do_not_overwrite_new_session_default() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -172,6 +174,7 @@ fn session_reload_reissues_matching_deferred_behavior_to_clear_confirmation() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -208,6 +211,7 @@ fn session_reload_reissues_unresolved_deferred_behavior_before_prompt_drain() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -321,6 +325,7 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -381,6 +386,7 @@ fn session_loaded_purges_replay_transient() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -404,6 +410,7 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -459,6 +466,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
                 "restore aborted (checkout failed); stash skipped: MERGE_HEAD present".into(),
             ),
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -496,6 +504,7 @@ fn session_loaded_without_restore_no_summary() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -540,6 +549,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -630,6 +640,7 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -699,6 +710,7 @@ fn session_loaded_combines_pending_first_prompt_before_typed_prompt() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -758,10 +770,10 @@ fn session_loaded_combines_pending_first_prompt_before_typed_prompt() {
     );
 }
 
-/// A prompt submitted while session history is replaying stays in the local
-/// FIFO until the authoritative load result closes the replay gate.
+/// Loading follows history and accepts only global Quit, preserving any draft
+/// from before the load. Ordinary input becomes available at SessionLoaded.
 #[test]
-fn loading_replay_preserves_typed_prompt_until_session_loaded() {
+fn loading_replay_ignores_input_and_preserves_existing_draft_until_session_loaded() {
     use crate::app::root::InputOutcome;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app();
@@ -770,7 +782,8 @@ fn loading_replay_preserves_typed_prompt_until_session_loaded() {
         &mut app,
     );
     let id = AgentId(0);
-    let draft = "unique loading draft";
+    let draft = "existing loading draft";
+    app.agents.get_mut(&id).unwrap().prompt.set_text(draft);
     assert!(app.agents[&id].session.loading_replay);
     for ch in draft.chars() {
         let outcome = app.handle_input(&Event::Key(KeyEvent::new(
@@ -778,34 +791,25 @@ fn loading_replay_preserves_typed_prompt_until_session_loaded() {
             KeyModifiers::NONE,
         )));
         assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "typed character must request a redraw: {outcome:?}"
+            matches!(outcome, InputOutcome::Unchanged),
+            "loading must ignore ordinary input: {outcome:?}"
         );
     }
     assert_eq!(app.agents[&id].prompt.text(), draft);
 
-    let InputOutcome::Action(action) = app.handle_input(&Event::Key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::NONE,
-    ))) else {
-        panic!("Enter must submit the current composer");
-    };
-    let effects = dispatch(action, &mut app);
-    assert!(
-        !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::SendPrompt { .. })),
-        "loading replay must not send the prompt before SessionLoaded: {effects:?}"
-    );
-    assert_eq!(
-        app.agents[&id]
-            .session
-            .pending_prompts
-            .front()
-            .map(|p| p.text.as_str()),
-        Some(draft),
-        "submitted draft must remain in the pending FIFO during replay"
-    );
+    assert!(matches!(
+        app.handle_input(&Event::Paste("ignored paste".into())),
+        InputOutcome::Unchanged
+    ));
+    assert!(matches!(
+        app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
+        InputOutcome::Unchanged
+    ));
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+    assert_eq!(app.agents[&id].prompt.text(), draft);
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
@@ -815,6 +819,7 @@ fn loading_replay_preserves_typed_prompt_until_session_loaded() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -824,12 +829,63 @@ fn loading_replay_preserves_typed_prompt_until_session_loaded() {
         "drained prompt must leave the local queue"
     );
     assert!(
-        effects.iter().any(|effect| matches!(
-            effect,
-            Effect::SendPrompt { text, .. } if text == draft
-        )),
-        "SessionLoaded must drain the preserved draft: {effects:?}"
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendPrompt { .. }))
     );
+    assert_eq!(app.agents[&id].prompt.text(), draft);
+    assert!(matches!(
+        app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        ))),
+        InputOutcome::Changed
+    ));
+    // set_text preserves the fixture's initial cursor at the beginning.
+    assert_eq!(app.agents[&id].prompt.text(), format!("!{draft}"));
+}
+
+#[test]
+fn loading_replay_keeps_confirmed_ctrl_d_and_resize_available() {
+    use crate::app::root::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-loading-quit".into(), None),
+        &mut app,
+    );
+    let id = AgentId(0);
+    let quit = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(matches!(app.handle_input(&quit), InputOutcome::Changed));
+    assert!(app.pending_action.is_some());
+    assert!(matches!(
+        app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))),
+        InputOutcome::Changed
+    ));
+    assert!(
+        app.pending_action.is_none(),
+        "another key disarms quit without editing"
+    );
+    assert!(app.agents[&id].prompt.text().is_empty());
+    let offset = app.agents[&id].scrollback.scroll_offset();
+    let _ = app.handle_input(&Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert_eq!(app.agents[&id].scrollback.scroll_offset(), offset);
+    let _ = app.handle_input(&Event::Resize(100, 30));
+    assert_eq!(app.last_known_terminal_rows, 30);
+    assert!(app.agents[&id].session.loading_replay);
+    assert!(matches!(app.handle_input(&quit), InputOutcome::Changed));
+    assert!(matches!(
+        app.handle_input(&quit),
+        InputOutcome::Action(Action::Quit)
+    ));
 }
 
 #[test]
@@ -845,6 +901,7 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );
@@ -946,6 +1003,7 @@ fn session_loaded_clears_stale_running_entries() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );

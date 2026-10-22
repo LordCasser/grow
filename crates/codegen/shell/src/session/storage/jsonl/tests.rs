@@ -20,6 +20,30 @@ fn create_test_chat_messages() -> Vec<ConversationItem> {
         ]
 }
 
+fn rewrite_first_domain_record(path: &std::path::Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines();
+    let record: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert!(lines.next().is_none(), "fixture has one domain record");
+    let seq = record["seq"].as_u64().unwrap();
+    let mut event = record["fact"]["event"].clone();
+    mutate(&mut event);
+    let raw = serde_json::value::to_raw_value(&event).unwrap();
+    let bytes = crate::session::history::encode_domain(seq, &raw, None).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+fn read_history(
+    adapter: &JsonlStorageAdapter,
+    info: &Info,
+) -> std::io::Result<Vec<SessionUpdate>> {
+    let opened = adapter.open_session(info)?;
+    let validated = opened.validated_timeline(info.id.0.as_ref())?;
+    Ok(validated
+        .history
+        .prepare(&info.id, &validated.timeline, None)?
+        .updates)
+}
+
 #[tokio::test]
 async fn communication_receipt_replay_uses_timeline_without_updates_cache() {
     use crate::extensions::notification::AgentMessageNotice;
@@ -410,14 +434,32 @@ async fn cold_writer_load_seeds_from_full_physical_update_snapshot() {
         .await
         .unwrap();
 
-    let physical = std::fs::read_to_string(writer.updates_file(&info)).unwrap();
-    let displayed = crate::session::storage::filter_rewind_lines(
-        physical.lines().filter(|line| !line.trim().is_empty()).collect(),
-    );
+    let physical = std::fs::read_to_string(writer.timeline_file(&info)).unwrap();
     assert!(
-        !displayed.iter().any(|line| line.contains("9000000999")),
-        "the high identity row is physically retained but hidden by rewind"
+        physical.contains("test-session-123-9000000999"),
+        "the high identity fact remains physically retained"
     );
+    let opened = writer.open_session(&info).unwrap();
+    let validated = opened.validated_timeline(info.id.0.as_ref()).unwrap();
+    let prepared = validated
+        .history
+        .prepare(&info.id, &validated.timeline, None)
+        .unwrap();
+    assert!(!prepared.updates.iter().any(|update| match update {
+        SessionUpdate::Acp(notification) => notification
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("eventId"))
+            .and_then(serde_json::Value::as_str)
+            == Some("test-session-123-9000000999"),
+        SessionUpdate::Grow(notification) => notification
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("eventId"))
+            .and_then(serde_json::Value::as_str)
+            == Some("test-session-123-9000000999"),
+        SessionUpdate::ResponseReplayProjection(_) => false,
+    }), "the high identity fact is not visible after rewind");
 
     writer
         .load_session_for_write_without_updates(&info)
@@ -761,7 +803,7 @@ fn loaded_surface(events: &[chat_state::TimelineEvent]) -> Vec<ConversationItem>
         .surface()
         .to_vec()
 }
-fn response_projection_production_timeline_with_items(
+pub(crate) fn response_projection_production_timeline_with_items(
     request_id: &str,
     attempt: u32,
     items: Vec<ConversationItem>,
@@ -825,7 +867,7 @@ fn response_projection_production_timeline_with_items(
     }
     timeline
 }
-fn response_projection_production_timeline(
+pub(crate) fn response_projection_production_timeline(
     request_id: &str,
     attempt: u32,
     canonical: &str,
@@ -881,20 +923,6 @@ fn response_projection_production_texts(updates: Vec<acp::SessionUpdate>) -> Vec
         text.text
     }).collect()
 }
-fn response_projection_production_physical_count(
-    bytes: &[u8],
-    request_id: &str,
-    attempt: u32,
-) -> usize {
-    std::str::from_utf8(bytes).unwrap().lines().filter(|line| {
-        matches!(
-            SessionUpdateEnvelope::from_str(line),
-            Ok(SessionUpdate::ResponseReplayProjection(projection))
-                if projection.request_id == request_id && projection.attempt == attempt
-        )
-    }).count()
-}
-
 fn response_projection_update_for_timeline(
     info: &Info,
     timeline: &chat_state::Timeline,
@@ -924,6 +952,12 @@ fn describe_fork_replay(updates: Vec<acp::SessionUpdate>) -> Vec<String> {
                     panic!("expected text message projection")
                 };
                 format!("message:{}", text.text)
+            }
+            acp::SessionUpdate::UserMessageChunk(chunk) => {
+                let acp::ContentBlock::Text(text) = chunk.content else {
+                    panic!("expected text user projection")
+                };
+                format!("user:{}", text.text)
             }
             acp::SessionUpdate::ToolCallUpdate(_) => "tool".into(),
             other => panic!("unexpected fork replay update: {other:?}"),
@@ -979,14 +1013,7 @@ async fn fork_reconciles_and_expands_response_projection_into_child_history() {
         .await
         .unwrap();
     let projection = response_projection_update_for_timeline(&source_info, &timeline);
-    adapter
-        .append_update(&source_info, &projection)
-        .await
-        .unwrap();
-    adapter
-        .append_update(&source_info, &projection)
-        .await
-        .unwrap();
+    assert!(adapter.append_update(&source_info, &projection).await.is_err());
     adapter
         .append_update(
             &source_info,
@@ -1004,10 +1031,7 @@ async fn fork_reconciles_and_expands_response_projection_into_child_history() {
         .await
         .unwrap();
 
-    let physical = JsonlStorageAdapter::read_updates_from_directory(
-        adapter.open_session(&target_info).unwrap().directory(),
-    )
-    .unwrap();
+    let physical = read_history(&adapter, &target_info).unwrap();
     assert_eq!(
         physical.len(),
         3,
@@ -1028,11 +1052,13 @@ async fn fork_reconciles_and_expands_response_projection_into_child_history() {
             .collect::<Vec<_>>(),
         vec![target_info.id.clone(); 3]
     );
-    assert!(
-        notifications[..2]
-            .iter()
-            .all(|notification| notification.meta.is_none())
-    );
+    assert!(notifications[..2].iter().all(|notification| {
+        notification.meta.as_ref().is_none_or(|meta| {
+            ["samplingRequestId", "samplingAttempt", "responseProjection"]
+                .iter()
+                .all(|key| !meta.contains_key(*key))
+        })
+    }));
     let typed = describe_fork_replay(
         notifications
             .iter()
@@ -1058,6 +1084,200 @@ async fn fork_reconciles_and_expands_response_projection_into_child_history() {
     );
     assert_eq!(describe_fork_replay(direct), typed);
     assert_eq!(describe_fork_replay(streamed), typed);
+}
+
+fn assert_message_references_are_seed_owned(adapter: &JsonlStorageAdapter, info: &Info) -> usize {
+    use crate::session::history::{HistoryContent, HistorySource};
+
+    let opened = adapter.open_session(info).unwrap();
+    let validated = opened.validated_timeline(info.id.0.as_ref()).unwrap();
+    let mut references = 0;
+    for source in &validated.history.sources {
+        let HistorySource::Presentation { fact, .. } = source else {
+            continue;
+        };
+        let HistoryContent::Message {
+            event,
+            item,
+            channel,
+            ..
+        } = &fact.content
+        else {
+            continue;
+        };
+        let seed_event = validated
+            .timeline
+            .events()
+            .get(*event as usize)
+            .filter(|candidate| candidate.seq.get() == *event)
+            .expect("Message reference must point at a child Timeline event");
+        let message = seed_event
+            .messages()
+            .expect("Message reference must point at a message event");
+        assert_eq!(message.cause, chat_state::MessageCause::Seed);
+        assert!(
+            message.response_admission.is_none(),
+            "a fork reference cannot inherit parent admission identity"
+        );
+        let item = message
+            .items
+            .get(*item)
+            .expect("Message reference item must exist in the child seed");
+        assert!(matches!(
+            (channel, item),
+            (
+                crate::session::history::TextChannel::User,
+                ConversationItem::User(_)
+            ) | (
+                crate::session::history::TextChannel::Assistant,
+                ConversationItem::Assistant(_)
+            ) | (
+                crate::session::history::TextChannel::Reasoning,
+                ConversationItem::Reasoning(_)
+            )
+        ));
+        references += 1;
+    }
+    references
+}
+
+#[tokio::test]
+async fn double_fork_preserves_seed_message_order_and_strip_reasoning() {
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("double-fork-history-source"),
+        cwd: "/source".into(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let timeline = response_projection_production_timeline_with_items(
+        "double-fork-response",
+        1,
+        vec![
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "private thought",
+            )),
+            ConversationItem::assistant("assistant answer"),
+        ],
+        0,
+    );
+    append_response_projection_production_timeline(&adapter, &source_info, &timeline).await;
+    adapter
+        .append_update(
+            &source_info,
+            &response_projection_production_tool_update(&source_info, "independent-tool"),
+        )
+        .await
+        .unwrap();
+    adapter
+        .append_update(
+            &source_info,
+            &fork_user_chunk(source_info.id.0.as_ref(), "independent user", 0),
+        )
+        .await
+        .unwrap();
+
+    let child_info = Info {
+        id: acp::SessionId::new("double-fork-history-child"),
+        cwd: "/child".into(),
+    };
+    adapter
+        .copy_session_data(&source_info, &child_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let child = adapter.load_session(&child_info).await.unwrap();
+    let expected = vec![
+        "thought:private thought",
+        "message:assistant answer",
+        "tool",
+        "user:independent user",
+    ];
+    let source_rows = describe_fork_replay(loaded_child_acp_updates(
+        read_history(&adapter, &source_info).unwrap(),
+    ).into_iter().map(|notification| notification.update).collect());
+    assert_eq!(source_rows, expected);
+    let child_rows = describe_fork_replay(
+        loaded_child_acp_updates(child.updates)
+            .into_iter()
+            .map(|notification| notification.update)
+            .collect(),
+    );
+    assert_eq!(child_rows, expected);
+    assert_eq!(assert_message_references_are_seed_owned(&adapter, &child_info), 2);
+
+    let grandchild_info = Info {
+        id: acp::SessionId::new("double-fork-history-grandchild"),
+        cwd: "/grandchild".into(),
+    };
+    adapter
+        .copy_session_data(&child_info, &grandchild_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let grandchild = adapter.load_session(&grandchild_info).await.unwrap();
+    let grandchild_rows = describe_fork_replay(
+        loaded_child_acp_updates(grandchild.updates)
+            .into_iter()
+            .map(|notification| notification.update)
+            .collect(),
+    );
+    assert_eq!(grandchild_rows, expected);
+    assert_eq!(assert_message_references_are_seed_owned(&adapter, &grandchild_info), 2);
+
+    let stripped_info = Info {
+        id: acp::SessionId::new("double-fork-history-stripped"),
+        cwd: "/stripped".into(),
+    };
+    adapter
+        .copy_session_data(
+            &source_info,
+            &stripped_info,
+            CopySessionOptions {
+                strip_reasoning: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stripped = adapter.load_session(&stripped_info).await.unwrap();
+    let stripped_rows = describe_fork_replay(
+        loaded_child_acp_updates(stripped.updates)
+            .into_iter()
+            .map(|notification| notification.update)
+            .collect(),
+    );
+    assert_eq!(
+        stripped_rows,
+        ["message:assistant answer", "tool", "user:independent user"]
+    );
+    assert_eq!(assert_message_references_are_seed_owned(&adapter, &stripped_info), 1);
+
+    let stripped_grandchild_info = Info {
+        id: acp::SessionId::new("double-fork-history-stripped-grandchild"),
+        cwd: "/stripped-grandchild".into(),
+    };
+    adapter
+        .copy_session_data(
+            &stripped_info,
+            &stripped_grandchild_info,
+            CopySessionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let stripped_grandchild = adapter.load_session(&stripped_grandchild_info).await.unwrap();
+    let stripped_grandchild_rows = describe_fork_replay(
+        loaded_child_acp_updates(stripped_grandchild.updates)
+            .into_iter()
+            .map(|notification| notification.update)
+            .collect(),
+    );
+    assert_eq!(stripped_grandchild_rows, stripped_rows);
+    assert_eq!(
+        assert_message_references_are_seed_owned(&adapter, &stripped_grandchild_info),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1089,16 +1309,17 @@ async fn fork_synthesizes_missing_projection_without_child_admission() {
         .await
         .unwrap();
 
-    let physical = JsonlStorageAdapter::read_updates_from_directory(
-        adapter.open_session(&target_info).unwrap().directory(),
-    )
-    .unwrap();
+    let physical = read_history(&adapter, &target_info).unwrap();
     assert_eq!(physical.len(), 1);
     let SessionUpdate::Acp(notification) = &physical[0] else {
         panic!("missing parent projection must be expanded to ACP history")
     };
     assert_eq!(notification.session_id, target_info.id);
-    assert!(notification.meta.is_none());
+    assert!(notification.meta.as_ref().is_none_or(|meta| {
+        ["samplingRequestId", "samplingAttempt", "responseProjection"]
+            .iter()
+            .all(|key| !meta.contains_key(*key))
+    }));
     assert_eq!(
         describe_fork_replay(vec![notification.update.clone()]),
         ["message:recovered answer"]
@@ -1148,10 +1369,7 @@ async fn fork_drops_quarantined_projection_and_parent_candidate_metadata() {
         .await
         .unwrap();
     let projection = response_projection_update_for_timeline(&source_info, &timeline);
-    adapter
-        .append_update(&source_info, &projection)
-        .await
-        .unwrap();
+    assert!(adapter.append_update(&source_info, &projection).await.is_err());
 
     let target_info = Info {
         id: acp::SessionId::new("fork-quarantine-child"),
@@ -1161,10 +1379,7 @@ async fn fork_drops_quarantined_projection_and_parent_candidate_metadata() {
         .copy_session_data(&source_info, &target_info, Default::default())
         .await
         .unwrap();
-    let physical = JsonlStorageAdapter::read_updates_from_directory(
-        adapter.open_session(&target_info).unwrap().directory(),
-    )
-    .unwrap();
+    let physical = read_history(&adapter, &target_info).unwrap();
     assert!(
         physical.is_empty(),
         "discarded parent response cannot seed child history"
@@ -1180,7 +1395,7 @@ async fn fork_drops_quarantined_projection_and_parent_candidate_metadata() {
 }
 
 #[tokio::test]
-async fn response_projection_production_cold_writer_repairs_once_after_timeline_admission() {
+async fn response_projection_production_cold_writer_preserves_unified_timeline() {
     let root = TempDir::new().unwrap();
     let info = create_test_info();
     let request_id = "production-request";
@@ -1190,21 +1405,23 @@ async fn response_projection_production_cold_writer_repairs_once_after_timeline_
     writer.init_session(&info, default_model_id()).await.unwrap();
     let timeline = response_projection_production_timeline(request_id, attempt, canonical);
     append_response_projection_production_timeline(&writer, &info, &timeline).await;
-    let updates_path = writer.session_dir(&info).join(super::super::UPDATES_FILE);
-    std::fs::write(&updates_path, b"").unwrap();
+    let timeline_path = writer.timeline_file(&info);
+    let before = std::fs::read(&timeline_path).unwrap();
     drop(writer);
 
     let replacement = JsonlStorageAdapter::with_root(root.path().to_path_buf());
     replacement.load_session_for_write_without_updates(&info).await.unwrap();
-    let repaired = std::fs::read(&updates_path).unwrap();
-    assert_eq!(response_projection_production_physical_count(&repaired, request_id, attempt), 1);
+    let after_first_load = std::fs::read(&timeline_path).unwrap();
+    assert_eq!(after_first_load, before);
+    assert!(!replacement
+        .session_dir(&info)
+        .join(super::super::UPDATES_FILE)
+        .exists());
     drop(replacement);
 
     let reopened = JsonlStorageAdapter::with_root(root.path().to_path_buf());
     reopened.load_session_for_write_without_updates(&info).await.unwrap();
-    let repaired_again = std::fs::read(&updates_path).unwrap();
-    assert_eq!(repaired_again, repaired);
-    assert_eq!(response_projection_production_physical_count(&repaired_again, request_id, attempt), 1);
+    assert_eq!(std::fs::read(&timeline_path).unwrap(), before);
     drop(reopened);
 
     let replay = crate::session::storage::load_updates_for_replay_at(
@@ -1275,7 +1492,7 @@ async fn cold_writer_repairs_projection_at_a_payload_free_anchor_after_admission
 }
 
 #[tokio::test]
-async fn response_projection_production_read_only_cores_synthesize_without_writer_authority() {
+async fn response_projection_production_read_only_cores_preserve_unified_timeline() {
     let root = TempDir::new().unwrap();
     let info = create_test_info();
     let request_id = "production-request";
@@ -1300,8 +1517,8 @@ async fn response_projection_production_read_only_cores_synthesize_without_write
         serde_json::json!({ "eventId": "event-later" })
             .as_object().cloned().unwrap(),
     )).await.unwrap();
-    let updates_path = writer.session_dir(&info).join(super::super::UPDATES_FILE);
-    let physical_before = std::fs::read(&updates_path).unwrap();
+    let timeline_path = writer.timeline_file(&info);
+    let physical_before = std::fs::read(&timeline_path).unwrap();
 
     let mut streamed = Vec::new();
     assert_eq!(
@@ -1318,7 +1535,8 @@ async fn response_projection_production_read_only_cores_synthesize_without_write
     ).unwrap().unwrap();
     assert_eq!(response_projection_production_texts(streamed), [canonical, later]);
     assert_eq!(response_projection_production_texts(materialized), [canonical, later]);
-    assert_eq!(std::fs::read(&updates_path).unwrap(), physical_before);
+    assert_eq!(std::fs::read(&timeline_path).unwrap(), physical_before);
+    assert!(!timeline_path.with_file_name(super::super::UPDATES_FILE).exists());
 
     let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
     assert!(!contender.try_acquire_writer_lease(&info).unwrap());
@@ -3074,7 +3292,7 @@ async fn write_jsonl_leaves_no_temp_and_renames_target() {
 /// The resume/read paths must not mutate the on-disk `updates.jsonl` or
 /// `rewind_points.jsonl`, and ACU lines stay on disk.
 #[tokio::test]
-async fn reads_never_modify_rewind_or_updates_files() {
+async fn reads_never_modify_rewind_or_timeline_files() {
     use workspace::session::file_state::{FileStateTracker, RewindPoint};
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
@@ -3082,13 +3300,19 @@ async fn reads_never_modify_rewind_or_updates_files() {
     adapter.init_session(&info, default_model_id()).await.unwrap();
     adapter.append_rewind_point(&info, &RewindPoint::new(0)).await.unwrap();
     adapter.append_rewind_point(&info, &RewindPoint::new(1)).await.unwrap();
-    let updates_path = adapter.updates_file(&info);
-    let acu = r#"{"timestamp":0,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}"#;
-    tokio::fs::write(&updates_path, format!("{acu}\n")).await.unwrap();
+    adapter
+        .append_update(
+            &info,
+            &SessionUpdate::Acp(Box::new(create_test_notification())),
+        )
+        .await
+        .unwrap();
+    let timeline_path = adapter.timeline_file(&info);
     let rewind_path = adapter.rewind_points_file(&info);
     let rewind_before = std::fs::read(&rewind_path).unwrap();
-    let updates_before = std::fs::read(&updates_path).unwrap();
+    let timeline_before = std::fs::read(&timeline_path).unwrap();
     adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(adapter.load_session(&info).await.unwrap().updates.len(), 1);
     let rewind_file = adapter
         .open_session(&info)
         .unwrap()
@@ -3106,15 +3330,11 @@ async fn reads_never_modify_rewind_or_updates_files() {
             "rewind_points.jsonl must be unchanged by reads"
         );
     assert_eq!(
-            std::fs::read(&updates_path).unwrap(),
-            updates_before,
-            "updates.jsonl must be unchanged by reads"
+            std::fs::read(&timeline_path).unwrap(),
+            timeline_before,
+            "the Timeline journal must be unchanged by reads"
         );
-    let updates_str = String::from_utf8(updates_before).unwrap();
-    assert!(
-            updates_str.contains("available_commands_update"),
-            "ACU stays persisted on disk (only skipped on forward)"
-        );
+    assert!(!timeline_path.with_file_name(super::super::UPDATES_FILE).exists());
 }
 #[tokio::test]
 async fn delete_session_removes_dir_and_is_idempotent() {
@@ -3474,7 +3694,10 @@ async fn test_subagent_notifications_round_trip() {
     };
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = create_test_info();
+    let info = Info {
+        id: acp::SessionId::new("parent-session"),
+        cwd: "/test/workspace".to_string(),
+    };
     adapter.init_session(&info, default_model_id()).await.unwrap();
     let spawned = GrowSessionNotification {
         session_id: acp::SessionId::new("parent-session"),
@@ -3563,29 +3786,15 @@ async fn test_subagent_notifications_round_trip() {
         }
         other => panic!("Expected Grow update, got {other:?}"),
     }
-    let raw_jsonl = tokio::fs::read_to_string(
-            adapter.session_dir(&info).join("updates.jsonl"),
-        )
-        .await
-        .unwrap();
-    let lines: Vec<&str> = raw_jsonl.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(
-            lines.len(),
-            2,
-            "Expected 2 JSONL lines (spawned + finished), got {}",
-            lines.len()
-        );
-    let spawned_json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(spawned_json["method"], "_grow/session/update");
-    let spawned_update = &spawned_json["params"]["update"];
-    assert_eq!(spawned_update["sessionUpdate"], "subagent_spawned");
-    assert_eq!(spawned_update["subagent_id"], "child-001");
-    let finished_json: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-    assert_eq!(finished_json["method"], "_grow/session/update");
-    let finished_update = &finished_json["params"]["update"];
-    assert_eq!(finished_update["sessionUpdate"], "subagent_finished");
-    assert_eq!(finished_update["tool_calls"], 5);
-    assert_eq!(finished_update["duration_ms"], 12345);
+    assert!(!adapter.session_dir(&info).join("updates.jsonl").exists());
+    let journal = JsonlStorageAdapter::read_journal_from_directory(&adapter.bound_session_directory(&info).unwrap()).unwrap();
+    assert_eq!(journal.history.sources.len(), 2, "spawned and finished each own one physical fact");
+    let facts = journal.history.sources.iter().filter_map(|source| match source {
+        crate::session::history::HistorySource::Presentation { fact, .. } => Some(fact), _ => None,
+    }).collect::<Vec<_>>();
+    assert!(matches!(&facts[0].content, crate::session::history::HistoryContent::Grow(value) if matches!(value.as_ref(), crate::session::history::GrowHistoryFact::SubagentSpawned { subagent_id, .. } if subagent_id == "child-001")));
+    assert!(matches!(&facts[1].content, crate::session::history::HistoryContent::Grow(value) if matches!(value.as_ref(), crate::session::history::GrowHistoryFact::SubagentFinished { tool_calls:5, duration_ms:12345, .. })));
+
 }
 #[tokio::test]
 async fn test_subagent_spawned_resumed_roundtrip() {
@@ -3595,7 +3804,10 @@ async fn test_subagent_spawned_resumed_roundtrip() {
     };
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = create_test_info();
+    let info = Info {
+        id: acp::SessionId::new("resume-parent"),
+        cwd: "/test/workspace".to_string(),
+    };
     adapter.init_session(&info, default_model_id()).await.unwrap();
     let spawned = GrowSessionNotification {
         session_id: acp::SessionId::new("resume-parent"),
@@ -3760,7 +3972,8 @@ async fn test_copy_session_data_basic() {
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
     let messages = create_test_chat_messages();
     append_timeline_seed(&adapter, &source_info, messages.clone()).await;
-    let notification = create_test_notification();
+    let mut notification = create_test_notification();
+    notification.session_id = source_info.id.clone();
     adapter
         .append_update(&source_info, &SessionUpdate::Acp(Box::new(notification)))
         .await
@@ -3874,21 +4087,12 @@ async fn load_reports_the_persisted_and_expected_timeline_schema_versions() {
     adapter.init_session(&info, default_model_id()).await.unwrap();
     append_timeline_seed(&adapter, &info, vec![ConversationItem::user("hello")]).await;
 
-    let path = adapter.timeline_file(&info);
-    let mut event: serde_json::Value = serde_json::from_slice(
-        std::fs::read(&path)
-            .unwrap()
-            .trim_ascii(),
-    )
-    .unwrap();
     let persisted_version = u64::from(chat_state::TIMELINE_SCHEMA_VERSION) + 1;
-    event["version"] = persisted_version.into();
-    event["future_field"] = true.into();
-    event.as_object_mut().unwrap().remove("type");
-    event.as_object_mut().unwrap().remove("event");
-    let mut bytes = serde_json::to_vec(&event).unwrap();
-    bytes.push(b'\n');
-    std::fs::write(path, bytes).unwrap();
+    rewrite_first_domain_record(&adapter.timeline_file(&info), |event| {
+        event["version"] = persisted_version.into();
+        event["future_field"] = true.into();
+        event.as_object_mut().unwrap().remove("kind");
+    });
 
     let error = adapter.load_session_without_updates(&info).await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
@@ -3919,18 +4123,9 @@ async fn load_reports_the_first_of_multiple_version_incompatibilities() {
     crate::session::storage::write_bytes_atomic(&adapter.summary_file(&info), &summary_bytes)
         .unwrap();
 
-    let timeline_path = adapter.timeline_file(&info);
-    let mut timeline_event: serde_json::Value = serde_json::from_slice(
-        std::fs::read(&timeline_path)
-            .unwrap()
-            .trim_ascii(),
-    )
-    .unwrap();
-    timeline_event["version"] =
-        (u64::from(chat_state::TIMELINE_SCHEMA_VERSION) + 1).into();
-    let mut timeline_bytes = serde_json::to_vec(&timeline_event).unwrap();
-    timeline_bytes.push(b'\n');
-    std::fs::write(timeline_path, timeline_bytes).unwrap();
+    rewrite_first_domain_record(&adapter.timeline_file(&info), |event| {
+        event["version"] = (u64::from(chat_state::TIMELINE_SCHEMA_VERSION) + 1).into();
+    });
 
     let error = adapter.load_session_without_updates(&info).await.unwrap_err();
     let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
@@ -5528,9 +5723,9 @@ fn set_mtime(path: &std::path::Path, time: chrono::DateTime<chrono::Utc>) {
     let mtime = filetime::FileTime::from_system_time(system_time);
     filetime::set_file_mtime(path, mtime).unwrap();
 }
-/// Invalid UTF-8 in `updates.jsonl` poisons only its own line.
+/// Invalid UTF-8 in a complete Timeline record fails closed.
 #[tokio::test]
-async fn read_updates_jsonl_skips_invalid_utf8_line() {
+async fn timeline_reader_rejects_invalid_utf8_record() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
@@ -5548,26 +5743,21 @@ async fn read_updates_jsonl_skips_invalid_utf8_line() {
         ),
     );
     adapter.append_update(&info, &notification).await.unwrap();
-    let updates_path = adapter.updates_file(&info);
+    let timeline_path = adapter.session_dir(&info).join(super::super::TIMELINE_FILE);
     {
         use std::io::Write as _;
         let mut f = std::fs::OpenOptions::new()
             .append(true)
-            .open(&updates_path)
+            .open(&timeline_path)
             .unwrap();
         f.write_all(&[0xE2, 0x82, b'\n']).unwrap();
     }
-    let updates = adapter.read_updates_jsonl(updates_path).unwrap();
-    assert_eq!(
-            updates.len(),
-            1,
-            "valid line kept, invalid-UTF8 line skipped"
-        );
+    let opened = adapter.open_session(&info).unwrap();
+    assert!(opened.validated_timeline(info.id.0.as_ref()).is_err());
 }
-/// Same self-healing for `updates.jsonl` appends, and the lenient reader
-/// skips the isolated torn line.
+/// Timeline readers ignore an incomplete trailing record.
 #[tokio::test]
-async fn append_update_terminates_torn_trailing_line() {
+async fn timeline_reader_ignores_torn_trailing_record() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -5585,25 +5775,17 @@ async fn append_update_terminates_torn_trailing_line() {
         ),
     );
     adapter.append_update(&info, &notification("first")).await.unwrap();
-    let updates_path = adapter.updates_file(&info);
+    let timeline_path = adapter.session_dir(&info).join(super::super::TIMELINE_FILE);
     {
         use std::io::Write as _;
         let mut f = std::fs::OpenOptions::new()
             .append(true)
-            .open(&updates_path)
+            .open(&timeline_path)
             .unwrap();
-        f.write_all(br#"{"timestamp":"2026-07-06T00:00:00Z","update":{"sessionId":"tor"#)
-            .unwrap();
+        f.write_all(b"{\"version\":1,\"seq\":1").unwrap();
     }
-    adapter.append_update(&info, &notification("second")).await.unwrap();
-    let raw = std::fs::read_to_string(&updates_path).unwrap();
-    assert_eq!(
-            raw.lines().count(),
-            3,
-            "first + torn(terminated) + second: {raw:?}"
-        );
-    let updates = adapter.read_updates_jsonl(updates_path).unwrap();
-    assert_eq!(updates.len(), 2, "torn line skipped, real updates kept");
+    let updates = read_history(&adapter, &info).unwrap();
+    assert_eq!(updates.len(), 1, "the committed fact remains visible");
 }
 #[tokio::test]
 async fn timeline_control_roundtrips_goal_through_light_session_load() {

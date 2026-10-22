@@ -1,0 +1,287 @@
+[
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 128,
+    "n": 1,
+    "metrics": {
+      "send_attempt_from_load_ms": {
+        "median_ms": 20.578125,
+        "range_ms": [
+          20.578125,
+          20.578125
+        ]
+      },
+      "applied_from_load_ms": {
+        "median_ms": 20.881103515625,
+        "range_ms": [
+          20.881103515625,
+          20.881103515625
+        ]
+      },
+      "frame_produced_from_load_ms": {
+        "median_ms": 106.9970703125,
+        "range_ms": [
+          106.9970703125,
+          106.9970703125
+        ]
+      },
+      "frame_delivered_from_load_ms": {
+        "median_ms": 107.094970703125,
+        "range_ms": [
+          107.094970703125,
+          107.094970703125
+        ]
+      },
+      "frame_ack_observed_from_load_ms": {
+        "median_ms": 107.083984375,
+        "range_ms": [
+          107.083984375,
+          107.083984375
+        ]
+      },
+      "send_to_applied_ms": {
+        "median_ms": 0.302978515625,
+        "range_ms": [
+          0.302978515625,
+          0.302978515625
+        ]
+      },
+      "applied_to_frame_produced_ms": {
+        "median_ms": 86.115966796875,
+        "range_ms": [
+          86.115966796875,
+          86.115966796875
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 512,
+    "n": 1,
+    "metrics": {
+      "send_attempt_from_load_ms": {
+        "median_ms": 55.327880859375,
+        "range_ms": [
+          55.327880859375,
+          55.327880859375
+        ]
+      },
+      "applied_from_load_ms": {
+        "median_ms": 55.427978515625,
+        "range_ms": [
+          55.427978515625,
+          55.427978515625
+        ]
+      },
+      "frame_produced_from_load_ms": {
+        "median_ms": 119.3759765625,
+        "range_ms": [
+          119.3759765625,
+          119.3759765625
+        ]
+      },
+      "frame_delivered_from_load_ms": {
+        "median_ms": 119.4580078125,
+        "range_ms": [
+          119.4580078125,
+          119.4580078125
+        ]
+      },
+      "frame_ack_observed_from_load_ms": {
+        "median_ms": 119.45703125,
+        "range_ms": [
+          119.45703125,
+          119.45703125
+        ]
+      },
+      "send_to_applied_ms": {
+        "median_ms": 0.10009765625,
+        "range_ms": [
+          0.10009765625,
+          0.10009765625
+        ]
+      },
+      "applied_to_frame_produced_ms": {
+        "median_ms": 63.947998046875,
+        "range_ms": [
+          63.947998046875,
+          63.947998046875
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "turns": 2048,
+    "n": 1,
+    "metrics": {
+      "send_attempt_from_load_ms": {
+        "median_ms": 216.439697265625,
+        "range_ms": [
+          216.439697265625,
+          216.439697265625
+        ]
+      },
+      "applied_from_load_ms": {
+        "median_ms": 216.56591796875,
+        "range_ms": [
+          216.56591796875,
+          216.56591796875
+        ]
+      },
+      "frame_produced_from_load_ms": {
+        "median_ms": 363.73095703125,
+        "range_ms": [
+          363.73095703125,
+          363.73095703125
+        ]
+      },
+      "frame_delivered_from_load_ms": {
+        "median_ms": 363.84765625,
+        "range_ms": [
+          363.84765625,
+          363.84765625
+        ]
+      },
+      "frame_ack_observed_from_load_ms": {
+        "median_ms": 365.239013671875,
+        "range_ms": [
+          365.239013671875,
+          365.239013671875
+        ]
+      },
+      "send_to_applied_ms": {
+        "median_ms": 0.126220703125,
+        "range_ms": [
+          0.126220703125,
+          0.126220703125
+        ]
+      },
+      "applied_to_frame_produced_ms": {
+        "median_ms": 147.1650390625,
+        "range_ms": [
+          147.1650390625,
+          147.1650390625
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 512,
+    "n": 1,
+    "metrics": {
+      "send_attempt_from_load_ms": {
+        "median_ms": 54.233154296875,
+        "range_ms": [
+          54.233154296875,
+          54.233154296875
+        ]
+      },
+      "applied_from_load_ms": {
+        "median_ms": 54.3388671875,
+        "range_ms": [
+          54.3388671875,
+          54.3388671875
+        ]
+      },
+      "frame_produced_from_load_ms": {
+        "median_ms": 166.05615234375,
+        "range_ms": [
+          166.05615234375,
+          166.05615234375
+        ]
+      },
+      "frame_delivered_from_load_ms": {
+        "median_ms": 216.14501953125,
+        "range_ms": [
+          216.14501953125,
+          216.14501953125
+        ]
+      },
+      "frame_ack_observed_from_load_ms": {
+        "median_ms": 216.13818359375,
+        "range_ms": [
+          216.13818359375,
+          216.13818359375
+        ]
+      },
+      "send_to_applied_ms": {
+        "median_ms": 0.105712890625,
+        "range_ms": [
+          0.105712890625,
+          0.105712890625
+        ]
+      },
+      "applied_to_frame_produced_ms": {
+        "median_ms": 111.71728515625,
+        "range_ms": [
+          111.71728515625,
+          111.71728515625
+        ]
+      }
+    }
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "turns": 2048,
+    "n": 1,
+    "metrics": {
+      "send_attempt_from_load_ms": {
+        "median_ms": 213.2470703125,
+        "range_ms": [
+          213.2470703125,
+          213.2470703125
+        ]
+      },
+      "applied_from_load_ms": {
+        "median_ms": 213.385009765625,
+        "range_ms": [
+          213.385009765625,
+          213.385009765625
+        ]
+      },
+      "frame_produced_from_load_ms": {
+        "median_ms": 278.411865234375,
+        "range_ms": [
+          278.411865234375,
+          278.411865234375
+        ]
+      },
+      "frame_delivered_from_load_ms": {
+        "median_ms": 320.76611328125,
+        "range_ms": [
+          320.76611328125,
+          320.76611328125
+        ]
+      },
+      "frame_ack_observed_from_load_ms": {
+        "median_ms": 321.678955078125,
+        "range_ms": [
+          321.678955078125,
+          321.678955078125
+        ]
+      },
+      "send_to_applied_ms": {
+        "median_ms": 0.137939453125,
+        "range_ms": [
+          0.137939453125,
+          0.137939453125
+        ]
+      },
+      "applied_to_frame_produced_ms": {
+        "median_ms": 65.02685546875,
+        "range_ms": [
+          65.02685546875,
+          65.02685546875
+        ]
+      }
+    }
+  }
+]

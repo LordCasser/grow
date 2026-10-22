@@ -1111,11 +1111,25 @@ pub(crate) fn tool_identity_issue<'a>(
     call: &'a sampling_types::ToolCall,
     seen: &mut std::collections::HashSet<&'a str>,
 ) -> Option<&'static str> {
+    let issue = tool_identity_issue_with_seen(call, |id| seen.contains(id));
+    if issue.is_none() {
+        seen.insert(call.id.as_ref());
+    }
+    issue
+}
+
+/// Apply the shared identity policy while letting a caller keep its own
+/// storage for previously seen IDs. The lookup is deferred until after the
+/// same blank-ID and blank-name checks used by quarantine.
+pub(crate) fn tool_identity_issue_with_seen(
+    call: &sampling_types::ToolCall,
+    seen: impl FnOnce(&str) -> bool,
+) -> Option<&'static str> {
     if call.id.trim().is_empty() {
         Some("empty tool id")
     } else if call.name.trim().is_empty() {
         Some("empty tool name")
-    } else if !seen.insert(call.id.as_ref()) {
+    } else if seen(call.id.as_ref()) {
         Some("duplicate tool id")
     } else {
         None

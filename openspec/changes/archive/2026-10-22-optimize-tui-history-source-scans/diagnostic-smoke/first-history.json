@@ -1,0 +1,18 @@
+[
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "turns": 128,
+    "source": "before-modern-1/run-modern-128-52610-1792645252895119000-loading.json",
+    "cursor": "{\"version\":1,\"session\":\"fee0fa39-3628-47e7-b3cb-f9639783a663\",\"cut\":1283,\"hash\":\"6aa556767996dc6801516cd5abdaca7a3e95476bd61acec97706d40e757fe853\",\"record\":4,\"part\":0,\"complete\":true}",
+    "writer_sequence": 3,
+    "send_attempt_from_load_ms": 28.760009765625,
+    "applied_from_load_ms": 32.176025390625,
+    "frame_produced_from_load_ms": 117.613037109375,
+    "frame_delivered_from_load_ms": 117.72509765625,
+    "frame_ack_observed_from_load_ms": 118.43408203125,
+    "send_to_applied_ms": 3.416015625,
+    "applied_to_frame_produced_ms": 85.43701171875
+  }
+]

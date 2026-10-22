@@ -1,0 +1,64 @@
+
+running 1 test
+test full_session_load_e2e ... [testkit] admitted history: turns=512 admissions=512 missing_projections=0 updates=4604058B timeline=3072258B rewind=5482B total=7681798B
+
+[perf] e2e session: updates=4.6 MB rewind=0.0 MB
+
+[perf] e2e: updates.jsonl composition (4.6 MB total):
+  sessionUpdate kind                  count         MB       %
+  response_replay_projection            512        2.3   50.2%
+  available_commands_update            1024        2.0   43.4%
+  agent_message_chunk                   512        0.2    4.0%
+  user_message_chunk                    512        0.1    2.5%
+
+[perf] ===== END-TO-END session/load (what the pager waits on) =====
+  total session/load round-trip :    1104.9 ms
+  notifications replayed         :      1028
+  available_commands_update      :         1 replayed / 1024 on disk
+  live catalog reached          :      true
+  time-to-first notification     :     489.6 ms
+  time-to-last notification      :    1104.9 ms
+  first historical text          :     489.6 ms
+  last historical text           :     596.4 ms
+  historical text chunks / bytes : 1024 / 2117522
+  ---- shell-side nested/inclusive timers (not additive) ----
+  session.load_session                                1103.1 ms count=1
+  session.spawn_and_register_session                   497.3 ms count=1
+  session.spawn_and_register                           497.1 ms count=1
+  session.load_light                                   321.4 ms count=1
+  session.spawn.install_coordination_backend           306.0 ms count=1
+  session.load_session_replay                          197.8 ms count=1
+  session.spawn_actor_call                             189.6 ms count=1
+  session.load.timeline_read_decode                    143.4 ms count=1
+  session.load.response_projection_plan                 95.1 ms count=1
+  session.projection.typed_canonical                    93.4 ms count=1
+  session.load.physical_updates_decode                  76.5 ms count=1
+  session.replay.forward_updates                        66.4 ms count=1
+  session.replay.read_and_reconcile                     66.3 ms count=1
+  session.replay.drain_completions                      62.7 ms count=1
+  session.replay.response_reconcile                     42.9 ms count=1
+  skill_discovery                                       14.0 ms count=2
+  session.reconcile_stale_tasks                         12.9 ms count=1
+  session.load.timeline_fold                             3.8 ms count=1
+  session.replay.read_snapshot                           2.3 ms count=1
+  session.spawn.prepare                                  0.7 ms count=1
+  session.load.timeline_evidence                         0.5 ms count=1
+  session.spawn.publish_coordination                     0.5 ms count=1
+  session.load.projection_metadata                       0.3 ms count=1
+  plugin_discovery                                       0.3 ms count=2
+  session.load.state_projections                         0.2 ms count=1
+  mcp_merge                                              0.1 ms count=1
+  session.load.open_session                              0.1 ms count=1
+  session.replay.communication_restore                   0.1 ms count=1
+  session.load.model_route_reconcile                     0.1 ms count=1
+  session.delta_flush_replay                             0.0 ms count=1
+  session.load.response_projection_appends               0.0 ms count=1
+  session.stale_tasks_drain_completions                  0.0 ms count=1
+  session.delta_drain_completions                        0.0 ms count=1
+================================================================
+
+PERF_RESUME {"format":"modern","turns":512,"missing_every":"0","route_seeded":true,"timeline_bytes":3072258,"updates_bytes":4604058,"load_ms":1104.926583,"first_notification_ms":489.602375,"first_history_ms":489.602375,"last_history_ms":596.434708,"max_history_gap_ms":24.576082999999997,"history_count":1024,"history_bytes":2117522,"phases":[{"name":"session.load_session","count":1,"ms":1103.115},{"name":"session.spawn_and_register_session","count":1,"ms":497.251},{"name":"session.spawn_and_register","count":1,"ms":497.053},{"name":"session.load_light","count":1,"ms":321.405},{"name":"session.spawn.install_coordination_backend","count":1,"ms":305.96},{"name":"session.load_session_replay","count":1,"ms":197.786},{"name":"session.spawn_actor_call","count":1,"ms":189.608},{"name":"session.load.timeline_read_decode","count":1,"ms":143.414},{"name":"session.load.response_projection_plan","count":1,"ms":95.089},{"name":"session.projection.typed_canonical","count":1,"ms":93.386},{"name":"session.load.physical_updates_decode","count":1,"ms":76.479},{"name":"session.replay.forward_updates","count":1,"ms":66.351},{"name":"session.replay.read_and_reconcile","count":1,"ms":66.332},{"name":"session.replay.drain_completions","count":1,"ms":62.651},{"name":"session.replay.response_reconcile","count":1,"ms":42.935},{"name":"skill_discovery","count":2,"ms":13.961},{"name":"session.reconcile_stale_tasks","count":1,"ms":12.92},{"name":"session.load.timeline_fold","count":1,"ms":3.79},{"name":"session.replay.read_snapshot","count":1,"ms":2.301},{"name":"session.spawn.prepare","count":1,"ms":0.736},{"name":"session.load.timeline_evidence","count":1,"ms":0.512},{"name":"session.spawn.publish_coordination","count":1,"ms":0.494},{"name":"session.load.projection_metadata","count":1,"ms":0.331},{"name":"plugin_discovery","count":2,"ms":0.256},{"name":"session.load.state_projections","count":1,"ms":0.152},{"name":"mcp_merge","count":1,"ms":0.15},{"name":"session.load.open_session","count":1,"ms":0.126},{"name":"session.replay.communication_restore","count":1,"ms":0.053},{"name":"session.load.model_route_reconcile","count":1,"ms":0.051},{"name":"session.delta_flush_replay","count":1,"ms":0.006},{"name":"session.load.response_projection_appends","count":1,"ms":0.004},{"name":"session.stale_tasks_drain_completions","count":1,"ms":0.001},{"name":"session.delta_drain_completions","count":1,"ms":0.0}]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.47s
+

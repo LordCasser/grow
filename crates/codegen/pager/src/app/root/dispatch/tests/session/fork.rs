@@ -217,6 +217,7 @@ fn fork_initiation_supersedes_open_reload_window() {
             code_restored: false,
             restore_summary: None,
             foreground: None,
+            descendant_ownership: None,
         }),
         &mut app,
     );

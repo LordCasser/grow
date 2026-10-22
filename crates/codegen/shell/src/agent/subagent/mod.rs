@@ -684,6 +684,7 @@ pub(crate) fn present_child_completion(
                 output: None,
             },
             completion_data.parent_cmd_tx.as_ref(),
+            false,
         );
     }
 }
@@ -2333,6 +2334,7 @@ fn emit_subagent_notification(
     parent_session_id: &str,
     mut update: SessionUpdate,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    restored: bool,
 ) {
     // The canonical child result and completion receipt own the answer. The
     // parent lifecycle projection only needs the terminal status/identity.
@@ -2349,6 +2351,7 @@ fn emit_subagent_notification(
             .send(SessionCommand::GrowSessionNotification {
                 notification: notification.clone(),
                 forward_to_gateway: true,
+                restored,
             })
             .is_ok()
         {
@@ -3037,13 +3040,9 @@ fn finish_from_durable_facts_in_directory(
     terminal: &chat_state::SubagentTerminalEvent,
     child_directory: &crate::session::storage::ContainedDirectory,
 ) -> Result<SessionUpdate, String> {
-    let events = crate::session::storage::read_committed_jsonl_from_directory(
-        child_directory,
-        std::ffi::OsStr::new(crate::session::storage::TIMELINE_FILE),
-        "child Timeline ledger",
-        crate::session::storage::MAX_JSONL_ENTRY_BYTES,
-    )
-    .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
+    let events =
+        crate::session::storage::JsonlStorageAdapter::read_timeline_from_directory(child_directory)
+            .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
     let child = chat_state::Timeline::from_events(events)
         .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
     let result = child
@@ -3761,88 +3760,13 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         }
     }
 
-    if emit_replay_projections {
-        for (_, _, spawn) in spawns.values() {
-            if !projections.spawned.contains(&spawn.subagent_id) {
-                emit_subagent_notification(
-                    gateway,
-                    parent_session_id,
-                    spawn_from_fact(parent_session_id, spawn, workflow_tracker),
-                    parent_cmd_tx,
-                );
-            }
-        }
-        for (subagent_id, terminal) in &terminals {
-            if !projections.finished.contains(&terminal.subagent_id) {
-                let Some((spawn_seq, _, spawn)) = spawns.get(subagent_id) else {
-                    tracing::error!(%subagent_id, "parent terminal has no spawn fact");
-                    continue;
-                };
-                match finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal) {
-                    Ok(update) => emit_subagent_notification(
-                        gateway,
-                        parent_session_id,
-                        update,
-                        parent_cmd_tx,
-                    ),
-                    Err(error) => tracing::error!(
-                        %subagent_id,
-                        %error,
-                        "refusing to replay an unverified subagent result"
-                    ),
-                }
-            }
-        }
-    }
-
-    // A process may have committed the parent terminal and died before the
-    // live completion producer received its receipt acknowledgement. Replay
-    // the durable model reminder independently of the UI projection ledger.
-    for (subagent_id, terminal) in &terminals {
-        let Some((spawn_seq, _, spawn)) = spawns.get(subagent_id) else {
-            tracing::error!(%subagent_id, "parent terminal has no spawn fact");
-            continue;
-        };
-        if let Err(error) =
-            finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal)
-        {
-            tracing::error!(
-                %subagent_id,
-                %error,
-                "refusing to publish an unverified local planning result"
-            );
+    // First repair historical authority. Publishing a receipt can immediately
+    // start a new notification turn, which interruption recovery must not close.
+    for (subagent_id, (spawn_seq, spawned_at_ms, spawn)) in &spawns {
+        if terminals.contains_key(subagent_id) {
             continue;
         }
-        let direct_cmd_tx = completion_command_route(
-            parent_session_id,
-            spawn,
-            parent_cmd_tx,
-            direct_parent_cmd_txs,
-        );
-        if !repair_subagent_planning_result(direct_cmd_tx, spawn, terminal).await {
-            tracing::warn!(
-                %subagent_id,
-                direct_parent_session_id = %spawn.security_parent_session_id,
-                "direct parent is unavailable; local plan result remains pending"
-            );
-            continue;
-        }
-        repair_subagent_completion_receipt(
-            parent_session_id,
-            parent_chat_state,
-            direct_cmd_tx,
-            *spawn_seq,
-            spawn,
-            terminal,
-        )
-        .await;
-    }
-
-    for (subagent_id, (spawn_seq, spawned_at_ms, spawn)) in spawns {
-        if terminals.contains_key(&subagent_id) {
-            continue;
-        }
-        let inspection = match backend.inspect(&subagent_id).await {
+        let inspection = match backend.inspect(subagent_id).await {
             Ok(inspection) => inspection,
             Err(error) => {
                 tracing::warn!(%subagent_id, %error, "backend inspection unavailable; leaving parent spawn open");
@@ -3852,7 +3776,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         if let Some(inspection) = &inspection
             && (inspection.parent_session_id != parent_session_id
                 || inspection.child_session_id != spawn.child_session_id
-                || inspection.snapshot.subagent_id != subagent_id)
+                || inspection.snapshot.subagent_id != *subagent_id)
         {
             tracing::error!(
                 %subagent_id,
@@ -3906,18 +3830,16 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         }
         let duration_ms = chrono::Utc::now()
             .timestamp_millis()
-            .saturating_sub(spawned_at_ms)
+            .saturating_sub(*spawned_at_ms)
             .max(0) as u64;
-        let Some(fallback) = result_from_inspection(&spawn, inspection.as_ref(), duration_ms)
-        else {
+        let Some(fallback) = result_from_inspection(spawn, inspection.as_ref(), duration_ms) else {
             tracing::warn!(%subagent_id, "finalization evidence is pending; leaving parent spawn open");
             continue;
         };
         let recovered =
-            ensure_recovered_child_result(parent_session_id, spawn_seq, &spawn, fallback.clone())
-                .await;
-        let (result_ref, result, output) = match recovered {
-            Ok((result_ref, result, output)) => (Some(result_ref), result, output),
+            ensure_recovered_child_result(parent_session_id, *spawn_seq, spawn, fallback).await;
+        let (result_ref, result) = match recovered {
+            Ok((result_ref, result, _)) => (Some(result_ref), result),
             Err(error) => {
                 tracing::error!(
                     %subagent_id,
@@ -3971,37 +3893,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             .await
         {
             Ok(_) => {
-                let direct_cmd_tx = completion_command_route(
-                    parent_session_id,
-                    &spawn,
-                    parent_cmd_tx,
-                    direct_parent_cmd_txs,
-                );
-                if !repair_subagent_planning_result(direct_cmd_tx, &spawn, &terminal).await {
-                    tracing::warn!(
-                        %subagent_id,
-                        direct_parent_session_id = %spawn.security_parent_session_id,
-                        "direct parent is unavailable; local plan result remains pending"
-                    );
-                } else {
-                    repair_subagent_completion_receipt(
-                        parent_session_id,
-                        parent_chat_state,
-                        direct_cmd_tx,
-                        spawn_seq,
-                        &spawn,
-                        &terminal,
-                    )
-                    .await;
-                }
-                if emit_replay_projections {
-                    emit_subagent_notification(
-                        gateway,
-                        parent_session_id,
-                        finish_from_terminal(&terminal, output),
-                        parent_cmd_tx,
-                    );
-                }
+                terminals.insert(subagent_id.clone(), terminal);
             }
             Err(error) => tracing::error!(
                 %subagent_id,
@@ -4016,7 +3908,66 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 %error,
                 "failed to close local recovery scopes after subagent reconciliation"
             );
+            return;
         }
+    }
+
+    // Only now may the current owner receive projections or receipts. Reuse
+    // the same maps, including newly committed terminals, without another fold.
+    if emit_replay_projections {
+        for (_, _, spawn) in spawns.values() {
+            if !projections.spawned.contains(&spawn.subagent_id) {
+                emit_subagent_notification(
+                    gateway,
+                    parent_session_id,
+                    spawn_from_fact(parent_session_id, spawn, workflow_tracker),
+                    parent_cmd_tx,
+                    true,
+                );
+            }
+        }
+    }
+    for (subagent_id, terminal) in &terminals {
+        let Some((spawn_seq, _, spawn)) = spawns.get(subagent_id) else {
+            tracing::error!(%subagent_id, "parent terminal has no spawn fact");
+            continue;
+        };
+        let update = match finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal)
+        {
+            Ok(update) => update,
+            Err(error) => {
+                tracing::error!(%subagent_id, %error, "refusing to publish an unverified subagent result");
+                continue;
+            }
+        };
+        if emit_replay_projections && !projections.finished.contains(subagent_id) {
+            emit_subagent_notification(gateway, parent_session_id, update, parent_cmd_tx, true);
+        }
+        // A crash after parent Ended can leave the durable model receipt
+        // missing independently of its UI projection.
+        let direct_cmd_tx = completion_command_route(
+            parent_session_id,
+            spawn,
+            parent_cmd_tx,
+            direct_parent_cmd_txs,
+        );
+        if !repair_subagent_planning_result(direct_cmd_tx, spawn, terminal).await {
+            tracing::warn!(
+                %subagent_id,
+                direct_parent_session_id = %spawn.security_parent_session_id,
+                "direct parent is unavailable; local plan result remains pending"
+            );
+            continue;
+        }
+        repair_subagent_completion_receipt(
+            parent_session_id,
+            parent_chat_state,
+            direct_cmd_tx,
+            *spawn_seq,
+            spawn,
+            terminal,
+        )
+        .await;
     }
 }
 #[cfg(test)]

@@ -490,6 +490,8 @@ impl AgentView {
         self.reset_mermaid_runtime();
         self.scrollback_search = None;
         self.session.loading_replay = true;
+        self.session.replay_first_applied = None;
+        self.session.replay_first_frame = false;
         self.session.replay_live_cursor_seen = false;
         self.session.replayed_terminal_prompts.clear();
         self.session.unexpected_replay_drops = 0;
@@ -723,6 +725,25 @@ impl AgentView {
             self.session.last_seen_event_id = Some(event_id);
         }
     }
+
+    /// Attribute an applied historical source without changing replay gates.
+    pub(crate) fn note_history_applied(&mut self, cursor: Option<&str>) {
+        if self.session.loading_replay
+            && self.session.replay_first_applied.is_none()
+            && diagnostics::instrumentation::current_mode()
+                != diagnostics::instrumentation::InstrumentationMode::Disabled
+            && let Some(cursor) = cursor
+        {
+            let mut timer = diagnostics::instrumentation::timer("pager.replay.first_applied");
+            timer.with_field(
+                "session_id",
+                self.session.session_id.as_ref().map(|id| id.0.as_ref()),
+            );
+            timer.with_field("cursor", cursor);
+            self.session.replay_first_applied = Some(cursor.to_owned());
+        }
+    }
+
     /// Record that a Plan update applied while a reload window is open.
     /// No-op otherwise.
     pub(crate) fn mark_reload_todo_update(&mut self) {
@@ -853,6 +874,10 @@ impl AgentView {
     /// on the most common reconnect outcome, once per open tab).
     #[must_use = "purge retained memory iff a heavy transient dropped"]
     fn apply_reload_outcome(&mut self, reload: SessionReload, success: bool) -> bool {
+        if !success {
+            self.session.replay_first_applied = None;
+            self.session.replay_first_frame = false;
+        }
         let minimal_mode = self.is_minimal_mode();
         let dropped_heavy;
         let mut restored_tracker = None;

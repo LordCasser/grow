@@ -15,7 +15,6 @@ pub(crate) struct WorkflowNotifySender {
     budget: sampler::PreviewEventBudget,
     preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
     store: WorkflowRunStore,
-    chat_state: chat_state::ChatStateHandle,
 }
 
 impl WorkflowNotifySender {
@@ -26,7 +25,6 @@ impl WorkflowNotifySender {
         budget: sampler::PreviewEventBudget,
         preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
         store: WorkflowRunStore,
-        chat_state: chat_state::ChatStateHandle,
     ) -> Self {
         Self {
             session_id,
@@ -35,7 +33,6 @@ impl WorkflowNotifySender {
             budget,
             preview,
             store,
-            chat_state,
         }
     }
 
@@ -46,11 +43,7 @@ impl WorkflowNotifySender {
         self.dispatch(
             build_workflow_updated(state, elapsed_ms, active_agents),
             true,
-            Some((
-                chat_state::DisplayProjectionKind::WorkflowUpdated,
-                state.run_id.clone(),
-                state.revision,
-            )),
+            Some((state.run_id.clone(), state.revision)),
         )
         .await;
     }
@@ -77,13 +70,7 @@ impl WorkflowNotifySender {
         self.dispatch(
             build_workflow_updated(state, elapsed_ms, active_agents),
             persist_update,
-            persist_update.then(|| {
-                (
-                    chat_state::DisplayProjectionKind::WorkflowUpdated,
-                    state.run_id.clone(),
-                    state.revision,
-                )
-            }),
+            persist_update.then(|| (state.run_id.clone(), state.revision)),
         )
         .await;
     }
@@ -92,14 +79,25 @@ impl WorkflowNotifySender {
         &self,
         update: GrowSessionUpdate,
         persist: bool,
-        projection: Option<(chat_state::DisplayProjectionKind, String, u64)>,
+        projection: Option<(String, u64)>,
     ) {
         let mut meta = None;
         crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
+        let mut meta = meta.unwrap_or_default();
+        if let Some((source_id, source_revision)) = projection {
+            meta.insert(
+                "grow/displayProjectionSource".to_owned(),
+                serde_json::Value::String(source_id),
+            );
+            meta.insert(
+                "grow/displayProjectionRevision".to_owned(),
+                serde_json::Value::from(source_revision),
+            );
+        }
         let notification = GrowSessionNotification {
             session_id: self.session_id.clone(),
             update,
-            meta: meta.map(serde_json::Value::Object),
+            meta: Some(serde_json::Value::Object(meta)),
         };
         let Some(prepared) = crate::session::notifications::prepare_auxiliary_grow(
             &self.persistence_tx,
@@ -110,20 +108,6 @@ impl WorkflowNotifySender {
         ) else {
             return;
         };
-        if let Some((kind, source_id, source_revision)) = projection
-            && let Err(error) =
-                crate::session::notifications::record_display_projection_expectation(
-                    &self.chat_state,
-                    &notification,
-                    kind,
-                    source_id,
-                    source_revision,
-                )
-                .await
-        {
-            tracing::error!(%error, "Workflow display projection expectation was not committed; suppressing publication");
-            return;
-        }
         crate::session::notifications::publish_prepared_auxiliary_grow(
             &self.gateway,
             &self.persistence_tx,
@@ -376,7 +360,6 @@ mod tests {
                     budget.clone(),
                     std::sync::Arc::new(parking_lot::Mutex::new(None)),
                     store,
-                    chat_state.clone(),
                 );
                 let mut tracker = WorkflowTracker::default();
                 tracker.start_run(

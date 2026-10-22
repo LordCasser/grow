@@ -400,6 +400,12 @@ fn merge_acp_chunks(
 ) {
     if prev.session_id != new.session_id
         || !sampling_metadata_compatible(prev.meta.as_ref(), new.meta.as_ref())
+        || new
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("grow/replaceSamplingPreview"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
     {
         return (true, prev, Some(new));
     }

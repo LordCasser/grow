@@ -1,0 +1,65 @@
+
+running 1 test
+test resume_input_latency::resume_modern_history_progress_with_slow_writer ... [testkit] admitted history: turns=512 admissions=512 missing_projections=512 updates=0B timeline=18694733B rewind=3434B total=18698167B
+[resume-source] turns=512 instrumentation=true stats={"timeline_bytes":18694991,"updates_bytes":0,"timeline_and_updates_bytes":18694991,"counted_files":["timeline.jsonl","updates.jsonl"],"excluded_source_files":["summary and other session files"],"source_file_count":1,"history_body":{"notifications":1025,"notification_types":{"agent_message_chunk":513,"user_message_chunk":512},"canonical_turns_by_fixture_sequence_marker":512,"assistant_message_notifications":513,"message_blocks":1025,"block_types":{"text":1025},"text_bytes":16797602,"scope":"typed_projector_output","matches_runtime_notification_input":true}}
+[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=341.4 history_visible_ms=341.4 advances=1 highest=Some(512) visible_maxima=[(341.400417ms, 512)] max_content_gap_ms=0.0
+
+thread 'resume_input_latency::resume_modern_history_progress_with_slow_writer' (42732189) panicked at crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs:853:9:
+slow replay must visibly advance through multiple history frames; advances=1, highest=Some(512), visible_maxima=[(341.400417ms, 512)], final_screen:
+
+  /private/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmpAVay6V                 — tokens · — cache │ 4.2M / 128K
+
+
+     ❯ user prompt for turn 511                                                                             10:19 AM
+
+
+     juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf
+     hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo
+     foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie
+     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha
+     bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec
+     romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar
+     papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike
+     november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo
+     lima mike november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india
+     juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf
+     hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo
+     foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie
+     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha
+     bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec
+     romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar
+     papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike
+     november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo
+     lima mike november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india
+     juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf
+     hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo
+     foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie
+     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha
+     bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec
+     romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar
+     papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike
+     november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo
+     lima mike november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf hotel india
+     juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo foxtrot golf
+     hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie delta echo
+     foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha bravo charlie
+     delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo alpha
+     bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa qu
+     GROW_SEQ_000512RESUME_READY_512
+                                                                                                                       █
+
+    ⠙ Loading session bc96d7bd-5142-463e-be2e-a750b1e77cf3…
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────────────────── grow · Mock · normal · ask ─╯
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    resume_input_latency::resume_modern_history_progress_with_slow_writer
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.85s
+

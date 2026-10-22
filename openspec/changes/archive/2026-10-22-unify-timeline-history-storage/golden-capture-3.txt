@@ -1,0 +1,17 @@
+
+running 1 test
+
+thread 'history_wire_golden' (39628431) panicked at crates/codegen/shell/tests/session_load_perf.rs:79:9:
+assertion `left == right` failed: "turn_completed": fixture must use the actual canonical wire shape without dropped fields
+  left: Object {"sessionId": String("golden"), "update": Object {"sessionUpdate": String("turn_completed"), "prompt_id": String("prompt-golden"), "identity": Object {"origin": String("user"), "turn_kind": String("internal"), "goal_id": String("goal-golden"), "goal_definition_revision": Number(3), "stage_id": Number(2)}, "stop_reason": String("end_turn"), "agent_result": String("Review complete"), "usage": Object {"inputTokens": Number(9000), "outputTokens": Number(1800), "totalTokens": Number(10800), "cachedReadTokens": Number(1000), "cacheCreationTokens": Number(200), "cacheReadKnownInputTokens": Number(800), "cacheReadUnknownCalls": Number(1), "cacheWriteUnknownCalls": Number(2), "reasoningTokens": Number(500), "modelCalls": Number(2), "apiDurationMs": Number(4300), "costUsdTicks": Number(12000), "modelUsage": Object {"vendor/model-a": Object {"inputTokens": Number(8000), "outputTokens": Number(1600), "totalTokens": Number(9600), "cachedReadTokens": Number(900), "cacheCreationTokens": Number(100), "cacheReadKnownInputTokens": Number(700), "cacheReadUnknownCalls": Number(1), "cacheWriteUnknownCalls": Number(1), "reasoningTokens": Number(400), "modelCalls": Number(1), "apiDurationMs": Number(2100), "costUsdTicks": Number(7000)}}, "numTurns": Number(3)}}, "_meta": Object {"eventId": String("golden-137"), "fixture": String("history-wire")}}
+ right: Object {"sessionId": String("golden"), "update": Object {"sessionUpdate": String("turn_completed"), "prompt_id": String("prompt-golden"), "identity": Object {"origin": String("user"), "turn_kind": String("internal"), "goal_id": String("goal-golden"), "goal_definition_revision": Number(3), "stage_id": Number(2)}, "stop_reason": String("end_turn"), "agent_result": String("Review complete"), "usage": Object {"inputTokens": Number(9000), "outputTokens": Number(1800), "totalTokens": Number(10800), "cachedReadTokens": Number(1000), "cacheCreationTokens": Number(200), "cacheReadKnownInputTokens": Number(800), "cacheReadUnknownCalls": Number(1), "cacheWriteUnknownCalls": Number(2), "reasoningTokens": Number(500), "modelCalls": Number(2), "apiDurationMs": Number(4300), "costUsdTicks": Number(12000), "costIsPartial": Bool(false), "modelUsage": Object {"vendor/model-a": Object {"inputTokens": Number(8000), "outputTokens": Number(1600), "totalTokens": Number(9600), "cachedReadTokens": Number(900), "cacheCreationTokens": Number(100), "cacheReadKnownInputTokens": Number(700), "cacheReadUnknownCalls": Number(1), "cacheWriteUnknownCalls": Number(1), "reasoningTokens": Number(400), "modelCalls": Number(1), "apiDurationMs": Number(2100), "costUsdTicks": Number(7000), "costIsPartial": Bool(false)}}, "numTurns": Number(3), "usageIsIncomplete": Bool(false)}}, "_meta": Object {"eventId": String("golden-137"), "fixture": String("history-wire")}}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test history_wire_golden ... FAILED
+
+failures:
+
+failures:
+    history_wire_golden
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+

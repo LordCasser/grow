@@ -1,0 +1,7 @@
+
+running 1 test
+[testkit] admitted history: turns=3 admissions=3 missing_projections=1 updates=4995B timeline=5827B rewind=0B total=10822B
+test session::testkit::synth::admission::tests::admitted_history_repairs_one_projection_without_changing_replay ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4334 filtered out; finished in 0.06s
+

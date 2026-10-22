@@ -1,0 +1,35 @@
+Binary: /Users/lordcasser/workspace/projects/grow/target/debug/deps/chat_state-9b80144afb0cb349
+Profile: dev/test opt-level=0 debug=0 incremental=0 jobs=2; sequential direct executable; RUST_MIN_STACK=16777216
+
+RUN 1
+
+running 1 test
+test timeline::tests::benchmark_timeline_response_admission_validation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 570 filtered out; finished in 11.22s
+
+response_admissions=128, events=896, surface_items=128, cold_from_events=1.468834ms
+response_admissions=512, events=3584, surface_items=512, cold_from_events=16.674667ms
+response_admissions=2048, events=14336, surface_items=2048, cold_from_events=337.224833ms
+
+RUN 2
+
+running 1 test
+test timeline::tests::benchmark_timeline_response_admission_validation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 570 filtered out; finished in 12.52s
+
+response_admissions=128, events=896, surface_items=128, cold_from_events=1.488459ms
+response_admissions=512, events=3584, surface_items=512, cold_from_events=16.879958ms
+response_admissions=2048, events=14336, surface_items=2048, cold_from_events=250.356375ms
+
+RUN 3
+
+running 1 test
+test timeline::tests::benchmark_timeline_response_admission_validation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 570 filtered out; finished in 16.43s
+
+response_admissions=128, events=896, surface_items=128, cold_from_events=1.47075ms
+response_admissions=512, events=3584, surface_items=512, cold_from_events=16.572833ms
+response_admissions=2048, events=14336, surface_items=2048, cold_from_events=594.941375ms

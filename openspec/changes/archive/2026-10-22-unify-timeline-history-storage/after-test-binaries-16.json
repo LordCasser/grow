@@ -1,0 +1,42 @@
+{
+  "trace_classify": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/trace_classify",
+    "sha256": "46a822c4efe253bf893c20d308853ab207a371e7b2902fb4c7f38b366e96c4d4"
+  },
+  "test-sampling-server": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/test-sampling-server",
+    "sha256": "3b71663fc3ac5b2323eeb48c64fedc685ec36bbc7babb58044d9bf0d3ccd3970"
+  },
+  "test_subagent_orphan_reconcile": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/test_subagent_orphan_reconcile-b84d731995f9ac20",
+    "sha256": "54ba3e966c2154e268da9ec495e72ed36a85dbc68c038e2ae178d5436dc0cd83"
+  },
+  "scrollback-selection-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/scrollback-selection-playground",
+    "sha256": "b5f2026ba8cf56de7a38549e17c0c39560a76255deaff0cb5cff25de81949fa7"
+  },
+  "mermaid_playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/mermaid_playground",
+    "sha256": "057ef076de1b98dab503320a2ac9594389dc54f275d95e6d2c368116617bdfea"
+  },
+  "scrollback_search_playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/scrollback_search_playground",
+    "sha256": "8a571e8d1cfac55c6c087fbd987db8924cda121f9350e7b8f2027b47a74b9ebb"
+  },
+  "question-view-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/question-view-playground",
+    "sha256": "30c802b39c6d08fadbae53bbea511eb801a3ba1b355cc550e8017d5922c29c19"
+  },
+  "todo-pane-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/todo-pane-playground",
+    "sha256": "611f93b7dbce7d09cf6359033112872c2099c03fca09027058a25bcb7c5a1c24"
+  },
+  "mouse-events-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/mouse-events-playground",
+    "sha256": "f60c59786e45e6fbf1720b500a22fed2512eec685d447bcf4df4bff718f685cd"
+  },
+  "leader_pty_e2e": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/leader_pty_e2e-0cf978ee5bed0153",
+    "sha256": "1f655fa842d6474ae2e648c20ce55272cab1e8bc54338eebf9d3bb6802c2c126"
+  }
+}

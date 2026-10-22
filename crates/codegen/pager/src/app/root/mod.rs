@@ -1671,6 +1671,32 @@ impl AppView {
             }
             return self.handle_global_action(ActionId::Quit, key);
         }
+        // History is the progress display during restoration. Keep the global
+        // Quit path above available, but do not edit drafts or leave follow
+        // mode while that visible session is still loading.
+        let visible_agent = match self.active_view {
+            ActiveView::Agent(id) => self.agents.get(&id),
+            ActiveView::AgentDashboard => self
+                .dashboard
+                .as_ref()
+                .and_then(|dashboard| dashboard.attached_agent)
+                .and_then(|id| self.agents.get(&id)),
+            ActiveView::Welcome => None,
+        };
+        let loading = visible_agent.is_some_and(|agent| {
+            agent.session.loading_replay
+                || agent
+                    .active_subagent
+                    .as_deref()
+                    .and_then(|id| agent.subagent_views.get(id))
+                    .is_some_and(|child| child.session.loading_replay)
+        });
+        if loading && matches!(ev, Event::Key(_) | Event::Paste(_) | Event::Mouse(_)) {
+            if key_event.is_some() && self.pending_action.take().is_some() {
+                return InputOutcome::Changed;
+            }
+            return InputOutcome::Unchanged;
+        }
         if key_event.is_some_and(|key| key!('c', CONTROL).matches(key)) {
             self.pending_action = None;
             let agent_id = match self.active_view {

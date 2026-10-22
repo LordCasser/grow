@@ -435,7 +435,9 @@ impl GrowStdioClient {
         )
         .await
         .unwrap_or_else(|_| panic!("session/load timed out\nstderr:\n{}", self.stderr()))
-        .expect("session/load failed")
+        .unwrap_or_else(|error| {
+            panic!("session/load failed: {error:?}\nstderr:\n{}", self.stderr())
+        })
     }
 
     pub async fn ext_method(

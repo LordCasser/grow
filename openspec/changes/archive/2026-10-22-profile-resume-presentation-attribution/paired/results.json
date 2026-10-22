@@ -1,0 +1,5336 @@
+[
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.diff count=35 sum_ms=3.2 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.queue count=25 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.render count=35 sum_ms=15.9 max_ms=7.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.write count=25 sum_ms=0.3 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.fs_notify_start count=1 sum_ms=14.9 max_ms=14.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.history_projection count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_evidence count=3 sum_ms=0.8 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_fold count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_read_decode count=3 sum_ms=39.2 max_ms=13.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load_light count=1 sum_ms=14.2 max_ms=14.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session count=1 sum_ms=132.8 max_ms=132.8"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=65.3 max_ms=65.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.install_coordination_backend count=1 sum_ms=4.0 max_ms=4.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.prepare count=1 sum_ms=1.0 max_ms=1.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_actor_call count=1 sum_ms=22.5 max_ms=22.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register count=1 sum_ms=28.0 max_ms=28.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register_session count=1 sum_ms=28.2 max_ms=28.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=200.3 ready_ms=241.9 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.9 frames=25"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=47 sum_ms=4.1 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=27 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=47 sum_ms=31.8 max_ms=9.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=27 sum_ms=0.5 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.6 max_ms=2.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.3 max_ms=1.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.6 max_ms=1.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=154.3 max_ms=51.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=54.4 max_ms=54.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=370.0 max_ms=370.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=254.1 max_ms=254.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.2 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.1 max_ms=4.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=23.0 max_ms=23.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=28.1 max_ms=28.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=28.2 max_ms=28.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=411.8 ready_ms=436.9 ready_echo_p95_ms=3.8 ready_echo_max_ms=4.5 frames=27"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.diff count=45 sum_ms=4.0 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.queue count=35 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.render count=45 sum_ms=82.5 max_ms=9.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.write count=35 sum_ms=0.7 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.end_batch count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.history_projection count=1 sum_ms=11.5 max_ms=11.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_evidence count=3 sum_ms=15.7 max_ms=5.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_fold count=3 sum_ms=13.7 max_ms=4.7"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_read_decode count=3 sum_ms=621.8 max_ms=208.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_light count=1 sum_ms=218.8 max_ms=218.8"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session count=1 sum_ms=1317.6 max_ms=1317.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session_replay count=1 sum_ms=1006.3 max_ms=1006.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.reconcile_stale_tasks count=1 sum_ms=0.5 max_ms=0.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.install_coordination_backend count=1 sum_ms=6.2 max_ms=6.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_actor_call count=1 sum_ms=39.3 max_ms=39.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register count=1 sum_ms=46.6 max_ms=46.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register_session count=1 sum_ms=46.6 max_ms=46.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 1,
+    "source": "before-modern-1.txt",
+    "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1385.6 ready_ms=1409.8 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.9 frames=35"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.acp.apply_batch count=14 sum_ms=67.2 max_ms=10.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.delivery count=25 sum_ms=0.7 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.diff count=35 sum_ms=3.2 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.present count=35 sum_ms=20.7 max_ms=7.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.queue count=25 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.render count=35 sum_ms=15.9 max_ms=7.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.wait count=25 sum_ms=0.2 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.write count=25 sum_ms=0.3 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.markdown.finish count=128 sum_ms=52.6 max_ms=2.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.markdown.wrap count=3 sum_ms=3.4 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.finish count=128 sum_ms=60.0 max_ms=2.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.image_refs count=128 sum_ms=6.3 max_ms=0.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.mermaid count=128 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.finalize count=1 sum_ms=15.4 max_ms=15.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.release_memory count=1 sum_ms=1.4 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.fs_notify_start count=1 sum_ms=6.2 max_ms=6.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.history_projection count=1 sum_ms=0.7 max_ms=0.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_evidence count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_fold count=3 sum_ms=0.6 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_read_decode count=3 sum_ms=38.7 max_ms=13.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load_light count=1 sum_ms=13.8 max_ms=13.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session count=1 sum_ms=135.0 max_ms=135.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=67.4 max_ms=67.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.install_coordination_backend count=1 sum_ms=3.8 max_ms=3.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.prepare count=1 sum_ms=1.0 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_actor_call count=1 sum_ms=21.0 max_ms=21.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register count=1 sum_ms=26.2 max_ms=26.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register_session count=1 sum_ms=26.3 max_ms=26.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=128 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=178.9 ready_ms=224.8 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=25"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.acp.apply_batch count=38 sum_ms=235.0 max_ms=8.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.delivery count=27 sum_ms=0.9 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=48 sum_ms=4.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.present count=48 sum_ms=40.5 max_ms=11.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=27 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=48 sum_ms=34.2 max_ms=10.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.wait count=27 sum_ms=0.2 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=27 sum_ms=0.5 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.finish count=512 sum_ms=191.4 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.wrap count=7 sum_ms=8.0 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.finish count=512 sum_ms=218.8 max_ms=1.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.image_refs count=512 sum_ms=23.2 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.mermaid count=512 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.finalize count=1 sum_ms=56.9 max_ms=56.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.release_memory count=1 sum_ms=2.1 max_ms=2.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.4 max_ms=5.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.7 max_ms=2.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.1 max_ms=1.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.5 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=154.1 max_ms=52.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.7 max_ms=53.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=363.9 max_ms=363.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=255.1 max_ms=255.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.0 max_ms=4.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=22.1 max_ms=22.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=27.2 max_ms=27.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=27.3 max_ms=27.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=415.9 ready_ms=483.2 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=27"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.acp.apply_batch count=135 sum_ms=970.4 max_ms=8.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.delivery count=36 sum_ms=2.6 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.diff count=43 sum_ms=3.8 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.present count=43 sum_ms=94.4 max_ms=9.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.queue count=36 sum_ms=0.1 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.render count=43 sum_ms=86.4 max_ms=9.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.wait count=36 sum_ms=1.4 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.write count=36 sum_ms=0.6 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.markdown.finish count=2048 sum_ms=788.6 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.markdown.wrap count=19 sum_ms=21.9 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.finish count=2048 sum_ms=898.3 max_ms=1.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.image_refs count=2048 sum_ms=92.4 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.mermaid count=2048 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.end_batch count=1 sum_ms=1.2 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.finalize count=1 sum_ms=242.6 max_ms=242.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.release_memory count=1 sum_ms=11.8 max_ms=11.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.fs_notify_start count=1 sum_ms=3.1 max_ms=3.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.history_projection count=1 sum_ms=11.4 max_ms=11.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_evidence count=3 sum_ms=17.1 max_ms=6.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_fold count=3 sum_ms=14.5 max_ms=5.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_read_decode count=3 sum_ms=625.9 max_ms=214.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_light count=1 sum_ms=217.5 max_ms=217.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session count=1 sum_ms=1506.4 max_ms=1506.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session_replay count=1 sum_ms=1054.7 max_ms=1054.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.reconcile_stale_tasks count=1 sum_ms=0.5 max_ms=0.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.install_coordination_backend count=1 sum_ms=6.3 max_ms=6.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.publish_coordination count=1 sum_ms=0.8 max_ms=0.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_actor_call count=1 sum_ms=48.7 max_ms=48.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register count=1 sum_ms=56.7 max_ms=56.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register_session count=1 sum_ms=56.7 max_ms=56.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-phase] turns=2048 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 1,
+    "source": "after-modern-1.txt",
+    "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1405.1 ready_ms=1838.9 ready_echo_p95_ms=3.9 ready_echo_max_ms=3.9 frames=36"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.acp.apply_batch count=15 sum_ms=61.3 max_ms=9.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.delivery count=25 sum_ms=0.7 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.diff count=34 sum_ms=3.0 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.present count=34 sum_ms=18.2 max_ms=6.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.queue count=25 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.render count=34 sum_ms=13.9 max_ms=6.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.wait count=25 sum_ms=0.2 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.write count=25 sum_ms=0.3 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.markdown.finish count=128 sum_ms=48.1 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.markdown.wrap count=3 sum_ms=3.1 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.finish count=128 sum_ms=55.1 max_ms=1.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.image_refs count=128 sum_ms=6.0 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.mermaid count=128 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.finalize count=1 sum_ms=15.3 max_ms=15.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.release_memory count=1 sum_ms=1.2 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.fs_notify_start count=1 sum_ms=5.4 max_ms=5.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.history_projection count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_evidence count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_fold count=3 sum_ms=0.6 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_read_decode count=3 sum_ms=38.6 max_ms=12.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load_light count=1 sum_ms=13.8 max_ms=13.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session count=1 sum_ms=139.8 max_ms=139.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=61.9 max_ms=61.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.reconcile_stale_tasks count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.install_coordination_backend count=1 sum_ms=3.5 max_ms=3.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_actor_call count=1 sum_ms=18.8 max_ms=18.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register count=1 sum_ms=23.3 max_ms=23.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register_session count=1 sum_ms=23.3 max_ms=23.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.4 ready_ms=232.3 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=25"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.acp.apply_batch count=38 sum_ms=237.4 max_ms=8.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.delivery count=27 sum_ms=0.8 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=47 sum_ms=4.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.present count=47 sum_ms=40.7 max_ms=10.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=27 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=47 sum_ms=34.0 max_ms=10.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.wait count=27 sum_ms=0.2 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=27 sum_ms=0.4 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.finish count=512 sum_ms=193.8 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.wrap count=7 sum_ms=7.9 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.finish count=512 sum_ms=221.1 max_ms=1.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.image_refs count=512 sum_ms=23.1 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.mermaid count=512 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.finalize count=1 sum_ms=57.6 max_ms=57.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.release_memory count=1 sum_ms=2.2 max_ms=2.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.7 max_ms=2.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.0 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.4 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=154.7 max_ms=52.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.7 max_ms=53.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=371.7 max_ms=371.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=257.0 max_ms=257.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.3 max_ms=4.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=24.0 max_ms=24.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=29.4 max_ms=29.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=29.4 max_ms=29.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=417.5 ready_ms=491.7 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=27"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.acp.apply_batch count=136 sum_ms=939.5 max_ms=8.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.delivery count=35 sum_ms=1.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.diff count=46 sum_ms=4.1 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.present count=46 sum_ms=91.8 max_ms=10.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.queue count=35 sum_ms=0.1 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.render count=46 sum_ms=85.3 max_ms=10.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.wait count=35 sum_ms=0.4 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.write count=35 sum_ms=0.5 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.markdown.finish count=2048 sum_ms=763.6 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.markdown.wrap count=19 sum_ms=21.8 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.finish count=2048 sum_ms=871.7 max_ms=1.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.image_refs count=2048 sum_ms=92.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.mermaid count=2048 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.end_batch count=1 sum_ms=0.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.finalize count=1 sum_ms=221.3 max_ms=221.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.release_memory count=1 sum_ms=3.6 max_ms=3.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.fs_notify_start count=1 sum_ms=1.4 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.history_projection count=1 sum_ms=11.3 max_ms=11.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_evidence count=3 sum_ms=13.1 max_ms=5.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_fold count=3 sum_ms=11.7 max_ms=4.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_read_decode count=3 sum_ms=615.1 max_ms=206.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_light count=1 sum_ms=215.1 max_ms=215.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session count=1 sum_ms=1332.9 max_ms=1332.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session_replay count=1 sum_ms=1024.5 max_ms=1024.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.reconcile_stale_tasks count=1 sum_ms=0.5 max_ms=0.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.install_coordination_backend count=1 sum_ms=5.6 max_ms=5.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_actor_call count=1 sum_ms=40.1 max_ms=40.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register count=1 sum_ms=46.8 max_ms=46.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register_session count=1 sum_ms=46.8 max_ms=46.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 2,
+    "source": "after-modern-2.txt",
+    "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1383.5 ready_ms=1633.1 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.9 frames=35"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.diff count=35 sum_ms=3.1 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.queue count=25 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.render count=35 sum_ms=14.1 max_ms=6.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.write count=25 sum_ms=0.4 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.fs_notify_start count=1 sum_ms=5.4 max_ms=5.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.history_projection count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_evidence count=3 sum_ms=0.7 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_fold count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_read_decode count=3 sum_ms=38.5 max_ms=13.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load_light count=1 sum_ms=13.9 max_ms=13.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session count=1 sum_ms=130.2 max_ms=130.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=60.7 max_ms=60.7"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.reconcile_stale_tasks count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.install_coordination_backend count=1 sum_ms=3.4 max_ms=3.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_actor_call count=1 sum_ms=19.2 max_ms=19.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register count=1 sum_ms=23.8 max_ms=23.8"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register_session count=1 sum_ms=23.8 max_ms=23.8"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=128 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=162.5 ready_ms=188.4 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.9 frames=25"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=46 sum_ms=4.0 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=46 sum_ms=30.0 max_ms=9.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.4 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.7 max_ms=2.7"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.1 max_ms=1.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.4 max_ms=0.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=153.2 max_ms=51.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.3 max_ms=53.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=373.9 max_ms=373.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=257.0 max_ms=257.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.1 max_ms=4.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=24.9 max_ms=24.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=30.0 max_ms=30.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=30.1 max_ms=30.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=492.1 ready_ms=492.1 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=26"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.diff count=44 sum_ms=3.9 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.queue count=35 sum_ms=0.1 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.render count=44 sum_ms=84.6 max_ms=10.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.write count=35 sum_ms=0.6 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.end_batch count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.fs_notify_start count=1 sum_ms=5.4 max_ms=5.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.history_projection count=1 sum_ms=11.4 max_ms=11.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_evidence count=3 sum_ms=16.9 max_ms=5.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_fold count=3 sum_ms=15.2 max_ms=5.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_read_decode count=3 sum_ms=620.2 max_ms=207.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_light count=1 sum_ms=217.4 max_ms=217.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session count=1 sum_ms=1316.0 max_ms=1316.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session_replay count=1 sum_ms=1007.2 max_ms=1007.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.reconcile_stale_tasks count=1 sum_ms=0.5 max_ms=0.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.install_coordination_backend count=1 sum_ms=6.0 max_ms=6.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.publish_coordination count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_actor_call count=1 sum_ms=37.7 max_ms=37.7"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register count=1 sum_ms=45.1 max_ms=45.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register_session count=1 sum_ms=45.1 max_ms=45.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-phase] turns=2048 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 2,
+    "source": "before-modern-2.txt",
+    "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1375.9 ready_ms=1404.9 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.9 frames=35"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.diff count=36 sum_ms=3.3 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.queue count=25 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.render count=36 sum_ms=14.6 max_ms=6.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.write count=25 sum_ms=0.4 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.fs_notify_start count=1 sum_ms=5.4 max_ms=5.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.history_projection count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_evidence count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_fold count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_read_decode count=3 sum_ms=38.6 max_ms=12.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load_light count=1 sum_ms=13.9 max_ms=13.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session count=1 sum_ms=122.0 max_ms=122.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=61.3 max_ms=61.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.reconcile_stale_tasks count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.install_coordination_backend count=1 sum_ms=3.3 max_ms=3.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_actor_call count=1 sum_ms=17.4 max_ms=17.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register count=1 sum_ms=21.8 max_ms=21.8"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register_session count=1 sum_ms=21.8 max_ms=21.8"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=169.4 ready_ms=192.5 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=25"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=46 sum_ms=4.0 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=46 sum_ms=28.6 max_ms=9.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.5 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.1 max_ms=5.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.4 max_ms=2.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=2.9 max_ms=1.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.7 max_ms=1.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=153.8 max_ms=51.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.6 max_ms=53.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=361.9 max_ms=361.9"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=251.6 max_ms=251.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.1 max_ms=4.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=23.0 max_ms=23.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=28.1 max_ms=28.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=28.2 max_ms=28.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=475.5 ready_ms=475.6 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=26"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.diff count=46 sum_ms=4.1 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.queue count=35 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.render count=46 sum_ms=85.1 max_ms=10.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.write count=35 sum_ms=0.5 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.end_batch count=1 sum_ms=0.2 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.history_projection count=1 sum_ms=11.3 max_ms=11.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_evidence count=3 sum_ms=18.2 max_ms=6.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_fold count=3 sum_ms=15.2 max_ms=5.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_read_decode count=3 sum_ms=620.1 max_ms=207.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_light count=1 sum_ms=217.5 max_ms=217.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session count=1 sum_ms=1332.7 max_ms=1332.7"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session_replay count=1 sum_ms=1029.3 max_ms=1029.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.reconcile_stale_tasks count=1 sum_ms=0.5 max_ms=0.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.install_coordination_backend count=1 sum_ms=6.5 max_ms=6.5"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_actor_call count=1 sum_ms=36.8 max_ms=36.8"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register count=1 sum_ms=44.3 max_ms=44.3"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register_session count=1 sum_ms=44.4 max_ms=44.4"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "modern",
+    "repeat": 3,
+    "source": "before-modern-3.txt",
+    "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1396.6 ready_ms=1421.7 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=35"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.acp.apply_batch count=14 sum_ms=62.0 max_ms=9.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.delivery count=25 sum_ms=0.8 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.diff count=36 sum_ms=3.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.present count=36 sum_ms=19.3 max_ms=7.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.queue count=25 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.render count=36 sum_ms=14.8 max_ms=6.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.wait count=25 sum_ms=0.2 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.frame.write count=25 sum_ms=0.4 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.markdown.finish count=128 sum_ms=48.5 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.markdown.wrap count=3 sum_ms=3.2 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.finish count=128 sum_ms=55.6 max_ms=1.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.image_refs count=128 sum_ms=5.9 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.message.mermaid count=128 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.finalize count=1 sum_ms=15.4 max_ms=15.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=pager.replay.release_memory count=1 sum_ms=1.2 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.history_projection count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_evidence count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_fold count=3 sum_ms=0.7 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load.timeline_read_decode count=3 sum_ms=38.6 max_ms=12.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load_light count=1 sum_ms=13.7 max_ms=13.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session count=1 sum_ms=127.3 max_ms=127.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.load_session_replay count=1 sum_ms=62.5 max_ms=62.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.reconcile_stale_tasks count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.install_coordination_backend count=1 sum_ms=3.4 max_ms=3.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_actor_call count=1 sum_ms=22.7 max_ms=22.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register count=1 sum_ms=27.3 max_ms=27.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.spawn_and_register_session count=1 sum_ms=27.3 max_ms=27.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=128 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=161.9 ready_ms=207.6 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=25"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.acp.apply_batch count=38 sum_ms=239.9 max_ms=8.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.delivery count=27 sum_ms=0.9 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=48 sum_ms=4.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.present count=48 sum_ms=37.8 max_ms=9.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=27 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=48 sum_ms=31.6 max_ms=9.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.wait count=27 sum_ms=0.2 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=27 sum_ms=0.4 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.finish count=512 sum_ms=195.9 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.wrap count=7 sum_ms=7.9 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.finish count=512 sum_ms=223.7 max_ms=1.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.image_refs count=512 sum_ms=23.5 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.mermaid count=512 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.finalize count=1 sum_ms=56.8 max_ms=56.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.release_memory count=1 sum_ms=2.0 max_ms=2.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.7 max_ms=2.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.0 max_ms=1.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.4 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=154.9 max_ms=51.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=54.1 max_ms=54.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=367.7 max_ms=367.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=258.0 max_ms=258.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=3.7 max_ms=3.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=20.5 max_ms=20.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=25.3 max_ms=25.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=25.3 max_ms=25.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=417.7 ready_ms=483.9 ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=27"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.acp.apply_batch count=135 sum_ms=952.2 max_ms=8.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.delivery count=35 sum_ms=1.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.diff count=46 sum_ms=4.0 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.present count=46 sum_ms=90.6 max_ms=9.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.queue count=35 sum_ms=0.1 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.render count=46 sum_ms=84.2 max_ms=9.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.wait count=35 sum_ms=0.4 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.frame.write count=35 sum_ms=0.6 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.markdown.finish count=2048 sum_ms=774.5 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.markdown.wrap count=19 sum_ms=21.6 max_ms=1.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.finish count=2048 sum_ms=883.2 max_ms=1.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.image_refs count=2048 sum_ms=92.4 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.message.mermaid count=2048 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.end_batch count=1 sum_ms=0.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.finalize count=1 sum_ms=223.6 max_ms=223.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=pager.replay.release_memory count=1 sum_ms=3.2 max_ms=3.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.history_projection count=1 sum_ms=11.3 max_ms=11.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_evidence count=3 sum_ms=17.6 max_ms=6.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_fold count=3 sum_ms=16.4 max_ms=5.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load.timeline_read_decode count=3 sum_ms=618.8 max_ms=207.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_light count=1 sum_ms=218.4 max_ms=218.4"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session count=1 sum_ms=1340.9 max_ms=1340.9"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.load_session_replay count=1 sum_ms=1035.2 max_ms=1035.2"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.reconcile_stale_tasks count=1 sum_ms=0.5 max_ms=0.5"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.install_coordination_backend count=1 sum_ms=6.7 max_ms=6.7"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_actor_call count=1 sum_ms=37.0 max_ms=37.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register count=1 sum_ms=44.8 max_ms=44.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.spawn_and_register_session count=1 sum_ms=44.8 max_ms=44.8"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-phase] turns=2048 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "modern",
+    "repeat": 3,
+    "source": "after-modern-3.txt",
+    "line": "[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=1392.6 ready_ms=1637.6 ready_echo_p95_ms=3.8 ready_echo_max_ms=3.8 frames=35"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=404.3 advances=2 highest=Some(512) visible_maxima=[(289.074125ms, 249), (404.286042ms, 512)] max_content_gap_ms=115.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=43 sum_ms=3.9 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=43 sum_ms=28.2 max_ms=9.7"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.6 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.6 max_ms=5.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.6 max_ms=2.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=2.8 max_ms=1.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.4 max_ms=0.9"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=153.8 max_ms=51.9"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.0 max_ms=53.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=362.2 max_ms=362.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=244.3 max_ms=244.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.6 max_ms=4.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=23.0 max_ms=23.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=28.7 max_ms=28.7"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=28.7 max_ms=28.7"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 1,
+    "source": "before-slow-1.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=411.6 ready_ms=433.8 ready_echo_p95_ms=49.0 ready_echo_max_ms=49.0 frames=26"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=292.0 history_visible_ms=578.9 advances=3 highest=Some(512) visible_maxima=[(292.045625ms, 246), (412.737125ms, 502), (578.854625ms, 512)] max_content_gap_ms=166.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.acp.apply_batch count=39 sum_ms=235.4 max_ms=8.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.delivery count=26 sum_ms=1146.3 max_ms=45.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=42 sum_ms=3.7 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.present count=42 sum_ms=34.6 max_ms=8.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=42 sum_ms=28.1 max_ms=8.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.wait count=26 sum_ms=1145.2 max_ms=45.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.5 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.finish count=512 sum_ms=192.4 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.wrap count=3 sum_ms=3.5 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.finish count=512 sum_ms=218.7 max_ms=1.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.image_refs count=512 sum_ms=23.0 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.mermaid count=512 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.finalize count=1 sum_ms=58.4 max_ms=58.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.release_memory count=1 sum_ms=4.2 max_ms=4.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.3 max_ms=5.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.5 max_ms=2.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.0 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.8 max_ms=1.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=154.7 max_ms=52.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.8 max_ms=53.8"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=407.8 max_ms=407.8"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=260.7 max_ms=260.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=9.5 max_ms=9.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=3.6 max_ms=3.6"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=23.1 max_ms=23.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=36.9 max_ms=36.9"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=37.0 max_ms=37.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 1,
+    "source": "after-slow-1.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=579.1 ready_ms=579.3 ready_echo_p95_ms=49.0 ready_echo_max_ms=49.3 frames=26"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=289.1 history_visible_ms=541.6 advances=3 highest=Some(512) visible_maxima=[(289.061041ms, 235), (429.362791ms, 507), (541.617291ms, 512)] max_content_gap_ms=140.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.acp.apply_batch count=39 sum_ms=239.9 max_ms=8.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.delivery count=26 sum_ms=1118.0 max_ms=45.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=43 sum_ms=3.9 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.present count=43 sum_ms=34.6 max_ms=8.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.1 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=43 sum_ms=27.9 max_ms=8.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.wait count=26 sum_ms=1116.7 max_ms=45.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.6 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.finish count=512 sum_ms=195.5 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.wrap count=3 sum_ms=3.6 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.finish count=512 sum_ms=223.1 max_ms=1.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.image_refs count=512 sum_ms=23.2 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.mermaid count=512 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.finalize count=1 sum_ms=56.6 max_ms=56.6"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.release_memory count=1 sum_ms=2.1 max_ms=2.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.1 max_ms=5.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.4 max_ms=2.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.3 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=3.0 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=153.6 max_ms=51.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=54.2 max_ms=54.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=375.3 max_ms=375.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=264.8 max_ms=264.8"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.4 max_ms=4.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=23.5 max_ms=23.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=28.9 max_ms=28.9"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=29.0 max_ms=29.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 2,
+    "source": "after-slow-2.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=541.9 ready_ms=542.0 ready_echo_p95_ms=49.0 ready_echo_max_ms=49.0 frames=26"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=287.3 history_visible_ms=551.3 advances=3 highest=Some(512) visible_maxima=[(287.279791ms, 237), (430.895791ms, 509), (551.278041ms, 512)] max_content_gap_ms=143.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=43 sum_ms=3.9 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.1 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=43 sum_ms=28.4 max_ms=8.4"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.7 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.4 max_ms=5.4"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.5 max_ms=2.5"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.2 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.2 max_ms=1.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.5 max_ms=1.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=154.2 max_ms=51.7"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=54.1 max_ms=54.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=377.7 max_ms=377.7"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=263.7 max_ms=263.7"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.2 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.6 max_ms=4.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=23.4 max_ms=23.4"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=29.1 max_ms=29.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=29.2 max_ms=29.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 2,
+    "source": "before-slow-2.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=551.5 ready_ms=551.6 ready_echo_p95_ms=49.1 ready_echo_max_ms=49.4 frames=26"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=291.3 history_visible_ms=436.5 advances=2 highest=Some(512) visible_maxima=[(291.301166ms, 247), (436.465083ms, 512)] max_content_gap_ms=145.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=43 sum_ms=3.9 max_ms=0.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=43 sum_ms=29.1 max_ms=10.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.8 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.4 max_ms=5.4"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.5 max_ms=2.5"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.5 max_ms=1.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=3.1 max_ms=1.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=155.1 max_ms=52.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.5 max_ms=53.5"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=355.6 max_ms=355.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=247.4 max_ms=247.4"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.1 max_ms=4.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.6 max_ms=0.6"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.3 max_ms=0.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=23.1 max_ms=23.1"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=28.2 max_ms=28.2"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=28.3 max_ms=28.3"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "before",
+    "case": "slow",
+    "repeat": 3,
+    "source": "before-slow-3.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=436.7 ready_ms=436.7 ready_echo_p95_ms=49.0 ready_echo_max_ms=49.0 frames=26"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-progress] turns=512 modern=true dense_tools=false first_history_ms=293.7 history_visible_ms=570.9 advances=3 highest=Some(512) visible_maxima=[(293.730917ms, 238), (434.017ms, 494), (570.928917ms, 512)] max_content_gap_ms=140.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.acp.apply_batch count=39 sum_ms=240.0 max_ms=8.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.delivery count=26 sum_ms=1106.8 max_ms=45.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.diff count=43 sum_ms=3.9 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.present count=43 sum_ms=35.7 max_ms=8.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.queue count=26 sum_ms=0.1 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.render count=43 sum_ms=28.3 max_ms=7.9"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.wait count=26 sum_ms=1105.4 max_ms=45.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.frame.write count=26 sum_ms=0.6 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.finish count=512 sum_ms=194.2 max_ms=1.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.markdown.wrap count=3 sum_ms=3.6 max_ms=1.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.finish count=512 sum_ms=222.1 max_ms=1.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.image_refs count=512 sum_ms=23.0 max_ms=0.3"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.message.mermaid count=512 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.end_batch count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.finalize count=1 sum_ms=58.5 max_ms=58.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=pager.replay.release_memory count=1 sum_ms=2.4 max_ms=2.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.delta_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.fs_notify_start count=1 sum_ms=5.5 max_ms=5.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.history_projection count=1 sum_ms=2.8 max_ms=2.8"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.model_route_reconcile count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.open_session count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.state_projections count=1 sum_ms=0.1 max_ms=0.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_evidence count=3 sum_ms=3.6 max_ms=1.5"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_fold count=3 sum_ms=2.9 max_ms=1.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load.timeline_read_decode count=3 sum_ms=157.0 max_ms=53.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_light count=1 sum_ms=53.7 max_ms=53.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session count=1 sum_ms=379.6 max_ms=379.6"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.load_session_replay count=1 sum_ms=264.7 max_ms=264.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.reconcile_stale_tasks count=1 sum_ms=0.2 max_ms=0.2"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.install_coordination_backend count=1 sum_ms=4.7 max_ms=4.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.prepare count=1 sum_ms=0.7 max_ms=0.7"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn.publish_coordination count=1 sum_ms=0.4 max_ms=0.4"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_actor_call count=1 sum_ms=26.1 max_ms=26.1"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register count=1 sum_ms=32.0 max_ms=32.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.spawn_and_register_session count=1 sum_ms=32.0 max_ms=32.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-phase] turns=512 name=session.stale_tasks_drain_completions count=1 sum_ms=0.0 max_ms=0.0"
+  },
+  {
+    "stage": "after",
+    "case": "slow",
+    "repeat": 3,
+    "source": "after-slow-3.txt",
+    "line": "[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=571.3 ready_ms=571.4 ready_echo_p95_ms=49.0 ready_echo_max_ms=49.1 frames=26"
+  }
+]

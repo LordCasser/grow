@@ -302,8 +302,18 @@ async fn make_subagent_fixture_with_replies(
 ) {
     let (gateway_tx, gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-    let (persistence_tx, _persistence_rx) =
+    let (persistence_tx, mut persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    // This fixture runs the actor without the production persistence worker.
+    // Buffered ACP updates still require an acknowledgement before they are
+    // sent to the inherited gateway, so acknowledge them as an in-memory sink.
+    tokio::task::spawn_local(async move {
+        while let Some(message) = persistence_rx.recv().await {
+            if let PersistenceMsg::AppendUpdateBufferedAndAck { respond_to, .. } = message {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    });
     let log = Arc::new(std::sync::Mutex::new(GatewayLog::default()));
     spawn_gateway_responder(gateway_rx, reply_options, Arc::clone(&log));
 
@@ -409,6 +419,9 @@ async fn drain_notifications_to_gateway(
             }
             other => panic!("expected only Notification events, got {other:?}"),
         }
+    }
+    if let Some(notification) = replay_buffer.flush() {
+        actor.emit_buffered(notification).await;
     }
 }
 

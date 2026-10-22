@@ -1,0 +1,49 @@
+{
+  "build_manifest": "openspec/changes/unify-timeline-history-storage/after-build-12.jsonl",
+  "artifacts": {
+    "session_fork_replay_memory": "target/resume-release/release/deps/session_fork_replay_memory-c9d92b4b92d9182a",
+    "test_session_load_memory": "target/resume-release/release/deps/test_session_load_memory-07eca10fc649a67c",
+    "testkit_synth_roundtrip": "target/resume-release/release/deps/testkit_synth_roundtrip-464c879bc1bba9cf"
+  },
+  "results": {
+    "fork_replay_stream_is_bounded_and_faithful": {
+      "passed": true,
+      "count": 300,
+      "on_disk_mb": 0.43326,
+      "old_parse_all_peak_mb": 1.388972,
+      "old_ratio": 3.2058625305820985,
+      "new_stream_peak_mb": 0.742658,
+      "new_ratio": 1.714116235055163,
+      "reduction_x": 1.8702713765959567,
+      "log": "final-12-fork.log"
+    },
+    "testkit_synth_roundtrip": {
+      "passed": 2,
+      "failed": 0,
+      "log": "final-12-roundtrip.log"
+    },
+    "test_session_load_memory_normal": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 2,
+      "log": "final-12-load-normal.log"
+    },
+    "rss::session_load_peak_rss_under_budget": {
+      "passed": true,
+      "on_disk_timeline_bytes": 1091100,
+      "baseline_rss_mb": 48.25,
+      "peak_rss_mb": 49.03125,
+      "peak_rss_growth_mb": 0.78125,
+      "budget_mb": 1024,
+      "replayed_lines": 540,
+      "expected_typed_history_updates": 540,
+      "log": "final-12-load-peak-rss.log"
+    },
+    "rss::session_load_e2e_peak_rss": {
+      "passed": false,
+      "measurement_produced": false,
+      "failure": "session/load failed with FS_OTHER: session is being written or is part of an unfinished session reclaim",
+      "log": "final-12-load-e2e-rss.log"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/c3-before/shell-commit-bench",
+  "sha256": "b8c782ed6e14acfa4ee2c7c11279df77eefc975cc249e621a771b035d4173f10",
+  "scope": "release library test, System allocator, ledger barrier probes; not full turn/CLI"
+}

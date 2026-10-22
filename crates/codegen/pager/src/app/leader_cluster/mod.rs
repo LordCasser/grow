@@ -75,10 +75,10 @@ fn effective_grow_home() -> PathBuf {
 
 /// Locate the durable leaf for a test session without reimplementing the
 /// storage cwd encoder.
-fn find_session_updates_file(sid: &str) -> Option<PathBuf> {
+fn find_session_timeline_file(sid: &str) -> Option<PathBuf> {
     let sessions = effective_grow_home().join("sessions");
     for entry in std::fs::read_dir(&sessions).ok()?.flatten() {
-        let candidate = entry.path().join(sid).join("updates.jsonl");
+        let candidate = entry.path().join(sid).join("timeline.jsonl");
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -281,7 +281,7 @@ struct PagerLeaderCluster {
     server_cancel: CancellationToken,
     /// The current generation's server/agent/bridge tasks. `kill_leader`
     /// aborts + drains them so a respawn can never race a still-running old
-    /// agent on the same GROW_HOME (two agents on one updates.jsonl is the
+    /// agent on the same GROW_HOME (two agents on one Timeline is the
     /// corruption class the real leader's flock exists to prevent).
     generation_tasks: Vec<tokio::task::JoinHandle<()>>,
     client_count: Arc<AtomicUsize>,
@@ -470,7 +470,7 @@ impl PagerLeaderCluster {
         // has already run its socket cleanup above). Channel-closure teardown
         // is only eventual; without this drain an old agent task could still
         // be running against the same GROW_HOME when the next generation's
-        // agent starts — two writers on one updates.jsonl, the corruption
+        // agent starts — two writers on one Timeline, the corruption
         // class the real leader's flock prevents.
         for task in self.generation_tasks.drain(..) {
             task.abort();
@@ -479,8 +479,8 @@ impl PagerLeaderCluster {
         // This fixture shares a process with session actor OS threads. A real
         // leader process exit kills them; here the Agent requests shutdown on
         // drop, and the replacement must wait for the old writer's lease.
-        let writer_lease = find_session_updates_file(session_id)
-            .expect("completed turn has a session updates file")
+        let writer_lease = find_session_timeline_file(session_id)
+            .expect("completed turn has a session Timeline")
             .parent()
             .and_then(std::path::Path::parent)
             .expect("session writer lease has a parent")

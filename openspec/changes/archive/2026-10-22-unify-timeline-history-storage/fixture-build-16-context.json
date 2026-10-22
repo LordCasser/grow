@@ -1,0 +1,32 @@
+{
+  "started_utc": "2026-10-21T18:17:52.996100+00:00",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--release",
+    "-p",
+    "shell",
+    "-p",
+    "pager",
+    "-p",
+    "pager-pty-harness",
+    "--features",
+    "shell/test-support",
+    "--test",
+    "test_subagent_orphan_reconcile",
+    "--test",
+    "leader_pty_e2e",
+    "--no-run",
+    "--message-format=json"
+  ],
+  "purpose": "Real child/seed orphan fixture and git/submit leader fixtures only",
+  "source_hashes": {
+    "crates/codegen/shell/tests/test_subagent_orphan_reconcile.rs": "1375f8cfd74193112e838ce75d8375689021eca8f6985cd9348a1818857c521f",
+    "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs": "018e7a8bbd0c769050c1f18df9ed525ff78aab877c2e1b4289958e15f24ff75e",
+    "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs": "89dc53fec788f0bb7b14dc73e62e2fd624933e0d61e83d666c4b19347a07730b"
+  },
+  "exit": 0,
+  "completed_utc": "2026-10-21T18:19:49.201056+00:00"
+}

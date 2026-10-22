@@ -32,6 +32,35 @@ pub struct NotificationSender {
     pub preview_gateway_budget: sampler::PreviewEventBudget,
 }
 
+/// Already-budgeted transport copy. Only the persistence owner publishes it,
+/// after the unique presentation fact crossed its durable barrier.
+pub struct CommittedGrowDelivery {
+    pub(crate) gateway: GatewaySender,
+    pub(crate) method: &'static str,
+    pub(crate) raw: Box<serde_json::value::RawValue>,
+    pub(crate) permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl std::fmt::Debug for CommittedGrowDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommittedGrowDelivery")
+            .field("method", &self.method)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommittedGrowDelivery {
+    pub(crate) fn publish(self) {
+        let outbound =
+            agent_client_protocol::schema::v1::ExtNotification::new(self.method, self.raw.into());
+        let completed = self.gateway.forward_with_completion(outbound);
+        tokio::spawn(async move {
+            let _ = completed.await;
+            drop(self.permit);
+        });
+    }
+}
+
 struct PreviewByteCounter(usize);
 
 impl Write for PreviewByteCounter {
@@ -214,17 +243,24 @@ pub(crate) fn publish_prepared_auxiliary_grow(
         persistence_permit,
         gateway_permit,
     } = prepared;
-    if let Some(permit) = persistence_permit
-        && persistence_tx
+    if let Some(permit) = persistence_permit {
+        if persistence_tx
             .send(PersistenceMsg::AuxiliaryGrow {
                 notification,
                 permit,
                 preview: owner,
                 respond_to: None,
+                delivery: Some(CommittedGrowDelivery {
+                    gateway: gateway.clone(),
+                    method,
+                    raw,
+                    permit: gateway_permit,
+                }),
             })
             .is_err()
-    {
-        tracing::warn!("session persistence actor stopped before auxiliary Grow append");
+        {
+            tracing::warn!("session persistence actor stopped before auxiliary Grow append");
+        }
         return;
     }
     let outbound = agent_client_protocol::schema::v1::ExtNotification::new(method, raw.into());
@@ -233,66 +269,6 @@ pub(crate) fn publish_prepared_auxiliary_grow(
         let _ = completed.await;
         drop(gateway_permit);
     });
-}
-
-/// Durably bind a display-only update to its source before it can be written
-/// to `updates.jsonl` or sent to a client. The digest covers the canonical
-/// serialized update payload; Timeline retains only this identity and digest.
-pub(crate) async fn record_display_projection_expectation(
-    chat_state: &chat_state::ChatStateHandle,
-    notification: &GrowSessionNotification,
-    kind: chat_state::DisplayProjectionKind,
-    source_id: String,
-    source_revision: u64,
-) -> Result<(), String> {
-    let event_id = notification
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("eventId"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "display projection has no stable event ID".to_owned())?;
-    // Hash the same canonical JSON value representation the bounded transcript
-    // reader obtains from the persisted envelope.
-    let mut payload = serde_json::to_value(&notification.update)
-        .map_err(|error| format!("display projection payload could not be serialized: {error}"))?;
-    payload.sort_all_objects();
-    record_display_projection_payload(
-        chat_state,
-        event_id,
-        &payload,
-        kind,
-        source_id,
-        source_revision,
-    )
-    .await
-}
-
-pub(crate) async fn record_display_projection_payload(
-    chat_state: &chat_state::ChatStateHandle,
-    event_id: &str,
-    payload: &serde_json::Value,
-    kind: chat_state::DisplayProjectionKind,
-    source_id: String,
-    source_revision: u64,
-) -> Result<(), String> {
-    let mut payload = payload.clone();
-    payload.sort_all_objects();
-    let payload = serde_json::to_vec(&payload)
-        .map_err(|error| format!("display projection payload could not be serialized: {error}"))?;
-    let expectation = chat_state::DisplayProjectionExpectation {
-        event_id: event_id.to_owned(),
-        kind,
-        source_id,
-        source_revision,
-        payload_digest: blake3::hash(&payload).to_hex().to_string(),
-    };
-    chat_state
-        .record_timeline_event_durably(chat_state::TimelineEventKind::DisplayProjectionExpected(
-            expectation,
-        ))
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 fn report_auxiliary_failure(
@@ -323,12 +299,19 @@ mod tests {
 
     #[tokio::test]
     async fn auxiliary_grow_holds_both_queue_credits_until_consumed() {
+        use std::time::Duration;
+
+        const WAIT: Duration = Duration::from_secs(1);
+
         let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel();
         let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
         let gateway = GatewaySender::new(gateway_tx);
         let budget = sampler::PreviewEventBudget::default();
         let preview = parking_lot::Mutex::new(Some(("request".into(), 1, false)));
-        let held = budget.acquire(4094).await.unwrap();
+        let held = tokio::time::timeout(WAIT, budget.acquire(4094))
+            .await
+            .expect("budget reservation should complete")
+            .unwrap();
         let notification = || GrowSessionNotification {
             session_id: agent_client_protocol::schema::v1::SessionId::new("budget-test"),
             update: crate::extensions::notification::SessionUpdate::MemoryFlushStarted,
@@ -353,20 +336,62 @@ mod tests {
             true,
         );
 
-        let persisted = persistence_rx.recv().await.unwrap();
-        assert!(matches!(persisted, PersistenceMsg::AuxiliaryGrow { .. }));
+        let persisted = tokio::time::timeout(WAIT, persistence_rx.recv())
+            .await
+            .expect("writer should receive the first AuxiliaryGrow")
+            .unwrap();
+        let (persistence_permit, delivery) = match persisted {
+            PersistenceMsg::AuxiliaryGrow {
+                notification,
+                permit,
+                delivery: Some(delivery),
+                respond_to: None,
+                ..
+            } => {
+                assert!(matches!(
+                    notification.update,
+                    crate::extensions::notification::SessionUpdate::MemoryFlushStarted
+                ));
+                (permit, delivery)
+            }
+            other => {
+                panic!("expected budgeted AuxiliaryGrow with deferred delivery, got {other:?}")
+            }
+        };
         assert!(matches!(
-            persistence_rx.recv().await.unwrap(),
+            tokio::time::timeout(WAIT, persistence_rx.recv())
+                .await
+                .expect("failed reservation should be reported to the writer")
+                .unwrap(),
             PersistenceMsg::AuxiliaryPreviewFailure { .. }
         ));
         assert!(budget.try_acquire_bytes(1).is_err());
-        let delivered = gateway_rx.recv().await.unwrap();
+
+        // The persistence owner publishes only after the typed presentation
+        // fact has been consumed and its durable append succeeds.
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "uncommitted snapshots stay private"
+        );
+        drop(persistence_permit);
+        delivery.publish();
+        let delivered = tokio::time::timeout(WAIT, gateway_rx.recv())
+            .await
+            .expect("committed snapshot should reach the gateway")
+            .unwrap();
         assert!(gateway_rx.try_recv().is_err());
-        drop(persisted);
-        assert!(budget.try_acquire_bytes(1).is_ok());
+        assert!(
+            budget.try_acquire_bytes(16 * 1024 + 1).is_err(),
+            "the freed persistence credit alone cannot cover both queue copies"
+        );
         drop(delivered);
-        tokio::task::yield_now().await;
-        assert!(budget.try_acquire_bytes(16 * 1024).is_ok());
+        let released = tokio::time::timeout(WAIT, budget.acquire(2))
+            .await
+            .expect("gateway completion should release its credit")
+            .unwrap();
+        drop(released);
+        assert!(budget.try_acquire_bytes(32 * 1024).is_ok());
         drop(held);
+        assert!(budget.try_acquire_bytes(16 * 1024).is_ok());
     }
 }

@@ -1,0 +1,6 @@
+- [x] Add and run the ignored clean-frame and height-only layout benchmark at 128, 512, and 2048 entries; record baseline timings and exact-oracle results.
+- [x] Optimize clean visible-range total calculation using the existing virtual-position prefix.
+- [x] Patch suffix virtual offsets and prompt descriptors in one ordered pass for height-only changes; preserve full rebuilds for structural and width changes.
+- [x] Compare exact offsets and totals against an independent full oracle for multiple dirty entries/prompts, fold/group truncation, view-range changes, resize, follow, and manual scroll anchoring.
+- [x] Run focused Pager layout validation and record before/after benchmark results.
+- [x] Add the separately owned recovery-loading input delta and verify the user-visible recovery behavior.

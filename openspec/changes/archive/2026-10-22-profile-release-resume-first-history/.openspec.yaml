@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-21
+skip_specs: true
+reason: "仅补充现有 JSONL 恢复路径的测量与分析，不改变持久化、恢复校验、历史顺序或 TUI 行为契约。"

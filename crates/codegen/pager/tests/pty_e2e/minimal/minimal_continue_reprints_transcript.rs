@@ -12,6 +12,9 @@ use crate::common::*;
 #[ignore]
 async fn minimal_continue_reprints_transcript() {
     let content = ContentController::start().await.expect("start content");
+    content
+        .seed_llm_config()
+        .expect("seed isolated mock provider");
     content.set_response(format!("{} first session payload.", turn_sentinel(1)));
 
     // Sessions are keyed by cwd: both runs must share a stable project dir.
@@ -26,7 +29,7 @@ async fn minimal_continue_reprints_transcript() {
     first
         .wait_for_full_text(&turn_sentinel(1), Duration::from_secs(30))
         .expect("turn 1 committed to scrollback");
-    // Idle before quit so the agent finishes turn completion + updates.jsonl
+    // Idle before quit so the agent finishes turn completion + unified journal
     // flush. Quitting mid-finalize under suite load left `--continue` loading a
     // session with the user message but no assistant payload (resume then
     // shows "Loading session…" / empty chrome past RESUME_TIMEOUT).
@@ -53,6 +56,13 @@ async fn minimal_continue_reprints_transcript() {
                 resumed.full_text()
             )
         });
+    wait_minimal_ready(&mut resumed);
+    let resumed_history = resumed.full_text();
+    assert_eq!(
+        resumed_history.matches(&turn_sentinel(1)).count(),
+        1,
+        "turn 1 must be reprinted exactly once after resume\nfull:\n{resumed_history}"
+    );
 
     // A follow-up turn still works in the resumed session.
     content.set_response(format!("{} resumed payload.", turn_sentinel(2)));
@@ -62,6 +72,20 @@ async fn minimal_continue_reprints_transcript() {
     resumed
         .wait_for_full_text(&turn_sentinel(2), Duration::from_secs(30))
         .expect("turn 2 rendered in resumed session");
+    resumed
+        .wait_for_text(MINIMAL_IDLE_SENTINEL, Duration::from_secs(15))
+        .expect("turn 2 returned to idle before transcript assertions");
+    let completed_history = resumed.full_text();
+    assert_eq!(
+        completed_history.matches(&turn_sentinel(1)).count(),
+        1,
+        "turn 1 must remain exactly once after the follow-up\nfull:\n{completed_history}"
+    );
+    assert_eq!(
+        completed_history.matches(&turn_sentinel(2)).count(),
+        1,
+        "turn 2 must appear exactly once after the follow-up\nfull:\n{completed_history}"
+    );
 
     assert!(
         !resumed.contains_text("panicked"),

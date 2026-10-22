@@ -7,7 +7,7 @@
 //! its session". One [`ContentController`] gives one shared `$HOME` (hence one
 //! elected leader) plus a fixed leader socket beneath its `GROW_HOME`; clients
 //! spawn with the `--leader`/`--leader-socket` flags so they all attach to the
-//! SAME leader. It also exposes the leader's durable `updates.jsonl` log so a
+//! SAME leader. It also exposes the leader's durable Timeline history so a
 //! reattach test can assert on the persisted, replayable turn-completion
 //! records — the genuine end-to-end signal behind durable turn completion.
 
@@ -35,6 +35,7 @@ impl LeaderCluster {
         let content = ContentController::start()
             .await
             .context("start content controller")?;
+        content.seed_llm_config().context("seed mock LLM config")?;
         // One shared GROW_HOME => one leader; the socket lives beneath it so
         // every client (sharing the same env) elects/attaches to the same one.
         let grow_home = content.home().join(".grow");
@@ -80,28 +81,32 @@ impl LeaderCluster {
     }
 
     /// The cluster's sessions root: `GROW_HOME/sessions` (layout below is
-    /// `sessions/<encoded-cwd>/<session-id>/updates.jsonl`).
+    /// `sessions/<encoded-cwd>/<session-id>/timeline.jsonl`).
     fn sessions_dir(&self) -> PathBuf {
         self.content.home().join(".grow").join("sessions")
     }
 
-    /// The session-update payload of every record across every `updates.jsonl`
-    /// under the cluster's [`sessions_dir`](Self::sessions_dir) — i.e. the
-    /// `params.update` object of each persisted envelope line, so a caller can
-    /// match on its `sessionUpdate` tag directly. Scans ALL sessions under the
-    /// cluster (fine for the single-session clusters these tests build).
+    /// The durable Grow notifications projected from each Timeline under the
+    /// cluster's [`sessions_dir`](Self::sessions_dir). Scans all sessions under
+    /// the cluster; callers use this to observe Grow terminal notifications.
     ///
-    /// Infallible by design: a file that vanishes mid-walk, or whose appended
-    /// tail tore across a multi-byte UTF-8 boundary (so `read_to_string`
-    /// fails), is skipped for this call and picked up on the next one.
+    /// Infallible by design: a file that vanishes or fails production journal
+    /// validation during a poll is skipped and retried on the next one.
     pub fn session_updates(&self) -> Vec<Value> {
         let mut files = Vec::new();
-        collect_updates_files(&self.sessions_dir(), &mut files);
+        collect_timeline_files(&self.sessions_dir(), &mut files);
         let mut out = Vec::new();
         for file in files {
-            // Skip a vanished file or a torn multi-byte tail; the next poll retries.
-            if let Ok(text) = std::fs::read_to_string(&file) {
-                out.extend(parse_update_payloads(&text));
+            let Some(session_id) = file
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(std::ffi::OsStr::to_str)
+            else {
+                continue;
+            };
+            if let Ok(updates) = replay_grow_updates(session_id, &self.content.home().join(".grow"))
+            {
+                out.extend(updates);
             }
         }
         out
@@ -145,30 +150,24 @@ fn is_turn_completed(update: &Value) -> bool {
     update.get("sessionUpdate").and_then(Value::as_str) == Some("turn_completed")
 }
 
-/// Parse the `params.update` payload out of each non-blank line of an
-/// `updates.jsonl` body, assuming the enveloped on-disk shape current sessions
-/// always write (`{..,"params":{"update":{..}}}`). A line that is blank, fails
-/// to parse (a torn trailing line that is still valid UTF-8), or carries no
-/// `params.update` is skipped — never failing the batch. (A torn *multi-byte*
-/// tail instead fails the file read upstream, skipping the whole file for that
-/// poll; see [`LeaderCluster::session_updates`].)
-fn parse_update_payloads(text: &str) -> Vec<Value> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
+fn replay_grow_updates(session_id: &str, grow_home: &Path) -> std::io::Result<Vec<Value>> {
+    let mut updates = Vec::new();
+    let _ = shell::session::storage::stream_replay_grow_notifications_at(
+        session_id,
+        grow_home,
+        |notification| {
+            if let Ok(update) = serde_json::to_value(notification.update) {
+                updates.push(update);
             }
-            let envelope: Value = serde_json::from_str(line).ok()?;
-            envelope.get("params")?.get("update").cloned()
-        })
-        .collect()
+        },
+    )?;
+    Ok(updates)
 }
 
-/// Recursively collect every `updates.jsonl` beneath `dir` (a manual walk to
+/// Recursively collect every physical Timeline beneath `dir` (a manual walk to
 /// avoid a new crate dep). A missing/unreadable dir yields nothing — sessions
 /// may not exist yet, and the walk is re-run on every poll.
-fn collect_updates_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_timeline_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -180,8 +179,8 @@ fn collect_updates_files(dir: &Path, out: &mut Vec<PathBuf>) {
         };
         let path = entry.path();
         if file_type.is_dir() {
-            collect_updates_files(&path, out);
-        } else if path.file_name().and_then(|n| n.to_str()) == Some("updates.jsonl") {
+            collect_timeline_files(&path, out);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("timeline.jsonl") {
             out.push(path);
         }
     }
@@ -190,48 +189,79 @@ fn collect_updates_files(dir: &Path, out: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shell::session::storage::{JsonlStorageAdapter, SessionUpdate, StorageAdapter};
+    use shell::session::testkit::synth::{SessionSpec, prepare_session};
 
-    /// Wrap a session update as the envelope stored in `updates.jsonl`.
-    fn envelope(update_json: &str) -> String {
-        format!(
-            r#"{{"timestamp":1,"method":"_grow/session/update","params":{{"sessionId":"s","update":{update_json}}}}}"#
-        )
+    fn small_session_spec() -> SessionSpec {
+        SessionSpec {
+            turns: 1,
+            acu_per_turn: 1,
+            catalog_commands: 1,
+            catalog_desc_len: 4,
+            agent_chunks_per_turn: 1,
+            agent_chunk_len: 4,
+            rewind_points: 0,
+            files_per_rewind: 0,
+            file_content_len: 0,
+        }
     }
 
-    #[test]
-    fn parse_update_payloads_unwraps_and_tolerates_torn_trailing_line() {
-        let body = format!(
-            "{}\n{}\n{{\"timestamp\":2,\"method\":\"_grow/sess",
-            envelope(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#
-            ),
-            envelope(
-                r#"{"sessionUpdate":"turn_completed","prompt_id":"p-1","stop_reason":"end_turn"}"#
-            ),
-        );
-        let updates = parse_update_payloads(&body);
-        // The two complete lines parse; the torn final line is dropped.
-        assert_eq!(updates.len(), 2);
-        let completed = updates
-            .iter()
-            .find(|u| is_turn_completed(u))
-            .expect("turn_completed payload is unwrapped from params.update");
-        assert_eq!(completed["stop_reason"], "end_turn");
-        assert_eq!(completed["prompt_id"], "p-1");
+    async fn session_with_turn_completed(root: &Path, cwd: &Path) -> (String, PathBuf) {
+        let (info, directory) = prepare_session(root, cwd, &small_session_spec()).await;
+        let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
+        let notification = shell::extensions::notification::SessionNotification {
+            session_id: info.id.clone(),
+            update: shell::extensions::notification::SessionUpdate::TurnCompleted {
+                prompt_id: "prompt-1".into(),
+                identity: None,
+                stop_reason: "end_turn".into(),
+                agent_result: Some("fixture result".into()),
+                usage: None,
+            },
+            meta: Some(serde_json::json!({"eventId": "turn-completed-prompt-1"})),
+        };
+        adapter
+            .append_update_durable_commit_aware(&info, &SessionUpdate::Grow(Box::new(notification)))
+            .await
+            .expect("append durable TurnCompleted Grow fact");
+        (info.id.0.to_string(), directory)
     }
 
-    #[test]
-    fn parse_update_payloads_skips_blank_and_payloadless_lines() {
-        let body = format!(
-            "\n   \n{}\n{{\"timestamp\":3,\"method\":\"x\",\"params\":{{\"sessionId\":\"s\"}}}}\n",
-            envelope(
-                r#"{"sessionUpdate":"turn_completed","prompt_id":"p","stop_reason":"cancelled"}"#
-            ),
+    #[tokio::test]
+    async fn production_replay_ignores_torn_trailing_physical_record() {
+        let root = tempfile::tempdir().expect("create isolated grow home");
+        let cwd = tempfile::tempdir().expect("create session cwd");
+        let (session_id, directory) = session_with_turn_completed(root.path(), cwd.path()).await;
+        let timeline = directory.join("timeline.jsonl");
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&timeline)
+            .expect("open physical Timeline")
+            .write_all(b"{\"version\":1,\"seq\":")
+            .expect("append torn physical record");
+
+        let updates = replay_grow_updates(&session_id, root.path())
+            .expect("stream through production Grow replay projection");
+        assert_eq!(
+            updates.len(),
+            1,
+            "complete Grow fact survives the torn tail"
         );
-        let updates = parse_update_payloads(&body);
-        // Only the one envelope carrying params.update survives.
-        assert_eq!(updates.len(), 1);
         assert!(is_turn_completed(&updates[0]));
-        assert_eq!(updates[0]["stop_reason"], "cancelled");
+        assert_eq!(updates[0]["prompt_id"], "prompt-1");
+        assert_eq!(updates[0]["agent_result"], "fixture result");
+    }
+
+    #[tokio::test]
+    async fn production_grow_replay_returns_turn_terminal_without_acp_facts() {
+        let root = tempfile::tempdir().expect("create isolated grow home");
+        let cwd = tempfile::tempdir().expect("create session cwd");
+        let (session_id, _) = session_with_turn_completed(root.path(), cwd.path()).await;
+        let updates = replay_grow_updates(&session_id, root.path())
+            .expect("stream through production Grow replay projection");
+        assert_eq!(updates.len(), 1, "only the persisted Grow fact is emitted");
+        assert!(is_turn_completed(&updates[0]));
+        assert_eq!(updates[0]["stop_reason"], "end_turn");
     }
 }

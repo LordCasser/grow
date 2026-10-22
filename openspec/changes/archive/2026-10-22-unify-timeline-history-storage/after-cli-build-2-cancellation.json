@@ -1,0 +1,9 @@
+{
+  "utc": "2026-10-21T17:28:55.757011+00:00",
+  "reason": "runtime memory gate still exceeded; layout probe confirmed 536-byte position slots and compact boxed sources; cancel only owned CLI build before final source/typecheck",
+  "pids": [
+    55768,
+    56136,
+    56221
+  ]
+}

@@ -147,6 +147,20 @@ fn reset_prefix_closes_over_model_skill_fact_and_all_results() {
             .any(|v| v["type"] == "function_call_output" && v["call_id"] == "b")
     );
 }
+#[test]
+fn previous_responses_user_skill_fix_is_still_present() {
+    let req = ConversationRequest::from_items(vec![skill(SkillLoadSource::User)]);
+    let w = wire(&req, ApiBackend::Responses);
+    assert_eq!(w["input"].as_array().unwrap().len(), 1);
+    assert_eq!(w["input"][0]["role"], "user");
+    assert!(
+        w["input"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("audit skill body")
+    );
+}
+
 fn response_ids(w: &Value, kind: &str) -> Vec<String> {
     w["input"]
         .as_array()

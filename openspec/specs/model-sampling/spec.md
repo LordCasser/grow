@@ -977,7 +977,7 @@ Runtime 来源的技能结果 SHALL 在各受支持请求协议中形成合法�
 
 #### Scenario: Portable provider request
 - **WHEN** Chat Completions、Responses 或 Messages 请求包含用户触发的技能加载结果
-- **THEN** 请求包含完整加载内容及协议要求的配对身份，没有孤立或重复结果，Timeline 仍记录 Runtime 来源。
+- **THEN** 请求包含完整加载内容；Responses 使用独立 user 上下文表达 Runtime 加载结果，保留结构化来源和加载身份，不生成模拟 function_call/output 或 reasoning；Chat Completions 与 Messages 保留协议配对。没有孤立或重复结果，Timeline 仍记录 Runtime 来源。
 
 #### Scenario: Existing model tool batch
 - **WHEN** 一个模型批次存在多个尚在结算的工具调用，同时收到技能插话
@@ -988,6 +988,14 @@ Runtime 来源的技能结果 SHALL 在各受支持请求协议中形成合法�
 - **THEN** 使用可安全表达该结果的增量路径或现有 portable 重建路径；不能表达时明确终止该次执行并结算尚未消费的加载贡献，不遗漏正文继续请求。
 
 证据入口：`crates/codegen/sampling-types/src/conversation.rs` 的 AgentMessage 配对展开、工具 ID 去重和各 backend 转换；该模式是参考，本条新增 Skill 事实投影。
+
+#### Scenario: Thinking route receives a user skill without model reasoning
+- **WHEN** Responses thinking 路由首次或在 portable/native 历史后收到用户加载的技能，且该 Runtime 事实没有模型思考
+- **THEN** 完整技能结果作为独立 user 消息出现一次，原始用户输入不改写，不依赖先触发 400、学习 reasoning 回放或用户再发继续；既有 native reasoning 与真实模型工具调用保持不变。
+
+#### Scenario: Model-triggered skill load
+- **WHEN** Responses 请求包含模型真实调用产生的技能加载事实及匹配工具结果
+- **THEN** 仅保留真实调用/结果，不追加用户技能消息或重复技能正文。
 
 ### Requirement: Loaded skill content must fit its dependent request
 Loaded SHALL 表示完整准备正文已获上下文发布确认，不等于后续采样必然成功。运行时 SHALL 在权威发布点及首次关联请求构造时复核当前 Surface revision、模型 / 路由与完整请求预算，覆盖用户输入、附件、技能正文、协议包装、工具定义及输出预留。首次关联步骤获得已接纳响应前，恢复重试 SHALL 保留全文；不得以静默截断、blob 地址或延后自主读取代替交付。历史 Loaded SHALL 不等于永久正文可用。
@@ -1120,3 +1128,22 @@ A failure returned by the tool execution pipeline SHALL stop the admitted model 
 #### Scenario: Marker appears in real content
 - **WHEN** 用户/工具提供同样文字，或 assistant 在正常解释中包含该文字
 - **THEN** 内容按原有语义保留，不执行通用子串过滤或修改原始持久记录。
+
+### Requirement: Side questions reuse durable image fallback
+/btw SHALL use its prepared transport identity for negative image capability. An unknown transport SHALL first receive original images; an explicit unconditional image rejection SHALL settle the failed Sideband, persist the negative capability and use the existing visual auxiliary/OCR/durable ImageProjection flow before at most one rebuilt side-question request. A known text-only transport SHALL perform that preparation before sending. The rebuilt request SHALL freeze the acknowledged Surface again and select textual image descriptions before portable history projection. Question and answer SHALL remain Sideband-only; shared image projections SHALL retain existing original-media and unresolved-removal semantics. Ordinary request failures SHALL NOT trigger image conversion. All attempts SHALL retain the prepared client/model route.
+
+#### Scenario: Historical images rejected by side question
+- **WHEN** /btw with user or completed-tool images receives the explicit text-only content type rejection
+- **THEN** the failed Sideband closes, shared image recovery is acknowledged and a new frozen Sideband sends textual context to the same prepared transport
+
+#### Scenario: Known text-only route
+- **WHEN** /btw uses a transport already marked text-only
+- **THEN** it selects acknowledged descriptions without sending raw images or repeating auxiliary work for described groups
+
+#### Scenario: Unrelated failure or failed projection
+- **WHEN** /btw receives an ordinary 400 or its image projection cannot be acknowledged
+- **THEN** it returns failure without an unacknowledged rebuilt provider request, and ordinary errors do not mark negative capability
+
+#### Scenario: Foreground context advances during the failed request
+- **WHEN** the frozen side-question request rejects images but the Surface revision has advanced before recovery
+- **THEN** /btw returns failure without projecting images from the newer revision

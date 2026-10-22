@@ -1080,6 +1080,31 @@ impl AcpUpdateTracker {
             acp::SessionUpdate::AgentMessageChunk(_) | acp::SessionUpdate::AgentThoughtChunk(_)
         );
         if is_sampling_preview
+            && meta.replace_sampling_preview
+            && let Some(key) = Self::sampling_key(meta)
+        {
+            // Reconnect may have replaced the transcript while this attempt was
+            // still provisional. Remove only its provisional entries; unrelated
+            // tools/notices and committed responses retain their original order.
+            let ids = self
+                .sampling_preview_entries
+                .remove(&key)
+                .unwrap_or_default();
+            for id in &ids {
+                scrollback.remove_entry(*id);
+            }
+            if self.current_agent_msg.is_some_and(|id| ids.contains(&id)) {
+                self.current_agent_msg = None;
+            }
+            if self.current_thinking.is_some_and(|id| ids.contains(&id)) {
+                self.current_thinking = None;
+                self.last_thinking_elapsed_ms = None;
+            }
+            if self.sampling_attempt.as_ref() == Some(&key) {
+                self.sampling_attempt = None;
+            }
+        }
+        if is_sampling_preview
             && let Some(key) = Self::sampling_key(meta)
             && self.sampling_preview_rejected(&key)
         {
@@ -3702,6 +3727,75 @@ mod tests {
             panic!("expected current agent message");
         };
         assert_eq!(message.text(), "current");
+    }
+
+    #[test]
+    fn replace_sampling_preview_removes_only_its_attempt_entries() {
+        use crate::scrollback::blocks::NoticeBlock;
+        use shell::extensions::notification::SamplingAttemptState;
+
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let first = sampling_meta("request", 1);
+        tracker.handle_sampling_attempt(
+            "request".into(),
+            1,
+            SamplingAttemptState::Started,
+            &mut sb,
+        );
+        assert!(tracker.handle_update(agent_chunk("attempt one"), &first, &mut sb));
+        tracker.handle_sampling_attempt(
+            "request".into(),
+            1,
+            SamplingAttemptState::Accepted,
+            &mut sb,
+        );
+
+        let second = sampling_meta("request", 2);
+        tracker.handle_sampling_attempt(
+            "request".into(),
+            2,
+            SamplingAttemptState::Started,
+            &mut sb,
+        );
+        assert!(tracker.handle_update(agent_chunk("stale attempt two"), &second, &mut sb));
+        tracker.handle_update(
+            tool_call("between-attempts", acp::ToolKind::Read, "src/lib.rs"),
+            &meta(),
+            &mut sb,
+        );
+        sb.push_block(RenderBlock::Notice(NoticeBlock::new("independent notice")));
+
+        let mut replacement = second;
+        replacement.replace_sampling_preview = true;
+        assert!(tracker.handle_update(agent_chunk("resynced attempt two"), &replacement, &mut sb,));
+
+        let entries = sb
+            .iter_entries()
+            .map(|(_, entry)| &entry.block)
+            .collect::<Vec<_>>();
+        let agent_texts = entries
+            .iter()
+            .filter_map(|block| match block {
+                RenderBlock::AgentMessage(message) => Some(message.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(agent_texts, vec!["attempt one", "resynced attempt two"]);
+        assert!(
+            entries.iter().any(|block| matches!(
+                block,
+                RenderBlock::ToolCall(crate::scrollback::blocks::tool::ToolCallBlock::Read(_))
+            )),
+            "the independent tool entry must survive preview replacement"
+        );
+        assert!(
+            entries.iter().any(|block| matches!(
+                block,
+                RenderBlock::Notice(notice) if notice.text == "independent notice"
+            )),
+            "the independent notice must survive preview replacement"
+        );
     }
 
     #[test]

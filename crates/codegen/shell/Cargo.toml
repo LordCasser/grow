@@ -216,5 +216,13 @@ required-features = ["test-support"]
 name = "testkit_synth_roundtrip"
 required-features = ["test-support"]
 
+[[test]]
+name = "test_subagent_orphan_reconcile"
+required-features = ["test-support"]
+
+[[test]]
+name = "test_tool_dispatch_duration_smoke"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

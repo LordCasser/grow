@@ -1,0 +1,38 @@
+{
+  "mouse-events-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/mouse-events-playground",
+    "sha256": "f60c59786e45e6fbf1720b500a22fed2512eec685d447bcf4df4bff718f685cd"
+  },
+  "scrollback-selection-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/scrollback-selection-playground",
+    "sha256": "b5f2026ba8cf56de7a38549e17c0c39560a76255deaff0cb5cff25de81949fa7"
+  },
+  "todo-pane-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/todo-pane-playground",
+    "sha256": "611f93b7dbce7d09cf6359033112872c2099c03fca09027058a25bcb7c5a1c24"
+  },
+  "question-view-playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/question-view-playground",
+    "sha256": "30c802b39c6d08fadbae53bbea511eb801a3ba1b355cc550e8017d5922c29c19"
+  },
+  "mermaid_playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/mermaid_playground",
+    "sha256": "057ef076de1b98dab503320a2ac9594389dc54f275d95e6d2c368116617bdfea"
+  },
+  "scrollback_search_playground": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/scrollback_search_playground",
+    "sha256": "8a571e8d1cfac55c6c087fbd987db8924cda121f9350e7b8f2027b47a74b9ebb"
+  },
+  "leader_pty_e2e": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/leader_pty_e2e-0cf978ee5bed0153",
+    "sha256": "9b82955f4148e69e559ca39118747e4d2a3d8b4a853367e5ec52359a5070e180"
+  },
+  "pty_e2e_minimal": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pty_e2e_minimal-5948ad2be16beab0",
+    "sha256": "e63a29e3210685a97a021820ef010ab646206e18e20750a6af445214ae370913"
+  },
+  "pty_e2e_persistence": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/deps/pty_e2e_persistence-a3d8341929662456",
+    "sha256": "9536ff152ad9c886680bfec82458dbfd9f0aeb64d77e9fad1a475761575ae74d"
+  }
+}

@@ -1,0 +1,35 @@
+Binary: /Users/lordcasser/workspace/projects/grow/target/debug/deps/shell-f7cac3aa63c59686
+Profile: dev/test opt-level=0 debug=0 incremental=0 jobs=2; sequential direct executable; RUST_MIN_STACK=16777216
+
+RUN 1
+
+running 1 test
+test session::response_projection::tests::ignored_resume_projection_reconcile_baseline_scales_with_existing_projection_count ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4329 filtered out; finished in 8.34s
+
+resume projection reconcile: existing=128, old_reconcile_plus_full_exact_scan=3.987209ms, new_load_append_plan=1.979167ms, planned_appends=0
+resume projection reconcile: existing=512, old_reconcile_plus_full_exact_scan=8.805166ms, new_load_append_plan=7.644541ms, planned_appends=0
+resume projection reconcile: existing=2048, old_reconcile_plus_full_exact_scan=48.554ms, new_load_append_plan=31.8965ms, planned_appends=0
+
+RUN 2
+
+running 1 test
+test session::response_projection::tests::ignored_resume_projection_reconcile_baseline_scales_with_existing_projection_count ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4329 filtered out; finished in 8.53s
+
+resume projection reconcile: existing=128, old_reconcile_plus_full_exact_scan=2.234ms, new_load_append_plan=1.838916ms, planned_appends=0
+resume projection reconcile: existing=512, old_reconcile_plus_full_exact_scan=8.930125ms, new_load_append_plan=7.728167ms, planned_appends=0
+resume projection reconcile: existing=2048, old_reconcile_plus_full_exact_scan=48.838792ms, new_load_append_plan=31.689458ms, planned_appends=0
+
+RUN 3
+
+running 1 test
+test session::response_projection::tests::ignored_resume_projection_reconcile_baseline_scales_with_existing_projection_count ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4329 filtered out; finished in 8.37s
+
+resume projection reconcile: existing=128, old_reconcile_plus_full_exact_scan=2.234958ms, new_load_append_plan=1.914333ms, planned_appends=0
+resume projection reconcile: existing=512, old_reconcile_plus_full_exact_scan=8.985834ms, new_load_append_plan=7.607834ms, planned_appends=0
+resume projection reconcile: existing=2048, old_reconcile_plus_full_exact_scan=49.678041ms, new_load_append_plan=32.322917ms, planned_appends=0

@@ -1,0 +1,16 @@
+{
+  "removed_pinned_target": "/tmp/grow-r5-r6-rust193.3273f6q7",
+  "removed_main_test_outputs": [
+    "target/debug/deps/pager-dd4f5e2b7bed4963",
+    "target/debug/deps/pager-dd4f5e2b7bed4963.d",
+    "target/debug/deps/pty_e2e_persistence-d87bfba196ee602c",
+    "target/debug/deps/pty_e2e_persistence-d87bfba196ee602c.d",
+    "target/debug/deps/shell-f7cac3aa63c59686",
+    "target/debug/deps/shell-f7cac3aa63c59686.d",
+    "target/debug/deps/session_load_perf-c1951fcebb27b71d",
+    "target/debug/deps/session_load_perf-c1951fcebb27b71d.d"
+  ],
+  "reclaimed_allocated_bytes": 11974295552,
+  "reclaimed_gib": 11.151931762695312,
+  "retained": "current target/debug/grow and reusable dependency cache; pre-existing incremental untouched"
+}

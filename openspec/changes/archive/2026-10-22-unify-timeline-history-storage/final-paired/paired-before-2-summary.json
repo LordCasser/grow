@@ -1,0 +1,422 @@
+[
+  {
+    "profile": "modern-128",
+    "runs": 1,
+    "load_ms": 91.447583,
+    "load_ms_range": [
+      91.447583,
+      91.447583
+    ],
+    "first_history_ms": 36.982625,
+    "first_history_ms_range": [
+      36.982625,
+      36.982625
+    ],
+    "last_history_ms": 40.175625,
+    "last_history_ms_range": [
+      40.175625,
+      40.175625
+    ],
+    "max_history_gap_ms": 1.0655000000000001,
+    "max_history_gap_ms_range": [
+      1.0655000000000001,
+      1.0655000000000001
+    ],
+    "process_peak_rss_bytes": 117473280,
+    "process_peak_rss_bytes_range": [
+      117473280,
+      117473280
+    ],
+    "timeline_bytes": 4437097,
+    "timeline_bytes_range": [
+      4437097,
+      4437097
+    ],
+    "updates_bytes": 4820762,
+    "updates_bytes_range": [
+      4820762,
+      4820762
+    ],
+    "directory_bytes": 9263748,
+    "directory_bytes_range": [
+      9263748,
+      9263748
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.088,
+      "plugin_discovery": 0.20299999999999999,
+      "session.delta_drain_completions": 0.0,
+      "session.delta_flush_replay": 0.001,
+      "session.load.model_route_reconcile": 0.005,
+      "session.load.open_session": 0.073,
+      "session.load.physical_updates_decode": 4.358,
+      "session.load.projection_metadata": 0.009,
+      "session.load.response_projection_appends": 0.0,
+      "session.load.response_projection_plan": 8.876,
+      "session.load.state_projections": 0.057,
+      "session.load.timeline_evidence": 0.263,
+      "session.load.timeline_fold": 0.151,
+      "session.load.timeline_read_decode": 5.822,
+      "session.load_light": 20.06,
+      "session.load_session": 90.587,
+      "session.load_session_replay": 9.17,
+      "session.projection.typed_canonical": 8.685,
+      "session.reconcile_stale_tasks": 2.941,
+      "session.replay.communication_restore": 0.004,
+      "session.replay.drain_completions": 1.626,
+      "session.replay.forward_updates": 1.344,
+      "session.replay.read_and_reconcile": 4.785,
+      "session.replay.read_snapshot": 1.387,
+      "session.replay.response_reconcile": 1.783,
+      "session.spawn.install_coordination_backend": 1.994,
+      "session.spawn.prepare": 0.394,
+      "session.spawn.publish_coordination": 0.271,
+      "session.spawn_actor_call": 28.525,
+      "session.spawn_and_register": 31.262,
+      "session.spawn_and_register_session": 31.326,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 12.656
+    }
+  },
+  {
+    "profile": "modern-512",
+    "runs": 1,
+    "load_ms": 202.989959,
+    "load_ms_range": [
+      202.989959,
+      202.989959
+    ],
+    "first_history_ms": 110.968875,
+    "first_history_ms_range": [
+      110.968875,
+      110.968875
+    ],
+    "last_history_ms": 146.326292,
+    "last_history_ms_range": [
+      146.326292,
+      146.326292
+    ],
+    "max_history_gap_ms": 12.798458,
+    "max_history_gap_ms_range": [
+      12.798458,
+      12.798458
+    ],
+    "process_peak_rss_bytes": 254181376,
+    "process_peak_rss_bytes_range": [
+      254181376,
+      254181376
+    ],
+    "timeline_bytes": 17752322,
+    "timeline_bytes_range": [
+      17752322,
+      17752322
+    ],
+    "updates_bytes": 19284122,
+    "updates_bytes_range": [
+      19284122,
+      19284122
+    ],
+    "directory_bytes": 37042333,
+    "directory_bytes_range": [
+      37042333,
+      37042333
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.072,
+      "plugin_discovery": 0.155,
+      "session.delta_drain_completions": 0.001,
+      "session.delta_flush_replay": 0.001,
+      "session.load.model_route_reconcile": 0.008,
+      "session.load.open_session": 0.072,
+      "session.load.physical_updates_decode": 15.755,
+      "session.load.projection_metadata": 0.042,
+      "session.load.response_projection_appends": 0.001,
+      "session.load.response_projection_plan": 34.19,
+      "session.load.state_projections": 0.085,
+      "session.load.timeline_evidence": 1.005,
+      "session.load.timeline_fold": 0.759,
+      "session.load.timeline_read_decode": 20.84,
+      "session.load_light": 73.526,
+      "session.load_session": 202.233,
+      "session.load_session_replay": 43.346,
+      "session.projection.typed_canonical": 33.48,
+      "session.reconcile_stale_tasks": 11.289,
+      "session.replay.communication_restore": 0.016,
+      "session.replay.drain_completions": 13.41,
+      "session.replay.forward_updates": 5.526,
+      "session.replay.read_and_reconcile": 18.64,
+      "session.replay.read_snapshot": 5.729,
+      "session.replay.response_reconcile": 7.04,
+      "session.spawn.install_coordination_backend": 1.917,
+      "session.spawn.prepare": 0.41,
+      "session.spawn.publish_coordination": 0.269,
+      "session.spawn_actor_call": 42.006,
+      "session.spawn_and_register": 44.681,
+      "session.spawn_and_register_session": 44.751,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 12.11
+    }
+  },
+  {
+    "profile": "modern-2048",
+    "runs": 1,
+    "load_ms": 773.141667,
+    "load_ms_range": [
+      773.141667,
+      773.141667
+    ],
+    "first_history_ms": 438.25575,
+    "first_history_ms_range": [
+      438.25575,
+      438.25575
+    ],
+    "last_history_ms": 648.525792,
+    "last_history_ms_range": [
+      648.525792,
+      648.525792
+    ],
+    "max_history_gap_ms": 65.344583,
+    "max_history_gap_ms_range": [
+      65.344583,
+      65.344583
+    ],
+    "process_peak_rss_bytes": 768196608,
+    "process_peak_rss_bytes_range": [
+      768196608,
+      768196608
+    ],
+    "timeline_bytes": 71032018,
+    "timeline_bytes_range": [
+      71032018,
+      71032018
+    ],
+    "updates_bytes": 77140456,
+    "updates_bytes_range": [
+      77140456,
+      77140456
+    ],
+    "directory_bytes": 148178363,
+    "directory_bytes_range": [
+      148178363,
+      148178363
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.078,
+      "plugin_discovery": 0.177,
+      "session.delta_drain_completions": 0.001,
+      "session.delta_flush_replay": 0.001,
+      "session.load.model_route_reconcile": 0.017,
+      "session.load.open_session": 0.069,
+      "session.load.physical_updates_decode": 65.356,
+      "session.load.projection_metadata": 0.288,
+      "session.load.response_projection_appends": 0.0,
+      "session.load.response_projection_plan": 140.056,
+      "session.load.state_projections": 0.212,
+      "session.load.timeline_evidence": 3.656,
+      "session.load.timeline_fold": 2.57,
+      "session.load.timeline_read_decode": 82.919,
+      "session.load_light": 297.231,
+      "session.load_session": 772.369,
+      "session.load_session_replay": 198.874,
+      "session.projection.typed_canonical": 136.346,
+      "session.reconcile_stale_tasks": 62.832,
+      "session.replay.communication_restore": 0.078,
+      "session.replay.drain_completions": 66.279,
+      "session.replay.forward_updates": 23.995,
+      "session.replay.read_and_reconcile": 80.828,
+      "session.replay.read_snapshot": 27.692,
+      "session.replay.response_reconcile": 31.918,
+      "session.spawn.install_coordination_backend": 2.056,
+      "session.spawn.prepare": 0.5,
+      "session.spawn.publish_coordination": 0.28,
+      "session.spawn_actor_call": 131.882,
+      "session.spawn_and_register": 134.803,
+      "session.spawn_and_register_session": 134.891,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 13.512
+    }
+  },
+  {
+    "profile": "modern-repair-512",
+    "runs": 1,
+    "load_ms": 471.164917,
+    "load_ms_range": [
+      471.164917,
+      471.164917
+    ],
+    "first_history_ms": 371.31295800000004,
+    "first_history_ms_range": [
+      371.31295800000004,
+      371.31295800000004
+    ],
+    "last_history_ms": 407.883125,
+    "last_history_ms_range": [
+      407.883125,
+      407.883125
+    ],
+    "max_history_gap_ms": 14.110459,
+    "max_history_gap_ms_range": [
+      14.110459,
+      14.110459
+    ],
+    "process_peak_rss_bytes": 278052864,
+    "process_peak_rss_bytes_range": [
+      278052864,
+      278052864
+    ],
+    "timeline_bytes": 17752322,
+    "timeline_bytes_range": [
+      17752322,
+      17752322
+    ],
+    "updates_bytes": 18222273,
+    "updates_bytes_range": [
+      18222273,
+      18222273
+    ],
+    "directory_bytes": 35980484,
+    "directory_bytes_range": [
+      35980484,
+      35980484
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.078,
+      "plugin_discovery": 0.217,
+      "session.delta_drain_completions": 0.001,
+      "session.delta_flush_replay": 0.001,
+      "session.load.model_route_reconcile": 0.009,
+      "session.load.open_session": 0.08,
+      "session.load.physical_updates_decode": 15.69,
+      "session.load.projection_metadata": 0.071,
+      "session.load.response_projection_appends": 255.409,
+      "session.load.response_projection_plan": 34.836,
+      "session.load.state_projections": 0.195,
+      "session.load.timeline_evidence": 0.967,
+      "session.load.timeline_fold": 0.811,
+      "session.load.timeline_read_decode": 20.868,
+      "session.load_light": 329.765,
+      "session.load_session": 470.306,
+      "session.load_session_replay": 47.441,
+      "session.projection.typed_canonical": 34.025,
+      "session.reconcile_stale_tasks": 12.55,
+      "session.replay.communication_restore": 0.018,
+      "session.replay.drain_completions": 13.582,
+      "session.replay.forward_updates": 6.257,
+      "session.replay.read_and_reconcile": 21.25,
+      "session.replay.read_snapshot": 6.29,
+      "session.replay.response_reconcile": 9.003,
+      "session.spawn.install_coordination_backend": 3.39,
+      "session.spawn.prepare": 0.423,
+      "session.spawn.publish_coordination": 0.633,
+      "session.spawn_actor_call": 47.039,
+      "session.spawn_and_register": 51.676,
+      "session.spawn_and_register_session": 51.758,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 12.599
+    }
+  },
+  {
+    "profile": "modern-short-512",
+    "runs": 1,
+    "load_ms": 120.89520900000001,
+    "load_ms_range": [
+      120.89520900000001,
+      120.89520900000001
+    ],
+    "first_history_ms": 41.256916999999994,
+    "first_history_ms_range": [
+      41.256916999999994,
+      41.256916999999994
+    ],
+    "last_history_ms": 56.356125,
+    "last_history_ms_range": [
+      56.356125,
+      56.356125
+    ],
+    "max_history_gap_ms": 5.5395,
+    "max_history_gap_ms_range": [
+      5.5395,
+      5.5395
+    ],
+    "process_peak_rss_bytes": 131661824,
+    "process_peak_rss_bytes_range": [
+      131661824,
+      131661824
+    ],
+    "timeline_bytes": 3072258,
+    "timeline_bytes_range": [
+      3072258,
+      3072258
+    ],
+    "updates_bytes": 4604058,
+    "updates_bytes_range": [
+      4604058,
+      4604058
+    ],
+    "directory_bytes": 7682205,
+    "directory_bytes_range": [
+      7682205,
+      7682205
+    ],
+    "directory_files": 5,
+    "directory_files_range": [
+      5,
+      5
+    ],
+    "phase_medians_ms": {
+      "mcp_merge": 0.104,
+      "plugin_discovery": 0.28,
+      "session.delta_drain_completions": 0.001,
+      "session.delta_flush_replay": 0.002,
+      "session.load.model_route_reconcile": 0.008,
+      "session.load.open_session": 0.088,
+      "session.load.physical_updates_decode": 9.579,
+      "session.load.projection_metadata": 0.053,
+      "session.load.response_projection_appends": 0.0,
+      "session.load.response_projection_plan": 5.236,
+      "session.load.state_projections": 0.106,
+      "session.load.timeline_evidence": 0.21,
+      "session.load.timeline_fold": 0.664,
+      "session.load.timeline_read_decode": 8.547,
+      "session.load_light": 25.275,
+      "session.load_session": 119.843,
+      "session.load_session_replay": 18.431,
+      "session.projection.typed_canonical": 4.907,
+      "session.reconcile_stale_tasks": 3.807,
+      "session.replay.communication_restore": 0.008,
+      "session.replay.drain_completions": 6.677,
+      "session.replay.forward_updates": 1.709,
+      "session.replay.read_and_reconcile": 8.111,
+      "session.replay.read_snapshot": 1.899,
+      "session.replay.response_reconcile": 3.536,
+      "session.spawn.install_coordination_backend": 1.84,
+      "session.spawn.prepare": 0.407,
+      "session.spawn.publish_coordination": 0.346,
+      "session.spawn_actor_call": 39.171,
+      "session.spawn_and_register": 41.876,
+      "session.spawn_and_register_session": 41.95,
+      "session.stale_tasks_drain_completions": 0.0,
+      "skill_discovery": 12.835
+    }
+  }
+]

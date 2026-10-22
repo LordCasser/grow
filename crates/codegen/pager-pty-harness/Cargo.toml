@@ -30,6 +30,7 @@ alacritty_terminal = { workspace = true }
 # Shared mock inference server used to drive content into the pager
 # during scenarios (content.rs wraps it).
 test-support = { workspace = true }
+shell = { workspace = true, features = ["test-support"] }
 
 # Async runtime + common helpers shared with the pager.
 tokio = { workspace = true, features = [

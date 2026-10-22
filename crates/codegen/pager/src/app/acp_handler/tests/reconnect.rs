@@ -68,6 +68,7 @@
             let mut input_max = Duration::ZERO;
             let filler = "x".repeat(CHUNK_BYTES);
             let draft = "REPLAY_BENCH_DRAFT";
+            app.agents.get_mut(&id).unwrap().prompt.set_text(draft);
             let mut draft_chars = draft.chars();
             let mut notification_count = 0usize;
             for turn in 0..turns {
@@ -101,7 +102,7 @@
                             let started = Instant::now();
                             let outcome = app.handle_input(&event);
                             input_max = input_max.max(started.elapsed());
-                            assert!(matches!(outcome, crate::app::root::InputOutcome::Changed));
+                            assert!(matches!(outcome, crate::app::root::InputOutcome::Unchanged));
                         }
                     }
                 }
@@ -115,11 +116,11 @@
             assert_eq!(agent_bytes, turns * CHUNKS_PER_TURN * CHUNK_BYTES,
                 "every replayed assistant byte must be handled");
             assert_eq!(app.agents[&id].prompt.text(), draft);
-            let crate::app::root::InputOutcome::Action(action) =
-                app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))
-            else { panic!("Enter must produce a submit action"); };
-            let _ = crate::app::root::dispatch::dispatch(action, &mut app);
-            assert_eq!(app.agents[&id].session.pending_prompts.back().map(|p| p.text.as_str()), Some(draft));
+            assert!(matches!(
+                app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+                crate::app::root::InputOutcome::Unchanged,
+            ));
+            assert!(app.agents[&id].session.pending_prompts.is_empty());
 
             let load_finish_started = Instant::now();
             let load_effects = crate::app::root::dispatch::dispatch(
@@ -131,6 +132,7 @@
                         code_restored: false,
                         restore_summary: None,
                         foreground: None,
+                        descendant_ownership: None,
                     },
                 ),
                 &mut app,
@@ -140,8 +142,9 @@
             let final_layout_started = Instant::now();
             app.agents.get_mut(&id).unwrap().scrollback.prepare_layout(120, 40);
             let final_layout_elapsed = final_layout_started.elapsed();
-            assert!(load_effects.iter().any(|effect| matches!(effect,
-                crate::app::actions::Effect::SendPrompt { text, .. } if text == draft)));
+            assert!(!load_effects.iter().any(|effect| matches!(effect,
+                crate::app::actions::Effect::SendPrompt { .. })));
+            assert_eq!(app.agents[&id].prompt.text(), draft);
 
             eprintln!(
                 "[replay-bench] turns={turns} notifications={notification_count} handle_total_ms={:.2} handle_max_ms={:.2} frame_total_ms={:.2} frame_max_ms={:.2} input_max_ms={:.2} load_finish_ms={:.2} final_layout_ms={:.2}",

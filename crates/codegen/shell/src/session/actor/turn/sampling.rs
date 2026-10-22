@@ -242,6 +242,7 @@ impl SessionActor {
         operation_id: &str,
         prompt_id: Option<&str>,
         operation_started: &mut bool,
+        expected_revision: Option<u64>,
     ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
         use sampling_types::conversation::conversation_image_groups;
 
@@ -250,6 +251,14 @@ impl SessionActor {
             .materialize_branch_transcript(self.session_info.id.to_string())
             .await
             .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
+        if let Some(expected) = expected_revision
+            && expected != materialized.surface_revision
+        {
+            return Err(chat_state::TimelineWriteError::SurfaceChanged {
+                expected,
+                actual: materialized.surface_revision,
+            });
+        }
         let conversation = &materialized.transcript;
         let groups = conversation_image_groups(conversation)
             .into_iter()
@@ -685,6 +694,15 @@ impl SessionActor {
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
     ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
+        self.project_conversation_images_for_text_model_at_revision(rejected_key, None)
+            .await
+    }
+
+    pub(in crate::session::actor) async fn project_conversation_images_for_text_model_at_revision(
+        &self,
+        rejected_key: &sampling_types::ModelImageInputKey,
+        expected_revision: Option<u64>,
+    ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
         let operation_id = uuid::Uuid::now_v7().simple().to_string();
         let prompt_id = self.current_prompt_id.lock().ok().and_then(|id| id.clone());
         let mut operation_started = false;
@@ -695,10 +713,13 @@ impl SessionActor {
                     &operation_id,
                     prompt_id.as_deref(),
                     &mut operation_started,
+                    expected_revision,
                 )
                 .await
             {
-                Err(chat_state::TimelineWriteError::SurfaceChanged { .. }) if attempt < 2 => {
+                Err(chat_state::TimelineWriteError::SurfaceChanged { .. })
+                    if expected_revision.is_none() && attempt < 2 =>
+                {
                     tracing::info!(
                         attempt = attempt + 1,
                         "image projection source changed; rebuilding from the new Surface"

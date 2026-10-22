@@ -64,7 +64,7 @@ pub fn synthesize_to_target_bytes(root: &Path, target_bytes: u64) -> Info {
             // panics here rather than spinning the append loop forever.
             if turn.is_multiple_of(32)
                 && adapter
-                    .updates_snapshot_len(&info)
+                    .history_snapshot_len(&info)
                     .expect("read updates ledger metadata")
                     >= target_bytes
             {

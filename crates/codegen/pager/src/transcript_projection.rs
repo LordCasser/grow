@@ -238,6 +238,8 @@ impl TranscriptProjection {
                 NotificationMeta::from_json(n.meta.as_ref().and_then(|m| m.as_object()))
                     .agent_timestamp_ms
             }
+            // Shell exposes one additional storage-oracle variant only in test builds.
+            #[allow(unreachable_patterns)]
             _ => None,
         }
         .and_then(|at| u64::try_from(at).ok())
@@ -346,7 +348,9 @@ impl TranscriptProjection {
                 meta.is_replay = true;
                 self.apply_grow(notification.update, meta, captured_snapshot);
             }
-            SessionUpdate::ResponseReplayProjection(_) => {
+            #[allow(unreachable_patterns)]
+            // Only the test-support legacy oracle adds another variant.
+            _ => {
                 unreachable!("reader expands projections")
             }
         }

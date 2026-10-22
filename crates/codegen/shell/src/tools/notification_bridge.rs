@@ -120,11 +120,9 @@ async fn handle_scheduled_task_removed(
                 "scheduler tombstone",
             )?;
         } else {
-            config
-                .persistence
-                .tx
-                .send(PersistenceMsg::Update(update))
-                .map_err(|_| "session persistence stopped".to_owned())?;
+            crate::session::persistence::append_buffered_and_ack(&config.persistence.tx, update)
+                .await
+                .map_err(|error| format!("scheduler tombstone was not appended: {error}"))?;
         }
         Ok(params)
     }
@@ -213,9 +211,15 @@ async fn emit_current_mode_update(
         ),
     );
     stamp_event_id(config, &mut notification.meta);
-    let _ = config.persistence.tx.send(PersistenceMsg::Update(
+    if let Err(error) = crate::session::persistence::append_buffered_and_ack(
+        &config.persistence.tx,
         crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
-    ));
+    )
+    .await
+    {
+        tracing::warn!(%error, "CurrentModeUpdate was not appended; suppressing live publication");
+        return;
+    }
     config.gateway.forward_fire_and_forget(notification);
 }
 
@@ -252,9 +256,12 @@ async fn handle_notification_with_ack(
             let update = coordination_phase_update(phase);
             let mut notification = acp::SessionNotification::new(config.session_id.clone(), update);
             stamp_event_id(config, &mut notification.meta);
-            let _ = config.persistence.tx.send(PersistenceMsg::Update(
+            crate::session::persistence::append_buffered_and_ack(
+                &config.persistence.tx,
                 crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
-            ));
+            )
+            .await
+            .map_err(|error| format!("coordination phase was not appended: {error}"))?;
             if config
                 .gateway_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -306,9 +313,12 @@ async fn handle_notification_with_ack(
             ));
             let mut notification = acp::SessionNotification::new(config.session_id.clone(), update);
             stamp_event_id(config, &mut notification.meta);
-            let _ = config.persistence.tx.send(PersistenceMsg::Update(
+            crate::session::persistence::append_buffered_and_ack(
+                &config.persistence.tx,
                 crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
-            ));
+            )
+            .await
+            .map_err(|error| format!("bash output update was not appended: {error}"))?;
             if config
                 .gateway_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -524,6 +534,7 @@ async fn handle_notification_with_ack(
                 };
                 let (respond_to, response) = tokio::sync::oneshot::channel();
                 let sent = config.persistence.tx.send(PersistenceMsg::AuxiliaryGrow {
+                    delivery: None,
                     notification: notification.clone(),
                     permit,
                     preview: owner,
@@ -986,6 +997,7 @@ mod tests {
             };
             respond_to.send(Ok("notification-1".into())).unwrap();
             let PersistenceMsg::AuxiliaryGrow {
+                delivery: None,
                 respond_to: Some(respond_to),
                 ..
             } = persistence_rx.recv().await.expect("durable UI projection")
@@ -1010,9 +1022,30 @@ mod tests {
         }
         None
     }
+    fn commit_auxiliary_grow(
+        message: PersistenceMsg,
+    ) -> crate::extensions::notification::SessionNotification {
+        let PersistenceMsg::AuxiliaryGrow {
+            notification,
+            delivery,
+            respond_to,
+            ..
+        } = message
+        else {
+            panic!("expected AuxiliaryGrow persistence message");
+        };
+        let delivery = delivery.expect("live publication is deferred until append commit");
+        delivery.publish();
+        if let Some(respond_to) = respond_to {
+            respond_to
+                .send(Ok(()))
+                .expect("persistence acknowledgement receiver remains open");
+        }
+        notification
+    }
     #[tokio::test]
     async fn task_completed_receipt_preserves_ui_and_storage_projections() {
-        let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
@@ -1028,6 +1061,23 @@ mod tests {
             cmd_rx.recv().await,
             Some(SessionCommand::ReceiveNotification { .. })
         ));
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "completion waits for append commit"
+        );
+        let message = persistence_rx
+            .recv()
+            .await
+            .expect("completion persistence message");
+        assert!(matches!(
+            &message,
+            PersistenceMsg::AuxiliaryGrow { notification, .. }
+                if matches!(
+                    &notification.update,
+                    crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
+                )
+        ));
+        let _persisted = commit_auxiliary_grow(message);
         let notification = take_task_completed_notification(&mut gateway_rx)
             .expect("completion notification must be emitted");
         assert!(notification["update"].get("will_wake").is_none());
@@ -1039,9 +1089,6 @@ mod tests {
             &mut offsets,
         )
         .await;
-        let notification = take_task_completed_notification(&mut gateway_rx)
-            .expect("completion must still emit a UI notification");
-        assert!(notification["update"].get("will_wake").is_none());
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(SessionCommand::ReceiveNotification { .. })
@@ -1050,24 +1097,26 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(SessionCommand::DispatchNotificationHook { .. })
         ));
-        let mut persisted = false;
-        while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::AuxiliaryGrow {
-                notification: update,
-                ..
-            } = message
-                && matches!(
-                    &update.update,
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "completion waits for append commit"
+        );
+        let message = persistence_rx
+            .recv()
+            .await
+            .expect("completion persistence message");
+        assert!(matches!(
+            &message,
+            PersistenceMsg::AuxiliaryGrow { notification, .. }
+                if matches!(
+                    &notification.update,
                     crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
                 )
-            {
-                persisted = true;
-            }
-        }
-        assert!(
-            persisted,
-            "completion must still persist grow/task_completed"
-        );
+        ));
+        let _persisted = commit_auxiliary_grow(message);
+        let notification = take_task_completed_notification(&mut gateway_rx)
+            .expect("completion must still emit a UI notification after commit");
+        assert!(notification["update"].get("will_wake").is_none());
     }
     #[tokio::test]
     async fn task_completed_rejects_without_uncommitted_projection_when_session_is_closed() {
@@ -1150,7 +1199,7 @@ mod tests {
     }
     #[tokio::test]
     async fn quiet_monitor_completion_emits_receipt_and_persists_projection() {
-        let (config, _gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
@@ -1171,21 +1220,24 @@ mod tests {
             Ok(SessionCommand::DispatchNotificationHook { .. })
         ));
         assert!(cmd_rx.try_recv().is_err());
-        let mut persisted_completion = false;
-        while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::AuxiliaryGrow {
-                notification: update,
-                ..
-            } = message
-                && matches!(
-                    &update.update,
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "completion waits for append commit"
+        );
+        let message = persistence_rx
+            .recv()
+            .await
+            .expect("completion persistence message");
+        assert!(matches!(
+            &message,
+            PersistenceMsg::AuxiliaryGrow { notification, .. }
+                if matches!(
+                    &notification.update,
                     crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
                 )
-            {
-                persisted_completion = true;
-            }
-        }
-        assert!(persisted_completion);
+        ));
+        let _persisted = commit_auxiliary_grow(message);
+        assert!(take_task_completed_notification(&mut gateway_rx).is_some());
     }
     /// Late progress still enters the durable inbox. Timeline folding owns
     /// suppression after a terminal monitor receipt, including after reload.
@@ -1247,7 +1299,7 @@ mod tests {
     }
     #[tokio::test]
     async fn scheduled_task_created_is_persisted() {
-        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
         let notification = ToolNotification::ScheduledTaskCreated(
             tools::notification::types::ScheduledTaskCreated {
                 task_id: "loop-1".into(),
@@ -1263,105 +1315,203 @@ mod tests {
         let msg = persistence_rx
             .try_recv()
             .expect("scheduled_task_created must be persisted");
-        match msg {
-            PersistenceMsg::AuxiliaryGrow {
-                notification: notif,
-                ..
-            } => {
-                assert!(matches!(
-                    &notif.update,
-                    crate::extensions::notification::SessionUpdate::ScheduledTaskCreated { .. }
-                ));
-                let meta = notif.meta.as_ref().expect("scheduler metadata");
-                assert_eq!(meta["grow/schedulerGeneration"], "generation-a");
-                assert_eq!(meta["grow/schedulerRevision"], 1);
-                assert!(
-                    notif
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.get("eventId"))
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|id| id.starts_with("test-session-")),
-                    "persisted Grow bridge lines must carry an eventId"
-                );
-            }
+        let notif = match &msg {
+            PersistenceMsg::AuxiliaryGrow { notification, .. } => notification,
             _ => panic!("expected bounded ScheduledTaskCreated Grow append"),
-        }
+        };
+        assert!(matches!(
+            &notif.update,
+            crate::extensions::notification::SessionUpdate::ScheduledTaskCreated { .. }
+        ));
+        let meta = notif.meta.as_ref().expect("scheduler metadata");
+        assert_eq!(meta["grow/schedulerGeneration"], "generation-a");
+        assert_eq!(meta["grow/schedulerRevision"], 1);
+        assert!(
+            notif
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("eventId"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id.starts_with("test-session-")),
+            "persisted Grow bridge lines must carry an eventId"
+        );
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "live scheduler event waits for commit"
+        );
+        let _persisted = commit_auxiliary_grow(msg);
+        assert!(matches!(
+            gateway_rx.try_recv().expect("committed scheduler event is published"),
+            acp_transport::AcpClientMessage::ExtNotification(args)
+                if args.request.method.as_ref() == "grow/scheduled_task_created"
+        ));
     }
     /// Persisted⇒stamped contract at the bridge's highest-frequency emitter:
     /// the persisted bash-output line carries an `eventId`, and the live
     /// broadcast carries the SAME id (the meta is minted before the
     /// persist/broadcast fork — divergent ids would re-deliver the line on a
     /// cursor reconnect).
+    fn bash_output_notification() -> ToolNotification {
+        ToolNotification::BashOutputChunk(tools::notification::types::BashOutputChunk {
+            base: tools::notification::types::BashNotificationBase {
+                tool_call_id: "call-1".into(),
+                command: "echo hi".into(),
+                output: b"hi\n".to_vec(),
+                total_bytes: 3,
+                truncated: false,
+                cwd: PathBuf::from("/tmp"),
+            },
+        })
+    }
+
     #[tokio::test]
     async fn bash_output_chunk_persists_and_broadcasts_one_event_id() {
+        use std::time::Duration;
+
         let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
-        let notification =
-            ToolNotification::BashOutputChunk(tools::notification::types::BashOutputChunk {
-                base: tools::notification::types::BashNotificationBase {
-                    tool_call_id: "call-1".into(),
-                    command: "echo hi".into(),
-                    output: b"hi\n".to_vec(),
-                    total_bytes: 3,
-                    truncated: false,
-                    cwd: PathBuf::from("/tmp"),
-                },
-            });
         let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
-        let persisted_id = match persistence_rx.try_recv().expect("chunk must be persisted") {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) => notif
+        let handling =
+            handle_notification_with_ack(&config, bash_output_notification(), &mut offsets, false);
+        let persistence_and_delivery = async {
+            let message = tokio::time::timeout(Duration::from_secs(1), persistence_rx.recv())
+                .await
+                .expect("writer should receive bash output append")
+                .expect("persistence channel remains open");
+            let PersistenceMsg::AppendUpdateBufferedAndAck {
+                update: crate::session::storage::SessionUpdate::Acp(notif),
+                respond_to,
+            } = message
+            else {
+                panic!("expected buffered ACP append for bash output");
+            };
+            let persisted_id = notif
                 .meta
                 .as_ref()
-                .and_then(|m| m.get("eventId"))
-                .and_then(|v| v.as_str())
+                .and_then(|meta| meta.get("eventId"))
+                .and_then(serde_json::Value::as_str)
                 .expect("persisted ACP bridge lines must carry an eventId")
-                .to_string(),
-            other => panic!("expected PersistenceMsg::Update(Acp(..)), got {other:?}"),
+                .to_string();
+            assert!(
+                gateway_rx.try_recv().is_err(),
+                "live output waits for append ACK"
+            );
+            respond_to
+                .send(Ok(()))
+                .expect("bash emitter awaits writer ACK");
+            let message = tokio::time::timeout(Duration::from_secs(1), gateway_rx.recv())
+                .await
+                .expect("committed bash output should be broadcast")
+                .expect("gateway remains open");
+            let broadcast_id = match message {
+                acp_transport::AcpClientMessage::SessionNotification(args) => args
+                    .request
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("eventId"))
+                    .and_then(serde_json::Value::as_str)
+                    .expect("broadcast must carry the eventId")
+                    .to_string(),
+                other => panic!("expected SessionNotification, got {other:?}"),
+            };
+            (persisted_id, broadcast_id)
         };
-        let broadcast_id = match gateway_rx.try_recv().expect("chunk must be broadcast") {
-            acp_transport::AcpClientMessage::SessionNotification(args) => args
-                .request
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("eventId"))
-                .and_then(|v| v.as_str())
-                .expect("broadcast must carry the eventId")
-                .to_string(),
-            other => panic!("expected SessionNotification, got {other:?}"),
-        };
+        let (result, (persisted_id, broadcast_id)) =
+            tokio::join!(handling, persistence_and_delivery);
+        result.unwrap();
         assert_eq!(persisted_id, broadcast_id);
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "one append produces one broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_output_chunk_is_not_broadcast_when_buffered_append_fails() {
+        use std::time::Duration;
+
+        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        let mut offsets = HashMap::new();
+        let handling =
+            handle_notification_with_ack(&config, bash_output_notification(), &mut offsets, false);
+        let persistence = async {
+            let message = tokio::time::timeout(Duration::from_secs(1), persistence_rx.recv())
+                .await
+                .expect("writer should receive bash output append")
+                .expect("persistence channel remains open");
+            let PersistenceMsg::AppendUpdateBufferedAndAck { respond_to, .. } = message else {
+                panic!("expected buffered append for bash output");
+            };
+            assert!(
+                gateway_rx.try_recv().is_err(),
+                "failed append must not publish live output"
+            );
+            respond_to
+                .send(Err(
+                    crate::session::storage::AppendUpdateError::NotCommitted(
+                        std::io::Error::other("injected append failure"),
+                    ),
+                ))
+                .expect("bash emitter awaits writer ACK");
+        };
+        let (result, ()) = tokio::join!(handling, persistence);
+        assert!(result.is_err());
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "failed append is never broadcast"
+        );
     }
     #[tokio::test]
     async fn scheduled_task_removed_is_persisted() {
-        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        use std::time::Duration;
+
+        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
         let removed = tools::notification::ScheduledTaskRemoved {
             task_id: "loop-1".into(),
             generation: "generation-a".into(),
             revision: 2,
         };
-        handle_scheduled_task_removed(&config, removed, None)
-            .await
-            .unwrap();
-        let msg = persistence_rx
-            .try_recv()
-            .expect("scheduled_task_removed must be persisted");
-        match msg {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
-                assert!(matches!(
-                    &notif.update,
-                    crate::extensions::notification::SessionUpdate::ScheduledTaskDeleted { .. }
-                ));
-                assert!(
-                    grow_persisted_event_id(&notif).is_some(),
-                    "the persisted deletion line must be stamped"
-                );
-                let meta = notif.meta.as_ref().expect("scheduler metadata");
-                assert_eq!(meta["grow/schedulerGeneration"], "generation-a");
-                assert_eq!(meta["grow/schedulerRevision"], 2);
-            }
-            _ => panic!("expected PersistenceMsg::Update(Grow(ScheduledTaskDeleted))"),
-        }
+        let removal = handle_scheduled_task_removed(&config, removed, None);
+        let persistence = async {
+            let message = tokio::time::timeout(Duration::from_secs(1), persistence_rx.recv())
+                .await
+                .expect("writer should receive scheduled_task_removed")
+                .expect("persistence channel remains open");
+            let PersistenceMsg::AppendUpdateBufferedAndAck {
+                update: crate::session::storage::SessionUpdate::Grow(notif),
+                respond_to,
+            } = message
+            else {
+                panic!("expected buffered Grow append for ScheduledTaskDeleted");
+            };
+            assert!(matches!(
+                &notif.update,
+                crate::extensions::notification::SessionUpdate::ScheduledTaskDeleted { .. }
+            ));
+            assert!(
+                grow_persisted_event_id(&notif).is_some(),
+                "the persisted deletion line must be stamped"
+            );
+            let meta = notif.meta.as_ref().expect("scheduler metadata");
+            assert_eq!(meta["grow/schedulerGeneration"], "generation-a");
+            assert_eq!(meta["grow/schedulerRevision"], 2);
+            assert!(
+                gateway_rx.try_recv().is_err(),
+                "broadcast waits for append ACK"
+            );
+            respond_to
+                .send(Ok(()))
+                .expect("producer is waiting for writer ACK");
+        };
+        let (result, ()) = tokio::join!(removal, persistence);
+        result.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), gateway_rx.recv())
+                .await
+                .expect("committed deletion should be broadcast")
+                .expect("gateway remains open"),
+            acp_transport::AcpClientMessage::ExtNotification(_)
+        ));
+        assert!(gateway_rx.try_recv().is_err());
     }
     #[tokio::test]
     async fn acknowledged_scheduler_removal_appends_before_ack_and_broadcast() {
@@ -1415,7 +1565,7 @@ mod tests {
     /// incremental reconnect for the session).
     #[tokio::test]
     async fn task_backgrounded_persisted_line_is_stamped() {
-        let (config, _gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         let notification = ToolNotification::BashExecutionBackgrounded(
             tools::notification::types::BashExecutionBackgrounded {
                 base: tools::notification::types::BashNotificationBase {
@@ -1441,19 +1591,26 @@ mod tests {
             SessionCommand::RecordGoalOwnedTaskIds { goal_id, definition_revision, task_ids }
                 if goal_id == "goal-1" && definition_revision == 1 && task_ids == vec!["task-bg"]
         ));
-        match persistence_rx.try_recv().expect("must persist") {
-            PersistenceMsg::AuxiliaryGrow {
-                notification: notif,
-                ..
-            } => {
-                assert!(grow_persisted_event_id(&notif).is_some());
-            }
+        let message = persistence_rx.try_recv().expect("must persist");
+        let notif = match &message {
+            PersistenceMsg::AuxiliaryGrow { notification, .. } => notification,
             _ => panic!("expected Grow update"),
-        }
+        };
+        assert!(grow_persisted_event_id(notif).is_some());
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "live update waits for append commit"
+        );
+        let _persisted = commit_auxiliary_grow(message);
+        assert!(matches!(
+            gateway_rx.try_recv().expect("committed update is published"),
+            acp_transport::AcpClientMessage::ExtNotification(args)
+                if args.request.method.as_ref() == "grow/task_backgrounded"
+        ));
     }
     #[tokio::test]
     async fn task_completed_persisted_line_is_stamped() {
-        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
         let snapshot = make_task_snapshot("mon-1", TaskKind::Monitor);
         let mut offsets = HashMap::new();
         handle_notification(
@@ -1462,15 +1619,22 @@ mod tests {
             &mut offsets,
         )
         .await;
-        match persistence_rx.try_recv().expect("must persist") {
-            PersistenceMsg::AuxiliaryGrow {
-                notification: notif,
-                ..
-            } => {
-                assert!(grow_persisted_event_id(&notif).is_some());
-            }
+        let message = persistence_rx.try_recv().expect("must persist");
+        let notif = match &message {
+            PersistenceMsg::AuxiliaryGrow { notification, .. } => notification,
             _ => panic!("expected Grow update"),
-        }
+        };
+        assert!(grow_persisted_event_id(notif).is_some());
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "live update waits for append commit"
+        );
+        let _persisted = commit_auxiliary_grow(message);
+        assert!(matches!(
+            gateway_rx.try_recv().expect("committed update is published"),
+            acp_transport::AcpClientMessage::ExtNotification(args)
+                if args.request.method.as_ref() == "grow/task_completed"
+        ));
     }
     #[tokio::test]
     async fn task_completion_grow_copies_only_metadata() {
@@ -1485,18 +1649,24 @@ mod tests {
             &mut offsets,
         )
         .await;
-        let PersistenceMsg::AuxiliaryGrow { notification, .. } = persistence_rx
+        let message = persistence_rx
             .try_recv()
-            .expect("bounded completion append")
-        else {
-            panic!("expected bounded Grow append");
+            .expect("bounded completion append");
+        let notification = match &message {
+            PersistenceMsg::AuxiliaryGrow { notification, .. } => notification,
+            _ => panic!("expected bounded Grow append"),
         };
         let crate::extensions::notification::SessionUpdate::TaskCompleted { task_snapshot } =
-            notification.update
+            &notification.update
         else {
             panic!("expected task completion projection");
         };
         assert!(task_snapshot.output.is_empty());
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "live completion waits for append commit"
+        );
+        let _persisted = commit_auxiliary_grow(message);
         let acp_transport::AcpClientMessage::ExtNotification(live) =
             gateway_rx.try_recv().expect("live completion")
         else {
@@ -1540,26 +1710,52 @@ mod tests {
     }
     #[tokio::test]
     async fn current_mode_update_persisted_line_is_stamped() {
-        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
-        emit_current_mode_update(&config, tools::types::BehaviorId::Plan).await;
-        match persistence_rx.try_recv().expect("must persist") {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) => {
-                assert!(matches!(
-                    notif.update,
-                    acp::SessionUpdate::CurrentModeUpdate(_)
-                ));
-                assert!(
-                    notif
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.get("eventId"))
-                        .and_then(|v| v.as_str())
-                        .is_some(),
-                    "the persisted mode line must be stamped"
-                );
-            }
-            _ => panic!("expected Acp update"),
-        }
+        use std::time::Duration;
+
+        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        let mode = emit_current_mode_update(&config, tools::types::BehaviorId::Plan);
+        let persistence = async {
+            let message = tokio::time::timeout(Duration::from_secs(1), persistence_rx.recv())
+                .await
+                .expect("writer should receive CurrentModeUpdate")
+                .expect("persistence channel remains open");
+            let PersistenceMsg::AppendUpdateBufferedAndAck {
+                update: crate::session::storage::SessionUpdate::Acp(notif),
+                respond_to,
+            } = message
+            else {
+                panic!("expected buffered ACP append for CurrentModeUpdate");
+            };
+            assert!(matches!(
+                notif.update,
+                acp::SessionUpdate::CurrentModeUpdate(_)
+            ));
+            assert!(
+                notif
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("eventId"))
+                    .and_then(|v| v.as_str())
+                    .is_some(),
+                "the persisted mode line must be stamped"
+            );
+            assert!(
+                gateway_rx.try_recv().is_err(),
+                "broadcast waits for append ACK"
+            );
+            respond_to
+                .send(Ok(()))
+                .expect("mode emitter awaits writer ACK");
+        };
+        let ((), ()) = tokio::join!(mode, persistence);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), gateway_rx.recv())
+                .await
+                .expect("committed mode should be broadcast")
+                .expect("gateway remains open"),
+            acp_transport::AcpClientMessage::SessionNotification(_)
+        ));
+        assert!(gateway_rx.try_recv().is_err());
     }
     #[test]
     fn durable_append_mapping_respects_commit_disposition() {
@@ -1736,7 +1932,7 @@ mod tests {
     }
     #[tokio::test]
     async fn block_waited_task_skips_auto_wake_prompt() {
-        let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         let mut snapshot = make_task_snapshot("bg-waited", TaskKind::Bash);
         snapshot.block_waited = true;
         let notification = ToolNotification::TaskCompleted(snapshot);
@@ -1757,6 +1953,15 @@ mod tests {
             cmd_rx.try_recv().is_err(),
             "block_waited completion should not send a durable receipt"
         );
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "completion UI waits for append commit"
+        );
+        let message = persistence_rx
+            .recv()
+            .await
+            .expect("task completion projection");
+        let _persisted = commit_auxiliary_grow(message);
         let mut found_ext = false;
         while let Ok(msg) = gateway_rx.try_recv() {
             if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
@@ -1772,7 +1977,7 @@ mod tests {
     }
     #[tokio::test]
     async fn explicitly_killed_task_skips_auto_wake_prompt() {
-        let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         let mut snapshot = make_task_snapshot("bg-killed", TaskKind::Bash);
         snapshot.explicitly_killed = true;
         let notification = ToolNotification::TaskCompleted(snapshot);
@@ -1793,6 +1998,15 @@ mod tests {
             cmd_rx.try_recv().is_err(),
             "explicitly_killed completion should not send a durable receipt"
         );
+        assert!(
+            gateway_rx.try_recv().is_err(),
+            "completion UI waits for append commit"
+        );
+        let message = persistence_rx
+            .recv()
+            .await
+            .expect("task completion projection");
+        let _persisted = commit_auxiliary_grow(message);
         let mut found_ext = false;
         while let Ok(msg) = gateway_rx.try_recv() {
             if let acp_transport::AcpClientMessage::ExtNotification(args) = msg

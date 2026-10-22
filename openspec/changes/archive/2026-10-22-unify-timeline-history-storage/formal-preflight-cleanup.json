@@ -1,0 +1,14 @@
+[
+  {
+    "pid": 63631,
+    "command": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/grow agent leader --no-exit-on-disconnect",
+    "signal": "SIGTERM",
+    "reason": "owned daemon left by failed leader fixtures; stop before formal measurement"
+  },
+  {
+    "pid": 67036,
+    "command": "/Users/lordcasser/workspace/projects/grow/target/resume-release/release/grow agent leader --no-exit-on-disconnect",
+    "signal": "SIGTERM",
+    "reason": "owned daemon left by failed leader fixtures; stop before formal measurement"
+  }
+]

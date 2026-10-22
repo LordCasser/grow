@@ -1,0 +1,15 @@
+
+running 1 test
+test resume_input_latency::resume_modern_admission_projection_128_512_turns ... [testkit] admitted history: turns=128 admissions=128 missing_projections=128 updates=0B timeline=4671796B rewind=3434B total=4675230B
+[resume-source] turns=128 instrumentation=false stats={"timeline_bytes":4672054,"updates_bytes":0,"timeline_and_updates_bytes":4672054,"counted_files":["timeline.jsonl","updates.jsonl"],"excluded_source_files":["summary and other session files"],"source_file_count":1,"history_body":{"notifications":257,"notification_types":{"agent_message_chunk":129,"user_message_chunk":128},"canonical_turns_by_fixture_sequence_marker":128,"assistant_message_notifications":129,"message_blocks":257,"block_types":{"text":257},"text_bytes":4199330,"scope":"typed_projector_output","matches_runtime_notification_input":true}}
+[resume-pty] turns=128 modern=true update_bytes=0 history_visible_ms=239.8 ready_ms=unavailable instrumentation=false ready_echo_p95_ms=6.2 ready_echo_max_ms=6.5 frames=25
+[testkit] admitted history: turns=512 admissions=512 missing_projections=512 updates=0B timeline=18694843B rewind=3434B total=18698277B
+[resume-source] turns=512 instrumentation=false stats={"timeline_bytes":18695101,"updates_bytes":0,"timeline_and_updates_bytes":18695101,"counted_files":["timeline.jsonl","updates.jsonl"],"excluded_source_files":["summary and other session files"],"source_file_count":1,"history_body":{"notifications":1025,"notification_types":{"agent_message_chunk":513,"user_message_chunk":512},"canonical_turns_by_fixture_sequence_marker":512,"assistant_message_notifications":513,"message_blocks":1025,"block_types":{"text":1025},"text_bytes":16797602,"scope":"typed_projector_output","matches_runtime_notification_input":true}}
+[resume-pty] turns=512 modern=true update_bytes=0 history_visible_ms=173.1 ready_ms=unavailable instrumentation=false ready_echo_p95_ms=5.0 ready_echo_max_ms=6.1 frames=25
+[testkit] admitted history: turns=2048 admissions=2048 missing_projections=2048 updates=0B timeline=74819653B rewind=3434B total=74823087B
+[resume-source] turns=2048 instrumentation=false stats={"timeline_bytes":74819913,"updates_bytes":0,"timeline_and_updates_bytes":74819913,"counted_files":["timeline.jsonl","updates.jsonl"],"excluded_source_files":["summary and other session files"],"source_file_count":1,"history_body":{"notifications":4097,"notification_types":{"agent_message_chunk":2049,"user_message_chunk":2048},"canonical_turns_by_fixture_sequence_marker":2048,"assistant_message_notifications":2049,"message_blocks":4097,"block_types":{"text":4097},"text_bytes":67191739,"scope":"typed_projector_output","matches_runtime_notification_input":true}}
+[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=552.3 ready_ms=unavailable instrumentation=false ready_echo_p95_ms=3.9 ready_echo_max_ms=4.0 frames=28
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 6.48s
+

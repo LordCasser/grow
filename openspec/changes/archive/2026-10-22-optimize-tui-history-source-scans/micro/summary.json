@@ -1,0 +1,98 @@
+[
+  {
+    "case": "image_markdown_repeated",
+    "stage": "before",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 60416,
+    "median_ms": 196.275,
+    "range_ms": [
+      195.027,
+      203.417
+    ]
+  },
+  {
+    "case": "image_markdown_repeated",
+    "stage": "after",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 60416,
+    "median_ms": 196.85,
+    "range_ms": [
+      196.392,
+      197.981
+    ]
+  },
+  {
+    "case": "plain_32k",
+    "stage": "before",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 32800,
+    "median_ms": 36.454,
+    "range_ms": [
+      36.378,
+      36.623
+    ]
+  },
+  {
+    "case": "plain_32k",
+    "stage": "after",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 32800,
+    "median_ms": 15.496,
+    "range_ms": [
+      15.14,
+      16.43
+    ]
+  },
+  {
+    "case": "slash_code_dense",
+    "stage": "before",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 32777,
+    "median_ms": 39.28,
+    "range_ms": [
+      38.906,
+      40.304
+    ]
+  },
+  {
+    "case": "slash_code_dense",
+    "stage": "after",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 32777,
+    "median_ms": 40.169,
+    "range_ms": [
+      39.559,
+      40.291
+    ]
+  },
+  {
+    "case": "unicode_false_markers",
+    "stage": "before",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 32805,
+    "median_ms": 360.287,
+    "range_ms": [
+      360.014,
+      376.52
+    ]
+  },
+  {
+    "case": "unicode_false_markers",
+    "stage": "after",
+    "n": 3,
+    "messages": 512,
+    "source_bytes": 32805,
+    "median_ms": 345.094,
+    "range_ms": [
+      342.216,
+      357.052
+    ]
+  }
+]
