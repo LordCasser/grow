@@ -1,6 +1,6 @@
 # Agent Core Timeline Architecture
 
-> Session format is v7; physical journal records are v1; domain Timeline schema is v27. Hook execution, human input admission, and
+> Current Timeline schema is v27. Session format is v7; physical journal records are v1. Hook execution, human input admission, and
 > visible human-interaction attempts are closed, typed event families; user
 > turns atomically consume their durable input identities. Older schemas are
 > rejected.

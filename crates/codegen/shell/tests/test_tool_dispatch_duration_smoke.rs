@@ -457,8 +457,7 @@ agent_type = "grow-build"
     );
     tokio::task::LocalSet::new()
         .run_until(async move {
-            let mut client =
-                GrowStdioClient::spawn_with_sandbox(&server, &workspace, sandbox).await;
+            let client = GrowStdioClient::spawn_with_sandbox(&server, &workspace, sandbox).await;
             client.initialize().await;
             let inference_count_before_load = inference_request_count(&server);
             client

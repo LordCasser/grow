@@ -179,7 +179,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
                 .unwrap_or_else(|| panic!("scalar setting `{}` has no current value", meta.key));
 
             let first = move_setting_away_from_default(&mut app, meta.key);
-            let first_write = setting_write(&first, meta.key).clone();
+            let first_write = setting_write(&first, meta.key);
             let first_target = match &first_write {
                 Effect::PersistSetting { value, .. } => value.clone(),
                 _ => unreachable!(),
@@ -258,7 +258,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
             }
 
             let retry = move_setting_away_from_default(&mut app, meta.key);
-            let retry_write = setting_write(&retry, meta.key).clone();
+            let retry_write = setting_write(&retry, meta.key);
             assert!(
                 matches!(
                     &retry_write,
@@ -272,7 +272,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
 
             let _ = open_reset_for_setting(&mut app, meta.key);
             let reset = dispatch_settings_key(&mut app, 'y');
-            let reset_write = setting_write(&reset, meta.key).clone();
+            let reset_write = setting_write(&reset, meta.key);
             assert_eq!(
                 match &reset_write {
                     Effect::PersistSetting { value, .. } => value,
@@ -296,7 +296,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
             } else {
                 dispatch_settings_key(&mut app, 'y')
             };
-            let reset_retry_write = setting_write(&reset_retry, meta.key).clone();
+            let reset_retry_write = setting_write(&reset_retry, meta.key);
             assert!(complete_setting_request(&mut app, &reset_retry_write, true).is_empty());
             assert_eq!(
                 setting_value(&app, meta.key),
@@ -330,7 +330,7 @@ fn queued_reset_failure_returns_to_last_confirmed_value_across_setting_kinds() {
             }
             let baseline = setting_value(&app, key).expect("registered scalar has a value");
             let first = move_setting_away_from_default(&mut app, key);
-            let first_write = setting_write(&first, key).clone();
+            let first_write = setting_write(&first, key);
             let target = match &first_write {
                 Effect::PersistSetting { value, .. } => value.clone(),
                 _ => unreachable!(),
