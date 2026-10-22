@@ -554,7 +554,10 @@ async fn headless_config_enables_doom_loop_check_header() {
     let grow_home = sandbox.grow_home().to_path_buf();
     std::fs::write(
         grow_home.join("config.toml"),
-        "[doom_loop_recovery]\nenabled = true\n",
+        format!(
+            "[doom_loop_recovery]\nenabled = true\n\n[models]\ndefault = \"mock/{MODEL}\"\n\n[provider.mock.options]\nbase_url = {:?}\nenv_key = \"GROW_API_KEY\"\n\n[provider.mock.models.{MODEL}]\nmodel = \"{MODEL}\"\napi_backend = \"responses\"\ncontext_window = 200000\nagent_type = \"grow-build\"\n",
+            server.url(),
+        ),
     )
     .expect("write config.toml");
 
