@@ -1318,8 +1318,8 @@ async fn test_stdio_full_session_lifecycle() {
 }
 
 /// Verify that grow/session/close frees the session.
-/// Creates a session, closes it via ext_method, then verifies session/info
-/// returns an empty response (session no longer exists).
+/// Creates a session, closes its runtime via ext_method, then verifies
+/// session/info reads the retained durable record instead of the actor.
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
 async fn test_stdio_session_close() {
@@ -1357,7 +1357,10 @@ async fn test_stdio_session_close() {
             "session/info should return the session we created, got: {info}"
         );
 
-        // Close the session
+        assert_eq!(info["result"]["status"], "found");
+        assert_eq!(info["result"]["source"], "runtime");
+
+        // Close the session runtime without deleting its durable history.
         let close_resp = client
             .ext_method(
                 "grow/session/close",
@@ -1371,7 +1374,12 @@ async fn test_stdio_session_close() {
             stderr_tail(&client.stderr(), 1200)
         );
 
-        // Session should be gone — session/info returns empty result (no sessionId)
+        let closed: serde_json::Value =
+            serde_json::from_str(close_resp.unwrap().0.get()).expect("parse close result");
+        assert_eq!(closed["result"]["success"], true);
+
+        // Runtime removal must expose the durable observation, not report the
+        // whole session absent or keep serving the resident actor.
         let info_after = client
             .ext_method(
                 "grow/session/info",
@@ -1381,9 +1389,14 @@ async fn test_stdio_session_close() {
         assert!(info_after.is_ok(), "session/info should still succeed");
         let info_val: serde_json::Value =
             serde_json::from_str(info_after.unwrap().0.get()).expect("parse info after close");
+        assert_eq!(info_val["result"]["sessionId"], session_id.0.as_ref());
+        assert_eq!(info_val["result"]["status"], "found");
+        assert_eq!(info_val["result"]["source"], "durable");
         assert!(
-            info_val["result"].get("sessionId").is_none(),
-            "session/info should not contain sessionId after close, got: {info_val}"
+            info_val["result"]["metadata"]["timelineEventCount"]
+                .as_u64()
+                .unwrap()
+                > 0
         );
     })
     .await;
@@ -1394,6 +1407,9 @@ async fn test_stdio_session_close() {
 async fn test_stdio_prompt_then_immediate_load_session() {
     with_local_set(|| async {
         let server = MockInferenceServer::start().await.expect("start mock server");
+        // Replay must preserve the accepted response independently of role
+        // reminders added after the original user message.
+        server.set_response("Echo: say hello");
         let workdir = git_workdir();
         let sandbox = TestSandbox::new();
         configure_lifecycle_model(&server, &sandbox);
@@ -1415,6 +1431,7 @@ async fn test_stdio_prompt_then_immediate_load_session() {
             stderr_tail(&writer.stderr(), 1200)
         );
 
+        assert_eq!(writer.captured_text(), "Echo: say hello");
         let shared_sandbox = writer.take_sandbox();
         drop(writer);
 
@@ -1672,9 +1689,7 @@ async fn test_stdio_agent_exits_on_stdin_eof() {
 // ============================================================================
 
 #[cfg(unix)]
-use test_support::sse::{
-    chat_completions_reasoning_then_tool_call_events, responses_api_reasoning_then_tool_call_events,
-};
+use test_support::sse::chat_completions_reasoning_then_tool_call_events;
 
 /// Poll `kill -0 <pid>` until the process is gone or the deadline passes.
 #[cfg(unix)]
@@ -1683,6 +1698,8 @@ fn process_dead_within(pid: u32, deadline: Duration) -> bool {
     loop {
         let alive = Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -1720,7 +1737,10 @@ fn read_task_pid(pid_file: &std::path::Path) -> u32 {
 /// its PID and sleeping far longer than any timeout, followed by a plain-text
 /// answer for the post-tool turn.
 #[cfg(unix)]
-fn enqueue_background_task_turn(server: &MockInferenceServer, pid_file: &std::path::Path) {
+fn enqueue_background_task_turn(
+    server: &MockInferenceServer,
+    pid_file: &std::path::Path,
+) -> InferenceExpectation {
     let command = format!(
         "echo $$ > {0} && /bin/sync {0} 2>/dev/null; exec /bin/sleep 300",
         pid_file.display()
@@ -1731,18 +1751,9 @@ fn enqueue_background_task_turn(server: &MockInferenceServer, pid_file: &std::pa
         "is_background": true,
     })
     .to_string();
-    server.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_reasoning_then_tool_call_events(
-            "starting a background task",
-            "call_bg",
-            "run_terminal_command",
-            &args,
-            "test-model",
-        )),
-    );
-    server.enqueue_response(
-        "/v1/chat/completions",
+    let response = server.expect_response(
+        "long-background-task",
+        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
         ScriptedResponse::sse(chat_completions_reasoning_then_tool_call_events(
             "starting a background task",
             "call_bg",
@@ -1752,6 +1763,7 @@ fn enqueue_background_task_turn(server: &MockInferenceServer, pid_file: &std::pa
         )),
     );
     server.set_response("done");
+    response
 }
 
 #[cfg(unix)]
@@ -1779,7 +1791,7 @@ async fn test_headless_timeout_exit_kills_pending_background_task() {
         .expect("start mock server");
     let workdir = git_workdir();
     let pid_file = workdir.workspace().join("task_pid.txt");
-    enqueue_background_task_turn(&server, &pid_file);
+    let task_response = enqueue_background_task_turn(&server, &pid_file);
 
     let result = run_lifecycle_headless(
         &server,
@@ -1801,6 +1813,7 @@ async fn test_headless_timeout_exit_kills_pending_background_task() {
         Some(&server),
     );
     assert_no_crashes(&result.stderr);
+    task_response.assert_satisfied();
 
     let pid = read_task_pid(&pid_file);
     assert!(
@@ -1821,7 +1834,7 @@ async fn test_headless_no_wait_exit_kills_background_task() {
         .expect("start mock server");
     let workdir = git_workdir();
     let pid_file = workdir.workspace().join("task_pid.txt");
-    enqueue_background_task_turn(&server, &pid_file);
+    let task_response = enqueue_background_task_turn(&server, &pid_file);
 
     let result = run_lifecycle_headless(
         &server,
@@ -1838,6 +1851,7 @@ async fn test_headless_no_wait_exit_kills_background_task() {
 
     assert_headless_success(&result, "grow -p --no-wait-for-background", Some(&server));
     assert_no_crashes(&result.stderr);
+    task_response.assert_satisfied();
 
     let pid = read_task_pid(&pid_file);
     assert!(
@@ -1866,18 +1880,9 @@ async fn test_headless_waits_for_short_background_task_and_exits_clean() {
         "is_background": true,
     })
     .to_string();
-    server.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_reasoning_then_tool_call_events(
-            "starting a short background task",
-            "call_bg_short",
-            "run_terminal_command",
-            &args,
-            "test-model",
-        )),
-    );
-    server.enqueue_response(
-        "/v1/chat/completions",
+    let task_response = server.expect_response(
+        "short-background-task",
+        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
         ScriptedResponse::sse(chat_completions_reasoning_then_tool_call_events(
             "starting a short background task",
             "call_bg_short",
@@ -1904,6 +1909,7 @@ async fn test_headless_waits_for_short_background_task_and_exits_clean() {
 
     assert_headless_success(&result, "grow -p with short background task", Some(&server));
     assert_no_crashes(&result.stderr);
+    task_response.assert_satisfied();
     assert!(
         marker.exists(),
         "short background task did not finish before exit — the intended wait \
