@@ -1,0 +1,143 @@
+{
+  "release_url": "https://github.com/LordCasser/grow/releases/tag/v2.5.0",
+  "run_url": "https://github.com/LordCasser/grow/actions/runs/39797866048",
+  "commit": "8443a4d1648d17b10f993c845cb68d949c55235e",
+  "tag_object": "f1e99dff7af3b499f8c8d432ba7e9d745b7c8829",
+  "release_id": 420909068,
+  "published_at": "2026-10-22T15:49:01Z",
+  "latest": true,
+  "notes_match_tagged_file": true,
+  "assets": [
+    {
+      "name": "grow-2.5.0-linux-aarch64-musl.tar.gz",
+      "bytes": 45671223,
+      "sha256": "eea4a8784860b3ec251f3a6b2bdaf996c2cd30565299734d224633b64eba9261",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 183,
+      "attestation_source_verified": true,
+      "ci_native_smoke": false
+    },
+    {
+      "name": "grow-2.5.0-linux-aarch64.tar.gz",
+      "bytes": 46154931,
+      "sha256": "9f74f82c815475dfd32d8d3a9ed3cdd101bb11f2021bbe912c1f42fdc5128590",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 183,
+      "attestation_source_verified": true,
+      "ci_native_smoke": true
+    },
+    {
+      "name": "grow-2.5.0-linux-riscv64.tar.gz",
+      "bytes": 48931340,
+      "sha256": "4dce87fa3280859532e344b6748214a4caadc172d02a9d328a05cfa4cc3ca5b2",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 243,
+      "attestation_source_verified": true,
+      "ci_native_smoke": false
+    },
+    {
+      "name": "grow-2.5.0-linux-x86_64-musl.tar.gz",
+      "bytes": 49759705,
+      "sha256": "42d54731a2ec24a13d8e9a3828953c5f5046bf6bb4a7ae75ae37902c19d95722",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 62,
+      "attestation_source_verified": true,
+      "ci_native_smoke": false
+    },
+    {
+      "name": "grow-2.5.0-linux-x86_64.tar.gz",
+      "bytes": 49194191,
+      "sha256": "842faafc8e884e8feb881a4fd52f5e02e4d1549f335c511e08844aba84be0bf5",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 62,
+      "attestation_source_verified": true,
+      "ci_native_smoke": true
+    },
+    {
+      "name": "grow-2.5.0-macos-aarch64.tar.gz",
+      "bytes": 43065494,
+      "sha256": "917b7b8b91c1d6e96d6901cd7b6649d7832bd92e7d217d3d5b2f69435563b17b",
+      "archive_entry": "grow",
+      "binary_format": "Mach-O64",
+      "machine": 16777228,
+      "attestation_source_verified": true,
+      "ci_native_smoke": true
+    },
+    {
+      "name": "grow-2.5.0-macos-x86_64.tar.gz",
+      "bytes": 46715434,
+      "sha256": "269c1e9d537e00f2d4526349aa2c728b8b1abe32491507db33d346af1a1c274a",
+      "archive_entry": "grow",
+      "binary_format": "Mach-O64",
+      "machine": 16777223,
+      "attestation_source_verified": true,
+      "ci_native_smoke": true
+    },
+    {
+      "name": "grow-2.5.0-ohos-aarch64.tar.gz",
+      "bytes": 42616757,
+      "sha256": "7f5cdb5ca1eca21de9c32b7c0954b03e3bf3e78f115d74f4785384ee244f97b8",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 183,
+      "attestation_source_verified": true,
+      "ci_native_smoke": false
+    },
+    {
+      "name": "grow-2.5.0-windows-aarch64.tar.gz",
+      "bytes": 41297071,
+      "sha256": "8da73f1f694e6d5ccd0fdc41dceb263d44a13d581386d8eaa285f5852f4cfa01",
+      "archive_entry": "grow.exe",
+      "binary_format": "PE64",
+      "machine": 43620,
+      "attestation_source_verified": true,
+      "ci_native_smoke": true
+    },
+    {
+      "name": "grow-2.5.0-windows-x86_64.tar.gz",
+      "bytes": 44498100,
+      "sha256": "cd28f22b4f495f70aa96ef29bd361bd05bc3bfa8b93931b6307b1dd5e8bc6ec0",
+      "archive_entry": "grow.exe",
+      "binary_format": "PE64",
+      "machine": 34404,
+      "attestation_source_verified": true,
+      "ci_native_smoke": true
+    }
+  ],
+  "checksum_manifest_verified": true,
+  "native_version": "grow 2.5.0 (8443a4d)",
+  "native_architecture": "/private/tmp/grow-publish-250-35fkbiit/native/grow: Mach-O 64-bit executable arm64",
+  "native_system_libraries": [
+    "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics",
+    "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+    "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+    "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+    "/usr/lib/libobjc.A.dylib",
+    "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+    "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+    "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+    "/usr/lib/libiconv.2.dylib",
+    "/usr/lib/libz.1.dylib",
+    "/usr/lib/libSystem.B.dylib"
+  ],
+  "native_signature_verified": true,
+  "native_coordination_exit": 0,
+  "release_run_attempt": 1,
+  "release_jobs_passed": 20,
+  "retained_native": {
+    "path": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow",
+    "sha256": "22fa55199b1c5bd7594b1bf19d5017829b5614b0c74593ab77bbab8df48c07f4",
+    "bytes": 100921072,
+    "commit": "8443a4d1648d17b10f993c845cb68d949c55235e",
+    "version": "grow 2.5.0 (8443a4d)",
+    "release_url": "https://github.com/LordCasser/grow/releases/tag/v2.5.0",
+    "official_release_asset": "grow-2.5.0-macos-aarch64.tar.gz",
+    "archive_sha256": "917b7b8b91c1d6e96d6901cd7b6649d7832bd92e7d217d3d5b2f69435563b17b",
+    "attestation_source_verified": true
+  }
+}

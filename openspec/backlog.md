@@ -2,8 +2,6 @@
 
 - **LSP mock diagnostics 的限时回归稳定性（独立测试债务）**：2.5.0 发布 run `39770985598` 的 Core 首次执行中，`a_refresh_we_cannot_act_on_does_not_discard_what_we_know` 在约 8 秒内未收到 mock 的 `a real problem` summary；同一提交的 push Core library suite 已通过该测试，且 LSP 目录相对 2.4.3 未修改。疑似调度相关超时，根因尚未证实；后续独立核对 mock 启动与通知同步，不通过放宽断言或绕过发布门禁处理。本次发布只允许原提交重试并记录结果。
 
-- **Plan resume PTY 的就绪判据**：夹具已独立修正，改等本恢复进程的真实 finalize 后输入，原审批和恰好一次实施断言不变；两种跨进程 Plan 恢复本机通过。Linux 托管 CI 仍待包含修正的新提交重新验证，未将本机通过当作原 tag 已可发布。见 [修正与验证](changes/archive/2026-10-22-synchronize-plan-resume-pty-readiness/verification.md)。
-
 截至 2026-10-20，此前 backlog 缺陷的完成记录见下表。退出挂起节点修复之后的扩散审计又确认三个待修边界，保留用户此前明确暂缓的 Remote Control，以及依赖真实路由与负载证据的 Provider/Recap 缓存优化。MCP 不在本轮修改范围。
 
 
@@ -52,6 +50,7 @@
 
 | 问题 | 归档与验证 |
 | --- | --- |
+| Plan resume PTY 把首段历史当输入就绪 | [真实 finalize 同步](changes/archive/2026-10-22-synchronize-plan-resume-pty-readiness/verification.md)，最终 2.5.0 发布及同提交 push Core 均通过。 |
 | Settings 全表键鼠、重置及保存失败重试/回滚覆盖不足 | [交互覆盖](changes/archive/2026-10-20-complete-settings-interaction-regressions/verification.md) |
 | show_tips / auto_update 保存回滚遗留旧默认值 | [默认值修复](changes/archive/2026-10-20-align-preference-rollback-defaults/verification.md) |
 | show_model_provider 的四项集成清单遗漏、完整 Settings integration 未进发布门禁 | [设置清单与门禁](changes/archive/2026-10-20-complete-settings-preference-test-inventory/verification.md) |

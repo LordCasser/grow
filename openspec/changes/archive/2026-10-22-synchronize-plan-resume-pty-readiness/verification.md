@@ -16,3 +16,5 @@
 清理：删除本轮专用编译树，删除前 allocated 为 5132636 KiB；未删除共享 target/debug、target/release-dist 或现有本机候选。按本轮 CI binary 路径检查测试子进程，剩余 0。临时下载与原始日志留在工作区外，待发布决策后统一清理。
 
 归档后严格校验：17 项当前规范/活动 change 通过；700 项 archive tasks 校验通过。该 change 已完成并归档；发布 change 继续保持未完成，等待精确提交与版本标签决策。
+
+后续托管确认：纳入最终 source 8443a4d1648d17b10f993c845cb68d949c55235e 后，[官方发布 Core](https://github.com/LordCasser/grow/actions/runs/39797866048) 与 [push Core](https://github.com/LordCasser/grow/actions/runs/39797846368) 均通过；发布日志实际执行并通过两种 Plan resume 场景，原 Linux 失败已在新夹具下消除。
