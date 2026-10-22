@@ -1,0 +1,80 @@
+[
+  {
+    "label": "test-hook-fixture",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "workspace-types",
+      "--lib"
+    ],
+    "exit": 0,
+    "elapsed_s": 6.689654749992769,
+    "log": "test-hook-fixture.log"
+  },
+  {
+    "label": "fmt-hook-fixture",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.259451917023398,
+    "log": "fmt-hook-fixture.log"
+  },
+  {
+    "label": "validate-hook-fixture",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.112281209032517,
+    "log": "validate-hook-fixture.log"
+  },
+  {
+    "label": "archive-hook-fixture",
+    "command": [
+      "openspec",
+      "archive",
+      "refresh-hook-registry-wire-fixture",
+      "--yes"
+    ],
+    "exit": 0,
+    "elapsed_s": 0.9118428750080056,
+    "log": "archive-hook-fixture.log"
+  },
+  {
+    "label": "validate-hook-fixture-post",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.0436283749877475,
+    "log": "validate-hook-fixture-post.log"
+  },
+  {
+    "label": "validate-hook-fixture-archive",
+    "command": [
+      "openspec",
+      "validate",
+      "--archived",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.0520122090238146,
+    "log": "validate-hook-fixture-archive.log"
+  }
+]

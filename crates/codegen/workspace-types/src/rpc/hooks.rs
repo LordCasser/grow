@@ -129,6 +129,7 @@ mod tests {
                     "url": null,
                     "url_raw": null,
                     "timeout_ms": 5000,
+                    "on_failure": "allow",
                     "source_dir": "/home/u/.grow/hooks",
                     "extra_env": { "FOO": "bar" },
                     "layer": "file"

@@ -1,0 +1,6 @@
+{
+  "commit": "b02731ea",
+  "test_function_identical_to_baseline": true,
+  "baseline_test_sha256": "ade181b9e3d975573ed904116d47402364cacc0b8bb7e8f8d25daeed4cec04a8",
+  "failure_log": "evidence/test-layout-libs.log.gz"
+}

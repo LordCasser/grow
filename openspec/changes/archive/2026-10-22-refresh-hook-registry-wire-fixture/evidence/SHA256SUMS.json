@@ -1,0 +1,12 @@
+{
+  "archive-hook-fixture.log.gz": "aa58521da03d2d3c46bb218b38ebd76f68aa748e44abd5d222cbf7066ce376a5",
+  "commands.json": "d61158183bbc19aff6c6defd0802b2ee36c596329123ca63c48d529536cad390",
+  "fmt-hook-fixture.log.gz": "ac73670af3abed54ac6fb4695131f4099be9fbe39d6076c5d0264a6bbdae9d83",
+  "identity.json": "39f669eee68c841a453b13295b861a1a30d1c2beed3b89cf96cd29dac031fcf4",
+  "source-hashes.json": "6614f32352763bbe9a07561196374d7ac4d98a7670b205df3ec6908f7b27f9d3",
+  "test-hook-fixture.log.gz": "09ee8609b01dda26564109da5d2106b185fd02a16b4eadd6b22916040f83065d",
+  "test-layout-libs.log.gz": "a617868b53ff2eb1e36bc988dfc9534614be9ded3b17b85975135fd2158784e1",
+  "validate-hook-fixture-archive.log.gz": "79dc89ea136b4350dcfba71e62cea1e2e67d0ea63c7f317124eae3c4e9a6c6c9",
+  "validate-hook-fixture-post.log.gz": "ab7ccad0bd31604d6b1f64d6a93f1fb5f30a58c7ee57ebe8c3e5d3d19b1629a9",
+  "validate-hook-fixture.log.gz": "bd3924f68f4b047ca74eea97d13d1c4f91f06a9162d4e71db109f799fd8326d0"
+}
