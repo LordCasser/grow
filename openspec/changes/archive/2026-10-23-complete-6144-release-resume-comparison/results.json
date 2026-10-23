@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-23",
+  "host": {
+    "chip": "Apple M4 Pro",
+    "cores": 12,
+    "memory_gib": 24,
+    "macos": "27.0.1",
+    "build": "26A434"
+  },
+  "binaries": [
+    {
+      "version": "2.4.3",
+      "source_digest": "2069c43db5a3756bf65d1a275e8ed16bef3a86fa",
+      "archive": "downloads/old/grow-2.4.3-macos-aarch64.tar.gz",
+      "archive_sha256": "72153ec6a71de13d7812e76e3c419582a8cab7508df0515ea58128a794732a08",
+      "api_digest": "sha256:72153ec6a71de13d7812e76e3c419582a8cab7508df0515ea58128a794732a08",
+      "api_size": 43176960,
+      "binary": "old/grow",
+      "binary_sha256": "40fe34c180e20814a3121f1a9d99f39d79f47ae17c064696ed9842eda7169de8",
+      "version_output": "grow 2.4.3 (2069c43)",
+      "attestation_verified": true,
+      "codesign_verified": true
+    },
+    {
+      "version": "2.5.0",
+      "source_digest": "8443a4d1648d17b10f993c845cb68d949c55235e",
+      "archive": "downloads/new/grow-2.5.0-macos-aarch64.tar.gz",
+      "archive_sha256": "917b7b8b91c1d6e96d6901cd7b6649d7832bd92e7d217d3d5b2f69435563b17b",
+      "api_digest": "sha256:917b7b8b91c1d6e96d6901cd7b6649d7832bd92e7d217d3d5b2f69435563b17b",
+      "api_size": 43065494,
+      "binary": "new/grow",
+      "binary_sha256": "22fa55199b1c5bd7594b1bf19d5017829b5614b0c74593ab77bbab8df48c07f4",
+      "version_output": "grow 2.5.0 (8443a4d)",
+      "attestation_verified": true,
+      "codesign_verified": true
+    }
+  ],
+  "method": {
+    "terminal_rows": 50,
+    "terminal_columns": 120,
+    "page_cache": "warm after fixture generation",
+    "diagnostics": "off",
+    "formal_pairs": 5,
+    "formal_samples": 10,
+    "warmup_samples_excluded": 2,
+    "order": "BA AB BA AB BA; excluded warmup AB",
+    "observer_process": "fresh per pair; target child and fixture fresh per sample",
+    "toolchain": "Rust 1.93.1 ordinary release observer; both targets official release-dist",
+    "monitor_interval_seconds": 0.5,
+    "formal_compiler_hits": 0,
+    "quiet_before_first_pair_seconds": 10,
+    "inference_requests": 0,
+    "audit": [
+      {
+        "pair": 0,
+        "attempt": 1,
+        "compiler_hits": 0,
+        "accepted": true,
+        "warmup": true
+      },
+      {
+        "pair": 1,
+        "attempt": 1,
+        "compiler_hits": 0,
+        "accepted": true,
+        "warmup": false
+      },
+      {
+        "pair": 2,
+        "attempt": 1,
+        "compiler_hits": 0,
+        "accepted": true,
+        "warmup": false
+      },
+      {
+        "pair": 3,
+        "attempt": 1,
+        "compiler_hits": 0,
+        "accepted": true,
+        "warmup": false
+      },
+      {
+        "pair": 4,
+        "attempt": 1,
+        "compiler_hits": 0,
+        "accepted": true,
+        "warmup": false
+      },
+      {
+        "pair": 5,
+        "attempt": 1,
+        "compiler_hits": 0,
+        "accepted": true,
+        "warmup": false
+      }
+    ],
+    "input_metric": "unsubmitted draft echoed in closed synchronized-update PTY frame after full history and Loading disappearance"
+  },
+  "observer": {
+    "source_sha256": "61ae842415aeb1bf9ad0e0e78c68bd8631a514c9043fb3a58e3c714718c73ac1",
+    "binary_sha256": "42cd4794f7b20e4ddb39513a0fab8d4a9f8c91a064fb5c160b13c112f24cae15"
+  },
+  "profiles": [
+    {
+      "turns": 6144,
+      "logical_messages": 12288,
+      "logical_text_bytes": 201577386,
+      "logical_blake3": "536552b49bfb66dc3bc9da928ada88d2e8e4587db90ef5a2c984c3cd9a39fe5c",
+      "metrics_ms": {
+        "first_history_ms": {
+          "2.4.3": {
+            "median": 2982.05125,
+            "min": 2974.467292,
+            "max": 3234.4845
+          },
+          "2.5.0": {
+            "median": 865.857459,
+            "min": 859.081667,
+            "max": 963.615625
+          },
+          "reduction_percent": 70.96436692696008,
+          "speedup": 3.4440440733097617
+        },
+        "last_history_ms": {
+          "2.4.3": {
+            "median": 6594.5602499999995,
+            "min": 6536.4637920000005,
+            "max": 6766.994208
+          },
+          "2.5.0": {
+            "median": 1304.050375,
+            "min": 1220.280292,
+            "max": 1327.190292
+          },
+          "reduction_percent": 80.22536263885071,
+          "speedup": 5.056982748845112
+        },
+        "input_echo_ms": {
+          "2.4.3": {
+            "median": 16385.959958,
+            "min": 16219.126208999998,
+            "max": 16756.142708
+          },
+          "2.5.0": {
+            "median": 1369.543459,
+            "min": 1314.3259170000001,
+            "max": 1412.887416
+          },
+          "reduction_percent": 91.64196993944589,
+          "speedup": 11.964541796990174
+        },
+        "ready_view_ms": {
+          "2.4.3": {
+            "median": 16380.281291,
+            "min": 16213.369583999998,
+            "max": 16749.6405
+          },
+          "2.5.0": {
+            "median": 1364.644834,
+            "min": 1309.577084,
+            "max": 1408.23125
+          },
+          "reduction_percent": 91.66897802451174,
+          "speedup": 12.00332927871546
+        }
+      }
+    }
+  ]
+}
