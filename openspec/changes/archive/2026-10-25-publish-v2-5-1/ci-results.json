@@ -1,0 +1,127 @@
+{
+  "status": "completed",
+  "conclusion": "success",
+  "headSha": "a58b5dd7e8c75c944b438593b1f2eca3b99badf4",
+  "jobs": [
+    {
+      "name": "Validate release tag",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:16:57Z",
+      "completedAt": "2026-10-25T13:17:17Z"
+    },
+    {
+      "name": "Validate dispatch inputs",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:16:57Z",
+      "completedAt": "2026-10-25T13:17:01Z"
+    },
+    {
+      "name": "Select platform matrix",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:16:57Z",
+      "completedAt": "2026-10-25T13:17:00Z"
+    },
+    {
+      "name": "Build linux-riscv64 / Build linux-riscv64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T13:41:05Z"
+    },
+    {
+      "name": "Build linux-aarch64 / Build linux-aarch64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:22Z",
+      "completedAt": "2026-10-25T13:38:43Z"
+    },
+    {
+      "name": "Build linux-x86_64-musl / Build linux-x86_64-musl",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T13:40:49Z"
+    },
+    {
+      "name": "Build macos-aarch64 / Build macos-aarch64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:21Z",
+      "completedAt": "2026-10-25T13:58:39Z"
+    },
+    {
+      "name": "Build macos-x86_64 / Build macos-x86_64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T14:16:02Z"
+    },
+    {
+      "name": "Build windows-x86_64 / Build windows-x86_64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T14:03:07Z"
+    },
+    {
+      "name": "Build windows-aarch64 / Build windows-aarch64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T13:48:23Z"
+    },
+    {
+      "name": "Core regressions on release commit / Core tests and CLI build",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:19Z",
+      "completedAt": "2026-10-25T14:06:37Z"
+    },
+    {
+      "name": "Build ohos-aarch64 / Build ohos-aarch64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:22Z",
+      "completedAt": "2026-10-25T14:22:50Z"
+    },
+    {
+      "name": "Build linux-aarch64-musl / Build linux-aarch64-musl",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T13:38:58Z"
+    },
+    {
+      "name": "Native coordination and export regressions on release commit / native (windows-2025)",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:19Z",
+      "completedAt": "2026-10-25T13:39:46Z"
+    },
+    {
+      "name": "Native coordination and export regressions on release commit / native (ubuntu-24.04)",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T13:33:04Z"
+    },
+    {
+      "name": "OpenSpec validation on release commit / validate",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:22:26Z",
+      "completedAt": "2026-10-25T13:22:45Z"
+    },
+    {
+      "name": "Native coordination and export regressions on release commit / native (macos-15)",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:21Z",
+      "completedAt": "2026-10-25T13:44:09Z"
+    },
+    {
+      "name": "Build linux-x86_64 / Build linux-x86_64",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T13:41:15Z"
+    },
+    {
+      "name": "Windows storage regressions on release commit / Create and reopen a session",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T13:17:20Z",
+      "completedAt": "2026-10-25T13:26:03Z"
+    },
+    {
+      "name": "Publish release assets",
+      "conclusion": "success",
+      "startedAt": "2026-10-25T14:22:52Z",
+      "completedAt": "2026-10-25T14:24:32Z"
+    }
+  ]
+}

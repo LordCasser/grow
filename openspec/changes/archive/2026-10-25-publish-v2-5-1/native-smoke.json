@@ -1,0 +1,9 @@
+{
+  "version": "grow 2.5.1 (a58b5dd)",
+  "bytes": 100921136,
+  "sha256": "e350352e8939f9bb4143b9931864bdfbddefb8237bd584bf8fca6028534a5d60",
+  "codesign_strict": true,
+  "help": true,
+  "real_process_coordination": true,
+  "system_libraries_only": true
+}

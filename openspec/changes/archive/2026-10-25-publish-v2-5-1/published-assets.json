@@ -1,0 +1,107 @@
+{
+  "release_url": "https://github.com/LordCasser/grow/releases/tag/v2.5.1",
+  "run_url": "https://github.com/LordCasser/grow/actions/runs/40196888908",
+  "commit": "a58b5dd7e8c75c944b438593b1f2eca3b99badf4",
+  "tag_object": "3ad53badad4bf38fc116e947b41cbff4b21f8024",
+  "release_id": 423450776,
+  "published_at": "2026-10-25T14:24:29Z",
+  "latest": true,
+  "notes_match_tagged_file": true,
+  "assets": [
+    {
+      "name": "SHA256SUMS",
+      "bytes": 989,
+      "sha256": "e5f732d36f52b11c0e5f06302fcb08cfb62d7a48add10c3dd219eecab9e7cd99"
+    },
+    {
+      "name": "grow-2.5.1-linux-aarch64-musl.tar.gz",
+      "bytes": 45672447,
+      "sha256": "bcabc998a85724979f67780b5472f3440903849409452781d1f14462349ef9e1",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 183,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-linux-aarch64.tar.gz",
+      "bytes": 46163269,
+      "sha256": "ad7cb563de1bafcd80b82b50215403ebdfba2eec3ca4ee1773bd4a5b80fb4dad",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 183,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-linux-riscv64.tar.gz",
+      "bytes": 48965289,
+      "sha256": "b48148e6ded9dcad6b2be99863ddf5098ba169cac92bcb01cd7f2c55d02c0912",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 243,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-linux-x86_64-musl.tar.gz",
+      "bytes": 49735864,
+      "sha256": "83ef31b38c58b4dc8e75053d18a1821f26187b446ef4d4ec71c78fbd53383cef",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 62,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-linux-x86_64.tar.gz",
+      "bytes": 49182181,
+      "sha256": "888fd53ecc0e24fb83b6584b8970e7f835a66c11005eb4fb2f98d62392b8509f",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 62,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-macos-aarch64.tar.gz",
+      "bytes": 43071713,
+      "sha256": "905196fe4a2aefe01206295bd8420df6af8df1ac87572a9d826366abce006374",
+      "archive_entry": "grow",
+      "binary_format": "Mach-O64",
+      "machine": 16777228,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-macos-x86_64.tar.gz",
+      "bytes": 46699970,
+      "sha256": "4c04d1427723a2b948c7403edf44ac61c563147b03d17a422a24e64c77bca4c8",
+      "archive_entry": "grow",
+      "binary_format": "Mach-O64",
+      "machine": 16777223,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-ohos-aarch64.tar.gz",
+      "bytes": 42610656,
+      "sha256": "a619f4420553c2238e8e2b7bf1fbd56a1d828d5e95065e1982666322a2ddccd6",
+      "archive_entry": "grow",
+      "binary_format": "ELF64",
+      "machine": 183,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-windows-aarch64.tar.gz",
+      "bytes": 41289775,
+      "sha256": "f9978b8a47c49e8ff0d2c9f25cae00e86c02c419e79a8cd6f974138d40a3bf1e",
+      "archive_entry": "grow.exe",
+      "binary_format": "PE",
+      "machine": 43620,
+      "attestation_source_verified": true
+    },
+    {
+      "name": "grow-2.5.1-windows-x86_64.tar.gz",
+      "bytes": 44517280,
+      "sha256": "29af82754aa57c03cedde105a548d80c5264f38a11de756f1dc81d1625ba173a",
+      "archive_entry": "grow.exe",
+      "binary_format": "PE",
+      "machine": 34404,
+      "attestation_source_verified": true
+    }
+  ]
+}
