@@ -252,6 +252,8 @@ pub(crate) enum GrowHistoryFact {
         updated_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status_message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_report: Option<String>,
     },
     RewindMarker {
         target_prompt_index: usize,
@@ -553,6 +555,7 @@ impl TryFrom<SessionUpdate> for GrowHistoryFact {
                 created_at,
                 updated_at,
                 status_message,
+                completion_report,
             } => Self::GoalUpdated {
                 goal_id,
                 objective,
@@ -565,6 +568,7 @@ impl TryFrom<SessionUpdate> for GrowHistoryFact {
                 created_at,
                 updated_at,
                 status_message,
+                completion_report,
             },
             SessionUpdate::RewindMarker {
                 target_prompt_index,
@@ -894,6 +898,7 @@ impl From<GrowHistoryFact> for SessionUpdate {
                 created_at,
                 updated_at,
                 status_message,
+                completion_report,
             } => Self::GoalUpdated {
                 goal_id,
                 objective,
@@ -906,6 +911,7 @@ impl From<GrowHistoryFact> for SessionUpdate {
                 created_at,
                 updated_at,
                 status_message,
+                completion_report,
             },
             GrowHistoryFact::RewindMarker {
                 target_prompt_index,

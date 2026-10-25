@@ -394,6 +394,129 @@
     }
 
     #[test]
+    fn effort_patch_terminal_applies_parked_model_change_with_other_control_pending() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+        use shell::sampling::types::ReasoningEffort;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = shell::agent::models::ModelId::new("provider/model");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let mut info = make_model_info("provider/model");
+        info.meta = serde_json::json!({
+            "reasoningEffort": "high",
+            "reasoningEfforts": ["high", "max"],
+        })
+        .as_object()
+        .cloned();
+        agent.session.models.available.insert(id.clone(), info);
+        agent
+            .session
+            .models
+            .set_current(id.clone(), Some(ReasoningEffort::High));
+        let effort_token = agent
+            .session
+            .enqueue_control(crate::app::session::PendingSessionControl::Model {
+                model_id: id.clone(),
+                effort: Some(ReasoningEffort::Max),
+                effort_patch: true,
+            })
+            .unwrap()
+            .0;
+        agent
+            .session
+            .enqueue_control(crate::app::session::PendingSessionControl::Agent {
+                agent_name: "reviewer".into(),
+            });
+
+        let sampling = |effort: &str| ControlTarget::Sampling {
+            model_id: id.0.to_string(),
+            reasoning_effort: Some(effort.into()),
+        };
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "epoch-a".into(),
+                    domain: ControlDomain::Sampling,
+                    revision: 0,
+                    intent: None,
+                    snapshot: true,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: sampling("high"),
+                    desired: None,
+                    message: None,
+                }),
+            ),
+            &mut app,
+        ));
+        assert!(!handle_ext_notification(
+            &model_changed_ext("sess-1", "provider/model", Some("max")),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&AgentId(0)].session.models.reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+
+        let mut foreign_intent = effort_token.shell_intent();
+        foreign_intent.client_id = "other-client".into();
+        assert!(!handle(
+            make_ext_session_notification(
+                "sess-1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "epoch-a".into(),
+                    domain: ControlDomain::Sampling,
+                    revision: 1,
+                    intent: Some(foreign_intent),
+                    snapshot: false,
+                    receipt_only: true,
+                    phase: ControlPhase::Applied,
+                    current: sampling("max"),
+                    desired: Some(sampling("max")),
+                    message: None,
+                }),
+            ),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&AgentId(0)].session.models.reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "epoch-a".into(),
+                    domain: ControlDomain::Sampling,
+                    revision: 1,
+                    intent: Some(effort_token.shell_intent()),
+                    snapshot: false,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: sampling("max"),
+                    desired: Some(sampling("max")),
+                    message: Some("Sampling switched to provider/model (max)".into()),
+                }),
+            ),
+            &mut app,
+        ));
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(
+            agent.session.models.reasoning_effort,
+            Some(ReasoningEffort::Max)
+        );
+        assert!(!agent.session.sampling_control_pending());
+        assert!(
+            agent.session.controls_pending(),
+            "unrelated Agent control remains pending"
+        );
+    }
+
+    #[test]
     fn agent_changed_is_not_blocked_by_an_unrelated_sampling_control() {
         let mut app = make_app_with_agent("sess-1");
         let token = app

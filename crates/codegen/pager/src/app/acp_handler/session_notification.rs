@@ -783,9 +783,13 @@ fn handle_session_notification_inner(
         GrowSessionUpdate::UiNotice(output) => {
             apply_ui_notice(agent, output, meta.event_id.clone(), meta.is_replay)
         }
-        GrowSessionUpdate::ControlStateUpdate(update) => {
-            apply_control_state_update(agent, update, meta.event_id.clone(), meta.is_replay)
-        }
+        GrowSessionUpdate::ControlStateUpdate(update) => apply_control_state_update(
+            agent,
+            root_session_id,
+            update,
+            meta.event_id.clone(),
+            meta.is_replay,
+        ),
         GrowSessionUpdate::SamplingAttempt {
             request_id,
             attempt,
@@ -1559,6 +1563,7 @@ fn handle_session_notification_inner(
             created_at,
             updated_at,
             status_message,
+            completion_report,
         } => {
             if status == "cleared" {
                 agent.clear_goal()
@@ -1579,6 +1584,7 @@ fn handle_session_notification_inner(
                     created_at,
                     updated_at,
                     status_message,
+                    completion_report,
                     received_at: std::time::Instant::now(),
                     elapsed_floor_ms: elapsed_ms,
                 })
@@ -1806,7 +1812,9 @@ pub(super) fn handle_child_session_notification(
         GrowSessionUpdate::ControlStateUpdate(update) => agent
             .subagent_views
             .get_mut(child_sid)
-            .is_some_and(|child| apply_control_state_update(child, update, event_id, is_replay)),
+            .is_some_and(|child| {
+                apply_control_state_update(child, child_sid, update, event_id, is_replay)
+            }),
         GrowSessionUpdate::ModelChanged {
             model_id,
             reasoning_effort,
@@ -1983,6 +1991,7 @@ pub(crate) fn sync_child_control_projection(agent: &mut AgentView, child_sid: &s
 
 fn apply_control_state_update(
     agent: &mut AgentView,
+    session_id: &str,
     update: shell::extensions::notification::ControlStateUpdate,
     event_id: Option<String>,
     is_replay: bool,
@@ -2027,6 +2036,13 @@ fn apply_control_state_update(
         desired.as_ref(),
         intent.as_ref(),
     );
+    // ModelChanged can precede an effort-only control's terminal receipt.
+    // Once this exact intent settles, release the parked authoritative state
+    // here: the successful RPC remains pending on that notification and does
+    // not drain it, and another control domain may still be in flight.
+    if intent_resolved {
+        apply_deferred_authoritative_controls(agent, session_id);
+    }
     let state_changed = apply_outcome.changed() || intent_resolved;
     if phase == ControlPhase::Superseded || terminal_message.is_none() {
         return state_changed;

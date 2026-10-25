@@ -335,7 +335,7 @@ Open the [Grow GitHub issue creation page](https://github.com/LordCasser/grow/is
 
 ### `/btw`
 
-Send an aside to the agent without interrupting the current task. In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped. The side question and its answer aren't part of the main turn.
+Send an aside to the agent without interrupting the current task. In the fullscreen TUI, the answer appears in a large popup; `Esc` saves a finished answer to the transcript, and double-clicking its saved row opens the full answer again. In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped. The side question and its answer aren't part of the main turn.
 
 ```
 /btw also check the error handling

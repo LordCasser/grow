@@ -2670,7 +2670,7 @@ mod grow_event_id_stamping_tests {
                     tracker
                         .create_goal("completed-goal".into(), "done".into(), None, "now".into())
                         .unwrap();
-                    assert!(tracker.complete());
+                    assert!(tracker.complete("All requested work verified complete."));
                 }
 
                 let normal = actor

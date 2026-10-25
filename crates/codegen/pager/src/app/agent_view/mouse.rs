@@ -41,6 +41,36 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
+                if self.last_btw_area.area() > 0
+                    && self
+                        .last_btw_area
+                        .contains((mouse.column, mouse.row).into())
+                {
+                    self.pending_scrollback_click = None;
+                    if self.hit_btw_close.contains(mouse.column, mouse.row) {
+                        return self.dismiss_btw_panel();
+                    }
+                    self.set_active_pane(AgentPane::Prompt, effects);
+                    self.btw_focused = true;
+                    if !has_native_link_hover()
+                        && !self.pos_occluded(mouse.column, mouse.row)
+                        && let Some(link) = self.visible_link_map.links()
+                            [self.scrollback_visible_link_count..]
+                            .iter()
+                            .find(|link| link.contains(mouse.column, mouse.row))
+                        && is_link_modifier_held(mouse.modifiers)
+                    {
+                        self.pending_link_click = app_should_open_link_on_click(link)
+                            .then(|| (mouse.column, mouse.row, link.target.clone()));
+                        self.pending_scrollback_click = None;
+                        return InputOutcome::Changed;
+                    }
+                    self.pending_link_click = None;
+                    if self.begin_pending_btw_text_drag(mouse) {
+                        return InputOutcome::Changed;
+                    }
+                    return InputOutcome::Unchanged;
+                }
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
                     self.todo.on_state_change();
@@ -72,14 +102,14 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if self.hit_goal_status.contains(mouse.column, mouse.row) {
-                    if !self.session.workflow_runs.is_empty() {
+                    if self.session.goal_state.is_some() {
+                        self.toggle_goal_detail();
+                    } else if !self.session.workflow_runs.is_empty() {
                         self.show_workflows = !self.show_workflows;
                         if self.show_workflows {
                             self.workflows_view.reset();
                             self.set_goal_detail_visible(false);
                         }
-                    } else if self.session.goal_state.is_some() {
-                        self.toggle_goal_detail();
                     }
                     return InputOutcome::Changed;
                 }
@@ -386,30 +416,6 @@ impl AgentView {
                 }
                 if self.hit_sb_view.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::OpenBlockViewer);
-                }
-                if self.last_btw_area.area() > 0
-                    && self
-                        .last_btw_area
-                        .contains((mouse.column, mouse.row).into())
-                    && !self.hit_btw_close.contains(mouse.column, mouse.row)
-                {
-                    self.set_active_pane(AgentPane::Prompt, effects);
-                    self.btw_focused = true;
-                    if !has_native_link_hover()
-                        && is_link_modifier_held(mouse.modifiers)
-                        && !self.pos_occluded(mouse.column, mouse.row)
-                        && let Some(link) = self.visible_link_map.link_at(mouse.column, mouse.row)
-                    {
-                        self.pending_link_click = app_should_open_link_on_click(link)
-                            .then(|| (mouse.column, mouse.row, link.target.clone()));
-                        self.pending_scrollback_click = None;
-                        return InputOutcome::Changed;
-                    }
-                    self.pending_link_click = None;
-                    if self.begin_pending_btw_text_drag(mouse) {
-                        return InputOutcome::Changed;
-                    }
-                    return InputOutcome::Unchanged;
                 }
                 match self.pane_areas.hit_test(mouse.column, mouse.row) {
                     Some(AgentPane::Todo) => {
@@ -809,7 +815,14 @@ impl AgentView {
                             self.last_click = last_click;
                             return InputOutcome::Changed;
                         }
-                        if is_text_selection_on_double_click() {
+                        let btw_row = self
+                            .scrollback
+                            .entry_index_at_screen_row(click_row, self.pane_areas.scrollback)
+                            .and_then(|idx| self.scrollback.entry(idx))
+                            .is_some_and(|entry| {
+                                matches!(entry.block, crate::scrollback::block::RenderBlock::Btw(_))
+                            });
+                        if is_text_selection_on_double_click() && !btw_row {
                             let exact_text_hit = self
                                 .last_scrollback_selection_model
                                 .hit_test_text_exact(click_col, click_row);

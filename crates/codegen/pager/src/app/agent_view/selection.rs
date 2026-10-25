@@ -911,6 +911,8 @@ impl AgentView {
         });
         let is_workflow = entry_block
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Workflow(_)));
+        let is_btw =
+            entry_block.is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Btw(_)));
         let is_coordination_notice = entry_block.is_some_and(|block| {
             matches!(block,
             crate::scrollback::block::RenderBlock::Notice(notice)
@@ -1047,6 +1049,12 @@ impl AgentView {
                     let run_id = wf.run_id.clone();
                     self.open_workflow_detail_by_run_id(&run_id);
                 }
+            }
+            2 if is_btw => {
+                self.block_viewer = self
+                    .scrollback
+                    .entry(idx)
+                    .and_then(crate::views::block_viewer::BlockViewerPane::for_entry);
             }
             2 if is_prompt => {
                 // Edit in place; bash/cron keep the old fold behavior.
@@ -1312,6 +1320,7 @@ mod tests {
     use super::*;
     use crate::actions::ActionRegistry;
     use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::scrollback::block::RenderBlock;
     use crate::scrollback::table_geometry::CellRef;
     use crate::scrollback::text_selection::{ResolvedSelectableLine, VisibleBlockGeometry};
     use crossterm::event::{Event, MouseButton, MouseEventKind};
@@ -1696,6 +1705,25 @@ mod tests {
         );
         agent.last_click = last;
         tip2
+    }
+
+    #[test]
+    fn saved_btw_double_click_opens_full_markdown_viewer() {
+        use crate::scrollback::blocks::BtwBlock;
+
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::Btw(BtwBlock::new("why?", "an **answer**")));
+        assert!(!double_click_gesture(&mut agent, Instant::now(), 0));
+        let viewer = agent.block_viewer.as_ref().expect("saved answer opens");
+        assert_eq!(viewer.kind, crate::views::block_viewer::ViewerKind::Btw);
+        assert!(
+            !viewer
+                .shortcuts_hints()
+                .iter()
+                .any(|hint| hint.label == "raw")
+        );
     }
 
     #[test]

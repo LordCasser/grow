@@ -647,6 +647,7 @@ impl TranscriptProjection {
                 objective,
                 status,
                 status_message,
+                completion_report,
                 token_budget,
                 tokens_used,
                 usage_incomplete,
@@ -709,8 +710,18 @@ impl TranscriptProjection {
                 } else {
                     cache_rate
                 };
+                let report = if status == "complete" {
+                    format!(
+                        "Completion report:\n{}\n\n",
+                        completion_report
+                            .as_deref()
+                            .unwrap_or("No completion report was archived for this Goal.")
+                    )
+                } else {
+                    String::new()
+                };
                 let details = Some(format!(
-                    "Recorded elapsed: {elapsed_ms} ms\nInput (cache hit): {marker}{}\nInput (cache miss): {marker}{}\nInput (unclassified): {marker}{}\nCache hit rate: {cache_rate}\nOutput: {marker}{}\nHistory without categories: {historical}\nBudget basis: all input + output, including cache hits",
+                    "{report}Recorded elapsed: {elapsed_ms} ms\nInput (cache hit): {marker}{}\nInput (cache miss): {marker}{}\nInput (unclassified): {marker}{}\nCache hit rate: {cache_rate}\nOutput: {marker}{}\nHistory without categories: {historical}\nBudget basis: all input + output, including cache hits",
                     usage_breakdown.cached_input_tokens,
                     usage_breakdown.uncached_input_tokens,
                     usage_breakdown.unclassified_input_tokens,

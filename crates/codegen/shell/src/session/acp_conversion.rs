@@ -590,6 +590,7 @@ mod tests {
                 created_at: "now".into(),
                 updated_at: "now".into(),
                 status_message: None,
+                completion_report: None,
             }),
             ToolOutput::UpdateGoal(UpdateGoalOutput {
                 success: true,

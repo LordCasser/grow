@@ -24,6 +24,7 @@ pub(super) fn goal_view_from_snapshot(
         created_at: goal.created_at.clone(),
         updated_at: goal.updated_at.clone(),
         status_message: goal.status_message.clone(),
+        completion_report: goal.completion_report.clone(),
     }
 }
 
@@ -174,7 +175,10 @@ impl SessionActor {
                 UiNoticeTone::Warning,
                 "Goal token budget reached. Change /goal budget and restart to continue.",
             ),
-            GoalStatus::Complete => (UiNoticeTone::Success, "Goal completed."),
+            GoalStatus::Complete => (
+                UiNoticeTone::Success,
+                "Goal completed. Open Goal: Done to view the completion report.",
+            ),
         };
         let message = match (goal.status, goal.status_message.as_deref()) {
             (GoalStatus::Paused | GoalStatus::Blocked, Some(reason)) => {
@@ -949,6 +953,10 @@ impl SessionActor {
                     ));
                     return;
                 }
+                if let Err(error) = input.validate() {
+                    let _ = respond_to.send(Err(error.to_owned()));
+                    return;
+                }
                 if matches!(input.status, GoalUpdateStatus::Complete) {
                     match self.planning_completion_blockers().await {
                         Ok(blockers) if !blockers.is_empty() => {
@@ -972,7 +980,12 @@ impl SessionActor {
                     .map(|goal| (goal.goal_id.clone(), goal.definition_revision));
                 let (changed, terminal, summary) = match input.status {
                     GoalUpdateStatus::Complete => (
-                        self.goal_tracker.lock().complete(),
+                        self.goal_tracker.lock().complete(
+                            input
+                                .completion_report
+                                .as_deref()
+                                .expect("validated completion report"),
+                        ),
                         true,
                         "Goal marked complete.".to_string(),
                     ),
@@ -1398,7 +1411,12 @@ mod goal_admission_tests {
                     .lock()
                     .select_behavior(tool_types::BehaviorId::Goal);
                 let previous = actor.goal_tracker.lock().snapshot().cloned().unwrap();
-                assert!(actor.goal_tracker.lock().complete());
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .complete("All requested work verified complete.")
+                );
                 actor.commit_goal_stop_or_restore(previous).await.unwrap();
                 crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
 
@@ -1673,7 +1691,12 @@ mod goal_admission_tests {
                         "2026-10-19T00:00:00Z".into(),
                     )
                     .unwrap();
-                assert!(actor.goal_tracker.lock().complete());
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .complete("All requested work verified complete.")
+                );
                 let goal = actor.goal_tracker.lock().snapshot().cloned();
                 let behavior = actor.behavior.lock().snapshot();
                 actor
@@ -1735,7 +1758,12 @@ mod goal_admission_tests {
                         "2026-10-19T00:00:00Z".into(),
                     )
                     .unwrap();
-                assert!(actor.goal_tracker.lock().complete());
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .complete("All requested work verified complete.")
+                );
                 let goal = actor.goal_tracker.lock().snapshot().cloned();
                 let behavior = actor.behavior.lock().snapshot();
                 actor
@@ -2020,6 +2048,9 @@ mod goal_admission_tests {
                         input: UpdateGoalInput {
                             status: GoalUpdateStatus::Complete,
                             blocker: None,
+                            completion_report: Some(
+                                "Revised Goal completion must be rejected.".into(),
+                            ),
                         },
                         authority: stale_authority,
                         respond_to,
@@ -2078,12 +2109,29 @@ mod goal_admission_tests {
                 ));
                 actor.record_control_snapshot_durably().await.unwrap();
 
+                for completion_report in [None, Some(" \n\t".into())] {
+                    let (respond_to, response) = tokio::sync::oneshot::channel();
+                    actor.handle_goal_command(GoalCommand::Update {
+                        input: UpdateGoalInput {
+                            status: GoalUpdateStatus::Complete,
+                            blocker: None,
+                            completion_report,
+                        },
+                        authority: authority.clone(),
+                        respond_to,
+                    }).await;
+                    assert!(response.await.unwrap().unwrap_err().contains("completion_report"));
+                    assert_eq!(actor.goal_tracker.lock().status(), Some(crate::session::goal_tracker::GoalStatus::Active));
+                    assert!(actor.goal_tracker.lock().snapshot().unwrap().completion_report.is_none());
+                }
+
                 let (respond_to, response) = tokio::sync::oneshot::channel();
                 actor
                     .handle_goal_command(GoalCommand::Update {
                         input: UpdateGoalInput {
                             status: GoalUpdateStatus::Complete,
                             blocker: None,
+                            completion_report: Some("Results: work finished.\nEvidence: all checks passed.\nLimitations: none.".into()),
                         },
                         authority,
                         respond_to,
@@ -2100,6 +2148,15 @@ mod goal_admission_tests {
                     tool_types::BehaviorId::Normal
                 );
                 assert!(!actor.goal_loop_active());
+                let report = "Results: work finished.\nEvidence: all checks passed.\nLimitations: none.";
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let control = crate::session::control::SessionControlSnapshot::latest_from_timeline(&events).unwrap().unwrap();
+                assert_eq!(control.behavior.behavior(), tool_types::BehaviorId::Normal);
+                let restored = crate::session::goal_tracker::GoalTracker::from_snapshot(control.goal.unwrap()).unwrap();
+                let goal = restored.snapshot().unwrap();
+                assert_eq!(goal.completion_report.as_deref(), Some(report));
+                assert_eq!(goal.status, crate::session::goal_tracker::GoalStatus::Complete);
+                assert_eq!(goal_view_from_snapshot(goal, goal.tokens_used, goal.elapsed_ms).completion_report.as_deref(), Some(report));
                 assert!(
                     actor
                         .render_goal_continuation(actor.goal_tokens_used())
@@ -2107,6 +2164,55 @@ mod goal_admission_tests {
                 );
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn failed_goal_completion_commit_restores_active_state_without_report() {
+        tokio::task::LocalSet::new().run_until(async {
+            use tools::implementations::grow_build::update_goal::{
+                GoalCommand, GoalMutationAuthority, GoalUpdateStatus, UpdateGoalInput,
+            };
+            let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                while let Some(message) = persistence_rx.recv().await {
+                    if let PersistenceMsg::TimelineDurablyAndAck { event, respond_to } = message {
+                        let result = if matches!(event.kind, chat_state::TimelineEventKind::Control(_)) {
+                            Err(std::io::Error::other("completion write failed"))
+                        } else {
+                            Ok(())
+                        };
+                        let _ = respond_to.send(result);
+                    }
+                }
+            });
+            let (actor, _events) = crate::session::actor::tests::support::create_test_actor_ex_with_physical_projection(
+                0, 256_000, 85, gateway_tx, persistence_tx,
+            ).await;
+            let actor = std::sync::Arc::new(actor);
+            actor.goal_tracker.lock().create_goal("g1".into(), "ship it".into(), None, "now".into()).unwrap();
+            actor.behavior.lock().select_behavior(tool_types::BehaviorId::Goal);
+            *actor.current_prompt_id.lock().unwrap() = Some("prompt-1".into());
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            actor.handle_goal_command(GoalCommand::Update {
+                input: UpdateGoalInput {
+                    status: GoalUpdateStatus::Complete,
+                    blocker: None,
+                    completion_report: Some("Results: shipped. Evidence: checks passed. Limitations: none.".into()),
+                },
+                authority: GoalMutationAuthority {
+                    prompt_id: "prompt-1".into(), prompt_index: 1, control_revision: 0,
+                    goal: Some(("g1".into(), 1)),
+                },
+                respond_to,
+            }).await;
+            assert!(response.await.unwrap().unwrap_err().contains("not persisted"));
+            let goal = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(goal.status, crate::session::goal_tracker::GoalStatus::Active);
+            assert!(goal.completion_report.is_none());
+            assert_eq!(actor.behavior.lock().behavior(), tool_types::BehaviorId::Goal);
+            assert!(gateway_rx.try_recv().is_err(), "uncommitted completion publishes no success");
+        }).await;
     }
 
     #[tokio::test]

@@ -1162,8 +1162,7 @@ impl AgentView {
             1
         };
         let _tool_usage_height = 0u16;
-        let btw_height =
-            crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width);
+        let btw_height = 0;
         let cta_height = match &self.plugin_cta.phase {
             CtaPhase::Hidden => 0,
             CtaPhase::Matched { .. } if self.prompt.text().trim().is_empty() => 0,
@@ -1209,6 +1208,7 @@ impl AgentView {
         }
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
+            || self.btw_state.is_some()
             || self.question_view.is_some()
             || !self.permission_queue.is_empty()
             || self.cancel_turn_view.is_some()
@@ -1979,39 +1979,70 @@ impl AgentView {
         }
         self.last_btw_selection_model = ResolvedSelectionModel::default();
         self.last_btw_area = Rect::default();
-        if btw_height > 0
-            && let Some(ref btw) = self.btw_state
-        {
-            let mut btw_links = crate::render::osc8::LinkOverlay::new();
-            crate::views::btw_overlay::render_btw_panel(
-                buf,
-                btw,
-                layout.btw,
-                frame_stamp,
-                self.btw_focused && self.active_pane == AgentPane::Prompt,
-                Some(&mut self.hit_btw_close),
-                &mut self.last_btw_selection_model,
-                Some(&mut btw_links),
-                Some(self.session.cwd.as_path()),
-                &self.media_link_paths,
+        let btw_link_start = self.last_link_overlay.links().len();
+        if let Some(ref btw) = self.btw_state {
+            let overlay_bottom = if layout.turn_status.height > 0 {
+                layout.turn_status.y
+            } else {
+                layout.prompt.y
+            };
+            let available = Rect::new(
+                area.x,
+                area.y,
+                area.width,
+                overlay_bottom.saturating_sub(area.y),
             );
-            self.last_btw_area = layout.btw;
-            if !btw_links.is_empty() {
-                self.last_link_overlay.extend_from(&btw_links);
-                self.visible_link_map.append_from_overlay(&btw_links);
-            }
-            let sb_n = self.scrollback_visible_link_count;
-            let total_links = self.visible_link_map.len();
-            self.paint_link_highlights(buf, link_active_style, sb_n..total_links);
-            self.reclamp_drag_head_post_render(true);
-            if let Some(ref drag) = self.drag_selection
-                && drag.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX
-            {
-                render_active_selection_overlay(&self.last_btw_selection_model, drag, None, buf);
-            } else if let Some(ref sel) = self.persistent_text_selection
-                && sel.entry_idx == BTW_OVERLAY_ENTRY_IDX
-            {
-                render_persistent_selection_overlay(&self.last_btw_selection_model, sel, None, buf);
+            let popup = crate::views::btw_overlay::btw_popup_area(available);
+            if popup.width >= 12 && popup.height >= 3 {
+                crate::views::file_search::line_viewer::dim_area(
+                    buf,
+                    available,
+                    theme.bg_base,
+                    0.5,
+                );
+                let mut btw_links = crate::render::osc8::LinkOverlay::new();
+                crate::views::btw_overlay::render_btw_panel(
+                    buf,
+                    btw,
+                    popup,
+                    frame_stamp,
+                    self.btw_focused && self.active_pane == AgentPane::Prompt,
+                    Some(&mut self.hit_btw_close),
+                    &mut self.last_btw_selection_model,
+                    Some(&mut btw_links),
+                    Some(self.session.cwd.as_path()),
+                    &self.media_link_paths,
+                );
+                self.last_btw_area = popup;
+                if !btw_links.is_empty() {
+                    self.last_link_overlay.extend_from(&btw_links);
+                    self.visible_link_map.append_from_overlay(&btw_links);
+                }
+                let sb_n = self.scrollback_visible_link_count;
+                let total_links = self.visible_link_map.len();
+                self.paint_link_highlights(buf, link_active_style, sb_n..total_links);
+                self.reclamp_drag_head_post_render(true);
+                if let Some(ref drag) = self.drag_selection
+                    && drag.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX
+                {
+                    render_active_selection_overlay(
+                        &self.last_btw_selection_model,
+                        drag,
+                        None,
+                        buf,
+                    );
+                } else if let Some(ref sel) = self.persistent_text_selection
+                    && sel.entry_idx == BTW_OVERLAY_ENTRY_IDX
+                {
+                    render_persistent_selection_overlay(
+                        &self.last_btw_selection_model,
+                        sel,
+                        None,
+                        buf,
+                    );
+                }
+            } else {
+                self.hit_btw_close.clear();
             }
         } else {
             self.hit_btw_close.clear();
@@ -3728,7 +3759,7 @@ impl AgentView {
         if let Some(ref mut viewer) = self.block_viewer {
             use ratatui::style::Modifier;
             use ratatui::widgets::{Block as RBlock, BorderType, Borders, Clear, Widget};
-            let overlay_area = Rect {
+            let mut overlay_area = Rect {
                 x: area.x,
                 y: area.y,
                 width: area.width,
@@ -3746,6 +3777,15 @@ impl AgentView {
                 self.pane_areas = layout.pane_areas();
                 return (prompt_cursor_pos, prompt_post_flush);
             };
+            let is_btw = matches!(entry.block, crate::scrollback::block::RenderBlock::Btw(_));
+            if is_btw {
+                let bottom = if layout.turn_status.height > 0 {
+                    layout.turn_status.y
+                } else {
+                    layout.prompt.y
+                };
+                overlay_area.height = bottom.saturating_sub(area.y);
+            }
             let popup_w = ((overlay_area.width as f32 * 0.95) as u16)
                 .max(60)
                 .min(overlay_area.width);
@@ -3761,7 +3801,11 @@ impl AgentView {
             }
             let popup_x = overlay_area.x + (overlay_area.width.saturating_sub(popup_w)) / 2;
             let popup_y = overlay_area.y + (overlay_area.height.saturating_sub(popup_h)) / 2;
-            let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+            let popup_area = if is_btw {
+                crate::views::btw_overlay::btw_popup_area(overlay_area)
+            } else {
+                Rect::new(popup_x, popup_y, popup_w, popup_h)
+            };
             let base_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
             let border = RBlock::default()
                 .borders(Borders::ALL)
@@ -3823,6 +3867,15 @@ impl AgentView {
                         .collect()
                 })
                 .unwrap_or_default();
+            if let crate::scrollback::block::RenderBlock::Btw(block) = &entry.block {
+                prepend_lines.insert(
+                    0,
+                    ratatui::text::Line::from(ratatui::text::Span::styled(
+                        format!("/btw {}", block.question),
+                        Style::default().fg(theme.accent_plan),
+                    )),
+                );
+            }
             if !prepend_lines.is_empty() {
                 prepend_lines.push(ratatui::text::Line::from(""));
             }
@@ -4214,7 +4267,17 @@ impl AgentView {
                     .last_link_overlay
                     .links()
                     .iter()
-                    .filter(|link| {
+                    .enumerate()
+                    .filter(|(idx, link)| {
+                        if *idx < btw_link_start
+                            && self.last_btw_area.area() > 0
+                            && link.screen_row >= self.last_btw_area.y
+                            && link.screen_row < self.last_btw_area.bottom()
+                            && link.col_start < self.last_btw_area.right()
+                            && self.last_btw_area.x < link.col_end
+                        {
+                            return false;
+                        }
                         !occluders.iter().any(|r| {
                             link.screen_row >= r.y
                                 && link.screen_row < r.y.saturating_add(r.height)
@@ -4222,7 +4285,7 @@ impl AgentView {
                                 && r.x < link.col_end
                         })
                     })
-                    .filter_map(|link| {
+                    .filter_map(|(_, link)| {
                         crate::render::osc8::resolve_link_target_with_presentation(
                             &link.target,
                             link.presentation,
@@ -4277,6 +4340,56 @@ impl AgentView {
 /// Padding the empty-state logo gates reserve around the art, mirroring the
 /// welcome convention (`H_PAD` / `V_PAD` in `views::welcome::logo`).
 const EMPTY_LOGO_PAD: u16 = 2;
+
+#[cfg(test)]
+mod btw_popup_tests {
+    use super::*;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::bundle::BundleState;
+    use crate::views::block_viewer::BlockViewerPane;
+    use crate::views::btw_overlay::BtwOverlayState;
+
+    fn draw(agent: &mut AgentView) {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut ScratchBuffer::new(),
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+    }
+
+    #[test]
+    fn live_and_saved_answers_use_same_popup_without_shrinking_scrollback() {
+        let mut agent = make_agent();
+        draw(&mut agent);
+        let scrollback_height = agent.pane_areas.scrollback.height;
+
+        agent.btw_state = Some(BtwOverlayState::done("why?".into(), "an **answer**".into()));
+        draw(&mut agent);
+        let live_area = agent.last_btw_area;
+        assert_eq!(live_area.x, 2);
+        assert_eq!(live_area.width, 96);
+        assert_eq!(agent.pane_areas.scrollback.height, scrollback_height);
+
+        agent.dismiss_btw_panel();
+        let entry = agent.scrollback.entry(agent.scrollback.len() - 1).unwrap();
+        agent.block_viewer = BlockViewerPane::for_entry(entry);
+        draw(&mut agent);
+        assert_eq!(
+            agent.block_viewer.as_ref().unwrap().modal.popup_area,
+            Some(live_area)
+        );
+    }
+}
 
 /// Pick the largest logo that fits the agent empty-state scrollback area
 /// (a bare centered logo, no chrome).
@@ -4634,6 +4747,54 @@ mod usage_status_tests {
 
         assert!(agent.hit_goal_status.rect.is_some());
         assert!(agent.hit_usage_status.rect.is_none());
+    }
+
+    #[test]
+    fn done_goal_status_click_opens_archived_completion_detail() {
+        let mut agent = make_agent();
+        let workflow = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "workflow_updated",
+            "run_id": "previous-workflow",
+            "revision": 1,
+            "name": "Previous workflow",
+            "objective": "previous work",
+            "status": "complete",
+            "elapsed_ms": 100
+        }))
+        .unwrap();
+        assert!(agent.ingest_workflow_update(workflow));
+        assert!(!agent.session.workflow_runs.is_empty());
+        let mut goal = GoalDisplayState::test_stub();
+        goal.status = crate::app::session::GoalDisplayStatus::Complete;
+        goal.completion_report = Some("Evidence: all requested work verified.".into());
+        agent.session.goal_state = Some(goal);
+        draw(&mut agent, 100);
+        let hit = agent.hit_goal_status.rect.expect("Done Goal is clickable");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(matches!(
+            agent.handle_mouse(&click, &mut Vec::new()),
+            InputOutcome::Changed
+        ));
+        assert!(agent.show_goal_detail);
+        assert!(
+            !agent.show_workflows,
+            "Workflow history cannot intercept a Goal click"
+        );
+        assert_eq!(
+            agent
+                .session
+                .goal_state
+                .as_ref()
+                .unwrap()
+                .completion_report
+                .as_deref(),
+            Some("Evidence: all requested work verified.")
+        );
     }
 
     #[test]

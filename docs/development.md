@@ -202,6 +202,8 @@ source 的 durable startup 与 runtime 登记使用同一 admission 边界，查
 
 Goal 状态栏、详情与只读回放的缓存率只用已分类的 cache hit + miss 输入作分母；未分类、历史聚合与未知消费使可计算比例带 `measured` 限定，无已分类输入则显示 N/A。其他无 Goal Behavior 沿用普通 session 用量投影。契约见 [Goal 缓存率](../openspec/specs/client-surfaces/spec.md#requirement-goal-usage-surfaces-show-measured-cache-hit-rates)。
 
+Goal 完成工具要求 `completion_report` 写明原目标的达成结果、具体依据、验证及剩余限制。报告原文随 Complete 状态在同一 Control 中确认，失败回滚；迟到用量保留报告，编辑重激活清除当前完成依据。状态栏 `Goal: Done` 的既有点击入口打开完整报告，支持 Markdown 和滚动；恢复与只读回放使用相同原文，历史缺失时明确显示未归档。契约见 [Goal 完成报告](../openspec/specs/behavior-goal/spec.md#requirement-goal-completion-archives-its-report-with-the-terminal-state) 与 [Done 详情](../openspec/specs/client-surfaces/spec.md#requirement-done-goal-details-expose-the-archived-completion-report)。
+
 Chat 流在 finish reason 与完整 usage 都已解析后，若用户 steer 或逻辑期限在可选尾帧等待期间取消 attempt，Sampler 仍以原 attempt 身份结算这份已确认的 token、cache 字段可用性与已报告费用；取消不等待尚未到达的 usage。未收到可信完整 usage 的已开始 attempt 继续按未知消费结算。状态栏在总消费不完整时保留 `≥`，只按 read 已知的输入样本计算缓存率，并以 `measured cache` 限定部分样本；`/usage` 的 coverage 是这些样本占全部已记录输入的比例，不包括未知消费。契约见 [中断用量结算](../openspec/specs/model-sampling/spec.md#requirement-cancellation-preserves-confirmed-attempt-usage) 与 [状态栏用量](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
 
 `UsageLedger` 同时保留账本所属 Agent 与每个已完成子 Agent 的身份分项；子 Agent 以稳定 `subagent_id` 沿既有终态 ACK fold 进入父账本并持久结算。`PromptUsage` 当前只投影包含全部 Agent 的总体和 provider/model 分项，不把 Agent 分项暴露到 `/usage`、headless 或 normal 状态栏。
@@ -427,6 +429,8 @@ PromptWidget 创建和 `/agent` picker 打开时只装载静态内建 Agent，�
 
 重复选择当前 Agent 或相同 provider/model/effort 仍完成正常控制回执，但不显示 Switching 或成功切换提示；相同 Agent 名称对应的有效配置改变、effort 改变以及失败仍按真实结果显示。见 [未改变选择的展示契约](../openspec/specs/client-surfaces/spec.md)。
 
+忙碌会话的 `/effort` 可先收到 `ModelChanged`，再收到对应控制终态。Pager 在本地 Sampling intent 未结算时暂存模型投影；匹配的终态回执解除该 intent 后，通知处理路径立即应用暂存投影，即使 Agent 或 Behavior 控制仍在等待。RPC 成功只确认请求，不能代替这个状态同步。见 [忙碌 Sampling 投影契约](../openspec/specs/client-surfaces/spec.md#requirement-busy-sampling-control-terminals-release-matching-model-projections)。
+
 Messages 在单次请求内为中性工具 ID 建立映射，预留已有合法和 native ID，并同步编码调用与结果。原生 continuation 的 ID/签名保持，Timeline 不改写，见 [工具身份编码契约](../openspec/specs/model-sampling/spec.md#requirement-messages-tool-identity-encoding-preserves-distinct-exchanges)。64 字节是 Grow 的中性 ID 编码预算。
 
 工具定义及模型图片资格 key 由 `tool-types` 持有，客户端身份值由 `config-types` 持有；HTTP 不引用 sampler/workspace 运行时。Pager 负责识别权限特殊行，renderer 只接收对应位置。版本策略由 `config::VersionPolicy` 持有，更新器的配置值和持久化操作由 CLI 组合层传入，仍复用 shell 的完整配置读写规则。Core regression 对这五条直接依赖边设有检查，不因此推断二进制或构建耗时的改善。
@@ -466,8 +470,14 @@ PTY 对应 `resume_modern_admission_projection_128_512_turns` 和 `resume_modern
 
 Responses 下用户主动加载的技能以独立 user 上下文传入，保留结构化来源、加载身份及完整正文；不再生成需要模型 reasoning 的模拟 `load_skill` 调用。真实模型技能调用仍使用原工具往返。排查 thinking `reasoning_text` 400 时，应区分历史 reasoning 缺失与 Runtime 事实被错误编码成模型调用。见 [技能请求投影](../openspec/specs/model-sampling/spec.md#requirement-runtime-skill-results-have-legal-provider-projections)。
 
+技能发布的 headroom 检查沿用 ChatState 的 `projected_tokens`，与状态栏、请求投影和普通上下文压力检查保持同一口径，再计入完整新增内容。不要用原始 Surface 的 bytes/4 总量替换现有计数：原始历史含可能不随请求发送的 reasoning，也不包含完整 provider envelope 开销。见 [技能发布预算计数](../openspec/specs/model-sampling/spec.md#requirement-skill-publication-uses-projected-request-context-pressure)。
+
+冷恢复会重建 native continuation lane，初始上下文压力按现有 portable replay 的消息贡献估算，原始 Surface 估值保留作差值基线。后续请求再通过原路径计入当前工具和 schema 等 envelope，并由 provider 用量校准；恢复估值不复用旧 live anchor，也不截到窗口上限。见 [冷恢复上下文计数](../openspec/specs/model-sampling/spec.md#requirement-cold-context-pressure-follows-portable-replay)。
+
 Runtime 收件消息在 Responses 中同样使用带来源的独立 user 上下文，明确不是直接用户指令或人工授权；Chat/Messages 保留完整收件工具对。Chat 路由确认 reasoning_content 拒绝后，统一为所有缺字段的 assistant 编码空字段，包括 portable 与 live Runtime 投影，不生成思考正文。模型技能结果间的匹配 SkillLoad 元数据在请求前稳定归整至结果批次之后，原始 Timeline 事实不变，真实 sibling 结果不得被取消说明覆盖；旧 IntegrityRepair 保留原精确重放证明。契约见 [Runtime 收件投影](../openspec/specs/model-sampling/spec.md#requirement-runtime-agent-messages-project-to-complete-tool-exchanges) 与 [结果证据保全](../openspec/specs/session-timeline/spec.md#requirement-integrity-repair-preserves-evidence)。回归入口为 sampling-types 的 `runtime_projection`、chat-state 的 `model_skill_integrity` 及 actor 的 `model_skill_batch_preserves_success_through_request_and_timeline_replay`。
 
 `/btw` 只读复用主会话的图片文字分支：等待已启动的主转换及其 ImageProjection durable ACK，再冻结 Sideband 上下文并优先选择已有描述（不依赖负能力缓存是否命中）。它不启动视觉辅助/OCR、不写图片能力、不因图片拒绝重建主会话；读锁在 HTTP 请求前释放。已知纯文本路由的未转换图片以未就绪失败返回。问题及回答仅归属独立 Sideband。见 [Side question 图片分支复用](../openspec/specs/model-sampling/spec.md#requirement-side-questions-reuse-durable-image-fallback)。
+
+全屏 TUI 的 `/btw` 回答使用覆盖式大弹窗；Esc 收起后双击历史行可在同尺寸查看。Minimal 模式继续使用输入框上方的原生终端面板。界面契约见 [侧问结果弹窗](../openspec/specs/client-surfaces/spec.md#requirement-fullscreen-side-question-answers-use-a-large-popup)。
 
 Resume 的首历史归因沿用 opt-in instrumentation：`session.replay.first_send` 标记工具消息合并后的首次 gateway 转发发起，须与相同 session/cursor 的 `pager.replay.first_applied` 配对确认交付。`pager.replay.first_frame` 是应用历史后的首个普通根会话帧，其 `writer_sequence` 与成功 `pager.frame.delivery`、`frame_ack.sequence` 关联；不是该 source row 首次出现在物理屏幕的证明。子页面、Dashboard/覆盖层不按普通根帧归因，失败/空历史不伪造完整链；终端可见时间继续由 PTY 独立观察。标记不改变 100ms loading 绘制节奏、顺序、Ctrl+D 或完整历史就绪屏障。

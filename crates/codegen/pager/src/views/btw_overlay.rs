@@ -1,7 +1,6 @@
-//! `/btw` side question inline panel.
+//! `/btw` side question panel.
 //!
-//! Renders as a compact bordered panel above the prompt input box,
-//! below the scrollback. Shows the question and a loading indicator
+//! Renders the question and a loading indicator
 //! while the response is in-flight. Once the response arrives the
 //! panel stays on screen until the user presses Esc, at which point
 //! the content is persisted to scrollback as a collapsed `BtwBlock`.
@@ -25,7 +24,7 @@ use crate::theme::Theme;
 pub const BTW_OVERLAY_ENTRY_IDX: usize = usize::MAX;
 const BTW_OVERLAY_RANGE_ID: u16 = 0;
 
-/// State of the /btw inline panel.
+/// State of the /btw panel.
 #[derive(Debug, Clone)]
 pub enum BtwOverlayState {
     /// Waiting for the shell to respond.
@@ -46,7 +45,7 @@ pub enum BtwOverlayState {
 impl BtwOverlayState {
     /// Build a `Done` state, rendering `response` as markdown via the same
     /// [`MarkdownContent`] renderer used for regular agent messages so the
-    /// inline panel shows formatted tables, headings, lists, etc.
+    /// panel shows formatted tables, headings, lists, etc.
     pub fn done(question: String, response: String) -> Self {
         Self::Done {
             question,
@@ -133,8 +132,20 @@ impl BtwOverlayState {
     }
 }
 
-/// Maximum body lines shown for a Done response.
+/// Maximum body lines shown in the minimal-mode panel.
 pub const DONE_MAX_BODY_LINES: u16 = 12;
+
+/// Match the fullscreen Plan preview's enlarged rectangle above the prompt.
+pub fn btw_popup_area(available: Rect) -> Rect {
+    let side_pad = 2u16;
+    let top_pad = 1u16;
+    Rect::new(
+        available.x.saturating_add(side_pad.min(available.width)),
+        available.y.saturating_add(top_pad.min(available.height)),
+        available.width.saturating_sub(side_pad * 2),
+        available.height.saturating_sub(top_pad),
+    )
+}
 
 /// Concatenate a line's span contents into plain text (styles stripped).
 ///
@@ -143,7 +154,7 @@ fn line_plain_text(line: &Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-/// Compute the desired height of the btw inline panel.
+/// Compute the desired height of the btw panel in minimal mode.
 ///
 /// Returns 0 when there is nothing to show (state is `None`).
 /// Loading / Error = 3 rows (top border + 1 body + bottom border).
@@ -168,11 +179,10 @@ pub fn btw_panel_height(state: Option<&BtwOverlayState>, content_width: u16) -> 
     }
 }
 
-/// Render the /btw inline panel into the given rect.
+/// Render the /btw panel into the given rect.
 ///
 /// The panel renders as a compact bordered box with the question in the
-/// top border and the status in the body. It sits in the normal layout
-/// flow (above queue / turn status / prompt).
+/// top border and the status in the body. The caller owns its placement.
 ///
 /// When `link_overlay` is `Some`, markdown hyperlinks in the Done body are
 /// mapped into screen-space overlay links (same path as scrollback) so OSC 8
@@ -544,6 +554,15 @@ mod tests {
             .map(|i| format!("line{i:02}"))
             .collect::<Vec<_>>()
             .join("  \n")
+    }
+
+    #[test]
+    fn popup_matches_plan_preview_size_and_stays_inside_small_terminal() {
+        assert_eq!(
+            btw_popup_area(Rect::new(0, 0, 120, 36)),
+            Rect::new(2, 1, 116, 35)
+        );
+        assert_eq!(btw_popup_area(Rect::new(4, 7, 3, 1)), Rect::new(6, 8, 0, 0));
     }
 
     #[test]

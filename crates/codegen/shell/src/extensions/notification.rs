@@ -1180,6 +1180,8 @@ pub enum SessionUpdate {
         updated_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status_message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_report: Option<String>,
     },
     /// A blocking reverse-request (permission / `ask_user_question` /
     /// plan-approval) is now **pending** on the agent, keyed by `tool_call_id`
@@ -1795,6 +1797,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:05:00Z".into(),
             status_message: Some("Working through the next slice".into()),
+            completion_report: None,
         }
     }
 

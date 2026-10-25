@@ -260,9 +260,9 @@ fn write_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
                         .as_ref()
                         .and_then(|meta| meta.get("messageId"))
                         .and_then(serde_json::Value::as_str)
-                    {
-                        prompt_ids.insert(message_id.to_owned());
-                    }
+                {
+                    prompt_ids.insert(message_id.to_owned());
+                }
             }
             SessionUpdate::Grow(notification) => {
                 if let GrowUpdate::TurnCompleted { prompt_id, .. } = &notification.update {
@@ -480,7 +480,7 @@ fn goal_state(
             tracker.budget_limit();
         }
         crate::session::goal_tracker::GoalStatus::Complete => {
-            tracker.complete();
+            tracker.complete("All requested work verified complete.");
         }
     }
     tracker.snapshot().unwrap().clone()
@@ -754,10 +754,9 @@ fn captured_root_and_child_topology_does_not_gain_later_root_spawn() {
 
     let mut expanded_timeline = Timeline::from_events(root_timeline.events().to_vec()).unwrap();
     expanded_timeline
-        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(spawn(
-            "later-child",
-            "root",
-        )))))
+        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+            Box::new(spawn("later-child", "root")),
+        )))
         .unwrap();
     let late_event = expanded_timeline.events().last().unwrap();
     let (_, records, _) = journal_data(home.path(), "root");
@@ -792,9 +791,9 @@ fn captured_timeline_fails_when_the_source_is_truncated() {
     let home = tempfile::tempdir().unwrap();
     let mut timeline = Timeline::default();
     timeline
-        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(spawn(
-            "child", "root",
-        )))))
+        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+            Box::new(spawn("child", "root")),
+        )))
         .unwrap();
     write_session(home.path(), "root", "/project", &timeline, false);
 
@@ -848,7 +847,12 @@ fn captured_control_snapshot_repairs_stale_goal_projection_without_rewriting_sou
     let home = tempfile::tempdir().unwrap();
     let active = goal_state(GoalStatus::Active);
     let paused = goal_state(GoalStatus::Paused);
-    let cases = [("paused", Some(paused)), ("cleared", None)];
+    let complete = goal_state(GoalStatus::Complete);
+    let cases = [
+        ("paused", Some(paused)),
+        ("complete", Some(complete)),
+        ("cleared", None),
+    ];
 
     for (id, final_goal) in cases {
         let timeline = control_timeline(7, BehaviorSnapshot::normal(), final_goal.clone());

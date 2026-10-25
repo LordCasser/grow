@@ -759,6 +759,7 @@ async fn delegated_goal_turn_uses_inherited_owner_revision() {
                                 created_at: "now".into(),
                                 updated_at: "now".into(),
                                 status_message: None,
+                                completion_report: None,
                             },
                         })))
                         .await;

@@ -1,0 +1,4 @@
+- [x] Reproduce skill publication's disagreement with projected request pressure.
+- [x] Use ChatState's current projection for both skill publication checks.
+- [x] Verify acceptance, true headroom rejection, atomicity and full-body delivery.
+- [x] Update developer guidance and validate the change.

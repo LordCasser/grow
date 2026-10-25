@@ -1,0 +1,4 @@
+- [x] Reproduce inflated cold-resume pressure with retained historical reasoning.
+- [x] Initialize pressure from portable replay while retaining the raw delta baseline.
+- [x] Verify cross-backend restoration, subsequent mutation/request projection, and genuine overflow.
+- [x] Update developer guidance and validate the change.

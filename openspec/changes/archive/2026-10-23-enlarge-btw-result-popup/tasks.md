@@ -1,0 +1,4 @@
+- [x] Render active `/btw` in a Plan-sized fullscreen TUI popup without reserving transcript rows.
+- [x] Open saved `/btw` entries in a matching read-only popup on double-click and viewer action.
+- [x] Verify popup geometry, input and link hit priority, scrolling, dismissal, and archived answer content.
+- [x] Update developer-facing UI guidance, validate and archive the change.

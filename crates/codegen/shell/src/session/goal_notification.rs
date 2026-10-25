@@ -129,6 +129,7 @@ pub(crate) fn build_goal_updated(
         created_at: goal.created_at.clone(),
         updated_at: goal.updated_at.clone(),
         status_message: goal.status_message.clone(),
+        completion_report: goal.completion_report.clone(),
     }
 }
 
@@ -145,6 +146,7 @@ pub(crate) fn build_goal_cleared() -> GrowSessionUpdate {
         created_at: String::new(),
         updated_at: String::new(),
         status_message: None,
+        completion_report: None,
     }
 }
 
@@ -165,6 +167,36 @@ pub(crate) fn format_elapsed(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_report_round_trips_through_typed_history() {
+        let report = "## Results\n目标已达成。\nEvidence: all checks passed.\nLimitations: none.\n";
+        let mut tracker = GoalTracker::new();
+        tracker
+            .create_goal("g1".into(), "ship it".into(), None, "now".into())
+            .unwrap();
+        assert!(tracker.complete(report));
+        let notification = GrowSessionNotification {
+            session_id: agent_client_protocol::schema::v1::SessionId::new("report-session"),
+            update: build_goal_updated(tracker.snapshot().unwrap(), 123, 456),
+            meta: None,
+        };
+        let update = crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone()));
+        let fact = crate::session::history::HistoryFact::from_update(&update)
+            .unwrap()
+            .unwrap();
+        let round_trip = fact.into_update(&notification.session_id).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&round_trip).unwrap(),
+            serde_json::to_value(&update).unwrap()
+        );
+        let crate::session::storage::SessionUpdate::Grow(notification) = round_trip else {
+            panic!("expected Goal notification")
+        };
+        assert!(
+            matches!(notification.update, GrowSessionUpdate::GoalUpdated { completion_report: Some(archived), .. } if archived == report)
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn goal_snapshot_is_one_typed_fact_before_live_publication() {
@@ -196,6 +228,7 @@ mod tests {
             created_at: "2026-10-19T00:00:00Z".into(),
             updated_at: "2026-10-19T00:00:00Z".into(),
             status_message: None,
+            completion_report: None,
             blocked_audit: None,
         };
 
@@ -222,6 +255,7 @@ mod tests {
                 created_at,
                 updated_at,
                 status_message: None,
+                completion_report: None,
             } if goal_id == "goal-1"
                 && objective == "ship the feature"
                 && status == "active"

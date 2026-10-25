@@ -168,6 +168,10 @@ pub struct GoalState {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
+    /// Full completion evidence, committed together with Complete. Absent for
+    /// unfinished Goals and historical completions without an archived report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_report: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_audit: Option<GoalBlockedAudit>,
 }
@@ -239,6 +243,9 @@ impl GoalTracker {
                     || audit.consecutive_turns >= REQUIRED_CONSECUTIVE_BLOCKED_TURNS
             })
             || (snapshot.status != GoalStatus::Active && snapshot.blocked_audit.is_some())
+            || snapshot.completion_report.as_ref().is_some_and(|report| {
+                snapshot.status != GoalStatus::Complete || report.trim().is_empty()
+            })
         {
             return Err("invalid Goal control payload");
         }
@@ -302,6 +309,7 @@ impl GoalTracker {
             created_at: created_at.clone(),
             updated_at: created_at,
             status_message: None,
+            completion_report: None,
             blocked_audit: None,
         });
         self.active_since = Some(Instant::now());
@@ -354,6 +362,7 @@ impl GoalTracker {
             goal.blocked_audit = None;
         }
         goal.status = next_status;
+        goal.completion_report = None;
         if next_status == GoalStatus::Active {
             goal.status_message = None;
         }
@@ -479,7 +488,10 @@ impl GoalTracker {
         true
     }
 
-    pub fn complete(&mut self) -> bool {
+    pub fn complete(&mut self, report: &str) -> bool {
+        if report.trim().is_empty() {
+            return false;
+        }
         self.account_elapsed();
         let Some(goal) = self.goal.as_mut() else {
             return false;
@@ -488,6 +500,7 @@ impl GoalTracker {
             return false;
         }
         goal.status = GoalStatus::Complete;
+        goal.completion_report = Some(report.to_owned());
         goal.status_message = None;
         goal.blocked_audit = None;
         goal.updated_at = now();
@@ -798,6 +811,53 @@ mod tests {
     }
 
     #[test]
+    fn completion_report_survives_restore_and_late_usage_until_goal_is_revised() {
+        let mut tracker = tracker();
+        for report in ["", " \n\t"] {
+            assert!(!tracker.complete(report));
+            assert_eq!(tracker.status(), Some(GoalStatus::Active));
+            assert!(tracker.snapshot().unwrap().completion_report.is_none());
+        }
+        let report =
+            "  ## Results\n目标已达成。\nEvidence: regression passed.\nLimitations: none.\n";
+        assert!(tracker.complete(report));
+        let encoded = serde_json::to_vec(tracker.snapshot().unwrap()).unwrap();
+        let restored: GoalState = serde_json::from_slice(&encoded).unwrap();
+        let mut tracker = GoalTracker::from_snapshot(restored).unwrap();
+        assert_eq!(
+            tracker.snapshot().unwrap().completion_report.as_deref(),
+            Some(report)
+        );
+        assert!(tracker.account_tokens("g1", GoalTokenUsage::new(10, 0, 1)));
+        assert!(tracker.mark_usage_incomplete("g1"));
+        assert_eq!(tracker.status(), Some(GoalStatus::Complete));
+        assert_eq!(
+            tracker.snapshot().unwrap().completion_report.as_deref(),
+            Some(report)
+        );
+        assert!(!tracker.complete("replacement report"));
+        assert!(tracker.revise_goal("follow-up objective".into(), None));
+        assert!(tracker.snapshot().unwrap().completion_report.is_none());
+        assert_eq!(tracker.status(), Some(GoalStatus::Active));
+    }
+
+    #[test]
+    fn archived_report_cannot_belong_to_an_unfinished_goal_or_be_blank() {
+        let mut goal = tracker().snapshot().unwrap().clone();
+        goal.completion_report = Some("work is complete".into());
+        assert!(GoalTracker::validate_snapshot(&goal).is_err());
+        goal.status = GoalStatus::Complete;
+        assert!(GoalTracker::validate_snapshot(&goal).is_ok());
+        goal.completion_report = Some(" \n".into());
+        assert!(GoalTracker::validate_snapshot(&goal).is_err());
+        goal.completion_report = None;
+        assert!(
+            GoalTracker::from_snapshot(goal).is_some(),
+            "historical completion has no invented report"
+        );
+    }
+
+    #[test]
     fn pause_restart_edit_and_complete_are_explicit() {
         let mut tracker = tracker();
         let initial_revision = tracker.snapshot().unwrap().definition_revision;
@@ -815,7 +875,7 @@ mod tests {
             tracker.snapshot().unwrap().definition_revision,
             initial_revision + 1
         );
-        assert!(tracker.complete());
+        assert!(tracker.complete("All requested work verified complete."));
         assert_eq!(
             tracker.snapshot().unwrap().definition_revision,
             initial_revision + 1
@@ -1017,7 +1077,7 @@ mod tests {
         assert_eq!(tracker.status(), Some(GoalStatus::Paused));
         assert!(tracker.snapshot().unwrap().blocked_audit.is_none());
         assert!(
-            !tracker.complete(),
+            !tracker.complete("All requested work verified complete."),
             "a stopped Goal is controlled by the user and cannot be completed by a later model turn"
         );
     }

@@ -151,15 +151,30 @@ impl AgentView {
             && !has_native_link_hover()
             && !self.pos_occluded(self.last_mouse_pos.0, self.last_mouse_pos.1)
         {
-            self.visible_link_map
-                .link_at(self.last_mouse_pos.0, self.last_mouse_pos.1)
-                .filter(|hit| app_should_open_link_on_click(hit))
-                .and_then(|hit| {
-                    self.visible_link_map
-                        .links()
-                        .iter()
-                        .position(|l| std::ptr::eq(l, hit))
-                })
+            if self.last_btw_area.area() > 0
+                && self.last_btw_area.contains(self.last_mouse_pos.into())
+            {
+                self.visible_link_map
+                    .links()
+                    .iter()
+                    .enumerate()
+                    .skip(self.scrollback_visible_link_count)
+                    .find(|(_, link)| {
+                        link.contains(self.last_mouse_pos.0, self.last_mouse_pos.1)
+                            && app_should_open_link_on_click(link)
+                    })
+                    .map(|(idx, _)| idx)
+            } else {
+                self.visible_link_map
+                    .link_at(self.last_mouse_pos.0, self.last_mouse_pos.1)
+                    .filter(|hit| app_should_open_link_on_click(hit))
+                    .and_then(|hit| {
+                        self.visible_link_map
+                            .links()
+                            .iter()
+                            .position(|l| std::ptr::eq(l, hit))
+                    })
+            }
         } else {
             None
         };

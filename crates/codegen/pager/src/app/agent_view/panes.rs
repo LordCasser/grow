@@ -587,8 +587,7 @@ impl AgentView {
             && self.last_btw_area.area() > 0
             && self.last_btw_area.contains((col, row).into())
         {
-            use crate::views::btw_overlay::DONE_MAX_BODY_LINES;
-            let max_body = DONE_MAX_BODY_LINES as usize;
+            let max_body = self.last_btw_area.height.saturating_sub(2) as usize;
             let content_width = self.last_btw_area.width.saturating_sub(4) as usize;
             let max_off = btw.max_scroll_offset(content_width, max_body);
             if lines > 0 {

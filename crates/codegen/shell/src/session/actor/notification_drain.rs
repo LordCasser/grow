@@ -2896,7 +2896,12 @@ mod tests {
                         "2026-08-24T00:00:00Z".into(),
                     )
                     .unwrap();
-                assert!(actor.goal_tracker.lock().complete());
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .complete("All requested work verified complete.")
+                );
                 actor.record_goal_owned_task_ids("goal-1", 1, ["goal-build".to_owned()]);
                 // A completed Goal remains a durable receipt and cannot be
                 // replaced implicitly. Model the explicit clear before the

@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 
 use crate::app::session::{GoalDisplayState, GoalDisplayStatus};
+use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::theme::Theme;
 use crate::util::group_thousands;
 
@@ -69,11 +70,31 @@ fn usage_lines(goal: &GoalDisplayState) -> Vec<String> {
 #[derive(Default)]
 pub(crate) struct GoalDetailRenderer {
     scroll: u16,
+    report: Option<(String, MarkdownContent)>,
 }
 
 impl GoalDetailRenderer {
     pub(crate) fn reset_navigation(&mut self) {
         self.scroll = 0;
+        self.report = None;
+    }
+
+    fn completion_lines(&mut self, report: &str, width: usize) -> Vec<Line<'static>> {
+        if self
+            .report
+            .as_ref()
+            .is_none_or(|(source, _)| source != report)
+        {
+            self.report = Some((
+                report.to_owned(),
+                MarkdownContent::new(strip_control_chars(report, true)),
+            ));
+        }
+        self.report
+            .as_ref()
+            .unwrap()
+            .1
+            .with_wrapped_lines(width.max(1), |wrapped| wrapped.lines.to_vec())
     }
 
     pub(crate) fn apply_scroll_key(&mut self, key: KeyCode) -> bool {
@@ -133,9 +154,15 @@ fn goal_actions_hint(status: GoalDisplayStatus) -> &'static str {
     }
 }
 
-fn centered_area(screen: Rect) -> Rect {
-    let width = screen.width.saturating_sub(4).clamp(36, 100);
-    let height = screen.height.saturating_sub(4).clamp(10, 22);
+fn centered_area(screen: Rect, complete: bool) -> Rect {
+    let width = screen
+        .width
+        .saturating_sub(4)
+        .min(if complete { 120 } else { 100 });
+    let height = screen
+        .height
+        .saturating_sub(4)
+        .min(if complete { u16::MAX } else { 22 });
     Rect::new(
         screen.x + screen.width.saturating_sub(width) / 2,
         screen.y + screen.height.saturating_sub(height) / 2,
@@ -172,7 +199,7 @@ pub(crate) fn render_goal_detail(
     if screen.width < 20 || screen.height < 8 {
         return None;
     }
-    let area = centered_area(screen);
+    let area = centered_area(screen, goal.status == GoalDisplayStatus::Complete);
     let theme = Theme::current();
     Clear.render(area, buf);
     let block = Block::default()
@@ -228,6 +255,24 @@ pub(crate) fn render_goal_detail(
         content_width,
         Style::default().fg(theme.text_primary),
     ));
+    if goal.status == GoalDisplayStatus::Complete {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Completion report",
+            Style::default()
+                .fg(theme.accent_success)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(report) = goal.completion_report.as_deref() {
+            lines.extend(renderer.completion_lines(report, content_width));
+        } else {
+            lines.extend(wrapped_lines(
+                "No completion report was archived for this Goal.",
+                content_width,
+                Style::default().fg(theme.gray),
+            ));
+        }
+    }
     lines.push(Line::default());
     for usage in usage_lines(goal) {
         lines.push(Line::from(Span::styled(
@@ -333,6 +378,60 @@ pub(crate) fn truncate_to_width(input: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_text(goal: &GoalDisplayState, renderer: &mut GoalDetailRenderer) -> String {
+        let screen = Rect::new(0, 0, 100, 32);
+        let mut buf = Buffer::empty(screen);
+        render_goal_detail(
+            &mut buf,
+            screen,
+            goal,
+            renderer,
+            crate::motion::FrameStamp::default(),
+            false,
+        )
+        .unwrap();
+        buf.content.iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn completed_detail_shows_report_before_usage_and_marks_missing_history() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.status = GoalDisplayStatus::Complete;
+        goal.completion_report = Some("**Evidence:** checks passed.\n\nLimitations: none.".into());
+        let mut renderer = GoalDetailRenderer::default();
+        let text = render_text(&goal, &mut renderer);
+        assert!(text.contains("Completion report"));
+        assert!(text.contains("Evidence:"));
+        assert!(text.contains("checks passed."));
+        assert!(!text.contains("**Evidence:**"));
+        assert!(text.find("Completion report").unwrap() < text.find("Total tokens").unwrap());
+        goal.completion_report = None;
+        assert!(
+            render_text(&goal, &mut renderer)
+                .contains("No completion report was archived for this Goal.")
+        );
+    }
+
+    #[test]
+    fn long_completion_report_can_be_scrolled_to_its_final_evidence() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.status = GoalDisplayStatus::Complete;
+        goal.completion_report = Some(
+            (0..80)
+                .map(|i| format!("Evidence {i}: passed.\n\n"))
+                .collect(),
+        );
+        let mut renderer = GoalDetailRenderer::default();
+        assert!(!render_text(&goal, &mut renderer).contains("Evidence 79: passed."));
+        assert!(renderer.apply_scroll_key(KeyCode::PageDown));
+        assert!(renderer.scroll > 0);
+        renderer.apply_scroll_delta(10_000);
+        assert!(render_text(&goal, &mut renderer).contains("Evidence 79: passed."));
+        assert!(renderer.apply_mouse_scroll(MouseEventKind::ScrollUp));
+        renderer.reset_navigation();
+        assert_eq!(renderer.scroll, 0);
+    }
 
     #[test]
     fn detail_shows_cache_inclusive_total_components_and_budget() {

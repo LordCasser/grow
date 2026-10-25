@@ -624,6 +624,57 @@ async fn final_request_schema_is_visible_to_pre_sampling_pressure() {
         .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_context_usage_is_portable_before_first_prompt() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (mut actor, mut event_rx) =
+                create_test_actor_ex(0, 10_000, 85, gateway_tx, persistence_tx).await;
+            let timeline = chat_state::Timeline::from_seed(vec![
+                ConversationItem::user("u".repeat(4_000)),
+                ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                    "r".repeat(80_000),
+                )),
+                ConversationItem::assistant("a".repeat(400)),
+            ])
+            .unwrap();
+            let (mock, _timeline_records) = chat_state::persistence::MockTimelinePersistence::new();
+            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                timeline.events().to_vec(),
+                actor.chat_state_handle.get_sampling_config().await.unwrap(),
+                Box::new(mock),
+                event_tx,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+            let info = actor.build_session_info().await;
+            assert_eq!(info.context.used, 1_100);
+            assert_eq!(info.context.free_tokens, 8_900);
+            // session/load ends by advertising commands through this same path.
+            actor.send_available_commands_update().await;
+            let SessionEvent::Notification(
+                crate::session::replay_events::SessionNotification::Acp(notification),
+            ) = event_rx.try_recv().unwrap()
+            else {
+                panic!("expected resumed command advertisement");
+            };
+            assert!(matches!(
+                notification.update,
+                acp::SessionUpdate::AvailableCommandsUpdate(_)
+            ));
+            assert_eq!(
+                notification.meta.unwrap()["totalTokens"],
+                serde_json::json!(1_100)
+            );
+        })
+        .await;
+}
+
 /// Wire contract the pager + TUI renderers depend on:
 /// `build_session_info().context.used` must reflect the model-reported
 /// `total_tokens` after a turn, and `usage_pct` / `free_tokens` /

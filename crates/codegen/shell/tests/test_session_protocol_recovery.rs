@@ -562,7 +562,7 @@ async fn goal_sampling_failure_requires_explicit_restart_and_preserves_budget_ga
             if known_usage && budget > paused.tokens_used {
                 let completed = server.expect_response("explicitly restarted Goal can finish",
                     InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-                    tools_reply(InferenceEndpoint::ChatCompletions, "recovery", &[("call_goal_complete", &update_goal, r#"{"status":"complete"}"#)]));
+                    tools_reply(InferenceEndpoint::ChatCompletions, "recovery", &[("call_goal_complete", &update_goal, r#"{"status":"complete","completion_report":"All requested work verified complete."}"#)]));
                 command(&client, &session, "goal restart").await;
                 let finished = wait_goal(&client, &session, &workspace, GoalStatus::Complete).await;
                 completed.assert_satisfied();

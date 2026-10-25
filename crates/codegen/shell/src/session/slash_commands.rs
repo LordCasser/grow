@@ -2949,7 +2949,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(tracker.objective(), Some("first"));
-        assert!(tracker.complete());
+        assert!(tracker.complete("All requested work verified complete."));
         assert!(
             tracker
                 .create_goal("g2".into(), "second".into(), None, "later".into())

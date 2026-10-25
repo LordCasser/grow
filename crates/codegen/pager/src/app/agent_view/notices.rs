@@ -139,9 +139,8 @@ impl AgentView {
     ///
     /// An occluder is anything that, later in the same frame, keeps the banner
     /// row from reaching the user. The transient mode-switch banner and the
-    /// inline `/btw` panel are deliberately NOT occluders: the banner owns the
-    /// slot ~2 s while the tip's TTL ticks, and `/btw` has its own layout slot
-    /// above the banner. The session announcement banner IS an occluder
+    /// The `/btw` popup may cover a tip while its TTL ticks; it does not own
+    /// the tip slot. The session announcement banner IS an occluder
     /// (long-lived; see `session_banner_active`).
     ///
     /// Drift warning: banner-covering views are also enumerated in two sibling

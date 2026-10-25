@@ -726,6 +726,7 @@ async fn request_goal_completion(
             input: UpdateGoalInput {
                 status: GoalUpdateStatus::Complete,
                 blocker: None,
+                completion_report: Some("All requested work verified complete.".into()),
             },
             authority,
             respond_to,

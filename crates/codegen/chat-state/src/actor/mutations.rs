@@ -86,12 +86,14 @@ impl ChatStateActor {
         if timeline.surface_revision() != expected_surface_revision {
             return Ok(ConditionalToolResultOutcome::RejectedSurfaceChanged);
         }
-        let surface_tokens = super::state::estimate_conversation_tokens(timeline.surface());
+        // Raw Surface retains history omitted by the final request projection.
+        // Use the same provider-anchored pressure as ordinary context admission.
+        let current_tokens = self.state.projected_tokens;
         let mut added_items = Vec::with_capacity(skill_loads.len() + 1);
         added_items.push(item.clone());
         added_items.extend(skill_loads.iter().cloned().map(ConversationItem::SkillLoad));
         let addition_tokens = super::state::estimate_conversation_tokens(&added_items);
-        if surface_tokens.saturating_add(addition_tokens) > max_context_tokens {
+        if current_tokens.saturating_add(addition_tokens) > max_context_tokens {
             return Ok(ConditionalToolResultOutcome::RejectedHeadroom);
         }
 
@@ -404,7 +406,7 @@ impl ChatStateActor {
         let result_tokens = super::state::estimate_item_tokens(&item);
         let accepted_items = vec![item.clone(), ConversationItem::SkillLoad(skill.clone())];
         let accepted_tokens = super::state::estimate_conversation_tokens(&accepted_items);
-        let current_tokens = super::state::estimate_conversation_tokens(timeline.surface());
+        let current_tokens = self.state.projected_tokens;
         let outcome = if timeline.surface_revision() != expected_surface_revision {
             ConditionalToolResultOutcome::RejectedSurfaceChanged
         } else if result_tokens > max_result_tokens

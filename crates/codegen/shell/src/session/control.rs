@@ -388,7 +388,7 @@ mod tests {
                 tracker.budget_limit();
             }
             crate::session::goal_tracker::GoalStatus::Complete => {
-                tracker.complete();
+                tracker.complete("All requested work verified complete.");
             }
         }
         tracker.snapshot().unwrap().clone()

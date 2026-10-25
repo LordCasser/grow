@@ -163,6 +163,45 @@ fn goal_transcript_details_keep_cache_rate_and_partial_qualifier() {
 }
 
 #[test]
+fn completed_goal_report_is_retained_in_replay_surfaces_and_details() {
+    let mut projection = TranscriptProjection::default();
+    let mut update = goal_update("g1", "ship release", "complete", 123, None);
+    let report = "## Results\n目标已完成。\nEvidence: regression passed.\nLimitations: none.\n";
+    let GrowUpdate::GoalUpdated {
+        completion_report, ..
+    } = &mut update
+    else {
+        unreachable!()
+    };
+    *completion_report = Some(report.into());
+    projection.apply(grow_event(update));
+    assert_eq!(
+        projection
+            .surfaces
+            .goal
+            .as_ref()
+            .unwrap()
+            .completion_report
+            .as_deref(),
+        Some(report)
+    );
+    let details = projection
+        .scrollback
+        .iter_entries()
+        .find_map(|(_, entry)| match &entry.block {
+            RenderBlock::Notice(notice) if notice.text.starts_with("Goal ·") => {
+                notice.details.as_deref()
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(details.contains(report));
+    assert!(
+        details.find("Completion report:").unwrap() < details.find("Recorded elapsed:").unwrap()
+    );
+}
+
+#[test]
 fn empty_id_clear_removes_goal_and_stale_updates_cannot_restore_it() {
     let mut projection = TranscriptProjection::default();
     projection.apply(grow_event(goal_update(

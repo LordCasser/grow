@@ -376,6 +376,7 @@ impl RecordedSurfaces {
                 created_at,
                 updated_at,
                 status_message,
+                completion_report,
             } => {
                 if status == "cleared" {
                     if goal_id.is_empty()
@@ -398,6 +399,7 @@ impl RecordedSurfaces {
                         created_at: created_at.clone(),
                         updated_at: updated_at.clone(),
                         status_message: status_message.clone(),
+                        completion_report: completion_report.clone(),
                         received_at: now,
                         elapsed_floor_ms: *elapsed_ms,
                     });

@@ -278,9 +278,9 @@ pub(crate) struct ChatState {
     /// Provider-anchored projection of the current model-visible context.
     /// Lifetime and per-prompt billing live exclusively in `UsageLedger`.
     pub projected_tokens: u64,
-    /// Canonical Surface estimate at the last final request projection.
+    /// Canonical Surface estimate at initialization or the last request projection.
     pub projected_request_surface_tokens: u64,
-    /// Provider-visible input estimate at the last final request projection.
+    /// Portable input estimate at initialization or the last final request estimate.
     /// The difference from `projected_request_surface_tokens` is the sole
     /// request-envelope adjustment carried across provider anchors.
     pub projected_request_input_tokens: u64,
@@ -862,7 +862,14 @@ impl ChatState {
         timeline: Timeline,
         sampling_config: SamplingConfig,
     ) -> Result<Self, crate::TimelineWriteError> {
-        let initial_tokens = estimate_conversation_tokens(timeline.surface());
+        let surface_tokens = estimate_conversation_tokens(timeline.surface());
+        // A restored continuation lane starts with portable replay, not the
+        // raw history's retained reasoning. Keep both baselines so later
+        // Surface deltas and request envelopes still apply exactly once.
+        let initial_tokens = estimate_wire_items(
+            &project_portable_history_with_reasoning(timeline.surface(), None),
+            false,
+        );
         let (
             settled_model_attempts,
             auxiliary_attempts,
@@ -880,7 +887,7 @@ impl ChatState {
             timeline,
             sampling_config,
             projected_tokens: initial_tokens,
-            projected_request_surface_tokens: initial_tokens,
+            projected_request_surface_tokens: surface_tokens,
             projected_request_input_tokens: initial_tokens,
             stream_start_ms: None,
             turn_start_ms: None,
@@ -968,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn new_state_estimates_tokens_from_conversation() {
+    fn new_state_estimates_portable_tokens_and_preserves_raw_baseline() {
         // 4000 bytes of text per item, bytes / 4 = 1000 tokens each
         let items = vec![
             ConversationItem::system("x".repeat(4000).as_str()),
@@ -977,7 +984,11 @@ mod tests {
             ConversationItem::tool_result("call-1", "w".repeat(4000).as_str()),
         ];
         let state = ChatState::new(items, test_sampling_config());
-        assert_eq!(state.projected_tokens, 4000); // 4 * (4000/4)
+        // The orphan result remains in history, but portable replay omits it.
+        assert_eq!(state.timeline.surface_len(), 4);
+        assert_eq!(state.projected_request_surface_tokens, 4000);
+        assert_eq!(state.projected_request_input_tokens, 3000);
+        assert_eq!(state.projected_tokens, 3000);
     }
 
     #[test]

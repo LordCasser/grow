@@ -396,6 +396,7 @@ pub struct GoalDisplayState {
     pub created_at: String,
     pub updated_at: String,
     pub status_message: Option<String>,
+    pub completion_report: Option<String>,
     /// Wall-clock instant when this state was last updated from a GoalUpdated
     /// notification. Used to compute local elapsed delta between notifications
     /// so the pager can tick elapsed_ms at render frequency.
@@ -436,6 +437,7 @@ impl GoalDisplayState {
             created_at: "now".into(),
             updated_at: "now".into(),
             status_message: None,
+            completion_report: None,
             received_at: std::time::Instant::now(),
             elapsed_floor_ms: 0,
         }

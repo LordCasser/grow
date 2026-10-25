@@ -13,7 +13,8 @@ fn send_goal_update(app: &mut AppView, status: &str, objective: &str) -> bool {
             "elapsed_ms": 750,
             "created_at": "2026-08-24T00:00:00Z",
             "updated_at": "2026-08-24T00:01:00Z",
-            "status_message": "next slice"
+            "status_message": "next slice",
+            "completion_report": (status == "complete").then_some("Results: shipped. Evidence: checks passed. Limitations: none.")
         }
     });
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
@@ -79,6 +80,16 @@ fn goal_replay_only_hydrates_state_even_in_goal_behavior() {
         assert!(send_goal_update(&mut app, status, "ship it"));
         assert!(app.agents[&AgentId(0)].scrollback.is_empty());
     }
+    assert_eq!(
+        app.agents[&AgentId(0)]
+            .session
+            .goal_state
+            .as_ref()
+            .unwrap()
+            .completion_report
+            .as_deref(),
+        Some("Results: shipped. Evidence: checks passed. Limitations: none.")
+    );
 }
 
 #[test]

@@ -1155,3 +1155,36 @@ A failure returned by the tool execution pipeline SHALL stop the admitted model 
 #### Scenario: Foreground context advances during the failed request
 - **WHEN** /btw's frozen provider request fails while main context advances
 - **THEN** /btw returns the failure without projecting either its frozen images or images from the newer Surface
+
+### Requirement: Skill publication uses projected request context pressure
+
+User and model skill publication SHALL check existing context using ChatState's current provider-anchored request projection, including committed Surface deltas and the current request envelope adjustment. The commit SHALL add the estimate of all complete new user/result/skill items and recheck the current Surface revision and reserved headroom. Raw history omitted by provider projection SHALL NOT independently cause rejection; known provider overhead SHALL NOT be discarded. The dependent request's final projection and budget validation SHALL remain required.
+
+#### Scenario: Raw history exceeds projected request size
+
+- **WHEN** raw history includes reasoning omitted by the request projection and the current projected context plus a complete skill group fits the reserved budget
+- **THEN** the group may publish atomically without rejecting solely because the raw Surface estimate is larger.
+
+#### Scenario: Provider accounting exhausts available space
+
+- **WHEN** the current provider anchor plus complete new skill content exceeds reserved headroom, even without a Surface revision change
+- **THEN** user publication rejects without consuming or exposing any part of the group, and model publication uses its existing paired rejection result without publishing skill guidance.
+
+### Requirement: Cold context pressure follows portable replay
+
+When cold restoration starts a new native continuation lane, ChatState SHALL initialize context pressure from the provider-neutral portable history that this lane can replay, without counting omitted historical reasoning. It SHALL retain the raw Surface estimate separately as the signed mutation baseline. The first real request SHALL add its current request envelope through the existing projection path, and later provider observations SHALL remain authoritative anchors. Initialization SHALL NOT delete history, start provider work, fabricate usage, or clamp genuine overflow to the model window.
+
+#### Scenario: Resume retains reasoning that is omitted from replay
+
+- **WHEN** a restored Timeline contains enough historical reasoning to make its raw estimate exceed the window, while portable message content fits
+- **THEN** context pressure reflects the portable message estimate before the first prompt, and the raw reasoning remains available in Timeline.
+
+#### Scenario: A new message follows restoration
+
+- **WHEN** a committed Surface append and a normal request build follow cold initialization
+- **THEN** the new content is counted once, and request projection replaces the prior envelope adjustment without reintroducing omitted reasoning or subtracting it twice.
+
+#### Scenario: Portable content is genuinely too large
+
+- **WHEN** portable replay itself exceeds the configured model window
+- **THEN** the restored context count remains above the window rather than being clipped for display.

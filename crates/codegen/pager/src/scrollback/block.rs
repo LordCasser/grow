@@ -1180,6 +1180,7 @@ impl RenderBlock {
         match self {
             RenderBlock::AgentMessage(_)
             | RenderBlock::Thinking(_)
+            | RenderBlock::Btw(_)
             | RenderBlock::ToolCall(ToolCallBlock::Execute(_))
             | RenderBlock::ToolCall(ToolCallBlock::Edit(_))
             | RenderBlock::ToolCall(ToolCallBlock::WebFetch(_))

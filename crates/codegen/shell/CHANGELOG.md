@@ -1,5 +1,11 @@
 # Changelog
 
+# 2.5.1 — 2026-10-25
+
+保存并展示 Goal 完成报告，修正冷恢复与技能加载的上下文计数、忙碌时 effort 同步，并扩大全屏 `/btw` 结果弹窗。
+
+完整发布说明见 [changelogs/2.5.1.md](https://github.com/LordCasser/grow/blob/v2.5.1/crates/codegen/shell/changelogs/2.5.1.md)。
+
 # 2.5.0 — 2026-10-22
 
 重组会话历史存储与恢复链路，减少长会话重复读取、解析和 TUI 扫描，并补齐图片、持久化及子会话恢复验证。新账本不自动迁移旧会话，升级前请查看说明并备份 GROW_HOME。

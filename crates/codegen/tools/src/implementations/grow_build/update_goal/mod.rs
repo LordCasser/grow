@@ -46,6 +46,32 @@ pub struct UpdateGoalInput {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<String>,
+    #[schemars(
+        description = "Required when status is complete: the full completion report explaining how the entire objective was achieved, concrete evidence and verification results, and any remaining limitations. Archived with the Goal and visible from Goal: Done. Omit when blocked."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_report: Option<String>,
+}
+
+impl UpdateGoalInput {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self.status {
+            GoalUpdateStatus::Complete
+                if self
+                    .completion_report
+                    .as_deref()
+                    .is_none_or(|report| report.trim().is_empty()) =>
+            {
+                Err(
+                    "Goal completion requires a non-empty completion_report with results, evidence, verification and remaining limitations.",
+                )
+            }
+            GoalUpdateStatus::Blocked if self.completion_report.is_some() => {
+                Err("completion_report is only accepted when completing the Goal.")
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -63,6 +89,8 @@ pub struct GoalView {
     pub created_at: String,
     pub updated_at: String,
     pub status_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_report: Option<String>,
 }
 
 impl tool_runtime::ToolOutput for GoalView {}
@@ -377,7 +405,7 @@ pub struct UpdateGoalTool;
 goal_metadata!(
     UpdateGoalTool,
     ToolKind::GoalLifecycleUpdate,
-    "Mark the current Goal complete only when authoritative current evidence proves the entire objective is achieved. Mark it blocked only after the same genuine impasse recurs for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. After a blocked Goal is restarted, count those three turns afresh from the resumed run. Pause, resume, edit, budget, and clear are user-owned controls.",
+    "Mark the current Goal complete only when authoritative current evidence proves the entire objective is achieved, and supply completion_report with the full results, completion evidence, verification and remaining limitations for archival in Goal: Done. Mark it blocked only after the same genuine impasse recurs for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. After a blocked Goal is restarted, count those three turns afresh from the resumed run. Pause, resume, edit, budget, and clear are user-owned controls.",
     true
 );
 
@@ -434,5 +462,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn completion_requires_a_report_and_blocked_cannot_archive_one() {
+        for report in [None, Some(""), Some(" \n\t")] {
+            let input = UpdateGoalInput {
+                status: GoalUpdateStatus::Complete,
+                blocker: None,
+                completion_report: report.map(str::to_owned),
+            };
+            assert!(input.validate().is_err());
+        }
+        let mut input: UpdateGoalInput = serde_json::from_value(serde_json::json!({
+            "status": "complete",
+            "completion_report": "Results: shipped. Evidence: checks passed. Limitations: none."
+        }))
+        .unwrap();
+        assert!(input.validate().is_ok());
+        input.status = GoalUpdateStatus::Blocked;
+        assert!(input.validate().is_err());
+        input.completion_report = None;
+        assert!(input.validate().is_ok());
     }
 }

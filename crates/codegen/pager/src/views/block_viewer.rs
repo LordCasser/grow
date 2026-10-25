@@ -102,6 +102,8 @@ pub struct DiffLineMeta {
 pub enum ViewerKind {
     /// Thinking or AgentMessage (markdown content).
     Markdown,
+    /// Saved `/btw` answer (read-only markdown).
+    Btw,
     /// Execute tool call (stdout).
     Execute,
     /// Edit tool call (diff).
@@ -259,7 +261,11 @@ impl BlockViewerPane {
 
         Some(Self {
             entry_id,
-            kind: ViewerKind::Markdown,
+            kind: if matches!(entry.block, RenderBlock::Btw(_)) {
+                ViewerKind::Btw
+            } else {
+                ViewerKind::Markdown
+            },
             list_state,
             list_style: ListPaneStyle {
                 uniform_visual_bg: true,
@@ -813,7 +819,7 @@ impl BlockViewerPane {
             RenderBlock::Notice(notice) if notice.communication_body().is_some() => {
                 Self::for_communication(entry.id, entry)
             }
-            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) => {
+            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_) => {
                 Self::for_markdown(entry.id, entry)
             }
             RenderBlock::ToolCall(ToolCallBlock::Execute(_)) => Self::for_execute(entry.id, entry),
@@ -1035,6 +1041,7 @@ impl BlockViewerPane {
         match block {
             RenderBlock::Thinking(b) => Some(b.content().pre_wrap_lines()),
             RenderBlock::AgentMessage(b) => Some(b.content().pre_wrap_lines()),
+            RenderBlock::Btw(b) => Some(b.content().pre_wrap_lines()),
             _ => None,
         }
     }
@@ -1083,6 +1090,7 @@ impl BlockViewerPane {
         match block {
             RenderBlock::Thinking(b) => Some(b.content().generation()),
             RenderBlock::AgentMessage(b) => Some(b.content().generation()),
+            RenderBlock::Btw(b) => Some(b.content().generation()),
             RenderBlock::ToolCall(ToolCallBlock::Execute(b)) => {
                 Some(b.output.as_ref().map_or(0, |o| o.len()) as u64)
             }
@@ -1119,7 +1127,7 @@ impl BlockViewerPane {
     /// Invalidates the ListPane layout cache since item content/heights may differ.
     pub fn rebuild_items(&mut self, entry: &ScrollbackEntry) {
         match self.kind {
-            ViewerKind::Markdown => {
+            ViewerKind::Markdown | ViewerKind::Btw => {
                 if let Some(lines) = Self::extract_markdown_lines(&entry.block) {
                     self.items = ContentLine::from_lines(&lines);
                     self.list_state.invalidate_layout();
@@ -1236,6 +1244,7 @@ impl BlockViewerPane {
             ViewerKind::Markdown => {
                 hints.push(HintItem::new(crate::key!('r'), "raw"));
             }
+            ViewerKind::Btw => {}
             ViewerKind::Communication => {
                 hints.push(HintItem::new(crate::key!('r'), "raw"));
                 hints.push(HintItem::new(crate::key!('D'), "data"));
@@ -2042,6 +2051,19 @@ mod tests {
         assert_eq!(
             BlockViewerPane::for_entry(&markdown).unwrap().kind,
             ViewerKind::Markdown
+        );
+
+        let btw = ScrollbackEntry::new(RenderBlock::Btw(crate::scrollback::blocks::BtwBlock::new(
+            "why?",
+            "an **answer**",
+        )));
+        let btw_viewer = BlockViewerPane::for_entry(&btw).expect("saved answer viewer");
+        assert_eq!(btw_viewer.kind, ViewerKind::Btw);
+        assert!(
+            btw_viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("answer"))
         );
 
         let execute = ScrollbackEntry::new(RenderBlock::execute_with_output(

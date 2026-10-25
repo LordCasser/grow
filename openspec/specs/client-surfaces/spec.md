@@ -4311,3 +4311,63 @@ Session load MAY reuse root child-ownership facts already validated for the same
 #### Scenario: Optional ownership exceeds the response budget
 - **WHEN** the root ownership projection would exceed the bounded optional response payload
 - **THEN** the server omits the whole optimization and restoration uses the independently validated fallback, without truncating ownership into an incomplete or empty verified tree.
+
+### Requirement: Busy Sampling control terminals release matching model projections
+
+Pager SHALL update the owning session's visible model and reasoning effort from an authoritative `ModelChanged` that was parked behind a local Sampling intent once that intent's matching terminal control state resolves. The update SHALL remain independent of other pending control domains and SHALL preserve the Shell's step boundary and terminal notice semantics.
+
+#### Scenario: Effort changes while the session is busy
+
+- **WHEN** a running session receives `ModelChanged` for a new effort before the matching effort-only Sampling control reaches its applied terminal state
+- **THEN** Pager displays the new effort after that terminal state without requiring another user action or turn completion
+
+#### Scenario: Another control is still pending
+
+- **WHEN** the matching Sampling terminal resolves while an Agent or Behavior control remains pending
+- **THEN** Pager applies the parked Sampling projection without waiting for that other control
+
+#### Scenario: Unmatched terminal cannot release the pending intent
+
+- **WHEN** a terminal receipt does not match the currently pending Sampling intent
+- **THEN** Pager keeps that intent and its parked authoritative model projection pending
+
+### Requirement: Fullscreen side-question answers use a large popup
+
+In the fullscreen TUI, an active `/btw` request SHALL display its question, loading, answer, or error in a popup sized like the fullscreen Plan preview instead of reserving a short inline transcript strip. The popup SHALL keep answer Markdown, links, text selection, scrolling and the existing dismissal behavior. Covered transcript controls and links SHALL NOT receive popup clicks. The normal prompt SHALL remain usable.
+
+#### Scenario: A long answer arrives
+
+- **WHEN** `/btw` returns a long Markdown answer in the fullscreen TUI
+- **THEN** the answer appears in a large popup with a scrollable body and the transcript does not lose rows to an inline panel.
+
+#### Scenario: An answer is dismissed and revisited
+
+- **WHEN** the user dismisses a completed `/btw` popup and double-clicks its saved transcript row
+- **THEN** the full answer opens in a read-only popup of the same size, with the original question and Markdown content available.
+
+#### Scenario: A popup covers a transcript link or control
+
+- **WHEN** the user clicks within the `/btw` popup over an underlying transcript target
+- **THEN** only the popup target handles the click.
+
+### Requirement: Done Goal details expose the archived completion report
+
+Pager SHALL 通过现有状态栏 `Goal: Done` 点击入口，在 Goal 详情中显示归档的完整完成报告与原目标，并允许滚动查看长报告。报告 SHALL 在用量前展示。实时通知、恢复与只读回放 SHALL 保留报告原文，历史 Complete 没有报告时 SHALL 明确显示未归档，而不是推测完成原因。
+
+#### Scenario: Open Done Goal
+- **WHEN** 用户点击有完成报告的 `Goal: Done`
+- **THEN** 打开既有 Goal 详情并可查看完整报告、原目标与用量，长报告可通过既有键盘和滚轮操作浏览。
+
+#### Scenario: Restore completed Goal
+- **WHEN** 已完成 Goal 被恢复或只读回放
+- **THEN** 详情保留归档原文，不重新生成报告或发起 Goal 工作。
+
+#### Scenario: Workflow history coexists with Done Goal
+- **WHEN** 会话仍保留 Workflow 历史，用户点击当前 `Goal: Done`
+- **THEN** 打开 Goal 报告详情，Workflow 历史不得截走该入口。
+
+#### Scenario: Historical report is absent
+- **WHEN** 用户查看没有已归档报告的历史 Complete Goal
+- **THEN** 详情明确说明该 Goal 没有归档的完成报告。
+
+实施入口：`shell/src/session/goal_notification.rs`、`shell/src/session/history/grow_facts.rs`、`pager/src/app/acp_handler/session_notification.rs`、`pager/src/views/goal_detail.rs`。

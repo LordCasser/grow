@@ -644,6 +644,78 @@ async fn restored_actor_replays_surface_and_continues_event_sequence() {
 }
 
 #[tokio::test]
+async fn cold_context_pressure_matches_portable_request_and_preserves_real_overflow() {
+    for backend in [
+        sampling_types::ApiBackend::ChatCompletions,
+        sampling_types::ApiBackend::Responses,
+        sampling_types::ApiBackend::Messages,
+    ] {
+        for (user_bytes, reasoning_bytes) in [(800, 80_000), (48_000, 0)] {
+            let mut items = vec![
+                ConversationItem::system("s".repeat(512)),
+                ConversationItem::user("u".repeat(user_bytes)),
+            ];
+            if reasoning_bytes > 0 {
+                items.push(ConversationItem::Reasoning(
+                    sampling_types::synthesized_reasoning_item("r".repeat(reasoning_bytes)),
+                ));
+            }
+            items.push(ConversationItem::assistant("a".repeat(400)));
+            let timeline = crate::Timeline::from_seed(items.clone()).unwrap();
+            let (mock, mut persistence_rx) = MockTimelinePersistence::new();
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let handle = ChatStateActor::spawn_from_timeline(
+                timeline.events().to_vec(),
+                SamplingConfig {
+                    api_backend: backend.clone(),
+                    ..test_config_with_window(10_000)
+                },
+                Box::new(mock),
+                event_tx,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let expected = (512 + user_bytes as u64 + 400) / 4;
+            assert!(crate::estimate_conversation_tokens(&items) > 10_000);
+            assert_eq!(
+                handle.get_projected_tokens().await,
+                expected,
+                "cold pressure must omit unsent reasoning on {backend:?}"
+            );
+            assert_eq!(expected > 10_000, reasoning_bytes == 0);
+            assert_eq!(
+                serde_json::to_value(handle.get_conversation().await).unwrap(),
+                serde_json::to_value(items).unwrap(),
+                "estimating portable pressure must preserve the original history"
+            );
+            assert!(persistence_rx.drain().is_empty());
+
+            handle
+                .push_user_message_durably(ConversationItem::user("n".repeat(400)))
+                .await
+                .unwrap();
+            assert_eq!(handle.get_projected_tokens().await, expected + 100);
+            for _ in 0..2 {
+                let request = handle
+                    .build_request("restored-context", vec![], None, None, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    crate::estimate_request_input_tokens(&request),
+                    expected + 100
+                );
+                assert_eq!(
+                    handle.get_projected_tokens().await,
+                    expected + 100,
+                    "first and repeated request builds must not reset the cold baseline"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn restored_actor_durably_repairs_dangling_tool_surface_before_launch() {
     let timeline = crate::Timeline::from_seed(vec![ConversationItem::Assistant(
         sampling_types::AssistantItem {
@@ -8815,7 +8887,14 @@ async fn prune_tool_results_clamps_after_underreported_anchor_is_ignored() {
     use crate::actor::state::EstimatedItemTokenCounter;
     use compaction::plan_tool_result_pruning;
 
-    let conv = vec![ConversationItem::tool_result("call-1", "x".repeat(4000))];
+    let conv = vec![
+        ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]),
+        ConversationItem::tool_result("call-1", "x".repeat(4000)),
+    ];
     let mut h = TestHarness::with_conversation(conv.clone());
     h.handle.record_provider_context_anchor(10);
     // Sync point: the query is ordered after the fire-and-forget anchor.
@@ -9003,10 +9082,17 @@ async fn prune_tool_results_zero_budget_clamps_instead_of_emptying() {
     // 300 'H' + 300 'T' = 600 bytes. Clamped budget 1 token → 4 bytes:
     // head 2 + marker clipped to its 1-byte room ("\n") + tail 1.
     let content = format!("{}{}", "H".repeat(300), "T".repeat(300));
-    let h = TestHarness::with_conversation(vec![ConversationItem::tool_result("call-1", content)]);
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]),
+        ConversationItem::tool_result("call-1", content),
+    ]);
     let plan = PrunePlan {
         items: vec![PruneItem {
-            index: 0,
+            index: 1,
             tokens_before: 150,
             budget_tokens: 0,
             estimated_savings: 150,
@@ -9020,7 +9106,7 @@ async fn prune_tool_results_zero_budget_clamps_instead_of_emptying() {
         .expect("prune succeeds");
     assert_eq!(report.pruned_count, 1);
     let conversation = h.handle.get_conversation().await;
-    let ConversationItem::ToolResult(tr) = &conversation[0] else {
+    let ConversationItem::ToolResult(tr) = &conversation[1] else {
         panic!("expected tool result");
     };
     assert!(
@@ -11110,6 +11196,172 @@ async fn conditional_skill_input_publishes_user_and_ordered_loads_once() {
         crate::TimelineEventKind::Input(crate::InputEvent::Consumed { skill_loads, .. })
             if skill_loads.len() == 2
     )));
+}
+
+#[tokio::test]
+async fn user_skill_publication_uses_projected_headroom() {
+    for (reasoning_bytes, provider_tokens, expected) in [
+        (80_000, 5_313, crate::ConditionalToolResultOutcome::Accepted),
+        (
+            0,
+            7_900,
+            crate::ConditionalToolResultOutcome::RejectedHeadroom,
+        ),
+    ] {
+        let h = skill_headroom_harness(reasoning_bytes).await;
+        let input_id = "projected-skill-input";
+        let turn = crate::TurnId(960);
+        seed_admitted_prompt_for_turn(&h.handle, input_id, turn).await;
+        let mut user = ConversationItem::user("/review inspect");
+        user.set_prompt_index(0);
+        let skill = user_skill_load(
+            input_id,
+            0,
+            "projected-user-skill",
+            "review",
+            &"complete guidance ".repeat(100),
+        );
+        let added_tokens = crate::estimate_conversation_tokens(&[
+            user.clone(),
+            ConversationItem::SkillLoad(skill.clone()),
+        ]);
+        let revision = h.handle.get_surface_revision().await.unwrap();
+        h.handle.record_provider_context_anchor(provider_tokens);
+        assert_eq!(h.handle.get_projected_tokens().await, provider_tokens);
+        assert_eq!(h.handle.get_surface_revision().await, Some(revision));
+        let before = h.handle.timeline_events().await.unwrap().len();
+        let outcome = h
+            .handle
+            .consume_input_group_conditionally(
+                vec![input_id.into()],
+                turn,
+                user,
+                Some(user_display_echo(input_id, 0, "/review inspect")),
+                vec![skill.clone()],
+                revision,
+                7_952,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, expected, "raw reasoning bytes={reasoning_bytes}");
+        let surface = h.handle.get_conversation().await;
+        if outcome == crate::ConditionalToolResultOutcome::Accepted {
+            assert!(surface.iter().any(|item| matches!(item,
+                ConversationItem::SkillLoad(loaded) if loaded == &skill)));
+            assert_eq!(
+                h.handle.get_projected_tokens().await,
+                provider_tokens + added_tokens
+            );
+        } else {
+            assert_eq!(h.handle.timeline_events().await.unwrap().len(), before);
+            assert!(
+                !surface
+                    .iter()
+                    .any(|item| matches!(item, ConversationItem::SkillLoad(_)))
+            );
+            assert!(
+                !surface
+                    .iter()
+                    .any(|item| item.text_content().contains("/review inspect"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn model_skill_publication_uses_projected_headroom() {
+    for (reasoning_bytes, provider_tokens, expected) in [
+        (80_000, 5_313, crate::ConditionalToolResultOutcome::Accepted),
+        (
+            0,
+            7_900,
+            crate::ConditionalToolResultOutcome::RejectedHeadroom,
+        ),
+    ] {
+        let h = skill_headroom_harness(reasoning_bytes).await;
+        let call_id = "projected-model-skill";
+        seed_admitted_load_skill_call(
+            &h.handle,
+            crate::TurnId(961),
+            call_id,
+            r#"{"name":"review","args":""}"#,
+        )
+        .await;
+        let mut skill = user_skill_load(
+            &format!("model:{call_id}"),
+            0,
+            call_id,
+            "review",
+            &"complete guidance ".repeat(100),
+        );
+        skill.source = sampling_types::SkillLoadSource::Model;
+        let result = ConversationItem::tool_result(
+            call_id,
+            sampling_types::skill_load_result_content(&skill),
+        );
+        let added_tokens = crate::estimate_conversation_tokens(&[
+            result.clone(),
+            ConversationItem::SkillLoad(skill.clone()),
+        ]);
+        let revision = h.handle.get_surface_revision().await.unwrap();
+        h.handle.record_provider_context_anchor(provider_tokens);
+        assert_eq!(h.handle.get_projected_tokens().await, provider_tokens);
+        assert_eq!(h.handle.get_surface_revision().await, Some(revision));
+        let rejection = ConversationItem::tool_result(call_id, "skill headroom exhausted");
+        let rejection_tokens = crate::estimate_item_tokens(&rejection);
+        let outcome = h
+            .handle
+            .publish_model_skill_conditionally(
+                result,
+                skill.clone(),
+                rejection,
+                revision,
+                7_952,
+                2_048,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, expected, "raw reasoning bytes={reasoning_bytes}");
+        let surface = h.handle.get_conversation().await;
+        if outcome == crate::ConditionalToolResultOutcome::Accepted {
+            assert!(surface.iter().any(|item| matches!(item,
+                ConversationItem::SkillLoad(loaded) if loaded == &skill)));
+            assert_eq!(
+                h.handle.get_projected_tokens().await,
+                provider_tokens + added_tokens
+            );
+        } else {
+            assert!(
+                !surface
+                    .iter()
+                    .any(|item| matches!(item, ConversationItem::SkillLoad(_)))
+            );
+            assert!(surface.iter().any(|item| matches!(item,
+                ConversationItem::ToolResult(result)
+                    if result.tool_call_id == call_id && result.content.as_ref() == "skill headroom exhausted")));
+            assert_eq!(
+                h.handle.get_projected_tokens().await,
+                provider_tokens + rejection_tokens
+            );
+        }
+    }
+}
+
+async fn skill_headroom_harness(reasoning_bytes: usize) -> TestHarness {
+    let h = TestHarness::with_config(
+        vec![ConversationItem::Reasoning(
+            sampling_types::synthesized_reasoning_item("x".repeat(reasoning_bytes)),
+        )],
+        test_config_with_window(10_000),
+    );
+    h.handle
+        .build_request("skill-headroom", vec![], None, None, None)
+        .await
+        .unwrap();
+    let raw_tokens = crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
+    assert_eq!(raw_tokens > 10_000, reasoning_bytes > 0);
+    assert!(h.handle.get_projected_tokens().await < 5_313);
+    h
 }
 
 #[tokio::test]

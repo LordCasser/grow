@@ -2569,6 +2569,7 @@ mod btw_focus_tests {
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = false;
         agent.force_active_pane(AgentPane::Scrollback);
+        agent.hit_badge.rect = Some(Rect::new(5, 5, 1, 1));
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 5,
