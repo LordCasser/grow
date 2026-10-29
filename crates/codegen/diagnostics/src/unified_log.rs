@@ -834,11 +834,99 @@ mod tests {
         let writer = Mutex::new(LogWriter::from_open_file(file, path.clone()));
         let dropped = AtomicU64::new(0);
         let (sender, receiver) = mpsc::sync_channel(1);
-        let held = writer.lock().unwrap();
 
         std::thread::scope(|scope| {
+            // Close the queue before scoped-thread joining if an assertion panics.
+            let sender = sender;
             let worker = scope.spawn(|| writer_loop(receiver, &writer, &dropped));
             assert!(enqueue_record(&sender, &dropped, b"first\n".to_vec()));
+            assert!(flush_sender(
+                &sender,
+                Instant::now() + Duration::from_secs(1)
+            ));
+
+            let held = writer.lock().unwrap();
+            assert!(enqueue_record(&sender, &dropped, b"second\n".to_vec()));
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut third = WriterCommand::Record(b"third\n".to_vec());
+            loop {
+                match sender.try_send(third) {
+                    Ok(()) => break,
+                    Err(TrySendError::Full(pending)) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "worker did not take second record"
+                        );
+                        third = pending;
+                        std::thread::yield_now();
+                    }
+                    Err(TrySendError::Disconnected(_)) => panic!("worker stopped"),
+                }
+            }
+            // `third` now occupies the bounded queue while the writer mutex
+            // remains held. The worker may observe the later drop just before
+            // or just after taking `second`'s counter snapshot.
+            let start = Instant::now();
+            assert!(!enqueue_record(&sender, &dropped, b"overflow\n".to_vec()));
+            assert!(start.elapsed() < Duration::from_millis(500));
+            // The worker may already have moved the counter into its pending
+            // diagnostic; the final file proves exact accounting after join.
+            drop(held);
+            drop(sender);
+            worker.join().unwrap();
+        });
+
+        let output = fs::read_to_string(path).unwrap();
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4, "{output}");
+        assert_eq!(lines[0], "first");
+        assert_eq!(lines[3], "third");
+        let diagnostic_index = lines
+            .iter()
+            .position(|line| line.contains("\"records_dropped\""))
+            .expect("one dropped-record diagnostic");
+        assert!(
+            matches!(diagnostic_index, 1 | 2) && lines[1..3].iter().any(|line| *line == "second"),
+            "only the diagnostic may move across second after first; observed {output}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("\"records_dropped\""))
+                .count(),
+            1,
+            "{output}"
+        );
+        let second_index = lines.iter().position(|line| *line == "second").unwrap();
+        assert!(second_index < 3, "real record order changed: {output}");
+        let diagnostic: serde_json::Value = serde_json::from_str(lines[diagnostic_index]).unwrap();
+        assert_eq!(diagnostic["ctx"]["event"], "records_dropped");
+        assert_eq!(diagnostic["ctx"]["count"], 1);
+    }
+
+    #[test]
+    fn overflow_before_first_append_reports_loss_before_first_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unified.jsonl");
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let writer = Mutex::new(LogWriter::from_open_file(file, path.clone()));
+        let dropped = AtomicU64::new(0);
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        assert!(enqueue_record(&sender, &dropped, b"first\n".to_vec()));
+        let start = Instant::now();
+        assert!(!enqueue_record(&sender, &dropped, b"overflow\n".to_vec()));
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+
+        std::thread::scope(|scope| {
+            // Close the queue before scoped-thread joining if an assertion panics.
+            let sender = sender;
+            let worker = scope.spawn(|| writer_loop(receiver, &writer, &dropped));
             let deadline = Instant::now() + Duration::from_secs(1);
             let mut second = WriterCommand::Record(b"second\n".to_vec());
             loop {
@@ -855,11 +943,6 @@ mod tests {
                     Err(TrySendError::Disconnected(_)) => panic!("worker stopped"),
                 }
             }
-            let start = Instant::now();
-            assert!(!enqueue_record(&sender, &dropped, b"third\n".to_vec()));
-            assert!(start.elapsed() < Duration::from_millis(500));
-            assert_eq!(dropped.load(Ordering::Acquire), 1);
-            drop(held);
             drop(sender);
             worker.join().unwrap();
         });
@@ -867,11 +950,19 @@ mod tests {
         let output = fs::read_to_string(path).unwrap();
         let lines = output.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 3, "{output}");
-        assert_eq!(lines[0], "first");
-        assert_eq!(lines[2], "second");
-        let diagnostic: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        let diagnostic: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(diagnostic["ctx"]["event"], "records_dropped");
         assert_eq!(diagnostic["ctx"]["count"], 1);
+        assert_eq!(lines[1], "first");
+        assert_eq!(lines[2], "second");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("\"records_dropped\""))
+                .count(),
+            1,
+            "{output}"
+        );
     }
 
     #[test]

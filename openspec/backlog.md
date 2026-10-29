@@ -30,6 +30,7 @@
 | OCR 后代与并发 fixture 失败清理 | [own-local-ocr-process-tree](changes/archive/2026-10-29-own-local-ocr-process-tree/verification.md) |
 | Plan live handoff 同 Turn 已消费后误报 ACK 丢失 | [fix-plan-handoff-consumption-recheck](changes/archive/2026-10-29-fix-plan-handoff-consumption-recheck/verification.md) |
 | Goal Control 后首请求前 scope 未同步 | [fix-goal-control-context-scope](changes/archive/2026-10-29-fix-goal-control-context-scope/verification.md) |
+| CI 发现日志溢出测试的诊断位置/中间计数时序假设 | [同步测试](changes/archive/2026-10-29-synchronize-unified-log-overflow-test/verification.md)，55项全量及200次精确执行通过 |
 | Runtime 回归未进入正式 Core 门禁 | [gate-backlog-runtime-regressions](changes/gate-backlog-runtime-regressions/verification.md) |
 
 - **Native 分段与 AgentMessage 交错候选**：真实生产 drain 位于整批工具边界，未发现反例生产可达性；关闭待证实项，保留直接构造 adapter 历史/未来新调用方的限制。见 [通路审计](changes/archive/2026-10-29-audit-runtime-native-message-tool-batch-boundary/audit.md)。

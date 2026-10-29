@@ -1,4 +1,4 @@
-# 2.5.2 修复与发布验证
+# 2.5.3 修复与发布验证
 
 ## 范围与版本
 
@@ -43,3 +43,17 @@ OS watcher注册无法取消；LocalSet可先结束等待，runtime仍持有阻�
 
 - 15个本轮已完成独立change已归档；归档后全量严格校验18/18通过，archive验证738/738通过。旧MCP多轮提案与发布阶段记录保持活动，不假勾未完成项。
 - `cargo fmt --all --check`通过；staged源码/规范/开发文档的diff whitespace检查通过。既有原始验证日志和reproduction.patch保留原样，其中有尾空白/空行，不通过全文件whitespace检查，未为检查改写原始证据。连续两次同环境默认CLI构建均无编译，0.99s与0.38s，验证Git监听修复未造成无修改重编译。
+
+## 正式发布执行
+
+- 发布源提交：`1c88fccb4adf18cc57d525685f6e87ddb26353e4`；注解 tag `v2.5.2` 精确指向该提交，已推送官方 origin/main/tag。
+- 干净工作区 `bash scripts/validate-release.sh v2.5.2` 通过，日志 `/tmp/grow-2.5.2-release-preflight.log`。
+- 官方 [release run 40830093920](https://github.com/LordCasser/grow/actions/runs/40830093920) 从 main dispatch，tag=v2.5.2，Linux/macOS/Windows/OHOS 与 publish 全部开启。结果待流水线完成后补齐，当前不宣称发布成功。
+
+### 2.5.2候选被门禁阻止
+
+正式release Core job `123302199979` 与同SHA push Core run `40830080583` 均在已有 diagnostics `blocked_writer_drops_overflow_without_blocking_producer_and_reports_it` 失败：first之前合法出现records_dropped，测试错误固定了诊断位置。日志 `/tmp/grow-2.5.2-ci-core-job.log` 与 `/tmp/grow-2.5.2-pushcore-failed.log`。已取消未发布run以停止无效构建，v2.5.2 tag保留原commit，不移动、不发布失败候选。新建独立test-only change修正同步；下一最小patch为2.5.3，最终重新执行完整门禁。前述“正式发布尚未执行/待完成”均属原候选阶段记录。
+
+### 2.5.3本地候选
+
+生产代码与已全量验证的2.5.2候选相同；新差异仅patch身份/changelog与日志测试同步。最终diagnostics55通过，两个溢出测试100轮/200次执行通过。原子计数已转入待写诊断时不再以中间load假设所有权；线程结束后仍精确核对记录顺序、唯一diagnostic、count=1。scoped闭包自持sender以在断言unwind时先断开队列再join。默认CLI2.5.3构建成功（1m15s），日志 `/tmp/grow-2.5.3-cli.log`。相邻firehose测试无同类固定位置断言。Windows存储同源push门禁 `40830080669` 和Ubuntu协调job已通过；仅属此前同生产源的补充证据，最终2.5.3仍需全量同SHA门禁。
