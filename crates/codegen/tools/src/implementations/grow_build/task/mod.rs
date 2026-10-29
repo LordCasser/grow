@@ -536,6 +536,23 @@ impl tool_runtime::Tool for TaskTool {
             cancel_token: child_cancellation,
         };
 
+        let (task_output_name, task_output_param_names) = {
+            let res = resources.lock().await;
+            let renderer = res.get::<crate::types::template_renderer::TemplateRenderer>();
+            let name = renderer
+                .and_then(|renderer| renderer.tool_for_kind(ToolKind::BackgroundTaskAction))
+                .unwrap_or("get_task_output")
+                .to_string();
+            let param_names = renderer
+                .and_then(|renderer| {
+                    renderer
+                        .param_names()
+                        .remove(&ToolKind::BackgroundTaskAction)
+                })
+                .unwrap_or_default();
+            (name, param_names)
+        };
+
         // 4. Background mode: fire-and-forget via backend.spawn().
         // Coordinator stores the result for TaskOutputTool polling.
         // Both transport errors and coordinator rejections are logged so
@@ -592,22 +609,14 @@ impl tool_runtime::Tool for TaskTool {
                 }
             });
 
-            // `resolve_tool_name` (not a template render): a missing kind
-            // renders as empty-`Ok`, so a `Result` fallback never fires.
-            let task_output_name =
-                crate::types::template_renderer::TemplateRenderer::resolve_tool_name(
-                    &resources,
-                    crate::types::tool::ToolKind::BackgroundTaskAction,
-                )
-                .await
-                .unwrap_or_else(|| "get_task_output".to_string());
-
             return Ok(ToolOutput::Text(
                 tool_types::format_subagent_started_background(
                     &id,
                     &input.subagent_type,
                     &input.description,
                     &task_output_name,
+                    &task_output_param_names,
+                    tool_types::max_wait_block_ms(),
                 )
                 .into(),
             ));
@@ -655,15 +664,6 @@ impl tool_runtime::Tool for TaskTool {
         // still-running child — return a task_id to poll, like the background
         // branch above (the result arrives via auto-wake or a later poll).
         if result.backgrounded {
-            // `resolve_tool_name` (not a template render): a missing kind
-            // renders as empty-`Ok`, so a `Result` fallback never fires.
-            let task_output_name =
-                crate::types::template_renderer::TemplateRenderer::resolve_tool_name(
-                    &resources,
-                    crate::types::tool::ToolKind::BackgroundTaskAction,
-                )
-                .await
-                .unwrap_or_else(|| "get_task_output".to_string());
             // Only promise a completion notification when the client
             // actually delivers system reminders.
             let notify_clause = if resources
@@ -684,7 +684,9 @@ impl tool_runtime::Tool for TaskTool {
                  subagent_id: {id}\n\
                  type: {}\n\
                  description: {}\n\n\
-                 Use {task_output_name} with task_ids=[\"{id}\"] and timeout_ms to wait for results.",
+                 Once independent work is done, use {task_output_name}'s blocking wait on this original \
+                 subagent ID with a positive wait timeout within its limit. Do not launch sleep commands \
+                 or extra tasks merely to wait. Check the returned status before treating the child as completed.",
                     input.subagent_type, input.description,
                 )
                 .into(),
@@ -1261,7 +1263,7 @@ mod tests {
                     text.text
                 );
                 assert!(
-                    text.text.contains("timeout_ms"),
+                    text.text.contains("positive wait timeout"),
                     "should instruct the model to wait: {}",
                     text.text
                 );
@@ -1422,7 +1424,20 @@ mod tests {
     #[tokio::test]
     async fn background_spawn_succeeds_when_coordinator_accepts() {
         let (backend, mut rx) = make_backend();
-        let resources = resources_for_task(backend);
+        let mut resources = resources_for_task(backend);
+        resources.insert(crate::types::template_renderer::TemplateRenderer::new(
+            std::collections::HashMap::from([(
+                ToolKind::BackgroundTaskAction,
+                "await_result".to_string(),
+            )]),
+            std::collections::HashMap::from([(
+                ToolKind::BackgroundTaskAction,
+                std::collections::HashMap::from([
+                    ("task_ids".to_string(), "jobs".to_string()),
+                    ("timeout_ms".to_string(), "max_wait".to_string()),
+                ]),
+            )]),
+        ));
 
         let drain = tokio::spawn(async move {
             if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
@@ -1436,17 +1451,22 @@ mod tests {
             }
         });
 
-        let result = tool_runtime::Tool::run(
-            &TaskTool,
-            test_ctx(resources.into_shared()),
-            task_input("general-purpose", true),
-        )
-        .await
-        .expect("background spawn should succeed");
+        let mut input = task_input("general-purpose", true);
+        input.task_id = Some("original-child".to_string());
+        let result = tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+            .await
+            .expect("background spawn should succeed");
 
         match result {
             ToolOutput::Text(text) => {
                 assert!(text.text.contains("Subagent started in background"));
+                let (before_json, rest) = text.text.split_once("```json\n").unwrap();
+                assert!(before_json.ends_with("await_result:\n"));
+                let (json, _) = rest.split_once("\n```").unwrap();
+                let args: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(args["jobs"], serde_json::json!(["original-child"]));
+                assert_eq!(args["max_wait"], tool_types::max_wait_block_ms());
+                assert_eq!(args.as_object().unwrap().len(), 2);
             }
             other => panic!("expected text output, got {other:?}"),
         }

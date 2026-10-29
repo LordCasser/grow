@@ -198,12 +198,26 @@ impl SessionActor {
             }
             let body = if recipe.run_in_background {
                 match self.tool_context.task_output_tool_name.as_deref() {
-                    Some(output_tool) => tool_types::format_subagent_started_background(
-                        &task_id,
-                        &spawn.subagent_type,
-                        &spawn.description,
-                        output_tool,
-                    ),
+                    Some(output_tool) => {
+                        let bridge = self.agent.borrow().tool_bridge().clone();
+                        let param_names = bridge
+                            .read_resource::<tools::types::template_renderer::TemplateRenderer>()
+                            .await
+                            .and_then(|renderer| {
+                                renderer
+                                    .param_names()
+                                    .remove(&tools::types::tool::ToolKind::BackgroundTaskAction)
+                            })
+                            .unwrap_or_default();
+                        tool_types::format_subagent_started_background(
+                            &task_id,
+                            &spawn.subagent_type,
+                            &spawn.description,
+                            output_tool,
+                            &param_names,
+                            tool_types::max_wait_block_ms(),
+                        )
+                    }
                     None => format!(
                         "Original background subagent restored. subagent_id: {task_id}. Its completion remains owned by the original coordinator."
                     ),

@@ -253,19 +253,41 @@ impl SubagentCompletedOutput {
 
 /// Render the model-facing notice for a subagent that was spawned in the
 /// background and is still running: its id/type/description plus a hint to
-/// poll it via the task-output tool.
+/// wait for its result through the existing task-output tool.
 pub fn format_subagent_started_background(
     subagent_id: &str,
     subagent_type: &str,
     description: &str,
     task_output_tool_name: &str,
+    task_output_param_names: &std::collections::HashMap<String, String>,
+    max_wait_ms: u64,
 ) -> String {
+    let wait_example = if max_wait_ms > 0 {
+        let task_ids_param = task_output_param_names
+            .get("task_ids")
+            .map(String::as_str)
+            .unwrap_or("task_ids");
+        let timeout_param = task_output_param_names
+            .get("timeout_ms")
+            .map(String::as_str)
+            .unwrap_or("timeout_ms");
+        let args = serde_json::json!({
+            task_ids_param: [subagent_id],
+            timeout_param: max_wait_ms,
+        });
+        format!("\n\nBlocking wait example — {task_output_tool_name}:\n```json\n{args}\n```")
+    } else {
+        "\n\nBlocking waits are disabled by the current zero wait limit.".to_string()
+    };
     format!(
         "Subagent started in background.\n\
          subagent_id: {subagent_id}\n\
          type: {subagent_type}\n\
          description: {description}\n\n\
-         Use {task_output_tool_name} with task_ids=[\"{subagent_id}\"] and timeout_ms to wait for results."
+         Continue useful independent work. When this result is needed and no independent work remains, \
+         use {task_output_tool_name} on this original subagent ID to retrieve or wait for its result. \
+         Do not launch sleep commands, polling loops, or extra tasks merely to wait. \
+         Check the returned status: the wait ending does not mean the child completed or its result was accepted.{wait_example}"
     )
 }
 
@@ -815,7 +837,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
          - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
          - Describe the objective, necessary inputs and unresolved assumptions, expected deliverable, write boundaries, and acceptance criteria. Include the task-specific evidence and constraints needed to work independently. Keep the assignment proportional to its scope; no fixed report schema is required.\n\
-         - Use {run_in_background_param}=true when useful independent work can proceed alongside the subagent. If no worthwhile independent work remains, wait through the available task mechanism. A returned result still requires verification appropriate to its intended use.\n\
+         - Use {run_in_background_param}=true when useful independent work can proceed alongside the subagent. Once that work is done and its result is needed next, use {background_retrieval_tool}'s blocking wait on the original subagent ID with a positive wait timeout. Do not launch a sleep command, a polling loop, or another task merely to wait. A returned result still requires verification appropriate to its intended use.\n\
          - The runtime supplies project-instruction and capability context. Include task-specific constraints and relevant evidence in the assignment; do not assume that the child knows your unstated decisions or current plan. Refer to applicable project instructions instead of inventing or overriding them.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\n\
          Resuming a previous agent (resume_from):\n\
@@ -977,6 +999,65 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_receipt_wait_example_is_callable_with_parameter_mapping() {
+        for (param_names, max_wait_ms) in [
+            (std::collections::HashMap::new(), MAX_WAIT_BLOCK_MS_DEFAULT),
+            (
+                std::collections::HashMap::from([
+                    ("task_ids".to_string(), "jobs".to_string()),
+                    ("timeout_ms".to_string(), "max_wait".to_string()),
+                ]),
+                50,
+            ),
+            (
+                std::collections::HashMap::from([("task_ids".to_string(), "jobs".to_string())]),
+                1,
+            ),
+        ] {
+            let id = "original-child-\"quoted\"";
+            let notice = format_subagent_started_background(
+                id,
+                "explore",
+                "Inspect code",
+                "await_result",
+                &param_names,
+                max_wait_ms,
+            );
+            let (before_json, rest) = notice.split_once("```json\n").unwrap();
+            assert!(before_json.ends_with("await_result:\n"));
+            let (json, _) = rest.split_once("\n```").unwrap();
+            let mut args: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(json).unwrap();
+            // Apply the same direction as runtime argument unmapping before
+            // decoding the actual wait input, including partial rename maps.
+            for (canonical, client_name) in &param_names {
+                let value = args.remove(client_name).unwrap();
+                args.insert(canonical.clone(), value);
+            }
+            let input: TaskOutputToolInput =
+                serde_json::from_value(serde_json::Value::Object(args)).unwrap();
+            assert!(input.waits());
+            assert_eq!(input.resolved_task_ids(), [id]);
+            assert_eq!(input.timeout_ms, Some(max_wait_ms));
+        }
+    }
+
+    #[test]
+    fn background_receipt_zero_wait_allowance_has_no_blocking_example() {
+        let notice = format_subagent_started_background(
+            "original-child",
+            "explore",
+            "Inspect code",
+            "await_result",
+            &std::collections::HashMap::new(),
+            0,
+        );
+        assert!(!notice.contains("```json"));
+        assert!(notice.contains("await_result"));
+        assert!(notice.contains("original-child"));
+    }
 
     #[test]
     fn subagent_capability_default_is_read_write() {

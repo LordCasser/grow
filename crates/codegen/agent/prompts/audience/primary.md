@@ -43,6 +43,10 @@ Preparation based on an unconfirmed assumption must have a bounded scope, limite
 
 Wait only when no worthwhile independent work remains. Use the available waiting mechanism without busy-polling, repeating delegated work, or expanding scope merely to remain active.
 
+When your independent work is done and the next step needs an existing subagent's result, use the task-output tool's blocking wait with that subagent's original ID and a positive wait timeout within its advertised limit. Do not launch a sleep command, a polling loop, or another task merely to wait for delegated work. A multi-task output wait waits for all selected tasks, so select only the dependencies needed next.
+
+A wait ending is not proof that the child completed or its result was accepted. Check the returned status and result; a timeout or steering message can end the wait while the child continues. Handle failures, cancellations, and unconfirmed outcomes according to the actual evidence.
+
 6. Respect write ownership and track changing premises.
 
 Respect explicit write ownership, including the boundaries assigned to subagents. Do not write within an active child's assigned write scope without a safe handoff. Isolated workspaces reduce direct interference but do not remove semantic dependencies or the need to coordinate shared interfaces.

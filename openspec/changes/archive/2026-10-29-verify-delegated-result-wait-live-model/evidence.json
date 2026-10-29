@@ -1,0 +1,185 @@
+{
+  "date": "2026-10-29",
+  "model": "opencode/deepseek-v4.1-flash",
+  "reasoning_effort": "max",
+  "provider_backend": "chat_completions",
+  "real_provider": true,
+  "mock_model": false,
+  "tool_filter_used": false,
+  "headless_automatic_background_wait": false,
+  "max_turns": 10,
+  "duration_s": 64.771,
+  "exit_code": 0,
+  "build": {
+    "rust": "1.93.1",
+    "cargo": "1.93.1",
+    "features": "--no-default-features --features sandbox-enforce",
+    "allocator": "system",
+    "binary_sha256": "01167cb1baf5a0894390db7e7dddeaac0d03c3f9b3dcbb0a3287047ffc1d3f81",
+    "source_sha256": {
+      "crates/codegen/agent/prompts/audience/primary.md": "1f3d20926be32de9affb34612c1fdf140aeaa8463d6842c1fa1fa7ca9067d3de",
+      "crates/common/tool-types/src/task.rs": "eb5147379501ab27143f2bdbb2843b8ac50596e4348d5e1b1c1e59330c590a26"
+    }
+  },
+  "primary_session_id": "01a1875e-f3dd-7dd1-9f4e-421704b8b940",
+  "child_session_id": "01a1875f-35cf-76d2-ad04-31ac59efaeb1",
+  "parent_tool_count": 11,
+  "child_tool_count": 7,
+  "original_background_receipt": "Subagent started in background.\nsubagent_id: 01a1875f-35cf-76d2-ad04-31ac59efaeb1\ntype: general-purpose\ndescription: Run remote report job\n\nContinue useful independent work. When this result is needed and no independent work remains, use get_command_or_subagent_output on this original subagent ID to retrieve or wait for its result. Do not launch sleep commands, polling loops, or extra tasks merely to wait. Check the returned status: the wait ending does not mean the child completed or its result was accepted.\n\nBlocking wait example — get_command_or_subagent_output:\n```json\n{\"task_ids\":[\"01a1875f-35cf-76d2-ad04-31ac59efaeb1\"],\"timeout_ms\":600000}\n```",
+  "primary_calls": [
+    {
+      "seq": 25,
+      "at_ms": 1793272513778,
+      "id": "call_00_zlbdvygmz7ycfyx0bs2p6yom",
+      "name": "list_dir",
+      "arguments": {
+        "target_directory": "."
+      },
+      "stream_elapsed_s": 8.557
+    },
+    {
+      "seq": 25,
+      "at_ms": 1793272513778,
+      "id": "call_01_2zjfc1mhqpe3z7xps3oph01x",
+      "name": "run_terminal_command",
+      "arguments": {
+        "command": "ls -la",
+        "description": "List workspace files with details"
+      },
+      "stream_elapsed_s": 8.599
+    },
+    {
+      "seq": 65,
+      "at_ms": 1793272516010,
+      "id": "call_00_jzesqzwbc4289yf4axkf4ke2",
+      "name": "read_file",
+      "arguments": {
+        "target_file": "ledger.csv"
+      },
+      "stream_elapsed_s": 10.789
+    },
+    {
+      "seq": 65,
+      "at_ms": 1793272516010,
+      "id": "call_01_3p2mjt7l7ih8x7r9sp02vmjs",
+      "name": "read_file",
+      "arguments": {
+        "target_file": "remote_report.py"
+      },
+      "stream_elapsed_s": 10.83
+    },
+    {
+      "seq": 100,
+      "at_ms": 1793272526124,
+      "id": "call_00_b1sv9w2gnvm766qafju5weps",
+      "name": "spawn_subagent",
+      "arguments": {
+        "subagent_type": "general-purpose",
+        "description": "Run remote report job",
+        "background": true
+      },
+      "stream_elapsed_s": 20.898,
+      "child_assignment_omitted": true
+    },
+    {
+      "seq": 100,
+      "at_ms": 1793272526124,
+      "id": "call_01_r5ht2e883iaegjp9ag6ovk5m",
+      "name": "run_terminal_command",
+      "arguments": {
+        "command": "python3 - <<'PY'\nimport csv\nfrom decimal import Decimal\nwith open('ledger.csv', newline='') as f:\n    rows = list(csv.DictReader(f))\ntotal = sum(Decimal(r['amount']) for r in rows)\nprint('rows:', len(rows))\nprint('total:', total)\nprint('fields:', rows[0].keys() if rows else None)\nPY",
+        "description": "Compute ledger entry count and amount sum"
+      },
+      "stream_elapsed_s": 20.949
+    },
+    {
+      "seq": 141,
+      "at_ms": 1793272528603,
+      "id": "call_00_mlkkm1ouc2el1cl24rznkswc",
+      "name": "write",
+      "arguments": {
+        "file_path": "local_summary.json",
+        "content": "{\n  \"entry_count\": 4,\n  \"local_total\": 220\n}\n"
+      },
+      "stream_elapsed_s": 23.365
+    },
+    {
+      "seq": 162,
+      "at_ms": 1793272531481,
+      "id": "call_00_973348zb3r4q40k1knguaklh",
+      "name": "run_terminal_command",
+      "arguments": {
+        "command": "python3 -c \"import json; d=json.load(open('local_summary.json')); print(d); assert d=={'entry_count':4,'local_total':220}\"",
+        "description": "Verify local summary JSON contents"
+      },
+      "stream_elapsed_s": 26.247
+    },
+    {
+      "seq": 186,
+      "at_ms": 1793272534663,
+      "id": "call_00_8hkyhc39s0ho8ucs376p0a94",
+      "name": "get_command_or_subagent_output",
+      "arguments": {
+        "task_ids": [
+          "01a1875f-35cf-76d2-ad04-31ac59efaeb1"
+        ],
+        "timeout_ms": 600000
+      },
+      "stream_elapsed_s": 29.444
+    },
+    {
+      "seq": 213,
+      "at_ms": 1793272560607,
+      "id": "call_00_9k6jyqr3kbsme9i2mj97s3sz",
+      "name": "write",
+      "arguments": {
+        "content": "{\n  \"entry_count\": 4,\n  \"local_total\": 220,\n  \"remote_total\": 310,\n  \"risk\": \"review\",\n  \"combined_total\": 530\n}\n",
+        "file_path": "combined.json"
+      },
+      "stream_elapsed_s": 55.384
+    },
+    {
+      "seq": 234,
+      "at_ms": 1793272563281,
+      "id": "call_00_pzkir26ta63bqdq8e9r67b67",
+      "name": "run_terminal_command",
+      "arguments": {
+        "command": "python3 - <<'PY'\nimport csv, json\nfrom decimal import Decimal\nlocal = json.load(open('local_summary.json'))\ncombined = json.load(open('combined.json'))\nwith open('ledger.csv', newline='') as f:\n    rows = list(csv.DictReader(f))\nassert local['entry_count'] == len(rows) == combined['entry_count']\nassert local['local_total'] == sum(Decimal(r['amount']) for r in rows) == combined['local_total']\nassert combined['combined_total'] == combined['local_total'] + combined['remote_total'] == 530\nassert combined['risk'] == 'review'\nprint('verified:', json.dumps(combined, ensure_ascii=False))\nPY",
+        "description": "Verify combined JSON against ledger and totals"
+      },
+      "stream_elapsed_s": 58.051
+    }
+  ],
+  "wait": {
+    "tool_call_id": "call_00_8hkyhc39s0ho8ucs376p0a94",
+    "arguments": {
+      "task_ids": [
+        "01a1875f-35cf-76d2-ad04-31ac59efaeb1"
+      ],
+      "timeout_ms": 600000
+    },
+    "started_s": 29.444,
+    "completed_s": 51.66,
+    "observed_duration_s": 22.216,
+    "result_status": "completed",
+    "result_task_id": "01a1875f-35cf-76d2-ad04-31ac59efaeb1",
+    "exit_code": 0
+  },
+  "local_summary": {
+    "entry_count": 4,
+    "local_total": 220
+  },
+  "combined": {
+    "entry_count": 4,
+    "local_total": 220,
+    "remote_total": 310,
+    "risk": "review",
+    "combined_total": 530
+  },
+  "all_stream_sleep_call_count": 0,
+  "primary_spawn_count": 1,
+  "primary_output_wait_count": 1,
+  "pass": true,
+  "evidence_basis": "Canonical per-session Timeline assistant tool calls, matching streaming call/result IDs and produced JSON files. Thoughts and credential/configuration contents omitted.",
+  "limitation": "One controlled-input scenario on one model; not a comparative baseline or an estimate of general compliance."
+}

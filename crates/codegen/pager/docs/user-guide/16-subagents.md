@@ -102,6 +102,10 @@ Project and user definitions can add new types or intentionally shadow a built-i
 
 Retrieve a background result with `get_command_or_subagent_output`.
 
+Continue useful independent work after delegation. When the next step needs the child's result and no independent work remains, use the output tool's blocking wait on the original child ID with a positive `timeout_ms` within the advertised limit. The background-start receipt includes an example using the current tool and parameter names. Do not create sleep commands, polling loops, or extra tasks solely to wait. Omitting the timeout or passing zero only reads a snapshot; multiple IDs with a positive timeout wait for all selected tasks, so include only results needed next.
+
+A timeout or steering message can end the wait while the child continues. Check the returned status and result; wait completion does not establish child completion or parent acceptance. The existing View shows the output wait without creating another Task row, and the underlying task retains its owner and identity. See the [primary coordination guidance](../../../../../openspec/specs/local-coordination/spec.md#requirement-primary-guidance-advances-independently-ready-work).
+
 ### Resume semantics
 
 `resume_from` creates a new child from a completed canonical lifecycle. It inherits the source transcript and model, while re-rendering the current Agent definition, system prompt, and tool runtime. In-memory permits and transport incarnations are never copied.
