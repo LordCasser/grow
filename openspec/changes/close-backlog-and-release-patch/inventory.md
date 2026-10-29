@@ -19,5 +19,7 @@
 | Plan handoff消费核对 | fix-plan-handoff-consumption-recheck | 同Turn幂等、其他Turn/Dismissed拒绝；Plan130通过 |
 | Goal各Control生命周期scope | fix-goal-control-context-scope | pause真实red、Goal194、ChatState602、最终Shell通过 |
 | 正式门禁覆盖新增runtime回归 | gate-backlog-runtime-regressions | 追加4包及真实daemon测试；Python34通过（1skip）；正式CI由发布记录补齐 |
+| 发布门禁新检出的日志测试时序 | synchronize-unified-log-overflow-test | diagnostics55及200次精确执行通过 |
+| 发布PTY沿用旧活动组契约 | align-activity-group-pty-contract | 最终交互+3次重复、余下16项发布PTY全通过 |
 
 历史原表完整保存于 [backlog-before](backlog-before.md)。最终命令、源码范围、正式发布与产物由 verification.md 记录。上述通过均为本地记录，发布门禁单独列证据。

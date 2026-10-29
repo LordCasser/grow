@@ -1,10 +1,10 @@
-# 2.5.3 修复与发布验证
+# 2.5.4 修复与发布验证
 
 ## 范围与版本
 
 用户确认仅清理缺陷和测试债务，Remote Control、真实 provider/负载依赖优化及独立 MCP 新功能保留说明。清理前完整清单见 backlog-before.md；逐项闭合见 inventory.md 与各独立 change。原有工作区内的上下文/压缩/恢复修复及工具/Thought 聚合一并核对和回归，未重置。
 
-当前正式版本为 v2.5.1，本次最小 patch 递增为 2.5.2；workspace、lockfile 和 changelog 同步。发布仅使用官方 `release.yml`，所有平台与 publish 开启，不绕过 required gates。正式发布尚未执行，提交、tag、run、产物核对在本文件后续补齐。
+起点正式版本为 v2.5.1；初始2.5.2和后续2.5.3候选分别被门禁发现的测试债务阻止，tag保留不移动，最终patch目标2.5.4。workspace、lockfile 和 changelog 同步。发布仅使用官方 `release.yml`，所有平台与 publish 开启，不绕过 required gates。各候选执行过程及最终提交、tag、run、产物核对按以下阶段记录。
 
 ## 本地环境与最终结果
 
@@ -57,3 +57,17 @@ OS watcher注册无法取消；LocalSet可先结束等待，runtime仍持有阻�
 ### 2.5.3本地候选
 
 生产代码与已全量验证的2.5.2候选相同；新差异仅patch身份/changelog与日志测试同步。最终diagnostics55通过，两个溢出测试100轮/200次执行通过。原子计数已转入待写诊断时不再以中间load假设所有权；线程结束后仍精确核对记录顺序、唯一diagnostic、count=1。scoped闭包自持sender以在断言unwind时先断开队列再join。默认CLI2.5.3构建成功（1m15s），日志 `/tmp/grow-2.5.3-cli.log`。相邻firehose测试无同类固定位置断言。Windows存储同源push门禁 `40830080669` 和Ubuntu协调job已通过；仅属此前同生产源的补充证据，最终2.5.3仍需全量同SHA门禁。
+
+- 2.5.3发布源：`fce2f3d590dd4d069f089a7afd467a31c5d4d094`，注解tag `v2.5.3`精确指向该commit；`bash scripts/validate-release.sh v2.5.3`在clean committed tree通过。官方origin/main/tag推送成功。归档后严格18/18、archive739/739通过。
+
+### 2.5.3候选的PTY契约债务
+
+官方run `40832137750`（源fce2f3d59）完成16包Core库、Settings235、采样失败真实进程恢复、真实daemon Drop/panic回收与前十项PTY后，在 `verb_group_fold_expand_collapse_pty` 失败。失败日志 `/tmp/grow-2.5.3-core-failed.log` 显示旧测试仍期待Read3+Search2/Edit单独/Read2，而现行归档契约要求所有连续工具和Thought属于同一活动；实际摘要Read5/Search2/Edit1正确。修复独立test-only change，仍验证真实展开、查看成员和折叠，不改生产规则、不放宽期限。失败run取消且未发布，v2.5.3 tag不移动。该候选三平台协调/导出、Windows存储、OpenSpec与Linux五平台build均通过；这些不是最终新版同SHA门禁的替代证据。
+
+下一候选在本地逐一跑完此前未执行到的发布PTY矩阵，并先等待同SHA push Core全部通过，再创建正式tag/dispatch，以避免再次把尚未验证的测试差异固化为发布候选。
+
+### 最终2.5.4准备
+
+活动组PTY已按真实idle/正文消失边界完成，DONE与idle共用90s绝对期限。一次最终精确通过后又连续3次通过。余下16项发布PTY全通过，详见align-activity-group-pty-contract验证记录。2.5.4仅递增patch身份并修正此测试；生产逻辑与2.5.3相同。先等待push Core全部成功，再创建tag并dispatch全平台release。
+
+2.5.4默认CLI构建成功（1m10s，`/tmp/grow-2.5.4-cli.log`），最终格式与diff检查通过；严格规范18/18、archive740/740通过。活动组3次重复与余下16项发布PTY全部成功后才提交候选；创建tag前等待同SHA push Core全部成功。

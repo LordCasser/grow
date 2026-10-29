@@ -4,12 +4,12 @@ use super::common::*;
 
 const DONE_SENTINEL: &str = "VERB_GROUP_DONE";
 
-/// PTY: runs of consecutive reads/searches fold into one "Verb N noun" header
-/// row and an Edit stays a standalone separator. Double-click expands the
-/// group to individual rows — including member 0 below the header — where the
-/// selected slot acts as member 0: Right (Expand; `l` is its vim-mode alias)
-/// opens the member's own block, Left (Collapse; `h` in vim mode) closes it
-/// and then collapses the whole group.
+/// PTY: consecutive reads, searches, and an edit fold into one continuous
+/// activity row. Double-click expands the group to individual rows —
+/// including member 0 below the header — where the selected slot acts as
+/// member 0: Right (Expand; `l` is its vim-mode alias) opens the member's own
+/// block without dissolving the group, and Left (Collapse; `h` in vim mode)
+/// closes it before a second Left collapses the whole group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn verb_group_fold_expand_collapse_pty() {
@@ -46,7 +46,8 @@ async fn verb_group_fold_expand_collapse_pty() {
     }
     let home_str = content.home().to_string_lossy().into_owned();
 
-    // read x3 → grep x2 → edit → read x2, then a plain completion to settle.
+    // Five reads, two searches, and one edit form a single uninterrupted
+    // activity; a plain completion settles the transcript afterward.
     let _tool_turns = [
         expect_tool_turn(&content, "call_r1", "read_file", read_args(&paths[0])),
         expect_tool_turn(&content, "call_r2", "read_file", read_args(&paths[1])),
@@ -99,40 +100,42 @@ async fn verb_group_fold_expand_collapse_pty() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    // The final completion means every tool turn ran; labels are past tense.
+    // Observe output and the actual idle boundary within one settling budget.
+    let settle_deadline = std::time::Instant::now() + Duration::from_secs(90);
     harness
-        .wait_for_text(DONE_SENTINEL, Duration::from_secs(90))
+        .wait_for_text(
+            DONE_SENTINEL,
+            settle_deadline.saturating_duration_since(std::time::Instant::now()),
+        )
         .unwrap_or_else(|_| {
             panic!(
                 "expected settled transcript; got:\n{}",
                 harness.screen_contents()
             )
         });
-
-    // First run folds reads + greps into one header ("· N failed" may follow).
     harness
-        .wait_for_text("Read 3 files, Searched 2 patterns", Duration::from_secs(20))
+        .wait_for_turn_idle(settle_deadline.saturating_duration_since(std::time::Instant::now()))
+        .expect("scripted activity turn idle");
+
+    const ACTIVITY_HEADER: &str = "Read 5 files, Searched 2 patterns, Edited 1 file";
+    // Tool kind changes do not split this activity group.
+    harness
+        .wait_for_text(ACTIVITY_HEADER, Duration::from_secs(20))
         .unwrap_or_else(|_| {
             panic!(
-                "expected first verb-group header; got:\n{}",
+                "expected complete activity-group header; got:\n{}",
                 harness.screen_contents()
             )
         });
-    // Second run folds independently; the edit stays a standalone row between.
-    assert!(
-        harness.contains_text("Read 2 files"),
-        "expected second verb-group header\nscreen:\n{}",
-        harness.screen_contents()
-    );
-    assert!(
-        harness.contains_text("edit_me.txt"),
-        "edit must stay a standalone separator row\nscreen:\n{}",
-        harness.screen_contents()
-    );
-    // Members of a folded run are hidden.
+    // Every member remains hidden behind that one folded activity row.
     assert!(
         !harness.contains_text("a2.txt"),
         "folded member must be hidden\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    assert!(
+        !harness.contains_text("edit_me.txt"),
+        "folded edit member must be hidden\nscreen:\n{}",
         harness.screen_contents()
     );
 
@@ -152,7 +155,7 @@ async fn verb_group_fold_expand_collapse_pty() {
             )
         });
     let screen = harness.screen_contents();
-    let (row, col) = locate_screen_text(&screen, "Read 3 files").unwrap_or_else(|| {
+    let (row, col) = locate_screen_text(&screen, ACTIVITY_HEADER).unwrap_or_else(|| {
         panic!("could not locate verb-group header; screen:\n{screen}");
     });
     // The transcript is short (fits the viewport), so expanding must grow
@@ -180,7 +183,15 @@ async fn verb_group_fold_expand_collapse_pty() {
                 harness.screen_contents()
             )
         });
-    for member in ["a2.txt", "a3.txt"] {
+    for member in [
+        "a2.txt",
+        "a3.txt",
+        "edit_me.txt",
+        "b1.txt",
+        "b2.txt",
+        "Search \"hello\"",
+        "Search \"verb\"",
+    ] {
         assert!(
             harness.contains_text(member),
             "all members must render while expanded ({member})\nscreen:\n{}",
@@ -188,12 +199,12 @@ async fn verb_group_fold_expand_collapse_pty() {
         );
     }
     assert!(
-        harness.contains_text("◈ Read 3 files"),
+        harness.contains_text(&format!("◈ {ACTIVITY_HEADER}")),
         "expanded header row must render caret-free chrome\nscreen:\n{}",
         harness.screen_contents()
     );
     let screen = harness.screen_contents();
-    let expanded_row = locate_screen_text(&screen, "Read 3 files")
+    let expanded_row = locate_screen_text(&screen, ACTIVITY_HEADER)
         .unwrap_or_else(|| panic!("expanded header must stay on screen:\n{screen}"))
         .0;
     assert_eq!(
@@ -208,9 +219,8 @@ async fn verb_group_fold_expand_collapse_pty() {
         harness.screen_contents()
     );
 
-    // Prove the scrollback owns keys, then Right: it must open MEMBER 0's
-    // own block (not re-toggle the group). Opening drops member 0 from the
-    // run, so the group dissolves while its body is on show.
+    // Prove the scrollback owns keys, then Right opens MEMBER 0's own block
+    // (not re-toggle the group). The group remains expanded around the body.
     harness
         .wait_for_text("Ctrl+e:", Duration::from_secs(10))
         .unwrap_or_else(|_| {
@@ -228,27 +238,46 @@ async fn verb_group_fold_expand_collapse_pty() {
                 harness.screen_contents()
             )
         });
+    assert!(
+        harness.contains_text(&format!("◈ {ACTIVITY_HEADER}")) && harness.contains_text("a2.txt"),
+        "opening member 0 must preserve the expanded group and other member rows\nscreen:\n{}",
+        harness.screen_contents()
+    );
 
-    // Left closes the block; the still-expanded group re-forms around it.
+    // Left closes the block while preserving the expanded group.
     harness.inject_keys(b"\x1b[D").expect("close member 0");
     harness
-        .wait_for_text("◈ Read 3 files", Duration::from_secs(10))
+        .wait_for_text_absent("first member body a1", Duration::from_secs(10))
         .unwrap_or_else(|_| {
             panic!(
-                "closing member 0 must re-form the expanded group; got:\n{}",
+                "Left must close member 0's body; got:\n{}",
                 harness.screen_contents()
             )
         });
     assert!(
-        !harness.contains_text("first member body a1"),
-        "member 0's body must fold away again\nscreen:\n{}",
+        harness.contains_text(&format!("◈ {ACTIVITY_HEADER}")) && harness.contains_text("a2.txt"),
+        "closing member 0 must preserve the expanded group and other member rows\nscreen:\n{}",
         harness.screen_contents()
     );
 
     // A second Left from the slot collapses the whole group (member path).
     harness.inject_keys(b"\x1b[D").expect("collapse group");
-    harness.update(Duration::from_millis(500));
-    for member in ["a1.txt", "a2.txt"] {
+    harness
+        .wait_for_text_absent("a1.txt", Duration::from_secs(10))
+        .unwrap_or_else(|_| {
+            panic!(
+                "collapsing must hide the first member row; got:\n{}",
+                harness.screen_contents()
+            )
+        });
+    for member in [
+        "a1.txt",
+        "a2.txt",
+        "a3.txt",
+        "edit_me.txt",
+        "b1.txt",
+        "b2.txt",
+    ] {
         assert!(
             !harness.contains_text(member),
             "members must fold back after Left ({member})\nscreen:\n{}",
@@ -258,12 +287,12 @@ async fn verb_group_fold_expand_collapse_pty() {
     // Collapse re-selects the header: the caret overdraws the diamond (not
     // the label) and points right again in the collapsed state.
     assert!(
-        harness.contains_text("› Read 3 files, Searched 2 patterns"),
+        harness.contains_text(&format!("› {ACTIVITY_HEADER}")),
         "collapsed header must return with the right-pointing caret\nscreen:\n{}",
         harness.screen_contents()
     );
     let screen = harness.screen_contents();
-    let collapsed_row = locate_screen_text(&screen, "Read 3 files")
+    let collapsed_row = locate_screen_text(&screen, ACTIVITY_HEADER)
         .unwrap_or_else(|| panic!("collapsed header must stay on screen:\n{screen}"))
         .0;
     assert_eq!(
