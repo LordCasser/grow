@@ -1,14 +1,12 @@
-//! Verb-group aggregation: the "Read 10 files, Ran 2 subagents" header
-//! label for a folded run of consecutive non-destructive tool calls and
-//! subagent lifecycle rows, plus any finished collapsed thoughts the run
-//! claims. Also home of the run classification ([`run_step`]) shared by the
-//! layout fold, range resolution, and the label walk.
+//! Activity aggregation: one summary for consecutive tools, subagent rows
+//! and interleaved Thought entries in their original order. The run
+//! classification ([`run_step`]) is shared by layout and the label walk.
 //!
 //! The layout pass in `state/layout.rs` detects the runs and marks the header
 //! via `EntryLayoutInfo::verb_group_header`; the render loop calls
 //! [`verb_group_header_label`] to build the live label each frame (running
-//! entries repaint every tick, so tense and counts update in place — no
-//! per-call detail churns beside the label while the run executes).
+//! entries repaint every tick, so tense and counts update in place).
+//! Active previews and opened members retain their source positions.
 //!
 //! The same bucket vocabulary labels group-truncation ("N more") headers:
 //! the render loop calls [`truncation_header_label`] with the fold's span,
@@ -25,72 +23,34 @@ use crate::scrollback::entry::ScrollbackEntry;
 use crate::scrollback::types::DisplayMode;
 use crate::theme::Theme;
 
-/// One step of a verb-group run walk.
+/// Stable membership in a continuous activity run. Visibility is projected
+/// separately, so streaming, completion and manual folds cannot split a run.
 pub(crate) enum RunStep {
-    /// A collapsed verb-groupable tool or subagent entry: joins the run and
-    /// counts toward the fold threshold ([`RunScan::folds`]).
     Member(VerbGroupKind),
-    /// A finished, collapsed, shown thinking entry: claims into the run
-    /// (folds to height 0) but never counts toward the threshold and never
-    /// appears in the header label.
     ThoughtMember,
-    /// An entry that renders its own rows (or none) without joining or
-    /// breaking the run: hidden, streaming, user-opened, or chrome-carrying
-    /// thinking, and a manually-opened verb-groupable tool.
-    Transparent,
-    /// Anything else: ends the run.
     Break,
 }
 
-/// Classify one entry for run walking — the single source of truth shared by
-/// the layout fold scan, `verb_group_range_of`, and the label walk.
-///
-/// Members are collapsed verb-groupable tool calls and subagent lifecycle
-/// rows; pending-user-input and hook-annotated rows stay standalone (their
-/// prompt / `[hooks: N/M]` chrome must remain visible). A manually-opened
-/// member is [`RunStep::Transparent`] — it keeps its own rows inside the run
-/// instead of splitting it. Thinking never breaks a run: a finished
-/// collapsed thought folds in as [`RunStep::ThoughtMember`]; hidden,
-/// still-streaming, opened, or chrome-carrying thinking is
-/// [`RunStep::Transparent`].
-pub(crate) fn run_step(entry: &ScrollbackEntry, show_thinking: bool) -> RunStep {
-    // Prompt / `[hooks: N/M]` chrome must stay visible, so chrome-carrying
-    // entries never claim into a run.
-    let no_chrome = !entry.is_pending_user_input && entry.hook_data.is_none();
-    // Claimed entries are collapsed single-row + chromeless — the contract
-    // the fold's absolute height-2 expanded slot leans on. Tools check the
-    // collapsed half inline to split Member from Transparent.
-    let claimable = entry.display_mode == DisplayMode::Collapsed && no_chrome;
-    if let RenderBlock::ToolCall(block) = &entry.block
-        && let Some(kind) = block.verb_group_kind()
-        && no_chrome
-    {
-        if entry.display_mode == DisplayMode::Collapsed {
-            RunStep::Member(kind)
-        } else {
-            // A manually-opened member keeps its own rows without splitting
-            // the run — same treatment as opened thinking — so toggling a
-            // member of an expanded group never dissolves the group.
-            RunStep::Transparent
-        }
-    } else if matches!(entry.block, RenderBlock::Subagent(_)) {
-        if claimable {
-            RunStep::Member(VerbGroupKind::Subagent)
-        } else {
-            // Subagent rows are always collapsed single-row entries; this
-            // arm only guards chrome — prompt / hook rows must stay visible,
-            // so such an entry splits the run like a chrome-carrying tool.
-            RunStep::Break
-        }
-    } else if entry.block.is_thinking() {
-        if show_thinking && !entry.is_running && claimable {
-            RunStep::ThoughtMember
-        } else {
-            RunStep::Transparent
-        }
-    } else {
-        RunStep::Break
+pub(crate) fn run_step(entry: &ScrollbackEntry, _show_thinking: bool) -> RunStep {
+    match &entry.block {
+        RenderBlock::ToolCall(block) => block
+            .verb_group_kind()
+            .map_or(RunStep::Break, RunStep::Member),
+        RenderBlock::Subagent(_) => RunStep::Member(VerbGroupKind::Subagent),
+        RenderBlock::Thinking(_) => RunStep::ThoughtMember,
+        _ => RunStep::Break,
     }
+}
+
+/// Members which must remain visible inside a folded activity. Their native
+/// display mode is preserved, including user-pinned bodies and pending hooks.
+pub(super) fn member_visible(entry: &ScrollbackEntry, expanded: bool, show_thinking: bool) -> bool {
+    !entry.is_hidden_thinking(show_thinking)
+        && (expanded
+            || entry.is_running
+            || entry.is_pending_user_input
+            || entry.hook_data.is_some()
+            || entry.display_mode != DisplayMode::Collapsed)
 }
 
 /// Whether an in-place block swap changes the entry's verb-group kind (e.g.
@@ -107,71 +67,46 @@ pub(crate) fn verb_group_kind_changed(old: &RenderBlock, new: &RenderBlock) -> b
 
 /// Shape of one forward run walk, as reported by [`scan_run_forward`].
 pub(crate) struct RunScan {
-    /// Member entries counted (tool calls and subagent rows), including a
-    /// member start entry. Thought members claim but never count — the fold
-    /// threshold is members-only.
+    /// Tool/subagent entries counted by the summary; Thought is counted
+    /// separately only to distinguish a single action from a mixed activity.
     pub(crate) members: usize,
-    /// Exclusive run end: one past the last claimed entry (member or thought
-    /// member), so trailing transparent entries stay outside the run.
+    pub(crate) thoughts: usize,
+    /// Exclusive end of the original activity, including trailing Thought.
     pub(crate) end: usize,
-    /// Where the walk stopped: the breaking entry's index, or the first index
-    /// where `entry_at` returned `None`.
-    pub(crate) stop: usize,
 }
 
 impl RunScan {
-    /// Whether the run folds into a verb-group header row. One member is
-    /// enough — the compact label beats the member's own row, and the header
-    /// appearing with the first streaming call avoids a fold-in jump when the
-    /// second arrives. Members-only: thought members claim into runs but
-    /// never count, so a pure-thought run (whose label would be empty) never
-    /// folds. The single predicate shared by the layout fold and
-    /// `verb_group_range_of` so the two can't drift.
     pub(crate) fn folds(&self) -> bool {
-        self.members >= 1
+        self.members > 0 && self.members + self.thoughts >= 2
     }
 }
 
-/// Walk a run forward from `start` until a breaking entry or the end of the
-/// entries, and report the run's shape. Returns `None` when the entry at
-/// `start` is missing or cannot anchor a run (members and thought members
-/// can; transparent and breaking entries cannot) — anchor eligibility lives
-/// in this function's matches, not in caller pre-checks — so a returned scan
-/// always has `end > start` and `stop > start` (`members` may be 0 for a
-/// thought-anchored walk with no members). The layout fold scan and
-/// `verb_group_range_of` share this walk so both agree on the exact run
-/// shape; the label walk needs per-member block data and stays its own loop,
-/// kept in sync by its exhaustive `RunStep` match.
+/// Anchor on the first activity entry, including leading Thought. Membership
+/// is independent of visibility and streaming state, so the anchor stays
+/// stable through the next conversation, Skill or standalone interaction.
 pub(crate) fn scan_run_forward<'e>(
     entry_at: impl Fn(usize) -> Option<&'e ScrollbackEntry>,
     start: usize,
     show_thinking: bool,
 ) -> Option<RunScan> {
-    // Members and finished thoughts anchor runs; transparent thinking may
-    // sit inside one but cannot start one.
-    match run_step(entry_at(start)?, show_thinking) {
-        RunStep::Member(_) | RunStep::ThoughtMember => {}
-        RunStep::Transparent | RunStep::Break => return None,
+    if matches!(run_step(entry_at(start)?, show_thinking), RunStep::Break) {
+        return None;
     }
-    let mut members = 0usize;
+    let mut members = 0;
+    let mut thoughts = 0;
     let mut end = start;
-    let mut i = start;
-    while let Some(entry) = entry_at(i) {
+    while let Some(entry) = entry_at(end) {
         match run_step(entry, show_thinking) {
-            RunStep::Member(_) => {
-                members += 1;
-                end = i + 1;
-            }
-            RunStep::ThoughtMember => end = i + 1,
-            RunStep::Transparent => {}
+            RunStep::Member(_) => members += 1,
+            RunStep::ThoughtMember => thoughts += 1,
             RunStep::Break => break,
         }
-        i += 1;
+        end += 1;
     }
     Some(RunScan {
         members,
+        thoughts,
         end,
-        stop: i,
     })
 }
 
@@ -246,7 +181,10 @@ pub fn verb_group_header_label(
         let kind = match run_step(entry, show_thinking) {
             RunStep::Member(kind) => kind,
             RunStep::Break => break,
-            RunStep::ThoughtMember | RunStep::Transparent => continue,
+            RunStep::ThoughtMember => {
+                acc.running |= entry.is_running;
+                continue;
+            }
         };
         acc.push(kind, entry);
     }
@@ -342,7 +280,7 @@ impl<'e> BucketAccumulator<'e> {
         // failure detection.
         match &entry.block {
             RenderBlock::ToolCall(block) => {
-                if block_failed(block) {
+                if !entry.is_running && block_failed(block) {
                     self.failed_count += 1;
                 }
             }
@@ -540,7 +478,7 @@ mod tests {
             /*show_thinking=*/ false,
             &Theme::current(),
         );
-        assert_eq!(l.text, "Read 2 files");
+        assert_eq!(l.text, "Read 3 files, Ran 1 command");
     }
 
     #[test]
@@ -572,7 +510,7 @@ mod tests {
             /*show_thinking=*/ true,
             &Theme::current(),
         );
-        assert_eq!(l.text, "Read 4 files");
+        assert_eq!(l.text, "Reading 5 files, Running 1 command");
     }
 
     fn execute() -> ScrollbackEntry {

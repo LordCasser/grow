@@ -215,7 +215,7 @@ mod tests {
         let meta = json!({
             "sessionId": "owning-root",
             "grow/descendantOwnership": {
-                "version": 1, "session_id": "owning-root", "cut": 0,
+                "version": 2, "session_id": "owning-root", "cut": 0,
                 "hash": "00".repeat(32), "spawns": {}
             }
         });
@@ -224,7 +224,7 @@ mod tests {
         assert!(session_load_descendant_ownership(meta.as_object(), &requested).is_none());
         assert!(session_load_descendant_ownership(None, &canonical).is_none());
         for (field, value) in [
-            ("version", json!(2)),
+            ("version", json!(1)),
             ("hash", json!("invalid")),
             ("session_id", json!("foreign")),
             ("unexpected", json!(true)),

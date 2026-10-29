@@ -2310,6 +2310,31 @@ impl Timeline {
             })
     }
 
+    /// The exact durable consumer of an immutable producer receipt, if consumed.
+    pub fn consumed_notification_turn(
+        &self,
+        source: &NotificationSource,
+        version: &NotificationSourceVersion,
+    ) -> Option<TurnId> {
+        let received = self.received_notification_event(source, version)?;
+        let TimelineEventKind::Notification(NotificationEvent::Received { id, .. }) =
+            &received.kind
+        else {
+            return None;
+        };
+        self.events
+            .iter()
+            .skip(received.seq.get() as usize + 1)
+            .find_map(|event| match &event.kind {
+                TimelineEventKind::Notification(NotificationEvent::Consumed {
+                    notification_ids,
+                    turn,
+                    ..
+                }) if notification_ids.contains(id) => Some(*turn),
+                _ => None,
+            })
+    }
+
     pub(crate) fn received_notification_event(
         &self,
         source: &NotificationSource,
@@ -2962,6 +2987,20 @@ impl Timeline {
             open: fold.open,
             closed: fold.closed,
         })
+    }
+
+    /// Return the existing promotion only while that exact generation still
+    /// awaits its summary. A closed or differently owned transaction cannot
+    /// borrow an earlier promotion's identity.
+    pub(crate) fn open_compaction_promotion(&self, id: &str) -> Option<&TimelineEvent> {
+        let open = self.lifecycle.open_compaction.as_ref()?;
+        if open.id != id || open.mode != CompactionMode::Foreground || open.summaries != 0 {
+            return None;
+        }
+        self.events.iter().rev().find(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Compaction(CompactionEvent::Promoted { id: promoted }) if promoted == id
+        ))
     }
 
     /// Append deterministic terminal facts for work left open by an interrupted
@@ -7008,15 +7047,11 @@ fn valid_notification_source_version(
             NotificationSourceVersion::Opaque { value },
         ) => *handoff != WorkflowTurnHandoff::None && valid_notification_identifier(value),
         (
-            NotificationSource::TaskCompleted { .. } | NotificationSource::SubagentCompleted { .. },
+            NotificationSource::TaskCompleted { .. }
+            | NotificationSource::SubagentCompleted { .. }
+            | NotificationSource::PlanHandoff { .. },
             NotificationSourceVersion::Ordinal { value },
         ) => *value > 0,
-        (
-            NotificationSource::PlanHandoff {
-                artifact_revision, ..
-            },
-            NotificationSourceVersion::Ordinal { value },
-        ) => *value == *artifact_revision && *value > 0,
         _ => false,
     }
 }
@@ -15261,6 +15296,81 @@ mod tests {
     }
 
     #[test]
+    fn notification_consumer_query_preserves_exact_identity_and_dismissal() {
+        let mut timeline = Timeline::default();
+        let hash = blake3::hash(b"approved plan").to_hex().to_string();
+        let source = NotificationSource::PlanHandoff {
+            artifact_hash: hash.clone(),
+            artifact_revision: 1,
+            handoff: PlanHandoffKind::Execute,
+        };
+        let version = NotificationSourceVersion::Ordinal { value: 7 };
+        let id = receive_notification(&mut timeline, source.clone(), version.clone(), "approved");
+        let dismissed_version = NotificationSourceVersion::Ordinal { value: 8 };
+        let dismissed = receive_notification(
+            &mut timeline,
+            source.clone(),
+            dismissed_version.clone(),
+            "later plan",
+        );
+        assert_eq!(timeline.consumed_notification_turn(&source, &version), None);
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![id],
+                    turn,
+                    input: None,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Dismissed {
+                    notification_ids: vec![dismissed],
+                    reason: NotificationDismissReason::PlanSuperseded {
+                        artifact_hash: hash,
+                        artifact_revision: 1,
+                        handoff: PlanHandoffKind::Execute,
+                    },
+                },
+            ))
+            .unwrap();
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            replayed.consumed_notification_turn(&source, &version),
+            Some(turn)
+        );
+        assert_ne!(
+            replayed.consumed_notification_turn(&source, &version),
+            Some(TurnId(2))
+        );
+        assert_eq!(
+            replayed.consumed_notification_turn(&source, &dismissed_version),
+            None
+        );
+        assert_eq!(
+            replayed.consumed_notification_turn(
+                &source,
+                &NotificationSourceVersion::Ordinal { value: 9 }
+            ),
+            None
+        );
+        assert_eq!(
+            replayed.consumed_notification_turn(
+                &NotificationSource::PlanHandoff {
+                    artifact_hash: blake3::hash(b"approved plan").to_hex().to_string(),
+                    artifact_revision: 2,
+                    handoff: PlanHandoffKind::Execute
+                },
+                &version
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn parent_receipt_history_retains_consumed_payload_without_model_input() {
         let mut timeline = Timeline::default();
         let source = NotificationSource::ParentMessage {
@@ -15446,6 +15556,46 @@ mod tests {
             )),
             Err(TimelineError::NotificationAlreadyConsumed(_))
         ));
+    }
+
+    #[test]
+    fn plan_receipt_submission_version_is_independent_of_artifact_revision() {
+        let hash = blake3::hash(b"plan").to_hex().to_string();
+        for (revision, submission, artifact_hash, valid) in [
+            (1, 7, hash.as_str(), true),
+            (7, 1, hash.as_str(), true),
+            (1, 0, hash.as_str(), false),
+            (0, 1, hash.as_str(), false),
+            (1, 7, "invalid", false),
+        ] {
+            let source = NotificationSource::PlanHandoff {
+                artifact_hash: artifact_hash.into(),
+                artifact_revision: revision,
+                handoff: PlanHandoffKind::Execute,
+            };
+            let version = NotificationSourceVersion::Ordinal { value: submission };
+            let mut timeline = Timeline::default();
+            let event = TimelineEventKind::Notification(NotificationEvent::Received {
+                id: notification_id("session-1", &source, &version)
+                    .unwrap_or_else(|_| "invalid".into()),
+                owner_session_id: "session-1".into(),
+                source: source.clone(),
+                source_version: version.clone(),
+                payload_ref: notification_payload("execute"),
+            });
+            assert_eq!(
+                timeline.record(event).is_ok(),
+                valid,
+                "revision={revision} submission={submission}"
+            );
+            if valid {
+                let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+                assert_eq!(
+                    replayed.received_notification_id(&source, &version),
+                    timeline.received_notification_id(&source, &version)
+                );
+            }
+        }
     }
 
     #[test]

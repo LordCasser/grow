@@ -38,7 +38,7 @@ pub use legacy_replay_oracle::{PreparedReplay, prepare_replay_lines};
 mod descendant_recovery;
 pub use descendant_recovery::{
     ChildReplaySpawn, DESCENDANT_OWNERSHIP_META_KEY, DescendantOwnership,
-    load_descendant_ownership_at, load_descendant_replay_at,
+    load_descendant_child_replay_at, load_descendant_ownership_at, load_descendant_replay_at,
 };
 
 pub mod jsonl;
@@ -2351,7 +2351,7 @@ pub(crate) fn validate_sideband_ledgers(
         }
     }
 
-    for event in parent.events() {
+    for (summary_index, event) in parent.events().iter().enumerate() {
         let chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary {
             id,
             target,
@@ -2380,7 +2380,27 @@ pub(crate) fn validate_sideband_ledgers(
 
         let mut replacement = None;
         let mut replacement_count = 0usize;
-        for candidate in parent.events() {
+        let mut failed = false;
+        // A failed transaction leaves its Surface IDs available for another
+        // compaction. Never borrow that later transaction's replacement just
+        // because its selected range is identical.
+        for candidate in &parent.events()[summary_index + 1..] {
+            match &candidate.kind {
+                chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Failed {
+                        id: terminal_id, ..
+                    },
+                ) if terminal_id == id => {
+                    failed = true;
+                    break;
+                }
+                chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Completed {
+                        id: terminal_id, ..
+                    },
+                ) if terminal_id == id => break,
+                _ => {}
+            }
             let chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
                 cause: chat_state::MessageCause::Compaction,
                 items,
@@ -2408,11 +2428,12 @@ pub(crate) fn validate_sideband_ledgers(
         }
         let replacement = match (replacement_count, replacement) {
             (1, Some(items)) => items,
-            (0, None) if parent.compaction_summary_awaits_recovery(id, target) => {
+            (0, None) if failed || parent.compaction_summary_awaits_recovery(id, target) => {
                 // A process may stop after the immutable Summary link but
                 // before the Surface replacement. Timeline recovery will
-                // append Compaction::Failed; accepting any terminal or
-                // target-mismatched state here would hide tampering.
+                // append Compaction::Failed, which must remain loadable on
+                // every later restart. Timeline's strict lifecycle rejects
+                // Failed with a replacement and Completed without one.
                 continue;
             }
             (count, _) => {

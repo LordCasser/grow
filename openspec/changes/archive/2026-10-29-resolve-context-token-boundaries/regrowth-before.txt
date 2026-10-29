@@ -1,0 +1,22 @@
+   Compiling chat-state v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state)
+    Finished `test` profile [unoptimized] target(s) in 8.12s
+     Running unittests src/lib.rs (target/debug/deps/chat_state-70408bffa0679435)
+
+running 2 tests
+test actor::tests::low_anchor_tests::low_context_anchor_zero_and_maximum_growth_do_not_wrap_or_freeze ... ok
+
+thread 'actor::tests::low_anchor_tests::low_context_anchor_survives_growth_compaction_and_repeated_projection' (3683938) panicked at crates/codegen/chat-state/src/actor/low_anchor_tests.rs:62:5:
+assertion `left == right` failed: growth after shrinking still adds its full local cost
+  left: 28
+ right: 103
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test actor::tests::low_anchor_tests::low_context_anchor_survives_growth_compaction_and_repeated_projection ... FAILED
+
+failures:
+
+failures:
+    actor::tests::low_anchor_tests::low_context_anchor_survives_growth_compaction_and_repeated_projection
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 600 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p chat-state --lib`

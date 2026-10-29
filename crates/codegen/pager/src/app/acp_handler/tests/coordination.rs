@@ -795,15 +795,13 @@ fn parent_message_live_and_replay_share_receipt_identity() {
     assert_eq!(row.name, "Message from parent-session");
     assert_eq!(row.summary, "Received");
     assert_eq!(
-        row
-            .communication_body()
+        row.communication_body()
             .expect("typed parent-message body")
             .raw_text(),
         "first line\nsecond line\nthird line"
     );
     let data: serde_json::Value = serde_json::from_str(
-        row
-            .communication_data()
+        row.communication_data()
             .expect("typed parent-message metadata"),
     )
     .unwrap();
@@ -834,9 +832,15 @@ fn received_agent_reply_uses_reply_row_and_preserves_reply_reference() {
     let row = tool_row(&app, 0);
     assert_eq!(row.name, "Reply from child-session");
     assert_eq!(row.summary, "Received");
-    assert_eq!(row.immutable_event_id(), Some("parent-message:reply-receipt"));
+    assert_eq!(
+        row.immutable_event_id(),
+        Some("parent-message:reply-receipt")
+    );
     let data: serde_json::Value = serde_json::from_str(row.communication_data().unwrap()).unwrap();
-    assert_eq!(data["notice"]["replyTo"]["source_session_id"], "parent-session");
+    assert_eq!(
+        data["notice"]["replyTo"]["source_session_id"],
+        "parent-session"
+    );
     assert_eq!(data["notice"]["replyTo"]["message_id"], "parent-message-4");
 }
 
@@ -889,7 +893,10 @@ fn parent_message_full_and_cursor_reload_keep_one_received_tool_row() {
             RenderBlock::ToolCall(ToolCallBlock::Other(block)) => block,
             other => panic!("expected message tool row, got {other:?}"),
         };
-        assert_eq!(row.immutable_event_id(), Some("parent-message:receipt-reload"));
+        assert_eq!(
+            row.immutable_event_id(),
+            Some("parent-message:receipt-reload")
+        );
         assert_eq!(row.name, "Message from parent-session");
         assert_eq!(row.summary, "Received");
         assert_eq!(
@@ -951,15 +958,13 @@ fn parent_message_routes_to_existing_child_view_and_handles_missing_body() {
     };
     assert_eq!(row.immutable_event_id(), Some("parent-message:receipt-2"));
     assert_eq!(
-        row
-            .communication_body()
+        row.communication_body()
             .expect("typed missing-body body")
             .raw_text(),
         "Message unavailable"
     );
     let data: serde_json::Value = serde_json::from_str(
-        row
-            .communication_data()
+        row.communication_data()
             .expect("typed missing-body metadata"),
     )
     .unwrap();

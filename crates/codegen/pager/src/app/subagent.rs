@@ -191,21 +191,23 @@ fn enrich_projected_subagent(
     let Some(info) = root.session.subagent_sessions.get_mut(child_session_id) else {
         return;
     };
-    if info.subagent_id.as_ref() != spawn.subagent_id {
+    if info.subagent_id.as_ref() != spawn.spawn.subagent_id {
         tracing::debug!(
             child_session_id,
             replayed_subagent_id = %info.subagent_id,
-            durable_subagent_id = spawn.subagent_id,
+            durable_subagent_id = spawn.spawn.subagent_id,
             "ignored mismatched durable subagent spawn enrichment"
         );
         return;
     }
-    info.prompt = Some(Arc::from(spawn.prompt.as_str()));
-    info.child_cwd = Some(Arc::from(spawn.child_cwd.as_str()));
-    info.worktree_path = spawn.worktree_path.as_deref().map(Arc::from);
+    info.prompt = Some(Arc::from(spawn.spawn.prompt.as_str()));
+    info.child_cwd = Some(Arc::from(spawn.spawn.child_cwd.as_str()));
+    info.worktree_path = spawn.spawn.worktree_path.as_deref().map(Arc::from);
     if let Some(child) = root.subagent_views.get_mut(child_session_id) {
-        child.session.cwd = std::path::PathBuf::from(&spawn.child_cwd);
-        child.session.set_worktree(spawn.worktree_path.is_some());
+        child.session.cwd = std::path::PathBuf::from(&spawn.spawn.child_cwd);
+        child
+            .session
+            .set_worktree(spawn.spawn.worktree_path.is_some());
     }
 }
 /// Best-effort replay of a child's inherited conversation, streamed one typed
@@ -333,7 +335,11 @@ pub(crate) fn restore_descendant_state(
         for (child_session_id, spawn) in &root_spawns {
             if replayed_direct_children.contains(child_session_id) {
                 enrich_projected_subagent(root, child_session_id, spawn);
-                queue.push_back(child_session_id.clone());
+                queue.push_back((
+                    child_session_id.clone(),
+                    root_session_id.clone(),
+                    spawn.clone(),
+                ));
             }
         }
         // Reuse the lifecycle projection's restoration semantics: spawn does
@@ -344,12 +350,14 @@ pub(crate) fn restore_descendant_state(
         root.session.loading_replay = true;
     }
 
-    while let Some(parent_session_id) = queue.pop_front() {
+    while let Some((parent_session_id, owner_session_id, owner_spawn)) = queue.pop_front() {
         if !visited.insert(parent_session_id.clone()) {
             continue;
         }
-        let (ownership, lifecycle) = match shell::session::storage::load_descendant_replay_at(
+        let (ownership, lifecycle) = match shell::session::storage::load_descendant_child_replay_at(
             &parent_session_id,
+            &owner_session_id,
+            &owner_spawn,
             &grow_home,
         ) {
             Ok(Some(snapshot)) => snapshot,
@@ -363,15 +371,55 @@ pub(crate) fn restore_descendant_state(
                 continue;
             }
         };
-        let mut durable_children = ownership.into_spawns();
+        let durable_children = ownership.into_spawns();
 
         for mut notification in lifecycle {
-            let discovered_child = match &notification.update {
+            let lifecycle_child = match &notification.update {
                 SessionUpdate::SubagentSpawned {
-                    child_session_id, ..
-                } => Some(child_session_id.clone()),
+                    subagent_id,
+                    parent_session_id: lifecycle_parent,
+                    child_session_id,
+                    ..
+                }
+                | SessionUpdate::SubagentProgress {
+                    subagent_id,
+                    parent_session_id: lifecycle_parent,
+                    child_session_id,
+                    ..
+                } => durable_children
+                    .get(child_session_id)
+                    .filter(|spawn| {
+                        notification.session_id.0.as_ref() == parent_session_id
+                            && lifecycle_parent == &parent_session_id
+                            && subagent_id == &spawn.spawn.subagent_id
+                    })
+                    .map(|_| child_session_id.clone()),
+                SessionUpdate::SubagentFinished {
+                    subagent_id,
+                    child_session_id,
+                    ..
+                } => durable_children
+                    .get(child_session_id)
+                    .filter(|spawn| {
+                        notification.session_id.0.as_ref() == parent_session_id
+                            && subagent_id == &spawn.spawn.subagent_id
+                    })
+                    .map(|_| child_session_id.clone()),
                 _ => None,
             };
+            if matches!(
+                &notification.update,
+                SessionUpdate::SubagentSpawned { .. }
+                    | SessionUpdate::SubagentProgress { .. }
+                    | SessionUpdate::SubagentFinished { .. }
+            ) && lifecycle_child.is_none()
+            {
+                continue;
+            }
+            let discovered_child =
+                matches!(&notification.update, SessionUpdate::SubagentSpawned { .. })
+                    .then(|| lifecycle_child.clone())
+                    .flatten();
             notification.session_id =
                 agent_client_protocol::schema::v1::SessionId::new(parent_session_id.clone());
             let mut meta = notification
@@ -390,12 +438,12 @@ pub(crate) fn restore_descendant_state(
             );
             crate::app::acp_handler::handle_descendant_state_replay(&ext, app, root_agent_id);
             if let Some(child) = discovered_child
-                && let Some(spawn) = durable_children.remove(&child)
+                && let Some(spawn) = durable_children.get(&child)
             {
                 if let Some(root) = app.agents.get_mut(&root_agent_id) {
                     enrich_projected_subagent(root, &child, &spawn);
                 }
-                queue.push_back(child);
+                queue.push_back((child, parent_session_id.clone(), spawn.clone()));
             }
         }
     }

@@ -59,6 +59,8 @@ pub struct EntryRenderer<'a> {
     /// When true, this is a collapse header for an expanded group
     /// ("▾ N tool calls" instead of "╶╶ N more").
     group_collapse_header: bool,
+    /// First-member content remains visible below the summary, even while folded.
+    group_member_visible: bool,
     /// Aggregated group-header label; when set, group-header rows render it
     /// instead of the plain "N more" / "N tool calls" text. The variant
     /// picks the chrome: verb-run headers wear running/error accents from
@@ -103,6 +105,7 @@ impl<'a> EntryRenderer<'a> {
             mouse_pos: None,
             group_header_count: 0,
             group_collapse_header: false,
+            group_member_visible: false,
             group_header_label: None,
             flat_background: false,
             hide_accent: false,
@@ -224,6 +227,11 @@ impl<'a> EntryRenderer<'a> {
 
     pub fn with_group_collapse_header(mut self, collapse: bool) -> Self {
         self.group_collapse_header = collapse;
+        self
+    }
+
+    pub fn with_group_member_visible(mut self, visible: bool) -> Self {
+        self.group_member_visible = visible;
         self
     }
 
@@ -410,8 +418,10 @@ impl<'a> EntryRenderer<'a> {
 
     /// Thinking entries take no rows when the Appearance toggle is off.
     fn thinking_hidden(&self) -> bool {
-        self.entry
-            .is_hidden_thinking(crate::appearance::cache::load_show_thinking_blocks())
+        self.group_header_count == 0
+            && self
+                .entry
+                .is_hidden_thinking(crate::appearance::cache::load_show_thinking_blocks())
     }
 
     /// Collect the hyperlinks painted by this renderer in the same coordinate
@@ -434,11 +444,12 @@ impl<'a> EntryRenderer<'a> {
         if area.width < chrome + 1 || area.height == 0 || self.thinking_hidden() {
             return overlay;
         }
-        if self.group_header_count > 0 && !self.group_collapse_header {
+        if self.group_header_count > 0 && !self.group_collapse_header && !self.group_member_visible
+        {
             return overlay;
         }
 
-        let (area, skip_rows) = if self.group_collapse_header {
+        let (area, skip_rows) = if self.group_collapse_header || self.group_member_visible {
             if self.skip_rows == 0 {
                 let remaining_height = area.height.saturating_sub(1);
                 if remaining_height == 0 {
@@ -693,7 +704,11 @@ impl<'a> EntryRenderer<'a> {
     pub fn native_row_provenance(&self, width: u16, height: u16) -> (Vec<bool>, Vec<Option<u16>>) {
         let mut wraps = vec![false; usize::from(height)];
         let mut source_ends = vec![None; usize::from(height)];
-        if height == 0 || (self.group_header_count > 0 && !self.group_collapse_header) {
+        if height == 0
+            || (self.group_header_count > 0
+                && !self.group_collapse_header
+                && !self.group_member_visible)
+        {
             return (wraps, source_ends);
         }
         let layout_cfg = &self.appearance().scrollback.layout;
@@ -714,7 +729,7 @@ impl<'a> EntryRenderer<'a> {
             .ensure_cached(content_width, self.appearance(), self.is_selected, self.cwd);
         let output = self.entry.cached_output_ref();
         let vpad_top = u16::from(self.entry.block.has_vpad_for(self.appearance()));
-        let (header_rows, skip_rows) = if self.group_collapse_header {
+        let (header_rows, skip_rows) = if self.group_collapse_header || self.group_member_visible {
             if self.skip_rows == 0 {
                 (1u16, 0u16)
             } else {
@@ -836,7 +851,8 @@ impl Renderable for EntryRenderer<'_> {
 
         // Expand header ("╶╶ N more"): replaces block content entirely.
         // Only for truncated (non-expanded) groups.
-        if self.group_header_count > 0 && !self.group_collapse_header {
+        if self.group_header_count > 0 && !self.group_collapse_header && !self.group_member_visible
+        {
             self.render_group_header(area, buf);
             return;
         }
@@ -845,7 +861,7 @@ impl Renderable for EntryRenderer<'_> {
         // entry (height=1) that replaces the first group entry's content.
         // The remaining group entries keep their normal heights, giving the
         // header its own selectable index with independent interaction.
-        let (area, skip_rows) = if self.group_collapse_header {
+        let (area, skip_rows) = if self.group_collapse_header || self.group_member_visible {
             if self.skip_rows == 0 {
                 // Header is visible — render it in the first row
                 let header_area = Rect::new(area.x, area.y, area.width, 1);

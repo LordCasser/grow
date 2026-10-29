@@ -1,0 +1,5 @@
+- [x] 1. Validate each descendant session's Seed and any linked Result against its immediate canonical parent spawn before projecting its history.
+- [x] 2. Gate replayed lifecycle projection and traversal on the canonical parent/subagent/child identity tuple.
+- [x] 3. Reuse an existing ID-less Started row for the same child during forced replay.
+- [x] 4. Add descendant restore regressions for cross-entity mismatch and repeated ID-less restore.
+- [x] 5. Run focused Pager validation and strict OpenSpec validation.

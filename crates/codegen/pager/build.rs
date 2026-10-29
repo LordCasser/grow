@@ -1,7 +1,15 @@
 use std::process::Command;
 
+#[path = "../version/git_identity.rs"]
+mod git_identity;
+
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"),
+    );
+    for path in git_identity::watch_paths(&manifest_dir) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
     println!("cargo:rerun-if-env-changed=GROW_VERSION");
 
     let commit = Command::new("git")

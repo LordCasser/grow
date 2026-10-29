@@ -1043,7 +1043,7 @@ impl ScrollbackPane {
                 let verb_expanded = state
                     .get_cached_entry_layouts()
                     .and_then(|l| l.get(selected_abs))
-                    .is_some_and(|i| i.verb_group_header && i.group_collapse_header);
+                    .is_some_and(|i| i.has_group_content());
                 // Bottom-clip that cuts the member row off is handled by the
                 // paint fn's bounds guard (the offset row is simply skipped).
                 paint_expandable_indicator(
@@ -1288,6 +1288,12 @@ mod tests {
             true,
             "Received",
         ));
+        // A received communication is an independent event, not an outgoing tool call.
+        if let RenderBlock::ToolCall(crate::scrollback::blocks::tool::ToolCallBlock::Other(block)) =
+            &mut state.entry_mut(1).unwrap().block
+        {
+            *block = block.clone().with_immutable_event_id("incoming-receipt");
+        }
         state.push_block(RenderBlock::search("needle", 0, vec![]));
         state.set_selected(Some(1));
         state.prepare_layout(80, 8);

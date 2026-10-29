@@ -79,6 +79,31 @@ pub struct PromptUsage {
     pub usage_is_incomplete: bool,
 }
 
+/// Build the transient ACP snapshot used to refresh a client's lifetime usage
+/// projection. The durable Timeline remains the source of truth; this message
+/// is only a live read-model update.
+pub fn session_usage_notification(
+    session_id: &acp::SessionId,
+    usage: &chat_state::UsageLedger,
+) -> acp::SessionNotification {
+    let update = acp::SessionInfoUpdate::new().meta(
+        serde_json::json!({
+            "grow/sessionUsage": PromptUsage::from(usage),
+        })
+        .as_object()
+        .cloned(),
+    );
+    acp::SessionNotification::new(
+        session_id.clone(),
+        acp::SessionUpdate::SessionInfoUpdate(update),
+    )
+    .meta(
+        serde_json::json!({ "transient": true })
+            .as_object()
+            .cloned(),
+    )
+}
+
 impl PromptUsage {
     /// Project a ledger snapshot for the wire. Returns `Some` whenever
     /// `incomplete` is set — even if `ledger` is `None` — so the flag is never

@@ -530,3 +530,34 @@ async fn busy_model_reload_is_applied_before_the_next_idle_consumer() {
         })
         .await;
 }
+
+#[test]
+fn image_reprojection_keeps_reserved_output_pressure_in_auto_compaction_gate() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let actor = test_actor().await;
+            run_image_result(&actor).await;
+            mark_current_model_as_text_only(&actor).await;
+            actor.compaction.pre_prune.set(false);
+            actor.chat_state_handle.record_provider_context_anchor(200_000);
+            let result = actor.run_compact_only(compaction::AutoCompactTriggerInfo {
+                tokens_used: 200_000,
+                context_window: 256_000,
+                percentage: 78,
+                source: "reserved_output_image_gate",
+                max_output_tokens: Some(80_000),
+            }).await;
+            assert!(result.is_err(), "removing the image cannot resolve input plus output; this fixture has no eligible closed summary range");
+            let pressure = actor.chat_state_handle.get_projected_tokens().await;
+            assert!(pressure < 217_600 && pressure + 80_000 > 256_000, "reserve-only overflow remains after projection: {pressure}");
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::ImageProjection(_))));
+            assert!(events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Started { .. }))), "image gate must enter recovery rather than declare input-only success");
+            assert!(sampling_types::conversation::conversation_image_groups(&actor.chat_state_handle.get_conversation().await).is_empty());
+        }));
+    });
+}

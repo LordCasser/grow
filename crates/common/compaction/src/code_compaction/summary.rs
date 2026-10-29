@@ -83,18 +83,15 @@ pub fn format_compact_summary(summary: &str) -> String {
 
 /// Peel leading drafting scratchpad off an extracted `<summary>` block.
 ///
-/// A markdown "**Analysis**"-style header has no opening `<analysis>` tag for
-/// step 1 to catch; it ends at an orphan `</analysis>`. Everything up to and
-/// including the *last* `</analysis>` is dropped, so a scratchpad that itself
-/// quotes `</analysis>` mid-reasoning is still removed whole. The peel is
-/// skipped when the block already starts with a numbered section — including a
-/// markdown-decorated one like `## 1.` or `**1.**` — so a `</analysis>` merely
-/// echoed inside a real section never truncates the summary. Any leftover
-/// leading `<summary>` wrapper is then unwrapped.
+/// A markdown "**Analysis**" header has no opening `<analysis>` tag for step 1
+/// to catch; it ends at an orphan `</analysis>`. Strip that block only when its
+/// first line is a recognizable Analysis heading. An unlabelled prose summary
+/// may mention or quote `</analysis>` as evidence and must remain intact. Any
+/// leftover leading `<summary>` wrapper is then unwrapped.
 fn strip_leading_scratchpad(inner: &str) -> String {
     let mut s = inner.trim();
-    let lead = s.trim_start_matches(['#', '*', '-', '>', ' ', '\t']);
-    if !lead.starts_with(|c: char| c.is_ascii_digit())
+    let first_line = s.lines().next().unwrap_or_default().trim();
+    if is_markdown_analysis_heading(first_line)
         && let Some(pos) = s.rfind("</analysis>")
     {
         s = s[pos + "</analysis>".len()..].trim_start();
@@ -103,6 +100,33 @@ fn strip_leading_scratchpad(inner: &str) -> String {
         s = rest.trim_start();
     }
     s.to_string()
+}
+
+/// Recognize explicit Markdown Analysis headers, including a bold heading
+/// followed by inline scratchpad text and a parenthesized explanation.
+fn is_markdown_analysis_heading(line: &str) -> bool {
+    let line = line.trim();
+    if let Some(bold) = line.strip_prefix("**")
+        && let Some(close) = bold.find("**")
+    {
+        return is_analysis_heading_label(&bold[..close]);
+    }
+
+    line.strip_prefix('#')
+        .is_some_and(|heading| is_analysis_heading_label(heading.trim_start_matches('#').trim()))
+}
+
+fn is_analysis_heading_label(label: &str) -> bool {
+    let label = label
+        .trim()
+        .strip_suffix(':')
+        .unwrap_or(label.trim())
+        .trim();
+    label.eq_ignore_ascii_case("analysis")
+        || label
+            .strip_prefix("Analysis (")
+            .or_else(|| label.strip_prefix("analysis ("))
+            .is_some_and(|qualifier| qualifier.ends_with(')'))
 }
 
 /// Defuse compaction-control tokens echoed inside a summary body by inserting
@@ -216,6 +240,61 @@ mod tests {
             !result.contains("</summary>"),
             "live </summary>: {result:?}"
         );
+    }
+
+    #[test]
+    fn preserves_prose_before_quoted_analysis_closer() {
+        let raw = "<summary>\nTask: MUST_KEEP_EVIDENCE is complete.\nThe source quoted `</analysis>` literally.\nCurrent details remain relevant.\n</summary>";
+        let result = format_compact_summary(raw);
+        assert!(result.contains("MUST_KEEP_EVIDENCE"), "{result:?}");
+        assert!(result.contains("source quoted `"), "{result:?}");
+        assert!(
+            result.contains("Current details remain relevant."),
+            "{result:?}"
+        );
+        assert!(
+            !result.contains("</analysis>"),
+            "control token remains live: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strips_markdown_analysis_scratchpad_header() {
+        let raw = "<summary>\n**Analysis**\nDrafting details. It may quote </analysis> while thinking.\n</analysis>\n1. Primary Request: keep this result.\n</summary>";
+        let result = format_compact_summary(raw);
+        assert!(!result.contains("Drafting details"), "{result:?}");
+        assert!(
+            result.contains("1. Primary Request: keep this result."),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn strips_qualified_markdown_analysis_heading_with_inline_body() {
+        let raw = "<summary>\n**Analysis (internal reasoning before final output):**\nDrafting details.\n</analysis>\n\n1. Primary Request: preserve the answer.\n</summary>";
+        let result = format_compact_summary(raw);
+        assert!(!result.contains("Drafting details"), "{result:?}");
+        assert!(
+            result.contains("1. Primary Request: preserve the answer."),
+            "{result:?}"
+        );
+
+        let raw = "<summary>\n**Analysis:** I first wrote </analysis> by mistake, then reasoned more.\n</analysis>\n\n1. Primary Request: preserve the answer.\n</summary>";
+        let result = format_compact_summary(raw);
+        assert!(!result.contains("Analysis"), "{result:?}");
+        assert!(
+            result.contains("1. Primary Request: preserve the answer."),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn preserves_plain_prose_starting_with_analysis_of() {
+        let raw = "<summary>\nAnalysis of the failure confirms MUST_KEEP_EVIDENCE before `</analysis>`.\nMore evidence follows.\n</summary>";
+        let result = format_compact_summary(raw);
+        assert!(result.contains("Analysis of the failure"), "{result:?}");
+        assert!(result.contains("MUST_KEEP_EVIDENCE"), "{result:?}");
+        assert!(result.contains("More evidence follows."), "{result:?}");
     }
 
     #[test]

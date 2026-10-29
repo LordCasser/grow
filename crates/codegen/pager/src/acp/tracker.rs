@@ -5505,6 +5505,8 @@ mod tests {
     }
     #[test]
     fn respect_manual_folds_off_bypasses_finish_pin_guard() {
+        // Preserve the non-activity fallback contract when grouping is disabled.
+        crate::appearance::cache::set_group_tool_verbs(false);
         use crate::appearance::AppearanceConfig;
         use crate::scrollback::types::DisplayMode;
         crate::appearance::cache::set_show_thinking_blocks(true);

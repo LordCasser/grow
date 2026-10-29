@@ -1,0 +1,20 @@
+
+running 15 tests
+test session::actor::tests::skill_loading_tests::cancelling_while_pretool_hook_is_pending_keeps_skill_group_unpublished ... ok
+test session::actor::tests::skill_loading_tests::complete_skill_request_rejects_explicit_output_overflow_after_publication ... ok
+test session::actor::tests::skill_loading_tests::complete_request_headroom_rejects_user_skill_group_before_sampling ... ok
+test session::actor::tests::skill_loading_tests::denied_user_skill_is_handled_without_loading_and_next_input_can_continue ... ok
+test session::actor::tests::skill_loading_tests::model_disabled_skill_pipeline_reports_failure_without_publishing_guidance ... ok
+test session::actor::tests::skill_loading_tests::model_skill_resource_permission_denial_publishes_no_guidance ... ok
+test session::actor::tests::skill_loading_tests::model_load_skill_pipeline_publishes_one_result_and_one_skill_item ... ok
+test session::actor::tests::skill_loading_tests::replayed_user_skill_input_does_not_switch_source_or_leave_result ... ok
+test session::actor::tests::skill_loading_tests::model_skill_resource_pipeline_commits_only_requested_literal_resource ... ok
+test session::actor::tests::skill_loading_tests::repeated_user_skill_references_publish_one_atomic_group_with_distinct_calls ... ok
+test session::actor::tests::skill_loading_tests::user_skill_pipeline_consumes_input_with_body_and_keeps_prompt_text ... ok
+test session::actor::tests::skill_loading_tests::second_user_skill_preparation_failure_does_not_publish_partial_group_and_fifo_continues ... ok
+test session::actor::tests::skill_loading_tests::unconfirmed_user_skill_group_stops_before_provider_without_partial_publication ... ok
+test session::actor::tests::skill_loading_tests::queued_and_direct_skill_steers_keep_images_literal_text_and_atomic_identity ... ok
+test session::actor::tests::skill_loading_tests::user_skill_remains_pinned_until_first_accepted_response_then_compacts ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 4388 filtered out; finished in 2.60s
+

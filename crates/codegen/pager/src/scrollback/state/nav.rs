@@ -711,8 +711,7 @@ impl ScrollbackState {
         let relative_prompts = self.build_relative_prompt_descriptors(cache, &visible_range);
 
         // Compute sticky header at current scroll position
-        let sticky =
-            compute_sticky_layout(self.scroll_offset, self.viewport_height, &relative_prompts);
+        let sticky = self.sticky_layout_at_scroll(self.scroll_offset, &relative_prompts);
         let header_height = sticky.header_screen_rows();
 
         // Content area bounds
@@ -754,7 +753,7 @@ impl ScrollbackState {
                 // But check: at the new scroll position, will a sticky header appear
                 // that clips the entry's top?
                 let sticky_at_target =
-                    compute_sticky_layout(target_scroll, self.viewport_height, &relative_prompts);
+                    self.sticky_layout_at_scroll(target_scroll, &relative_prompts);
                 let header_at_target = sticky_at_target.header_screen_rows();
                 let content_top_at_target = target_scroll + header_at_target as usize;
 
@@ -849,7 +848,20 @@ impl ScrollbackState {
         visible_range: &Range<usize>,
     ) -> StickyHeaderLayout {
         let relative_prompts = self.build_relative_prompt_descriptors(cache, visible_range);
-        compute_sticky_layout(self.scroll_offset, self.viewport_height, &relative_prompts)
+        self.sticky_layout_at_scroll(self.scroll_offset, &relative_prompts)
+    }
+
+    /// Compute the sticky layout used by rendering at a scroll position.
+    /// Compact prompts and the disabled setting render no sticky rows.
+    fn sticky_layout_at_scroll(
+        &self,
+        scroll_offset: usize,
+        relative_prompts: &[PromptDescriptor],
+    ) -> StickyHeaderLayout {
+        if !self.appearance.scrollback.display.sticky_headers || self.appearance.prompt.compact {
+            return StickyHeaderLayout::default();
+        }
+        compute_sticky_layout(scroll_offset, self.viewport_height, relative_prompts)
     }
 
     /// Find scroll position that puts entry_y at top of content area.
@@ -866,8 +878,7 @@ impl ScrollbackState {
         // Iterate to find fixed point (max 3 iterations as safety bound).
         // Converges quickly because header shrinks monotonically as we scroll up.
         for _ in 0..3 {
-            let sticky =
-                compute_sticky_layout(target_scroll, self.viewport_height, relative_prompts);
+            let sticky = self.sticky_layout_at_scroll(target_scroll, relative_prompts);
             let header_at_target = sticky.header_screen_rows();
             let content_top_at_target = target_scroll + header_at_target as usize;
 
@@ -931,7 +942,7 @@ impl ScrollbackState {
         let relative_prompts = self.build_relative_prompt_descriptors(cache, &visible_range);
         let mut scroll = entry_y;
         for _ in 0..3 {
-            let sticky = compute_sticky_layout(scroll, self.viewport_height, &relative_prompts);
+            let sticky = self.sticky_layout_at_scroll(scroll, &relative_prompts);
             let header = sticky.header_screen_rows();
             scroll = entry_y.saturating_sub(header as usize);
         }
@@ -961,7 +972,7 @@ impl ScrollbackState {
         let relative_prompts = self.build_relative_prompt_descriptors(cache, &visible_range);
         let mut scroll = target;
         for _ in 0..3 {
-            let sticky = compute_sticky_layout(scroll, self.viewport_height, &relative_prompts);
+            let sticky = self.sticky_layout_at_scroll(scroll, &relative_prompts);
             let header = sticky.header_screen_rows();
             scroll = entry_y.saturating_sub(half_vp + header as usize);
         }
@@ -1016,7 +1027,13 @@ impl ScrollbackState {
             && entry.display_mode != DisplayMode::Expanded
         {
             entry.set_display_mode(DisplayMode::Expanded);
-            if respect_manual_folds {
+            if respect_manual_folds
+                || (crate::appearance::cache::load_group_tool_verbs()
+                    && !matches!(
+                        super::verb_group::run_step(entry, true),
+                        super::verb_group::RunStep::Break
+                    ))
+            {
                 entry.display_mode_pinned = true;
                 tracing::debug!(
                     entry_id = id.value(),
@@ -1024,9 +1041,6 @@ impl ScrollbackState {
                     "scrollback.fold.pinned"
                 );
             }
-            // Revealing an expanded run's head re-anchors the run; migrate
-            // the expansion key with it (same discipline as the fold path).
-            self.rekey_verb_group_expansion(entry_idx);
             layout_changed = true;
         }
 
@@ -1385,6 +1399,83 @@ mod tests {
         // Exactly at the only anchor's top: both directions are no-ops
         assert!(!state.next_response());
         assert!(!state.prev_response());
+    }
+
+    #[test]
+    fn precise_entry_navigation_matches_sticky_display_setting() {
+        fn state_with_target(
+            sticky_headers: bool,
+            compact_prompt: bool,
+        ) -> (ScrollbackState, usize) {
+            let mut state = ScrollbackState::new();
+            let mut appearance = crate::appearance::AppearanceConfig::default();
+            appearance.scrollback.display.sticky_headers = sticky_headers;
+            appearance.prompt.compact = compact_prompt;
+            appearance.scrollback.blocks.prompt.vpad = false;
+            state.set_appearance(appearance);
+            state.push_block(user_block("old question"));
+            state.push_block(agent_block(
+                &(1..=40)
+                    .map(|i| format!("history line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+            state.push_block(user_block("new question"));
+            state.push_block(agent_block(
+                &(1..=8)
+                    .map(|i| format!("response line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+            let target = state.push_block(agent_block("target entry"));
+            let target_idx = state.index_of_id(target).unwrap();
+            state.prepare_layout(80, 12);
+            (state, target_idx)
+        }
+
+        for (sticky_headers, compact_prompt) in [(false, false), (true, false), (true, true)] {
+            let (mut state, target_idx) = state_with_target(sticky_headers, compact_prompt);
+            let visible_range = state.visible_entry_range();
+            let base_y = state.layout_cache.as_ref().unwrap().virtual_y[visible_range.start];
+            let target_y = state.layout_cache.as_ref().unwrap().virtual_y[target_idx] - base_y;
+            let expected_header = sticky_headers && !compact_prompt;
+
+            state.set_selected(Some(target_idx));
+            state.scroll_to_entry_top(target_idx);
+            let area = ratatui::layout::Rect::new(0, 0, 80, 12);
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+            let output = crate::scrollback::scrollback_pane::ScrollbackPane::new()
+                .active(true)
+                .render_with_scratch(area, &mut buffer, &state, &mut scratch);
+            let rendered_target_top = output
+                .selected_entry_area
+                .expect("selected target is rendered")
+                .y as usize;
+            assert_eq!(
+                state.scroll_offset + rendered_target_top,
+                target_y,
+                "top navigation must align with actual rendered entry geometry (sticky={sticky_headers}, compact={compact_prompt})"
+            );
+            assert_eq!(rendered_target_top > 0, expected_header);
+
+            state.scroll_to_entry_center(target_idx);
+            let header = state.current_header_screen_rows() as usize;
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+            let output = crate::scrollback::scrollback_pane::ScrollbackPane::new()
+                .active(true)
+                .render_with_scratch(area, &mut buffer, &state, &mut scratch);
+            let rendered_target_top = output
+                .selected_entry_area
+                .expect("selected target is rendered")
+                .y as usize;
+            assert_eq!(
+                rendered_target_top,
+                header + state.viewport_height as usize / 2,
+                "center navigation must use the rendered content area's center (sticky={sticky_headers}, compact={compact_prompt})"
+            );
+        }
     }
 
     #[test]
@@ -1770,36 +1861,26 @@ mod tests {
         crate::appearance::cache::set_group_tool_verbs(true);
         crate::appearance::cache::set_show_thinking_blocks(false);
         let mut state = ScrollbackState::new();
-        let mut appearance = AppearanceConfig::default();
-        appearance.scrollback.display.group_max_visible = 3;
-        state.set_appearance(appearance);
-        state.push_block(RenderBlock::read("lone.rs", None));
+        let first = state.push_block(RenderBlock::read("lone.rs", None));
         push_tool_calls(&mut state, 12);
+        state.entry_mut(2).unwrap().block =
+            RenderBlock::tool_call_with_details("Tool1", "info", true, "searchable body");
         state.prepare_layout(80, 40);
-
-        // The read folds on its own; the Others truncate behind entry 1.
-        let verb_header = |state: &ScrollbackState, idx: usize| {
-            state.get_cached_entry_layouts().unwrap()[idx].verb_group_header
-        };
-        assert!(verb_header(&state, 0));
-        assert_eq!(cached_height_at(&state, 2), 0, "dense member truncated");
-
+        assert_eq!(cached_height_at(&state, 2), 0);
         state.reveal_entry_line(2, 0);
-
-        assert!(
-            cached_height_at(&state, 2) > 0,
-            "reveal must key the expansion on the dense run's own header"
-        );
-        assert!(verb_header(&state, 0), "the read's fold is untouched");
-        assert_eq!(cached_height_at(&state, 0), 1);
-
-        // Left from the revealed entry collapses the DENSE group (same
-        // bounded range), leaving the read folded.
+        assert!(cached_height_at(&state, 2) > 0);
+        assert!(state.expanded_groups.contains(&first));
+        assert_eq!(state.group_range_of(2, true), 0..13);
         state.set_selected(Some(2));
         assert!(state.collapse_group_if_expanded());
         state.prepare_layout(80, 40);
-        assert_eq!(cached_height_at(&state, 2), 0, "dense run re-truncates");
-        assert!(verb_header(&state, 0), "the read's fold is untouched");
+        assert!(!state.expanded_groups.contains(&first));
+        assert_eq!(state.entry(2).unwrap().display_mode, DisplayMode::Expanded);
+        assert!(
+            cached_height_at(&state, 2) > 0,
+            "search-revealed body remains explicitly visible"
+        );
+        assert_eq!(cached_height_at(&state, 1), 0);
     }
 
     #[test]

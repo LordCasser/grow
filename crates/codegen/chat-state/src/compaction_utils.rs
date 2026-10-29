@@ -604,6 +604,7 @@ pub fn fit_compaction_range_to_budget(
     plan: &CompactionRangePlan,
     max_source_tokens: u64,
     min_source_tokens: u64,
+    estimate_source: impl Fn(&[ConversationItem]) -> u64,
 ) -> Option<CompactionRangePlan> {
     let start = plan.start_index;
     let end = plan.end_index;
@@ -615,14 +616,9 @@ pub fn fit_compaction_range_to_budget(
     {
         return None;
     }
-    let mut tokens = 0u64;
-    let mut best = None;
+    let mut closed_ends = Vec::new();
     let mut pending_calls = BTreeSet::new();
     for index in start..=end {
-        tokens = tokens.saturating_add(estimate_item_tokens(&surface[index]));
-        if tokens > max_source_tokens {
-            break;
-        }
         match &surface[index] {
             ConversationItem::ToolResult(result) => {
                 if !pending_calls.remove(result.tool_call_id.as_str()) {
@@ -662,11 +658,20 @@ pub fn fit_compaction_range_to_budget(
             && (index == end
                 || is_response_group_start(surface, start, next)
                 || is_new_prompt_boundary(surface, next));
-        if closed && tokens >= min_source_tokens {
-            best = range_plan(surface_ids, start, index, tokens);
+        if closed {
+            closed_ends.push(index);
         }
     }
-    best
+    // Validate boundaries on the original history, but budget the caller's
+    // transmitted projection. Start at the longest complete range so the
+    // normal fitting case needs only one projection. Do not assume projection
+    // costs are monotonic (e.g. duplicate tool IDs can change portability).
+    closed_ends.into_iter().rev().find_map(|end| {
+        let tokens = estimate_source(&surface[start..=end]);
+        (min_source_tokens..=max_source_tokens)
+            .contains(&tokens)
+            .then(|| range_plan(surface_ids, start, end, tokens))?
+    })
 }
 
 /// A repeated runtime batch with the same prompt coordinate remains part of
@@ -1607,6 +1612,7 @@ mod tests {
             &plan,
             max_source_tokens,
             first_two_batches,
+            crate::estimate_conversation_tokens,
         )
         .expect("two complete tool batches fit before the third result");
 
@@ -1649,8 +1655,15 @@ mod tests {
                 crate::estimate_conversation_tokens(&surface),
             )
             .unwrap();
-            let fitted =
-                fit_compaction_range_to_budget(&surface, &ids, &original, u64::MAX, 5_000).unwrap();
+            let fitted = fit_compaction_range_to_budget(
+                &surface,
+                &ids,
+                &original,
+                u64::MAX,
+                5_000,
+                crate::estimate_conversation_tokens,
+            )
+            .unwrap();
             assert_eq!(
                 fitted.target.shadowed,
                 ids[..1],
@@ -1664,8 +1677,15 @@ mod tests {
             )
             .unwrap();
             assert!(
-                fit_compaction_range_to_budget(&surface, &ids, &incomplete_only, u64::MAX, 1)
-                    .is_none()
+                fit_compaction_range_to_budget(
+                    &surface,
+                    &ids,
+                    &incomplete_only,
+                    u64::MAX,
+                    1,
+                    crate::estimate_conversation_tokens
+                )
+                .is_none()
             );
         }
     }
@@ -1687,8 +1707,15 @@ mod tests {
         .unwrap();
         assert!(crate::estimate_conversation_tokens(&small_surface[1..=2]) < 5_000);
         assert!(
-            fit_compaction_range_to_budget(&small_surface, &small_ids, &small_plan, 10_000, 5_000,)
-                .is_none()
+            fit_compaction_range_to_budget(
+                &small_surface,
+                &small_ids,
+                &small_plan,
+                10_000,
+                5_000,
+                crate::estimate_conversation_tokens
+            )
+            .is_none()
         );
 
         let giant_items = vec![
@@ -1706,8 +1733,15 @@ mod tests {
         .unwrap();
         assert!(crate::estimate_conversation_tokens(&giant_surface[1..=2]) > 5_000);
         assert!(
-            fit_compaction_range_to_budget(&giant_surface, &giant_ids, &giant_plan, 5_000, 5_000,)
-                .is_none()
+            fit_compaction_range_to_budget(
+                &giant_surface,
+                &giant_ids,
+                &giant_plan,
+                5_000,
+                5_000,
+                crate::estimate_conversation_tokens
+            )
+            .is_none()
         );
     }
 
@@ -1739,6 +1773,7 @@ mod tests {
                 &shadowed_mismatch,
                 max_source_tokens,
                 1,
+                crate::estimate_conversation_tokens
             )
             .is_none()
         );
@@ -1755,20 +1790,24 @@ mod tests {
                 &endpoint_mismatch,
                 max_source_tokens,
                 1,
+                crate::estimate_conversation_tokens
             )
             .is_none()
         );
 
         let mut length_mismatch = ids.clone();
         length_mismatch.pop();
-        assert!(fit_compaction_range_to_budget(
-            &surface,
-            &length_mismatch,
-            &plan,
-            max_source_tokens,
-            1,
-        )
-        .is_none());
+        assert!(
+            fit_compaction_range_to_budget(
+                &surface,
+                &length_mismatch,
+                &plan,
+                max_source_tokens,
+                1,
+                crate::estimate_conversation_tokens
+            )
+            .is_none()
+        );
     }
 
     #[test]

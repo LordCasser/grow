@@ -71,12 +71,16 @@ impl ChatStateActor {
         self.persist_pending_timeline_event(&event, caller_deadline)
             .await?;
         let committed = event.clone();
+        let previous_surface_revision = self.state.timeline.surface_revision();
         let previous_prompt_index = self.state.timeline.next_prompt_index();
         if let Err(error) = self.state.timeline.accept(event) {
             self.persistence_poisoned = true;
             return Err(crate::commands::TimelineWriteError::CommittedProjectionInvalid(error));
         }
         self.refresh_prompt_projection(previous_prompt_index);
+        if self.state.timeline.surface_revision() != previous_surface_revision {
+            self.state.refresh_context_pressure();
+        }
         Ok(committed)
     }
 
@@ -214,6 +218,7 @@ impl ChatStateActor {
         {
             return false;
         }
+        let previous_surface_revision = self.state.timeline.surface_revision();
         let previous_prompt_index = self.state.timeline.next_prompt_index();
         self.state.timeline.accept(event).unwrap_or_else(|error| {
             self.persistence_poisoned = true;
@@ -223,6 +228,9 @@ impl ChatStateActor {
             return false;
         }
         self.refresh_prompt_projection(previous_prompt_index);
+        if self.state.timeline.surface_revision() != previous_surface_revision {
+            self.state.refresh_context_pressure();
+        }
         true
     }
 
@@ -274,6 +282,7 @@ impl ChatStateActor {
         Self::spawn_from_validated_timeline(
             timeline,
             sampling_config,
+            None,
             persistence,
             event_tx,
             cancellation_token,
@@ -287,13 +296,14 @@ impl ChatStateActor {
     pub async fn spawn_from_validated_timeline(
         mut timeline: Timeline,
         sampling_config: SamplingConfig,
+        active_goal: Option<sampling_types::GoalDirectiveTag>,
         persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Result<ChatStateHandle, crate::commands::TimelineWriteError> {
         let mut recovery_events = timeline.recover_interrupted()?;
         recovery_events.extend(timeline.recover_surface_integrity()?);
-        let state = ChatState::from_timeline(timeline, sampling_config)?;
+        let state = ChatState::from_timeline(timeline, sampling_config, active_goal)?;
         Ok(Self::launch(
             state,
             persistence,
@@ -461,13 +471,44 @@ impl ChatStateActor {
             }
             ChatStateCommand::RecordTimelineEventDurably {
                 kind,
+                request_goal_scope,
                 deadline,
                 reply,
             } => {
-                let result = match self.state.timeline.prepare(kind) {
-                    Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
-                    Ok(event) => self.commit_timeline_event_before(event, deadline).await,
+                // The waiting future may disappear after its durable promotion
+                // commits. Rejoining the same generation reuses that confirmed
+                // fact, rather than appending another lifecycle transition.
+                // The live fold only contains events applied after their ACK.
+                let previous_pressure = self.state.projected_tokens;
+                let previous_scope = request_goal_scope
+                    .filter(|scope| scope != &self.state.request_active_goal)
+                    .map(|scope| std::mem::replace(&mut self.state.request_active_goal, scope));
+                let existing = match &kind {
+                    TimelineEventKind::Compaction(crate::CompactionEvent::Promoted { id }) => {
+                        self.state.timeline.open_compaction_promotion(id).cloned()
+                    }
+                    _ => None,
                 };
+                let result = if let Some(event) = existing {
+                    Ok(event)
+                } else {
+                    match self.state.timeline.prepare(kind) {
+                        Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                        Ok(event) => self.commit_timeline_event_before(event, deadline).await,
+                    }
+                };
+                if let Some(previous_scope) = previous_scope {
+                    if result.is_err() {
+                        self.state.request_active_goal = previous_scope;
+                    } else {
+                        let projected_tokens = self.state.refresh_context_pressure();
+                        if projected_tokens != previous_pressure {
+                            self.send_event(ChatStateEvent::ContextPressureUpdated {
+                                projected_tokens,
+                            });
+                        }
+                    }
+                }
                 let _ = reply.send(result);
             }
             ChatStateCommand::ReceiveNotificationDurably {
@@ -817,6 +858,11 @@ impl ChatStateActor {
                 let result = self.begin_usage_resume_segment().await;
                 let _ = reply.send(result);
             }
+            ChatStateCommand::SetRequestGoalScope { active_goal, reply } => {
+                self.state.request_active_goal = active_goal;
+                self.refresh_context_pressure_and_notify_if_changed();
+                let _ = reply.send(());
+            }
             ChatStateCommand::ReplaceSamplingRoute { config } => {
                 self.state.image_budget = None;
                 self.state.continuation.replace_route(
@@ -824,14 +870,22 @@ impl ChatStateActor {
                     self.state.timeline.surface_len(),
                 );
                 self.state.sampling_config = config;
+                self.state.rebase_context_pressure_to_portable();
+                self.send_event(ChatStateEvent::ContextPressureUpdated {
+                    projected_tokens: self.state.projected_tokens,
+                });
             }
             ChatStateCommand::UpdateSamplingConfig { config } => {
-                if sampling_types::model_image_input_key(&self.state.sampling_config)
-                    != sampling_types::model_image_input_key(&config)
-                {
+                let image_route_changed =
+                    sampling_types::model_image_input_key(&self.state.sampling_config)
+                        != sampling_types::model_image_input_key(&config);
+                if image_route_changed {
                     self.state.image_budget = None;
                 }
                 self.state.sampling_config = config;
+                if image_route_changed {
+                    self.refresh_context_pressure_and_notify_if_changed();
+                }
             }
             ChatStateCommand::ResetContinuation { reply } => {
                 self.state.continuation.reset(
@@ -839,6 +893,7 @@ impl ChatStateActor {
                     self.state.timeline.surface_len(),
                     "provider_rejected_native_continuation",
                 );
+                self.refresh_context_pressure_and_notify_if_changed();
                 let _ = reply.send(());
             }
             ChatStateCommand::EnablePortableReasoning { backend, reply } => {
@@ -882,6 +937,7 @@ impl ChatStateActor {
                     .state
                     .continuation
                     .enable_portable_reasoning(backend, changes_history);
+                self.refresh_context_pressure_and_notify_if_changed();
                 let _ = reply.send(changed);
             }
             ChatStateCommand::RecordAgentEditedPath { path } => {
@@ -1036,6 +1092,17 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetAdmittedResponse { identity, reply } => {
                 let _ = reply.send(self.state.timeline.admitted_response(&identity));
+            }
+            ChatStateCommand::GetConsumedNotificationTurn {
+                source,
+                source_version,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.state
+                        .timeline
+                        .consumed_notification_turn(&source, &source_version),
+                );
             }
             ChatStateCommand::GetPendingNotifications { reply } => {
                 let _ = reply.send(self.state.timeline.pending_notifications());

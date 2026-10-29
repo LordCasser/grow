@@ -1,0 +1,35 @@
+   Compiling shell v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+    Finished `test` profile [unoptimized] target(s) in 1m 12s
+     Running unittests src/lib.rs (target/debug/deps/shell-361a98a001547f23)
+
+running 1 test
+test session::actor::tests::compaction_process_recovery_tests::compaction_real_files_process_recovery ... real file/process boundary passed: promoted; writer_pid=47062; recovered_pid=47063; durable_bytes=3664; prefix_bytes=2944; prefix_hash=b9d6a0f2d1897e2086865fa5c2b8fb29bf9c33a39db05da792bc4bfd169a8a14
+
+thread 'session::actor::tests::compaction_process_recovery_tests::compaction_real_files_process_recovery' (3460297) panicked at crates/codegen/shell/src/session/actor/tests/compaction_process_recovery_tests.rs:405:17:
+recovery process failed: 
+running 1 test
+test session::actor::tests::compaction_process_recovery_tests::compaction_real_files_process_recovery ... 
+thread 'session::actor::tests::compaction_process_recovery_tests::compaction_real_files_process_recovery' (3460327) panicked at crates/codegen/shell/src/session/actor/tests/compaction_process_recovery_tests.rs:99:81:
+called `Result::unwrap()` on an `Err` value: Custom { kind: InvalidData, error: "compaction/summary references 0 matching replacements for sideband 01a185b2-86e6-76d3-8ff5-0644cd2e4c9b/2" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    session::actor::tests::compaction_process_recovery_tests::compaction_real_files_process_recovery
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4392 filtered out; finished in 0.10s
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    session::actor::tests::compaction_process_recovery_tests::compaction_real_files_process_recovery
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4392 filtered out; finished in 0.60s
+
+error: test failed, to rerun pass `-p shell --lib`

@@ -1,0 +1,24 @@
+
+running 2 tests
+
+thread 'actor::tests::context_pressure::image_route_invalidation_retains_goal_scope_and_same_route_calibration' (3535843) panicked at crates/codegen/chat-state/src/actor/context_pressure_tests.rs:60:5:
+assertion `left == right` failed: route invalidation keeps the latest request's Goal projection
+  left: 2036
+ right: 48026
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'actor::tests::context_pressure::sampling_route_replacement_retains_goal_scope_for_pressure_rebase' (3535844) panicked at crates/codegen/chat-state/src/actor/context_pressure_tests.rs:60:5:
+assertion `left == right` failed: route invalidation keeps the latest request's Goal projection
+  left: 36
+ right: 46026
+test actor::tests::context_pressure::image_route_invalidation_retains_goal_scope_and_same_route_calibration ... FAILED
+test actor::tests::context_pressure::sampling_route_replacement_retains_goal_scope_for_pressure_rebase ... FAILED
+
+failures:
+
+failures:
+    actor::tests::context_pressure::image_route_invalidation_retains_goal_scope_and_same_route_calibration
+    actor::tests::context_pressure::sampling_route_replacement_retains_goal_scope_for_pressure_rebase
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 597 filtered out; finished in 0.01s
+

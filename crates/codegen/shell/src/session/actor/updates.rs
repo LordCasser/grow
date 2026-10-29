@@ -664,22 +664,10 @@ impl SessionActor {
 
     /// Billing is a live process-local ledger, never replayable transcript.
     pub(super) fn emit_session_usage_update(&self, usage: &chat_state::UsageLedger) {
-        let update = acp::SessionInfoUpdate::new().meta(
-            serde_json::json!({
-                "grow/sessionUsage": crate::extensions::notification::PromptUsage::from(usage),
-            })
-            .as_object()
-            .cloned(),
-        );
         self.emit_transient_notification(
-            acp::SessionNotification::new(
-                self.session_info.id.clone(),
-                acp::SessionUpdate::SessionInfoUpdate(update),
-            )
-            .meta(
-                serde_json::json!({ "transient": true })
-                    .as_object()
-                    .cloned(),
+            crate::extensions::notification::session_usage_notification(
+                &self.session_info.id,
+                usage,
             ),
         );
     }

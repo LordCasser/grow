@@ -1,0 +1,43 @@
+    Finished `test` profile [unoptimized] target(s) in 3m 05s
+     Running unittests src/lib.rs (target/debug/deps/shell-361a98a001547f23)
+
+running 6 tests
+
+thread 'session::actor::compaction::adversarial_audit_probes::adversarial_audit_quoted_analysis_closer_preserves_summary_evidence' (3063465) panicked at crates/codegen/shell/src/session/actor/compaction.rs:3880:9:
+summary cleanup deleted real evidence while accepting the remaining 1701 chars
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'session::actor::compaction::adversarial_audit_probes::adversarial_audit_summary_budget_ignores_reasoning_that_will_not_be_sent' (3063466) panicked at crates/codegen/shell/src/session/actor/compaction.rs:3902:9:
+raw range has 110002 tokens but actual summary source only 10003; a valid fitting source was rejected
+
+thread 'session::actor::compaction::adversarial_audit_probes::adversarial_audit_ordinary_cancel_signals_unpromoted_generation' (3063464) panicked at crates/codegen/shell/src/session/actor/compaction.rs:3928:13:
+ordinary invalidation left the unpromoted generation token uncancelled
+test session::actor::compaction::adversarial_audit_probes::adversarial_audit_quoted_analysis_closer_preserves_summary_evidence ... FAILED
+test session::actor::compaction::adversarial_audit_probes::adversarial_audit_summary_budget_ignores_reasoning_that_will_not_be_sent ... FAILED
+test session::actor::compaction::adversarial_audit_probes::adversarial_audit_ordinary_cancel_signals_unpromoted_generation ... FAILED
+
+thread '<unnamed>' (3063468) panicked at crates/codegen/shell/src/session/actor/tests/compaction_pre_prune_tests.rs:2799:17:
+cancelled ready generation must not publish: Ok(Ok(true))
+test session::actor::tests::compaction_pre_prune_tests::adversarial_audit_background_cancel_probe::adversarial_audit_ordinary_cancel_discards_released_background_summary ... FAILED
+
+thread '<unnamed>' (3063490) panicked at crates/codegen/shell/src/session/actor/tests/compaction_pre_prune_tests.rs:2645:17:
+non-success summary terminal accepted as replacement (stop, returned_ok, installed): [("max_tokens", true, true), ("model_context_window_exceeded", true, true), ("refusal", true, true), ("pause_turn", true, true)]
+test session::actor::tests::compaction_pre_prune_tests::adversarial_audit_output_probes::adversarial_audit_non_success_summary_stop_cannot_replace_history ... FAILED
+
+thread '<unnamed>' (3063491) panicked at crates/codegen/shell/src/session/actor/tests/compaction_pre_prune_tests.rs:2666:17:
+queued manual compaction prevented auto compaction but ordinary loop kept retrying: 62 Steps, 0 provider requests
+test session::actor::tests::compaction_pre_prune_tests::adversarial_audit_queue_probes::adversarial_audit_pending_manual_compact_does_not_spin_automatic_recovery ... FAILED
+
+failures:
+
+failures:
+    session::actor::compaction::adversarial_audit_probes::adversarial_audit_ordinary_cancel_signals_unpromoted_generation
+    session::actor::compaction::adversarial_audit_probes::adversarial_audit_quoted_analysis_closer_preserves_summary_evidence
+    session::actor::compaction::adversarial_audit_probes::adversarial_audit_summary_budget_ignores_reasoning_that_will_not_be_sent
+    session::actor::tests::compaction_pre_prune_tests::adversarial_audit_background_cancel_probe::adversarial_audit_ordinary_cancel_discards_released_background_summary
+    session::actor::tests::compaction_pre_prune_tests::adversarial_audit_output_probes::adversarial_audit_non_success_summary_stop_cannot_replace_history
+    session::actor::tests::compaction_pre_prune_tests::adversarial_audit_queue_probes::adversarial_audit_pending_manual_compact_does_not_spin_automatic_recovery
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 4379 filtered out; finished in 0.66s
+
+error: test failed, to rerun pass `-p shell --lib`

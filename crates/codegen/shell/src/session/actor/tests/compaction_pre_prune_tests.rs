@@ -10,7 +10,8 @@
 //!    conversation is its input).
 //! 3. `ModelContextWindowExceeded` + compaction still over the window → turn
 //!    fails with a diagnostic (bounded sampling, no re-loop).
-//! 5. `prune_tool_results` errors → fail-open: the summary path still runs.
+//! 5. A pre-write Invalid prune failure falls back to summary; durable write
+//!    failures fail closed instead of sampling stale context.
 //! Plus a layering test: pruning appends exactly one Surface replacement,
 //! emits no chat-state UI events, and leaves the original Timeline fact
 //! available behind the shadowing edge for rewind.
@@ -266,7 +267,15 @@ fn async_compaction_scenario(action: &'static str) {
                 tokio::time::timeout(std::time::Duration::from_secs(5), foreground.wait_satisfied()).await.expect("foreground expectation consumed");
             }
             if action == "goal" { assert_eq!(actor.goal_tokens_used(), 148_010); }
-            assert_eq!(actor.compaction.background.borrow().is_some(), !between_step);
+            if action == "budget" {
+                // Ordinary budget invalidation now signals the generation.
+                // A later invalidation may already have reaped its settled
+                // owner; the contract is closed admission and settled usage,
+                // not keeping a finished worker in the slot.
+                assert_eq!(actor.goal_tracker.lock().snapshot().map(|goal| goal.status), Some(crate::session::goal_tracker::GoalStatus::BudgetLimited));
+            } else {
+                assert_eq!(actor.compaction.background.borrow().is_some(), !between_step);
+            }
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
             assert_eq!(events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary { .. }))), between_step);
             let mut early_notifications = Vec::new();
@@ -300,7 +309,7 @@ fn async_compaction_scenario(action: &'static str) {
                 promotion = Some(tokio::task::spawn_local({ let actor = actor.clone(); async move {
                     actor.run_compact_only(compaction::AutoCompactTriggerInfo {
                         tokens_used: 85_000, context_window: 100_000, percentage: 85, source: "pre_sampling",
-                    }).await
+                     max_output_tokens: None }).await
                 }}));
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     loop {
@@ -370,6 +379,8 @@ fn async_compaction_scenario(action: &'static str) {
                 )
                 .await
                 .expect("budget-triggered cancellation must settle the summary attempt");
+                // This fixture blocks the terminal event, after usage has
+                // already arrived. Cancellation still settles that known bill.
                 assert_eq!(actor.goal_tokens_used(), 148_025);
                 assert!(actor
                     .goal_usage_window
@@ -580,6 +591,18 @@ fn async_compaction_scenario(action: &'static str) {
             assert_eq!(completions.len(), usize::from(should_notify));
             if should_notify { assert_eq!(completions[0]["update"]["async_compact"], action != "promote"); }
             assert_eq!(notifications.iter().filter(|kind| *kind == "auto_compact_started").count(), usize::from(promotes));
+            if action == "promote_control" {
+                assert_eq!(
+                    notifications
+                        .iter()
+                        .filter(|kind| *kind == "auto_compact_cancelled")
+                        .count(),
+                    1,
+                    "a cancelled promoted foreground compaction publishes one cancellation terminal: {notifications:?}"
+                );
+                assert!(completions.is_empty());
+                assert!(!notifications.iter().any(|kind| kind == "auto_compact_failed"));
+            }
             if matches!(action, "promote_incomplete" | "promote_waiter_cancelled") {
                 if action == "promote_waiter_cancelled" {
                     // Keep the provider response blocked until the real drain
@@ -1280,6 +1303,7 @@ fn pre_prune_insufficient_projection_runs_summary() {
                 context_window: 100_000,
                 percentage: 100,
                 source: "test",
+                max_output_tokens: None,
             };
 
             let pruned = actor
@@ -1388,7 +1412,7 @@ fn workflow_guidance_survives_mid_turn_compaction_once() {
                     context_window: 100_000,
                     percentage: 90,
                     source: "workflow_test",
-                })
+                 max_output_tokens: None })
                 .await
                 .expect("Workflow compaction succeeds");
 
@@ -1444,7 +1468,7 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 "/v1/messages",
                 messages_turn(&[(&long_summary, END_TURN)], END_TURN),
             );
-            let (actor, _gateway_rx) =
+            let (actor, mut gateway_rx) =
                 actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
             // Keep the static estimate below the 85% preflight trigger, but
             // make the retained tail large enough that removing the 6K-token
@@ -1498,17 +1522,345 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 compaction_terminal.state, "completed",
                 "the Surface replacement committed; only the enclosing turn fails"
             );
+
+            let (updates, completed) = drain_session_updates(&mut gateway_rx);
+            assert_eq!(
+                updates
+                    .iter()
+                    .filter(|kind| *kind == "auto_compact_started")
+                    .count(),
+                1,
+                "the foreground compaction start is presented exactly once: {updates:?}"
+            );
+            assert_eq!(
+                updates
+                    .iter()
+                    .filter(|kind| *kind == "auto_compact_completed")
+                    .count(),
+                1,
+                "the committed replacement is presented as completed: {updates:?}"
+            );
+            assert_eq!(completed.len(), 1);
+            assert!(
+                !updates.iter().any(|kind| kind == "auto_compact_failed"),
+                "a post-commit convergence error must not present compaction as failed: {updates:?}"
+            );
+        }));
+    });
+}
+
+#[test]
+fn committed_over_window_replacement_discards_pending_async_notice() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            for manual in [false, true] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let long_summary = format!(
+                    "compacted summary: {}",
+                    "filler sentence that keeps the summary above the minimum seed length. "
+                        .repeat(20)
+                );
+                server.enqueue_response(
+                    "/v1/messages",
+                    messages_turn(&[(&long_summary, END_TURN)], END_TURN),
+                );
+                let (actor, mut gateway_rx) = actor_with_sampler_cw(
+                    &server,
+                    sampling_types::ApiBackend::Messages,
+                    100_000,
+                )
+                .await;
+                seed_closed_compaction_range(&actor, 150_000).await;
+                actor
+                    .chat_state_handle
+                    .record_provider_context_anchor(120_000);
+                let _ = actor.chat_state_handle.get_conversation_len().await;
+                actor.compaction.pending_async_notice.set(Some(
+                    crate::session::compaction_config::PendingAsyncCompactionNotice {
+                        tokens_before: 120_000,
+                        elapsed_ms: 10,
+                    },
+                ));
+
+                let error = if manual {
+                    actor.run_compact(None).await
+                } else {
+                    actor
+                        .run_compact_only(compaction::AutoCompactTriggerInfo {
+                            tokens_used: 120_000,
+                            context_window: 100_000,
+                            percentage: 120,
+                            source: "test",
+                         max_output_tokens: None })
+                        .await
+                }
+                .expect_err("the committed summary leaves known pressure above the window");
+                assert!(
+                    error.to_string().contains("still exceeds"),
+                    "post-commit convergence must return its error: {error}"
+                );
+                assert!(
+                    actor.compaction.pending_async_notice.get().is_none(),
+                    "committing the replacement invalidates the old asynchronous notice (manual={manual})"
+                );
+                if manual {
+                    assert!(
+                        crate::session::commands::control_terminal_was_published(&error),
+                        "manual post-commit error already published its control terminal"
+                    );
+                }
+                assert_eq!(
+                    server.messages_request_count(),
+                    1,
+                    "only the summary request runs (manual={manual})"
+                );
+
+                let (updates, completed) = drain_session_updates(&mut gateway_rx);
+                assert_eq!(
+                    updates
+                        .iter()
+                        .filter(|kind| *kind == "auto_compact_completed")
+                        .count(),
+                    1,
+                    "the durable replacement settles as completed despite the enclosing error (manual={manual}): {updates:?}"
+                );
+                assert_eq!(completed.len(), 1);
+                assert!(
+                    !updates.iter().any(|kind| kind == "auto_compact_failed"),
+                    "a post-commit convergence error must not present as compaction failure (manual={manual}): {updates:?}"
+                );
+                if !manual {
+                    assert_eq!(
+                        updates
+                            .iter()
+                            .filter(|kind| *kind == "auto_compact_started")
+                            .count(),
+                        1,
+                        "automatic compaction publishes one start: {updates:?}"
+                    );
+                }
+            }
+        }));
+    });
+}
+
+#[test]
+fn model_switch_compaction_failure_blocks_the_ordinary_request() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let (actor, _gateway_rx) =
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 1_000_000)
+                    .await;
+            actor.compaction.pre_prune.set(false);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::system("test system prompt"),
+                    prompt("large model turn", 0),
+                    ConversationItem::assistant("x".repeat(2_400_000)),
+                    prompt("recent retained turn", 1),
+                    ConversationItem::assistant("y".repeat(20_000)),
+                ],
+            )
+            .await;
+            let projected = actor.chat_state_handle.get_projected_tokens().await;
+            assert!(
+                projected > 500_000,
+                "fixture must exceed the replacement window"
+            );
+
+            actor.compaction.previous_model.set(Some(
+                crate::session::compaction_config::PreviousModelInfo {
+                    model_slug: "large-model".into(),
+                    context_window: 1_000_000,
+                },
+            ));
+            let mut route = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("sampling route exists");
+            route.model = "small-model".into();
+            route.context_window = std::num::NonZeroU64::new(500_000).unwrap();
+            actor.chat_state_handle.replace_sampling_route(route);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
+
+            let error = actor
+                .maybe_compact_on_model_switch()
+                .await
+                .expect_err("an unfit pre-compaction source must fail the model switch turn");
+            assert!(
+                error
+                    .to_string()
+                    .contains("no closed Surface range is large enough"),
+                "the failure should identify that no closed range can be compacted: {error}"
+            );
+            assert_eq!(
+                server.messages_request_count(),
+                0,
+                "a failed model-switch compaction must not reach ordinary provider sampling"
+            );
+        }));
+    });
+}
+
+#[test]
+fn suppressed_known_overflow_fails_before_provider_dispatch() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let (actor, _gateway_rx) =
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(100_001);
+            actor.compaction.auto_compact_suppressed.store(
+                crate::session::compaction_config::SUPPRESS_AUTH,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
+            let error = run_user_turn(&actor, "suppressed-overflow")
+                .await
+                .expect_err("known overflow must fail even while auto-compaction is suppressed");
+            let message = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("message"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            assert!(
+                message.contains("context window"),
+                "the turn should fail admission for its configured window: {message:?}"
+            );
+            assert_eq!(
+                server.messages_request_count(),
+                0,
+                "known overflow must be rejected before an ordinary provider request"
+            );
         }));
     });
 }
 
 // ─── Scenario 5 ────────────────────────────────────────────────────────────
 
-/// `prune_tool_results` returning `Err` must fail open: `maybe_pre_prune`
-/// returns `false` without touching the suppress state, and the summary path
-/// still runs afterwards.
+struct FailToolResultPruneAck {
+    attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl chat_state::TimelinePersistence for FailToolResultPruneAck {
+    fn persist_timeline_event_and_ack(
+        &mut self,
+        event: &chat_state::TimelineEvent,
+    ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+        let (respond_to, receiver) = tokio::sync::oneshot::channel();
+        let is_tool_result_prune = event.messages().is_some_and(|messages| {
+            matches!(&messages.cause, chat_state::MessageCause::ToolResultPrune)
+        });
+        if is_tool_result_prune {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = respond_to.send(Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "simulated durable tool-result prune failure",
+            )));
+        } else {
+            let _ = respond_to.send(Ok(()));
+        }
+        receiver
+    }
+
+    fn flush(&mut self) {}
+}
+
 #[test]
-fn pre_prune_error_fails_open_to_summary() {
+fn pre_prune_durable_ack_failure_fails_closed() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let (mut actor, _planning_rx) =
+                create_test_actor_with_planning_receiver(0, 40_000, 85, gateway_tx, persistence_tx)
+                    .await;
+            let sampling_config = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("sampling route exists");
+            let (chat_event_tx, _chat_event_rx) = mpsc::unbounded_channel();
+            let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            actor.chat_state_handle = chat_state::ChatStateActor::spawn(
+                vec![ConversationItem::system("test system prompt")],
+                sampling_config,
+                Box::new(FailToolResultPruneAck {
+                    attempts: attempts.clone(),
+                }),
+                chat_event_tx,
+                tokio_util::sync::CancellationToken::new(),
+            );
+            seed_tool_result_rounds(&actor, 1).await;
+            let effective = actor.chat_state_handle.get_projected_tokens().await;
+            let provider_anchor = effective + 10_000;
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(provider_anchor);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
+
+            let error = actor
+                .maybe_pre_prune(&compaction::AutoCompactTriggerInfo {
+                    tokens_used: provider_anchor,
+                    context_window: 40_000,
+                    percentage: 150,
+                    source: "test_ack_failure",
+                    max_output_tokens: None,
+                })
+                .await
+                .expect_err("a durable prune ACK failure must abort compaction preflight");
+            assert!(
+                error
+                    .to_string()
+                    .contains("simulated durable tool-result prune failure"),
+                "the durable writer failure must propagate: {error}"
+            );
+            assert_eq!(
+                attempts.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the fixture must fail the actual prune replacement ACK"
+            );
+            assert_eq!(
+                actor
+                    .compaction
+                    .auto_compact_suppressed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                crate::session::compaction_config::SUPPRESS_NONE,
+                "a durable writer failure is not treated as an optional Invalid plan"
+            );
+        }));
+    });
+}
+
+/// A Timeline Invalid detected before writing is an optional-pruning failure:
+/// `maybe_pre_prune` falls back without changing suppression. This does not
+/// apply to durable ACK failures or other writer/owner failures.
+#[test]
+fn pre_prune_invalid_replacement_fails_open_to_summary() {
     run_with_session_stack(|| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1535,18 +1887,18 @@ fn pre_prune_error_fails_open_to_summary() {
                 context_window: 40_000,
                 percentage: 125,
                 source: "test",
-            };
+             max_output_tokens: None };
             let trigger_phase_a = compaction::AutoCompactTriggerInfo {
                 tokens_used: trigger.tokens_used,
                 context_window: trigger.context_window,
                 percentage: trigger.percentage,
                 source: trigger.source,
-            };
+             max_output_tokens: None };
 
             // Phase A: an already-open compaction transaction rejects the
-            // pre-prune replacement deterministically. This exercises the
-            // same `PruneError::Timeline` fail-open arm without relying on an
-            // unsafe external full-Surface overwrite race.
+            // pre-prune replacement with Timeline Invalid before any durable
+            // write. This exercises the narrow fail-open arm without relying
+            // on an unsafe external full-Surface overwrite race.
             let (mut trace_rx, _guard) = capture_trace_events();
             actor
                 .chat_state_handle
@@ -1576,9 +1928,9 @@ fn pre_prune_error_fails_open_to_summary() {
                 .await
                 .unwrap();
             assert!(!pruned, "prune error must fail open (no summary skip)");
-            // Pin the Err arm: the fail-open warn must have been logged (if
-            // the interleave ever degraded to the empty-plan rung, this fails
-            // loudly instead of silently weakening the test).
+            // Pin the Invalid fail-open arm: the warning must have been logged
+            // (if the interleave ever degraded to the empty-plan rung, this
+            // fails loudly instead of silently weakening the test).
             let mut raw_events = Vec::new();
             while let Ok(e) = trace_rx.try_recv() {
                 raw_events.push(e);
@@ -1706,6 +2058,7 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
                 context_window: 100_000,
                 percentage: 105,
                 source: "test",
+                max_output_tokens: None,
             };
             actor
                 .compaction
@@ -1825,6 +2178,7 @@ fn pre_prune_blocked_by_account_and_turn_suppress() {
                 context_window: 100_000,
                 percentage: 105,
                 source: "test",
+                max_output_tokens: None,
             };
             for suppress in [SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS, SUPPRESS_AUTH] {
                 actor
@@ -2277,3 +2631,241 @@ fn compaction_size_failure_allows_the_next_user_turn_to_recover() {
         }));
     });
 }
+
+#[path = "pressure_admission_tests.rs"]
+mod pressure_admission;
+
+#[cfg(test)]
+mod compaction_regression_output_probes {
+    use super::*;
+    #[test]
+    fn compaction_regression_non_success_summary_stop_cannot_replace_history() {
+        run_with_session_stack(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(tokio::task::LocalSet::new().run_until(async {
+                let mut accepted = Vec::new();
+                for stop in ["max_tokens", "model_context_window_exceeded", "refusal", "pause_turn"] {
+                    let server = MockInferenceServer::start().await.unwrap();
+                    let summary = format!("AUDIT_PARTIAL_SUMMARY: {}", "unfinished retained evidence. ".repeat(40));
+                    for _ in 0..3 {
+                        server.enqueue_response("/v1/messages", messages_turn(&[(&summary, stop)], stop));
+                    }
+                    let (actor, _) = actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+                    seed_closed_compaction_range(&actor, 150_000).await;
+                    actor.compaction.pre_prune.set(false);
+                    let before = actor.chat_state_handle.get_conversation().await;
+                    let result = actor.run_compact_only(compaction::AutoCompactTriggerInfo {tokens_used: 90_000, context_window: 100_000, percentage: 90, source: "audit", max_output_tokens: None }).await;
+                    let items = actor.chat_state_handle.get_conversation().await;
+                    assert_eq!(serde_json::to_value(&items).unwrap(), serde_json::to_value(&before).unwrap(), "failed summary must preserve complete Surface ({stop})");
+                    let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                    assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Completed { .. }))));
+                    assert!(server.messages_request_count() <= 3);
+                    let installed = items.iter().any(|item| item.text_content().contains("AUDIT_PARTIAL_SUMMARY"));
+                    if result.is_ok() || installed { accepted.push((stop, result.is_ok(), installed)); }
+                }
+                assert!(accepted.is_empty(), "non-success summary terminal accepted as replacement (stop, returned_ok, installed): {accepted:?}");
+            }));
+        });
+    }
+}
+
+#[cfg(test)]
+mod compaction_regression_queue_probes {
+    use super::*;
+    #[test]
+    fn compaction_regression_pending_manual_compact_does_not_spin_automatic_recovery() {
+        run_with_session_stack(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(tokio::task::LocalSet::new().run_until(async {
+                let server = MockInferenceServer::start().await.unwrap();
+                let (actor, _) = actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+                seed_closed_compaction_range(&actor, 88_000).await;
+                actor.compaction.pre_prune.set(false);
+                actor.chat_state_handle.record_provider_context_anchor(90_000);
+                actor.state.lock().await.pending_manual_compact = Some(Some("preserve this manual instruction".into()));
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), run_user_turn(&actor, "audit-manual-queue")).await;
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let steps = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Step(chat_state::StepEvent::Started { .. }))).count();
+                assert!(steps <= 1, "queued manual compact opened {steps} Steps");
+                assert_eq!(server.messages_request_count(), 0);
+                assert_eq!(actor.state.lock().await.pending_manual_compact, Some(Some("preserve this manual instruction".into())));
+                assert!(result.as_ref().is_ok_and(|result| result.is_ok()), "queued manual compaction prevented auto compaction but ordinary loop kept retrying: {steps} Steps, {} provider requests", server.messages_request_count());
+                let ended = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Step(chat_state::StepEvent::Ended { .. }))).count();
+                assert_eq!(steps, ended, "yield must close every started Step");
+                assert!(actor.chat_state_handle.get_conversation().await.iter().any(|item| item.text_content().contains("write a long answer")), "admitted user input remains on Surface");
+                let summary = format!("MANUAL_QUEUE_RECOVERED: {}", "verified retained evidence. ".repeat(40));
+                server.enqueue_response("/v1/messages", messages_turn(&[(&summary, END_TURN)], END_TURN));
+                assert!(crate::session::actor::idle_arbitration::maybe_start_pending_manual_compaction(actor.clone()).await);
+                tokio::time::timeout(std::time::Duration::from_secs(5), actor.session_activities.wait_idle()).await.expect("manual owner must settle");
+                assert!(actor.state.lock().await.pending_manual_compact.is_none());
+                assert_eq!(server.messages_request_count(), 1);
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Completed { .. }))));
+                assert!(actor.chat_state_handle.get_conversation().await.iter().any(|item| item.text_content().contains("MANUAL_QUEUE_RECOVERED")));
+
+            }));
+        });
+    }
+}
+
+#[cfg(test)]
+mod compaction_regression_background_cancel_probe {
+    use super::*;
+    use test_support::{InferenceEndpoint, InferenceRequestMatcher};
+
+    #[test]
+    fn compaction_regression_ordinary_cancel_discards_released_background_summary() {
+        run_with_session_stack(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+                let server = MockInferenceServer::start().await.unwrap();
+                let summary = format!(
+                    "compaction_regression_late_summary: old work complete. {}",
+                    "verified old evidence. ".repeat(35)
+                );
+                let mut blocked_summary = server.expect_response_blocked(
+                    "adversarial audit background summary",
+                    InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                    messages_turn(&[(&summary, END_TURN)], END_TURN),
+                );
+                let (actor, _notifications) =
+                    actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
+                        .await;
+                actor.compaction.threshold_percent.set(80);
+                actor.compaction.pre_prune.set(false);
+                seed_closed_compaction_range(&actor, 88_000).await;
+                actor
+                    .chat_state_handle
+                    .record_provider_context_anchor(75_000);
+                actor.state.lock().await.foreground =
+                    ForegroundState::RegularTurn(running_task_stub("adversarial-audit-cancel"));
+
+                let start_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.background_compaction_boundary(),
+                )
+                .await;
+                let summary_started = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    blocked_summary.wait_blocked(),
+                )
+                .await
+                .is_ok();
+
+                // Invalidation happens while the server holds the summary's
+                // terminal response event. Release only after ordinary cancel
+                // returns, so this is a deterministic late-result race.
+                let cancel_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.cancel_background_compaction("compaction_regression_invalidation"),
+                )
+                .await;
+                blocked_summary.release();
+                let generation_drained = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    actor.session_activities.wait_idle(),
+                )
+                .await
+                .is_ok();
+
+                // Force the ready result through the real publication gate.
+                // A slot-presence assertion alone would miss a late commit.
+                let boundary_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.background_compaction_boundary(),
+                )
+                .await;
+
+                // Cleanup is deliberately after the assertion observations:
+                // it may cancel/join a still-owned worker, but cannot mask a
+                // result that the publication boundary already committed.
+                let cleanup_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(12),
+                    actor.cancel_background_compaction_before(
+                        "compaction_regression_probe_cleanup",
+                        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10)),
+                    ),
+                )
+                .await;
+                let owner_drained = actor.compaction.background.borrow().is_none();
+                let activities_drained = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.session_activities.wait_idle(),
+                )
+                .await
+                .is_ok();
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let completed = events.iter().any(|event| {
+                    matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Compaction(
+                            chat_state::CompactionEvent::Completed { .. }
+                        )
+                    )
+                });
+                let surface = actor.chat_state_handle.get_conversation().await;
+                let late_summary_installed = surface.iter().any(|item| {
+                    item.text_content()
+                        .contains("compaction_regression_late_summary")
+                });
+
+                assert!(
+                    summary_started,
+                    "summary provider must be blocked before cancel"
+                );
+                assert!(
+                    start_result
+                        .as_ref()
+                        .is_ok_and(|result| matches!(result, Ok(false))),
+                    "soft-threshold boundary must start without publishing: {start_result:?}"
+                );
+                assert!(
+                    cancel_result.as_ref().is_ok_and(|result| result.is_ok()),
+                    "ordinary cancellation should return: {cancel_result:?}"
+                );
+                assert!(
+                    generation_drained,
+                    "released generation must settle before publication"
+                );
+                assert!(
+                    boundary_result
+                        .as_ref()
+                        .is_ok_and(|result| matches!(result, Ok(false))),
+                    "cancelled ready generation must not publish: {boundary_result:?}"
+                );
+                assert!(
+                    !completed,
+                    "ordinary-cancelled summary must not reach Completed"
+                );
+                assert!(
+                    !late_summary_installed,
+                    "ordinary-cancelled summary must not replace the Surface"
+                );
+                assert!(
+                    cleanup_result.as_ref().is_ok_and(|result| result.is_ok()),
+                    "probe cleanup must drain the owner: {cleanup_result:?}"
+                );
+                assert!(
+                    owner_drained,
+                    "probe must leave no background compaction owner"
+                );
+                assert!(activities_drained, "probe must leave no Sideband activity");
+            }));
+        });
+    }
+}
+
+#[path = "compaction_repromotion_tests.rs"]
+mod compaction_repromotion_tests;
+
+#[path = "compaction_route_notice_tests.rs"]
+mod compaction_route_notice_tests;

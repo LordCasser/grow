@@ -160,6 +160,7 @@ same-file = "1.0.6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+async-trait = { workspace = true }
 # Enable the render crate's test-only helpers for the pager's test build.
 pager-render = { path = "../pager-render", features = ["test-support"] }
 shell = { workspace = true, features = ["test-support"] }

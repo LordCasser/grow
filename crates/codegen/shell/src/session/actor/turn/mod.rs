@@ -1450,6 +1450,23 @@ impl SessionActor {
                             snapshot: Box::new(snapshot),
                         });
                     }
+                    // A queued manual compaction owns the next idle foreground
+                    // slot. Once the previous Step is closed and its admitted
+                    // controls are applied, finish this turn so idle arbitration
+                    // can transfer that ownership without opening another Step.
+                    if self.state.lock().await.pending_manual_compact.is_some() {
+                        let snapshot = self
+                            .finalize_turn_bookkeeping(
+                                req_id,
+                                conv_turn_start,
+                                &turn_span_totals,
+                                model_fingerprint.clone(),
+                            )
+                            .await;
+                        return Ok(TurnOutcome::ControlEnded {
+                            snapshot: Box::new(snapshot),
+                        });
+                    }
                     if plan_handoff_resample_pending {
                         self.consume_live_plan_handoff_for_next_step()
                             .await
@@ -1561,12 +1578,14 @@ impl SessionActor {
                             snapshot: Box::new(snapshot),
                         });
                     }
-                    let step_started = {
+                    let (step_started, manual_compaction_pending) = {
                         let _boundary = self.step_control_gate.lock().await;
                         self.refresh_goal_step_resources().await;
                         let admission = self.state.lock().await;
-                        if !admission.can_continue_regular_turn(req_id) {
-                            false
+                        if admission.pending_manual_compact.is_some() {
+                            (false, true)
+                        } else if !admission.can_continue_regular_turn(req_id) {
+                            (false, false)
                         } else {
                             // The owner has admitted another Step. Keep the handoff
                             // after the retained tail, without reopening a completed
@@ -1595,10 +1614,23 @@ impl SessionActor {
                             self.emit_event(crate::session::events::Event::LoopStarted {
                                 loop_index,
                             });
-                            true
+                            (true, false)
                         }
                     };
                     if !step_started {
+                        if manual_compaction_pending {
+                            let snapshot = self
+                                .finalize_turn_bookkeeping(
+                                    req_id,
+                                    conv_turn_start,
+                                    &turn_span_totals,
+                                    model_fingerprint.clone(),
+                                )
+                                .await;
+                            return Ok(TurnOutcome::ControlEnded {
+                                snapshot: Box::new(snapshot),
+                            });
+                        }
                         return Ok(TurnOutcome::Cancelled {
                             category: None,
                             context: Some(serde_json::json!({
@@ -1724,7 +1756,6 @@ impl SessionActor {
                         parameters: schema,
                     });
                 }
-                let active_goal = self.active_goal_directive_tag();
                 let request_json_output = structured_output_native
                     .then(|| {
                         json_schema
@@ -1733,28 +1764,34 @@ impl SessionActor {
                     })
                     .flatten();
                 let build_req_start = std::time::Instant::now();
-                let mut request = self
-                    .chat_state_handle
-                    .build_request_for_image_mode(
-                        self.session_info.id.0.as_ref(),
-                        effective_tools,
-                        memory_reminder,
-                        active_goal,
-                        request_json_output,
-                        self.unsupported_current_model_for_images().await.is_some(),
-                    )
-                    .await
-                    .map_err(|error| {
-                        let message = if matches!(
-                            error,
-                            chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
-                        ) {
-                            Self::image_projection_failure_message(&error)
-                        } else {
-                            format!("failed to durably prepare model context: {error}")
-                        };
-                        acp::Error::internal_error().data(message)
-                    })?;
+                let mut request = {
+                    // A control commit and request preparation share authority.
+                    // Keep a captured Goal tag from outliving a pause/clear
+                    // across the asynchronous image-mode query below.
+                    let _boundary = self.step_control_gate.lock().await;
+                    let active_goal = self.active_goal_directive_tag();
+                    self.chat_state_handle
+                        .build_request_for_image_mode(
+                            self.session_info.id.0.as_ref(),
+                            effective_tools,
+                            memory_reminder,
+                            active_goal,
+                            request_json_output,
+                            self.unsupported_current_model_for_images().await.is_some(),
+                        )
+                        .await
+                }
+                .map_err(|error| {
+                    let message = if matches!(
+                        error,
+                        chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
+                    ) {
+                        Self::image_projection_failure_message(&error)
+                    } else {
+                        format!("failed to durably prepare model context: {error}")
+                    };
+                    acp::Error::internal_error().data(message)
+                })?;
                 ::diagnostics::unified_log::debug(
                     "shell.turn.build_request_done",
                     Some(self.session_info.id.0.as_ref()),
@@ -1764,7 +1801,9 @@ impl SessionActor {
                     })),
                 );
                 if self.tool_context.task_output_token_budget.is_none()
-                    && let Some(trigger_info) = self.check_auto_compact_needed().await
+                    && let Some(trigger_info) = self
+                        .check_auto_compact_needed(request.max_output_tokens)
+                        .await
                 {
                     // This request projection is complete even though its pressure
                     // requires a synchronous compaction before provider admission.
@@ -1826,41 +1865,37 @@ impl SessionActor {
                     .tool_context
                     .clamp_task_model_request(request.max_output_tokens)
                     .map_err(|message| acp::Error::internal_error().data(message))?;
-                if request
-                    .items
-                    .iter()
-                    .any(|item| matches!(item, ConversationItem::SkillLoad(_)))
-                {
-                    let window = self
-                        .chat_state_handle
-                        .get_sampling_config()
-                        .await
-                        .map(|config| config.context_window.get())
-                        .unwrap_or(0);
-                    let input_tokens = chat_state::estimate_request_input_tokens(&request);
-                    let output_reserve = request.max_output_tokens.map(u64::from).unwrap_or(2_048);
-                    if input_tokens
-                        .saturating_add(output_reserve)
-                        .saturating_add(256)
-                        > window
+                self.ensure_model_context_fits(request.max_output_tokens)
+                    .await?;
+                let (provider_admitted, manual_compaction_pending) =
                     {
-                        return Err(acp::Error::invalid_params().data(
-                        "Loaded skills do not fit the complete model request, including tools and output reserve. No truncated skill request was sent.",
-                    ));
-                    }
-                }
-                let provider_admitted = {
-                    let _boundary = self.step_control_gate.lock().await;
-                    let admission = self.state.lock().await;
-                    admission.can_continue_regular_turn(req_id)
-                        && self.events.has_active_step()
-                        && self
-                            .tool_context
-                            .storage_admission
-                            .as_ref()
-                            .is_none_or(|gate| gate.check(self.session_info.id.0.as_ref()).is_ok())
-                };
+                        let _boundary = self.step_control_gate.lock().await;
+                        let admission = self.state.lock().await;
+                        let manual_compaction_pending = admission.pending_manual_compact.is_some();
+                        (
+                            !manual_compaction_pending
+                                && admission.can_continue_regular_turn(req_id)
+                                && self.events.has_active_step()
+                                && self.tool_context.storage_admission.as_ref().is_none_or(
+                                    |gate| gate.check(self.session_info.id.0.as_ref()).is_ok(),
+                                ),
+                            manual_compaction_pending,
+                        )
+                    };
                 if !provider_admitted {
+                    if manual_compaction_pending {
+                        let snapshot = self
+                            .finalize_turn_bookkeeping(
+                                req_id,
+                                conv_turn_start,
+                                &turn_span_totals,
+                                model_fingerprint.clone(),
+                            )
+                            .await;
+                        return Ok(TurnOutcome::ControlEnded {
+                            snapshot: Box::new(snapshot),
+                        });
+                    }
                     return Ok(TurnOutcome::Cancelled {
                         category: None,
                         context: Some(serde_json::json!({
@@ -2392,6 +2427,7 @@ impl SessionActor {
                         context_window,
                         percentage,
                         source: "context_window_exceeded",
+                        max_output_tokens: None,
                     };
                     tracing::info!(
                         session_id = %self.session_info.id.0,

@@ -17,10 +17,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use test_support::process::{TestProcess, TestProcessConfig};
+
 use crate::{ContentController, PtyHarness, pager_binary};
 
 /// One shared mock-backed leader plus the pager clients attached to it.
 pub struct LeaderCluster {
+    // Declared first so this concrete owner shuts down before content drops.
+    _leader_owner: TestProcess,
     content: ContentController,
     binary: PathBuf,
     socket: PathBuf,
@@ -36,13 +40,45 @@ impl LeaderCluster {
             .await
             .context("start content controller")?;
         content.seed_llm_config().context("seed mock LLM config")?;
-        // One shared GROW_HOME => one leader; the socket lives beneath it so
-        // every client (sharing the same env) elects/attaches to the same one.
-        let grow_home = content.home().join(".grow");
-        std::fs::create_dir_all(&grow_home).context("create grow home")?;
-        let socket = grow_home.join("leader-e2e.sock");
         let binary = pager_binary().context("resolve pager binary")?;
+        let cwd = std::env::current_dir().context("resolve leader working directory")?;
+        let socket = content.sandbox().grow_home().join("leader.sock");
+        let mut command = tokio::process::Command::new(&binary);
+        command
+            .args([
+                "agent",
+                "leader",
+                "--no-exit-on-disconnect",
+                "--no-auto-update",
+            ])
+            .current_dir(&cwd);
+        let mut leader_owner = TestProcess::spawn(
+            command,
+            content.sandbox(),
+            TestProcessConfig::new()
+                .label("dedicated PTY test leader")
+                .env("GROW_LEADER_SOCKET", &socket),
+        )
+        .context("spawn owned persistent leader")?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !socket.exists() {
+            if let Some(status) = leader_owner.try_wait().context("poll dedicated leader")? {
+                anyhow::bail!(
+                    "dedicated PTY test leader exited with {status} before binding {}: {}",
+                    socket.display(),
+                    leader_owner.stderr_tail().text,
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "dedicated PTY test leader did not bind {} within 30 seconds",
+                    socket.display(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         Ok(Self {
+            _leader_owner: leader_owner,
             content,
             binary,
             socket,
@@ -51,8 +87,9 @@ impl LeaderCluster {
         })
     }
 
-    /// Spawn the leader-electing client (`--leader --leader-socket <S>` plus
-    /// `extra_args`); it starts a fresh session and brings up the leader.
+    /// Spawn a client attached to the dedicated leader
+    /// (`--leader --leader-socket <S>` plus `extra_args`); it starts a fresh
+    /// session through the already-owned daemon.
     pub fn spawn_leader(&self, extra_args: &[&str]) -> Result<PtyHarness> {
         self.spawn_client(&[], extra_args)
     }
@@ -263,5 +300,33 @@ mod tests {
         assert_eq!(updates.len(), 1, "only the persisted Grow fact is emitted");
         assert!(is_turn_completed(&updates[0]));
         assert_eq!(updates[0]["stop_reason"], "end_turn");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ownership_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "starts the built Grow daemon in an isolated test sandbox"]
+    async fn leader_cluster_reaps_dedicated_daemon_on_drop_and_unwind() {
+        for unwind in [false, true] {
+            let cluster = LeaderCluster::start(40, 120).await.unwrap();
+            let pid = cluster._leader_owner.pid().expect("owned daemon is live");
+            assert!(
+                !test_support::process::process_has_exited_without_reap(pid, "owned leader")
+                    .unwrap()
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _cluster = cluster;
+                if unwind {
+                    panic!("simulate PTY fixture assertion failure");
+                }
+            }));
+            assert_eq!(result.is_err(), unwind);
+            let error = test_support::process::process_has_exited_without_reap(pid, "owned leader")
+                .expect_err("cluster Drop must wait/reap the dedicated daemon");
+            assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+        }
     }
 }

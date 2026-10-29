@@ -33,7 +33,7 @@ fn spawn(parent: &Info, child: &Info) -> chat_state::SubagentSpawnEvent {
         subagent_type: "explore".into(),
         description: "inspect the child workspace".into(),
         prompt: "Read the requested files".into(),
-        execution_recipe: serde_json::json!({"private": "must not be copied"}),
+        execution_recipe: serde_json::json!({"mode": "test"}),
         context_source: chat_state::SubagentContextSource::New,
         source_ref: None,
         context_normalized: false,
@@ -143,13 +143,21 @@ async fn only_canonical_domain_spawn_grants_compact_child_ownership() {
         .unwrap();
     let spawns = ownership.into_spawns();
     let compact = spawns.get(child.id.0.as_ref()).unwrap();
-    assert_eq!(compact.subagent_id, "agent-child");
-    assert_eq!(compact.prompt, "Read the requested files");
-    assert_eq!(compact.child_cwd, child.cwd);
-    assert_eq!(compact.worktree_path.as_deref(), Some("/worktrees/child"));
+    assert_eq!(compact.spawn.subagent_id, "agent-child");
+    assert_eq!(compact.spawn.prompt, "Read the requested files");
+    assert_eq!(compact.spawn.child_cwd, child.cwd);
+    assert_eq!(
+        compact.spawn.worktree_path.as_deref(),
+        Some("/worktrees/child")
+    );
     let encoded = serde_json::to_value(compact).unwrap();
-    assert!(encoded.get("execution_recipe").is_none());
-    assert!(encoded.get("origin_tool_call_id").is_none());
+    assert_eq!(
+        encoded["spawn"]["execution_recipe"],
+        serde_json::json!({
+            "mode": "test"
+        })
+    );
+    assert_eq!(encoded["spawn"]["origin_tool_call_id"], "tool-child");
 
     // A UI-only spawn remains visible in the ordered projection, but has no
     // authority to create an ownership edge.
@@ -211,7 +219,7 @@ async fn ownership_payload_is_bound_to_session_version_and_valid_prefix_hash() {
     assert!(!ownership.belongs_to("foreign-root"));
 
     let mut wire = serde_json::to_value(&ownership).unwrap();
-    wire["version"] = serde_json::json!(2);
+    wire["version"] = serde_json::json!(3);
     let wrong_version: DescendantOwnership = serde_json::from_value(wire).unwrap();
     assert!(!wrong_version.belongs_to(parent.id.0.as_ref()));
 
@@ -438,6 +446,7 @@ async fn oversized_optional_metadata_is_omitted_without_losing_local_authority()
         .spawns
         .get_mut(child.id.0.as_ref())
         .unwrap()
+        .spawn
         .prompt = "\u{0000}".repeat(170_000);
     let near_limit = ownership.clone().into_load_meta().unwrap();
     assert!(serde_json::to_vec(&near_limit).unwrap().len() <= 1024 * 1024);
@@ -445,6 +454,7 @@ async fn oversized_optional_metadata_is_omitted_without_losing_local_authority()
         .spawns
         .get_mut(child.id.0.as_ref())
         .unwrap()
+        .spawn
         .prompt = "\u{0000}".repeat(180_000);
     assert!(ownership.clone().into_load_meta().is_none());
     assert_eq!(

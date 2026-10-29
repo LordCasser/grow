@@ -170,6 +170,10 @@
 - **WHEN** 待发布期间同步压缩、手动压缩或 rewind 在下一普通请求前替换上下文
 - **THEN** 丢弃旧异步压缩的待发布通知，不把新 replacement 的 token 数归因给旧异步事务。
 
+#### Scenario: Route changes while an async completion awaits projection
+- **WHEN** 异步 replacement 已提交且完成通知待发布，其后仅切换模型路由并成功物化下一普通请求
+- **THEN** 不提前发布；通知采用该新请求投影并且只发布一次；若切换触发新的 replacement，旧通知按既有 supersession 规则丢弃。
+
 ### Requirement: Cancellation preserves and drains the compaction generation owner
 When ordinary authority invalidation cancels a background compaction generation, the Session SHALL signal cancellation without joining an unfinished worker from inside the root command handler, and SHALL retain the worker in its existing owner slot. An explicit suspension or teardown barrier SHALL keep the root accounting inbox able to process the worker's Goal settlement receipt while it joins the worker; it SHALL publish the cancellation terminal only after that drain. A runtime freeze SHALL use the existing shared deadline for this drain and SHALL fail without claiming a settled checkpoint when the worker has not joined by that deadline. Cancelled or late generation output SHALL NOT be committed to the visible Surface.
 
@@ -192,6 +196,18 @@ When ordinary authority invalidation cancels a background compaction generation,
 #### Scenario: Manual compaction waits for the existing generation owner
 - **WHEN** a manual compaction starts while an asynchronous summary still owns the compaction lease
 - **THEN** manual compaction signals cancellation, leaves the root Goal inbox available while it joins that worker, and acquires the lease only after the original worker has settled.
+
+#### Scenario: Ordinary stop precedes a late background summary
+- **WHEN** 未提升的后台摘要仍在等待 provider，普通取消已返回，然后 provider 返回有效摘要
+- **THEN** 后续发布边界丢弃迟到结果，不提交 replacement；排空仍由现有显式 drain 边界负责。
+
+#### Scenario: Promotion waiter is dropped and the same generation is awaited again
+- **WHEN** 后台 generation 已经 durable 提升，但等待方 future 被丢弃，随后前台再次等待同一 worker
+- **THEN** 复用已有 promotion 事实和 provider attempt，保留原截止时间，并且最多提交一次 replacement；generation token 真正取消时不得发布迟到结果。
+
+#### Scenario: Rejoined promotion still waits for the original durable acknowledgement
+- **WHEN** 原 Promoted 写入尚未确认，等待方退出后另一等待方提交同一 promotion
+- **THEN** 后者等待原 durable 边界；原 ACK 确认后复用同一事件，原写入失败或超时则拒绝后续写入，不能因事件已保留而提前报告成功。
 
 ### Requirement: Planning context projects current local obligations
 
@@ -247,3 +263,92 @@ When ordinary authority invalidation cancels a background compaction generation,
 - **THEN** 普通中断恢复在关闭原 Turn 前结算未消费正文，保留原输入和 Hook 身份，不让正文进入下一独立 Turn；有效挂起仍保留原 Turn 的正文和首次消费保护。
 
 证据入口：`crates/common/compaction/src/prune.rs` 的 plan_tool_result_pruning、`crates/codegen/shell/src/session/actor/compaction.rs` 的 maybe_pre_prune_at / 后台发布，以及 `crates/codegen/chat-state/src/actor/mutations.rs` 的 Surface 修改。本条只增加首次消费所需的短期约束。
+
+### Requirement: Compaction completion and admission use effective context pressure
+Manual and synchronous compaction completion and post-replacement window checks SHALL use the current effective request projection with known request envelope and provider calibration, never a raw Surface delta intermediate. A subsequent full request SHALL refresh its current envelope and pass the independent admission check. Background completion SHALL retain its existing deferred request-projection semantics.
+
+#### Scenario: Retained reasoning after manual replacement
+- **WHEN** a manual summary replaces a range while raw reasoning remains in history
+- **THEN** completion reports nonempty effective retained content accurately and repeated request assembly does not introduce phantom growth.
+
+### Requirement: Every foreground compaction start has a terminal presentation
+Every published foreground or promoted compaction Started SHALL receive one terminal presentation after the transaction settles. A committed replacement SHALL be presented as completed even if a post-commit error fails its enclosing turn; failures before commit and cancellation SHALL use their corresponding terminal. A new committed replacement SHALL invalidate an older pending asynchronous completion notice regardless of the later enclosing result.
+
+#### Scenario: Committed replacement remains over window
+- **WHEN** replacement commits and convergence validation fails the turn
+- **THEN** Timeline and presentation both settle compaction, the turn error propagates, and the UI does not remain compacting.
+
+#### Scenario: Replacement supersedes deferred completion then fails
+- **WHEN** a pending async notice exists and a manual or synchronous replacement commits but later returns an error
+- **THEN** the older notice is discarded and cannot attribute the new request size to the old transaction.
+
+#### Scenario: Summary generation is cancelled
+- **WHEN** a foreground or promoted summary generation is cancelled before replacement
+- **THEN** its foreground owner publishes exactly one Cancelled terminal, without a second terminal from the generation layer.
+
+#### Scenario: Pruning loses persistence acknowledgement
+- **WHEN** pre-prune cannot confirm its write or the ChatState owner is unavailable
+- **THEN** the foreground compaction settles with failure and does not fall through to a summary provider request; a plan rejected before writing may still use the normal summary path.
+
+### Requirement: Queued manual compaction yields at a closed execution boundary
+普通 turn SHALL 在已排队手动压缩需要取得前台 owner 时，于闭合 Step 边界结束当前执行并交给既有 idle arbitration；被跳过的自动压缩 SHALL NOT 被当作恢复进展而无限重建请求。
+
+#### Scenario: Manual request competes with automatic pressure recovery
+- **WHEN** 手动压缩已排队且普通请求投影超过自动压缩阈值
+- **THEN** 普通 turn 有界让出 owner，手动请求仍保留并可运行，不反复生成空 Step 或向超窗 provider 发请求。
+
+### Requirement: Summary source fitting uses the transmitted history projection
+摘要来源预算 SHALL 使用将实际发送的历史投影，同时保持原始 Surface 的完整选区边界及 target identity。不会发送的 reasoning 和回忆派生内容 SHALL NOT 挤占来源预算；重试缩小选区也使用同一投影。
+
+#### Scenario: Omitted reasoning dominates raw history
+- **WHEN** 原历史包含大量在当前摘要协议中不发送的 reasoning，而完整来源投影可装入预算
+- **THEN** 接纳该合法来源，不因原始 reasoning 体积拒绝压缩；replacement 仍只覆盖选定完整范围。
+
+### Requirement: Only completed summary responses may replace history
+压缩 SHALL 仅接纳成功结束的摘要响应作为历史 replacement。非成功终态即使有足量正文，也 SHALL 按现有失败/有界恢复路径处理，不提交部分摘要。
+
+#### Scenario: Provider returns partial or refused summary text
+- **WHEN** 摘要流以输出截断、上下文超窗、拒绝或暂停终止，并附带非空正文
+- **THEN** 不以该正文替换历史；Sideband 和压缩事务按实际结果结算。
+
+#### Scenario: Provider stream ends without a completion terminal
+- **WHEN** provider stream emits summary text but reaches EOF without a typed successful completion terminal
+- **THEN** the response is rejected through the bounded failure path and its text cannot replace history.
+
+### Requirement: Summary cleanup preserves quoted control tokens as evidence
+摘要清理 SHALL 只剥离明确的前导 scratchpad，保留正文引用控制标签之前和之后的事实，不以是否数字开头判断正文可删除。
+
+#### Scenario: Prose summary quotes an analysis closing tag
+- **WHEN** 摘要正文以自然语言开始并在后文引用 analysis 结束标签
+- **THEN** 标签可被中和，但正文前面的证据保持完整。
+
+### Requirement: Compaction persistence uncertainty preserves committed boundaries
+压缩在 replacement、终态或必要控制修复的 durable ACK 不明时 SHALL 返回错误并阻断依赖采样。已确认 replacement SHALL 保持其 identity；冷恢复 SHALL 依据实际持久事实闭合事务，不重复替换，也不把未确认的写入作为 live 成功依据。
+
+#### Scenario: Replacement or terminal acknowledgement is lost
+- **WHEN** replacement 或 Completed 记录的 durable ACK 丢失且既有精确重试仍无法重新确认，记录可能已经持久化
+- **THEN** live 调用不能报告整体执行成功；恢复按实际记录保留原历史或确认后的 replacement，且每个事务最多有一次有效替换及一个终态。
+
+#### Scenario: Required control repair fails after replacement
+- **WHEN** replacement 已确认但其后的必要控制上下文重投影未获得持久确认
+- **THEN** 保留已提交 replacement，当前执行失败并阻断下一请求；事务按已提交事实闭合，不能被改判为未提交失败。
+
+#### Scenario: Lost acknowledgement is recovered by an exact retry
+- **WHEN** 记录实际已持久化但第一次 ACK 丢失，既有写入循环对同一事件重试并获得确认
+- **THEN** 复用同一 seq 和 payload，只应用一次逻辑事实；不重发模型请求、不重复替换或计费。
+
+#### Scenario: Writer process dies after a durable replacement but before acknowledgement
+- **WHEN** replacement 已经通过真实文件与目录同步，返回原 actor 的 ACK 未确认时 writer 进程被强制终止
+- **THEN** 新进程取得独占 writer 后保留同一 replacement 与未选中的 Surface 身份，恢复必要 Control 上下文并且只闭合一个 Completed，不重跑摘要生成。
+
+#### Scenario: Recovery process dies after committing its terminal
+- **WHEN** 恢复进程写入 Completed 后、其 ACK 返回前再次中断
+- **THEN** 下一独立恢复进程承认已有终态，保持原日志 prefix，不追加重复 replacement、terminal 或 Control 重投影。
+
+#### Scenario: Failed summary-only recovery is loaded again
+- **WHEN** 摘要事实已持久化但 replacement 未提交，恢复以 Failed 闭合该事务，随后再次启动
+- **THEN** 校验接受该合法失败事务，保留原历史及摘要来源证据，不要求失败事务存在 replacement。
+
+#### Scenario: A failed range is summarized by a later transaction
+- **WHEN** 含 Summary 的失败事务未替换历史，后续新事务重新压缩相同 SurfaceRange 并提交不同摘要
+- **THEN** 每个 Summary 只与自身事务中的 replacement 对账，不借用另一事务的 replacement；原失败事实仍可重复加载。

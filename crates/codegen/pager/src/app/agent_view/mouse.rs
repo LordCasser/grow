@@ -18,6 +18,19 @@ use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
+
+/// Whether a click lands on a visible activity summary row. When a grouped
+/// slot is top-clipped, its visible first row may be member content instead
+/// of the synthetic summary, so the clipped viewport edge is not a header hit.
+pub(super) fn is_verb_group_header_row_click(
+    is_header: bool,
+    click_row: u16,
+    screen_area: Option<(ratatui::layout::Rect, bool, bool)>,
+) -> bool {
+    is_header
+        && screen_area.is_some_and(|(area, top_clipped, _)| !top_clipped && click_row == area.y)
+}
+
 impl AgentView {
     /// Time-paired multi-click check for the prompt textarea. Pairing is
     /// time-only (no coordinates); a mispaired action is one undo step.
@@ -879,17 +892,17 @@ impl AgentView {
                                 .get(idx)
                                 .is_some_and(|e| e.block.is_selectable());
                             if selectable {
-                                let header_row_click = self
+                                let is_header = self
                                     .scrollback
                                     .get_cached_entry_layouts()
                                     .and_then(|l| l.get(idx))
-                                    .is_some_and(|i| {
-                                        i.verb_group_header && i.group_collapse_header
-                                    })
-                                    && self
-                                        .scrollback
-                                        .entry_screen_area(idx, self.pane_areas.scrollback)
-                                        .is_some_and(|(a, _, _)| click_row == a.y);
+                                    .is_some_and(|i| i.verb_group_header);
+                                let header_row_click = is_verb_group_header_row_click(
+                                    is_header,
+                                    click_row,
+                                    self.scrollback
+                                        .entry_screen_area(idx, self.pane_areas.scrollback),
+                                );
                                 let (last_click, show_word_select_tip) = self
                                     .handle_scrollback_click(
                                         now,

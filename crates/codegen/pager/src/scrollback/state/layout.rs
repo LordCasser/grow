@@ -1,6 +1,6 @@
 //! Layout cache and lazy viewport measurement for [`ScrollbackState`].
 
-use super::verb_group::{RunStep, run_step, scan_run_forward};
+use super::verb_group::{RunStep, run_step};
 use super::*;
 
 /// A width-stable anchor for the content at the viewport top, captured before a
@@ -703,7 +703,9 @@ impl ScrollbackState {
             };
             let needs_measure = (start..=end).any(|idx| {
                 cache.entries.get(idx).is_some_and(|info| {
-                    !cache.measured[idx] && info.height != 0 && !info.is_group_header()
+                    !cache.measured[idx]
+                        && info.height != 0
+                        && (!info.is_group_header() || info.has_group_content())
                 })
             });
             if !needs_measure {
@@ -733,7 +735,7 @@ impl ScrollbackState {
             // Estimated entries always have height >= 1, so a height of 0 here
             // means group truncation hid this entry; group headers render a
             // synthetic line. Neither needs a markdown render.
-            if info.height == 0 || info.is_group_header() {
+            if info.height == 0 || (info.is_group_header() && !info.has_group_content()) {
                 continue;
             }
             let Some((entry_id, entry)) = self.entries.get_index(idx) else {
@@ -747,6 +749,8 @@ impl ScrollbackState {
                 Some((edit_id, h)) if edit_id == *entry_id => h,
                 _ => renderer.desired_height(entry_area_width),
             };
+            cache.entries[idx].unfolded_height = new_height;
+            let new_height = new_height.saturating_add(u16::from(info.has_group_content()));
             cache.entries[idx].height = new_height;
             if old_height != new_height {
                 height_changes.push((idx, new_height as i32 - old_height as i32));
@@ -1087,6 +1091,8 @@ impl ScrollbackState {
                 _ => (renderer.desired_height(entry_area_width), true),
             };
             let old_height = cache.entries[idx].height;
+            cache.entries[idx].unfolded_height = new_height;
+            self.gaps_may_be_dirty |= groups::span_containing(&cache.groups, idx).is_some();
             // Replay may dirty many entries between frames. Exact rendering
             // remains bounded to the viewport while a batch is open.
             cache.measured[idx] = measured;
@@ -1364,6 +1370,7 @@ impl ScrollbackState {
         // Append the new entry. It's now the trailing entry, so gap_after = 1.
         cache.entries.push(EntryLayoutInfo {
             height,
+            unfolded_height: height,
             gap_after: 1,
             group_header_count: 0,
             group_collapse_header: false,
@@ -1423,6 +1430,7 @@ impl ScrollbackState {
             let height = renderer.estimate_height(entry_area_width);
             cache.entries.push(EntryLayoutInfo {
                 height,
+                unfolded_height: height,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -1587,89 +1595,24 @@ impl ScrollbackState {
     /// Whether the entry at `i` joins a dense (non-verb) run walk — the one
     /// membership predicate shared by every dense-run re-derivation
     /// (`group_range_of`, `expand_all_groups`), so their run shapes can't
-    /// drift apart. Verb-claimed entries never join: truncation breaks its
-    /// runs at claimed entries, and a walk that disagrees keys
-    /// expand/collapse on the wrong header id. Unclaimed entries
-    /// (pure-thought runs, flag off) stay in, as in truncation.
+    /// drift apart. With activity grouping enabled, activity entries never
+    /// join this fallback, including single actions and pure Thought runs.
     pub(super) fn joins_dense_run(&self, i: usize, collapsed_only: bool) -> bool {
         if let Some((_, e)) = self.entries.get_index(i) {
             e.block.is_groupable()
                 && (!collapsed_only || e.display_mode == DisplayMode::Collapsed)
-                && self.eager_group_range_of(i).is_none()
+                && (!crate::appearance::cache::load_group_tool_verbs()
+                    || matches!(run_step(e, true), RunStep::Break))
         } else {
             false
         }
     }
 
-    /// The folded eager run containing the claimed entry at `idx`, read from
-    /// the last fold pass's spans ([`Self::span_at`]). Transparent entries
-    /// inside the span (live/opened thinking, opened members) keep their own
-    /// rows and stay outside the toggle unit, mirroring the walk's anchor
-    /// check in [`Self::verb_group_range_of`]. Post-layout query paths
-    /// (toggle / collapse / reveal / selection grouping) use this; paths that
-    /// run mid-mutation, before the next fold — `rekey_verb_group_expansion`,
-    /// `joins_dense_run` — keep the walk, which predicts the NEXT fold from
-    /// current entry state.
+    /// Read the rendered activity range, independently of member visibility.
+    /// Navigation and selection use this same span as the fold projection.
     fn eager_group_span_range(&self, idx: usize) -> Option<Range<usize>> {
         let span = self.span_at(idx)?;
-        let (_, entry) = self.entries.get_index(idx)?;
-        match span.kind {
-            groups::GroupKind::VerbRun { .. } => {
-                let show_thinking = crate::appearance::cache::load_show_thinking_blocks();
-                match run_step(entry, show_thinking) {
-                    RunStep::Member(_) | RunStep::ThoughtMember => Some(span.range.clone()),
-                    RunStep::Transparent | RunStep::Break => None,
-                }
-            }
-            groups::GroupKind::Truncation { .. } => None,
-        }
-    }
-
-    /// Predict the eager fold containing `idx` from current entry state.
-    /// Permission audits are stable turn-scoped blocks, outside this generic
-    /// eager-fold model.
-    fn eager_group_range_of(&self, idx: usize) -> Option<Range<usize>> {
-        self.verb_group_range_of(idx)
-    }
-
-    /// The folding verb-group run (per `RunScan::folds`, `group_tool_verbs`
-    /// on) containing the claimed entry (member or thought member) at `idx`,
-    /// else `None`. Walks with the fold's own predicate + thinking
-    /// transparency so toggle/collapse/reveal operate on the exact folded
-    /// range, not the broader dense-group run (which would leak across
-    /// separators like Edit). Predicts the fold from CURRENT entry state —
-    /// mid-mutation callers rely on this; post-layout queries go through
-    /// [`Self::verb_group_span_range`] instead.
-    pub(super) fn verb_group_range_of(&self, idx: usize) -> Option<Range<usize>> {
-        if !crate::appearance::cache::load_group_tool_verbs() {
-            return None;
-        }
-        let show_thinking = crate::appearance::cache::load_show_thinking_blocks();
-        // An unclaimable `idx` has no range, even when its neighbors form a
-        // run.
-        let (_, entry) = self.entries.get_index(idx)?;
-        match run_step(entry, show_thinking) {
-            RunStep::Member(_) | RunStep::ThoughtMember => {}
-            RunStep::Transparent | RunStep::Break => return None,
-        }
-
-        // Backward half only finds the run's start; the shared forward scan
-        // from `start` then measures the whole run in one pass.
-        let mut start = idx;
-        let mut scan = idx;
-        while scan > 0 {
-            let (_, e) = self.entries.get_index(scan - 1)?;
-            match run_step(e, show_thinking) {
-                RunStep::Member(_) | RunStep::ThoughtMember => start = scan - 1,
-                RunStep::Transparent => {}
-                RunStep::Break => break,
-            }
-            scan -= 1;
-        }
-
-        let entry_at = |i: usize| self.entries.get_index(i).map(|(_, e)| e);
-        let run = scan_run_forward(entry_at, start, show_thinking)?;
-        run.folds().then_some(start..run.end)
+        matches!(span.kind, groups::GroupKind::VerbRun { .. }).then(|| span.range.clone())
     }
 
     /// Paint window for one scroll frame: the sub-range of `visible_range`
@@ -1942,6 +1885,7 @@ mod tests {
             let gap_after = 1u16; // constant for now
             entries.push(EntryLayoutInfo {
                 height: h,
+                unfolded_height: h,
                 gap_after,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3848,6 +3792,7 @@ mod tests {
             let is_header = verb_headers.contains(&i);
             layouts.push(EntryLayoutInfo {
                 height,
+                unfolded_height: height,
                 gap_after,
                 verb_group_header: is_header,
                 group_header_count: u16::from(is_header),
@@ -3965,7 +3910,11 @@ mod tests {
             "window starts mid-history and includes the header: {range:?}"
         );
         assert_eq!(content_y0, virtual_y[range.start]);
-        assert_eq!(range.end, header + 50);
+        assert_eq!(
+            range.end,
+            header + 51,
+            "trailing Thought belongs to the same group"
+        );
     }
 
     fn permission_event(tool_call_id: &str) -> crate::scrollback::blocks::SubagentPermissionEvent {

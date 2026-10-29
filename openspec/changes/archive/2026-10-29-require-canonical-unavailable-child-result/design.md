@@ -1,0 +1,2 @@
+## Decision
+恢复函数接受可选fallback。先在原有seed/identity/writer/prefix校验之后查找既有合法SubagentResult；其outcome保持，即使正文不可读。无既有result且观察为CompletedOutputUnavailable时，返回未发布并保持parent spawn open，不执行scope关闭或合成success。正常Completed仍可沿既有恢复流程发布正文与结果，Suspended/FinalizationPending原门控不改变。

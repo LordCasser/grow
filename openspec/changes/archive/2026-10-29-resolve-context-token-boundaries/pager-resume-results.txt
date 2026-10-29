@@ -1,0 +1,6 @@
+
+running 1 test
+test app::acp_handler::tests::resumed_usage::restored_usage_resume_snapshot_reaches_status_and_usage_without_stale_regression ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7629 filtered out; finished in 1.28s
+

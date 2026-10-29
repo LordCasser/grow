@@ -105,10 +105,12 @@ pub(super) const RESUME_WARM_PAGES: u16 = 3;
 ///
 /// Combines height and gap data in a single struct for cache-friendliness
 /// (they're always accessed together during layout and rendering).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EntryLayoutInfo {
     /// Rendered height at current width.
     pub height: u16,
+    /// Native content height before group visibility is projected.
+    pub unfolded_height: u16,
     /// Gap rows after this entry (0 for dense group members, 1 otherwise).
     pub gap_after: u16,
     /// When non-zero, this entry renders as a group header instead of its
@@ -122,18 +124,23 @@ pub struct EntryLayoutInfo {
     /// When true, this entry renders as an expanded-group collapse header.
     /// Set on the first entry of a manually-expanded group. N-more headers
     /// replace the entry's content with the "N tool calls" line; expanded
-    /// verb-group headers stack the header line ABOVE the entry's own row
-    /// (slot height 2), so every member stays visible.
+    /// activity headers stack one summary row above the first member's native
+    /// content, when visible. Other members retain their source positions.
     pub group_collapse_header: bool,
     /// When true, this entry heads a verb-group run: it renders the aggregated
     /// "Verb N noun" label instead of its own content (collapsed state) or
     /// marks the collapse header of an expanded verb group. The run's other
-    /// claimed entries — members and folded thoughts — hide behind it
-    /// (height 0) until the group is expanded.
+    /// entries hide behind it unless expanded or independently visible
+    /// (running, opened, awaiting input or carrying hook information).
     pub verb_group_header: bool,
 }
 
 impl EntryLayoutInfo {
+    /// A summary row stacked above its visible first member.
+    pub fn has_group_content(&self) -> bool {
+        self.verb_group_header && self.height > 1
+    }
+
     /// Whether this entry renders as any kind of group header (N-more
     /// truncation, expanded-group collapse, or verb) in place of its own
     /// block content. The single gate shared by every consumer, so no site

@@ -8,20 +8,20 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::SessionUpdate;
+use super::jsonl::JsonlStorageAdapter;
 use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
 use crate::session::history::HistorySnapshot;
 
 pub const DESCENDANT_OWNERSHIP_META_KEY: &str = "grow/descendantOwnership";
 
-/// Only fields consumed by the Pager's spawn enrichment. In particular this
-/// does not duplicate execution recipes, model bodies or unrelated spawn data.
+/// Exact validated facts used by Pager presentation and the existing
+/// cross-entity Seed/Result validators. This remains display data, not a grant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildReplaySpawn {
-    pub subagent_id: String,
-    pub prompt: String,
-    pub child_cwd: String,
-    pub worktree_path: Option<String>,
+    pub spawn: chat_state::SubagentSpawnEvent,
+    pub parent_spawn_seq: u64,
+    pub terminal: Option<chat_state::SubagentTerminalEvent>,
 }
 
 /// Owned by one load response (or one local read), not cached across reloads.
@@ -43,6 +43,21 @@ impl DescendantOwnership {
         timeline: &chat_state::Timeline,
         history: &HistorySnapshot,
     ) -> Self {
+        let mut terminals = BTreeMap::new();
+        for event in timeline.events() {
+            if let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                terminal,
+            )) = &event.kind
+                && terminal.result_ref.is_some()
+            {
+                terminals
+                    .entry((
+                        terminal.subagent_id.as_str(),
+                        terminal.child_session_id.as_str(),
+                    ))
+                    .or_insert(terminal);
+            }
+        }
         let spawns = timeline
             .events()
             .iter()
@@ -53,19 +68,24 @@ impl DescendantOwnership {
                 else {
                     return None;
                 };
+                if spawn.security_parent_session_id != session_id {
+                    return None;
+                }
+                let terminal = terminals
+                    .get(&(spawn.subagent_id.as_str(), spawn.child_session_id.as_str()))
+                    .map(|terminal| (**terminal).clone());
                 Some((
                     spawn.child_session_id.clone(),
                     ChildReplaySpawn {
-                        subagent_id: spawn.subagent_id.clone(),
-                        prompt: spawn.prompt.clone(),
-                        child_cwd: spawn.child_cwd.clone(),
-                        worktree_path: spawn.worktree_path.clone(),
+                        spawn: (**spawn).clone(),
+                        parent_spawn_seq: event.seq.get(),
+                        terminal,
                     },
                 ))
             })
             .collect();
         Self {
-            version: 1,
+            version: 2,
             session_id: session_id.to_owned(),
             cut: history.sources.len() as u64,
             hash: history.prefix_hash.clone(),
@@ -82,17 +102,13 @@ impl DescendantOwnership {
         let bound = self.spawns.iter().fold(
             512usize.saturating_add(self.session_id.len().saturating_mul(6)),
             |total, (child, spawn)| {
-                [
-                    child.as_str(),
-                    spawn.subagent_id.as_str(),
-                    spawn.prompt.as_str(),
-                    spawn.child_cwd.as_str(),
-                    spawn.worktree_path.as_deref().unwrap_or_default(),
-                ]
-                .into_iter()
-                .fold(total.saturating_add(128), |bound, text| {
-                    bound.saturating_add(text.len().saturating_mul(6))
-                })
+                let spawn_len = serde_json::to_vec(spawn)
+                    .expect("validated ownership spawn serializes")
+                    .len();
+                total
+                    .saturating_add(64)
+                    .saturating_add(child.len().saturating_mul(6))
+                    .saturating_add(spawn_len)
             },
         );
         (bound <= MAX_META_BYTES)
@@ -103,16 +119,23 @@ impl DescendantOwnership {
     /// present payload as authority. An absent or rejected payload falls back
     /// to an independent validated local read, never an assumed empty map.
     pub fn belongs_to(&self, session_id: &str) -> bool {
-        self.version == 1
+        self.version == 2
             && !session_id.is_empty()
             && self.session_id == session_id
             && self.hash.len() == 64
             && self.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
             && (self.cut != 0 || self.spawns.is_empty())
-            && self
-                .spawns
-                .iter()
-                .all(|(child, spawn)| !child.is_empty() && !spawn.subagent_id.is_empty())
+            && self.spawns.iter().all(|(child, spawn)| {
+                !child.is_empty()
+                    && child == &spawn.spawn.child_session_id
+                    && !spawn.spawn.subagent_id.is_empty()
+                    && spawn.spawn.security_parent_session_id == session_id
+                    && spawn.terminal.as_ref().is_none_or(|terminal| {
+                        terminal.subagent_id == spawn.spawn.subagent_id
+                            && terminal.child_session_id == *child
+                            && terminal.result_ref.is_some()
+                    })
+            })
     }
 
     pub fn into_spawns(self) -> BTreeMap<String, ChildReplaySpawn> {
@@ -143,6 +166,40 @@ pub fn load_descendant_replay_at(
     let Some(snapshot) = super::load_validated_session_at(session_id, grow_home)? else {
         return Ok(None);
     };
+    Ok(Some(project_descendant_replay(session_id, snapshot)?))
+}
+
+/// Load a child source's lifecycle presentation only after validating its
+/// canonical Seed/Result link against the already-validated owner projection.
+/// The child is read once; breadth-first replay does not reopen its parent.
+pub fn load_descendant_child_replay_at(
+    child_session_id: &str,
+    parent_session_id: &str,
+    owner_spawn: &ChildReplaySpawn,
+    grow_home: &Path,
+) -> io::Result<Option<(DescendantOwnership, Vec<SessionNotification>)>> {
+    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
+    let Some(child) = storage.open_session_by_id_shared_read(child_session_id)? else {
+        return Ok(None);
+    };
+    let child_snapshot = child.validated_timeline(child_session_id)?;
+    validate_child_parent_link(
+        child_session_id,
+        parent_session_id,
+        owner_spawn,
+        child.summary(),
+        &child_snapshot.timeline,
+    )?;
+    Ok(Some(project_descendant_replay(
+        child_session_id,
+        child_snapshot,
+    )?))
+}
+
+fn project_descendant_replay(
+    session_id: &str,
+    snapshot: super::jsonl::ValidatedTimeline,
+) -> io::Result<(DescendantOwnership, Vec<SessionNotification>)> {
     let ownership =
         DescendantOwnership::from_validated(session_id, &snapshot.timeline, &snapshot.history);
     let prepared = snapshot.history.into_prepare(
@@ -169,7 +226,47 @@ pub fn load_descendant_replay_at(
             _ => None,
         })
         .collect();
-    Ok(Some((ownership, lifecycle)))
+    Ok((ownership, lifecycle))
+}
+
+fn validate_child_parent_link(
+    child_session_id: &str,
+    parent_session_id: &str,
+    owner_spawn: &ChildReplaySpawn,
+    child_summary: &super::Summary,
+    child_timeline: &chat_state::Timeline,
+) -> io::Result<()> {
+    if owner_spawn.spawn.child_session_id != child_session_id
+        || owner_spawn.spawn.security_parent_session_id != parent_session_id
+        || child_summary.parent_session_id.as_deref() != Some(parent_session_id)
+        || !child_summary
+            .session_kind
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("subagent"))
+    {
+        return Err(invalid(format!(
+            "child '{child_session_id}' summary disagrees with its lifecycle owner"
+        )));
+    }
+    let spawn_seq = chat_state::EventSeq::new(owner_spawn.parent_spawn_seq);
+    child_timeline
+        .validate_subagent_seed_link(parent_session_id, spawn_seq, &owner_spawn.spawn)
+        .map_err(|error| invalid(error.to_string()))?;
+    if let Some(terminal) = &owner_spawn.terminal {
+        child_timeline
+            .validate_subagent_result_link(
+                parent_session_id,
+                spawn_seq,
+                &owner_spawn.spawn,
+                terminal,
+            )
+            .map_err(|error| invalid(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 #[cfg(test)]

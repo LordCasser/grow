@@ -1,0 +1,27 @@
+
+#[cfg(test)]
+mod adversarial_audit_output_probes {
+    use super::*;
+    #[test]
+    fn adversarial_audit_non_success_summary_stop_cannot_replace_history() {
+        run_with_session_stack(|| {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(tokio::task::LocalSet::new().run_until(async {
+                let mut accepted = Vec::new();
+                for stop in ["max_tokens", "model_context_window_exceeded", "refusal", "pause_turn"] {
+                    let server = MockInferenceServer::start().await.unwrap();
+                    let summary = format!("AUDIT_PARTIAL_SUMMARY: {}", "unfinished retained evidence. ".repeat(40));
+                    server.enqueue_response("/v1/messages", messages_turn(&[(&summary, stop)], stop));
+                    let (actor, _) = actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+                    seed_closed_compaction_range(&actor, 150_000).await;
+                    actor.compaction.pre_prune.set(false);
+                    let result = actor.run_compact_only(compaction::AutoCompactTriggerInfo {tokens_used: 90_000, context_window: 100_000, percentage: 90, source: "audit"}).await;
+                    let items = actor.chat_state_handle.get_conversation().await;
+                    let installed = items.iter().any(|item| item.text_content().contains("AUDIT_PARTIAL_SUMMARY"));
+                    if result.is_ok() || installed { accepted.push((stop, result.is_ok(), installed)); }
+                }
+                assert!(accepted.is_empty(), "non-success summary terminal accepted as replacement (stop, returned_ok, installed): {accepted:?}");
+            }));
+        });
+    }
+}

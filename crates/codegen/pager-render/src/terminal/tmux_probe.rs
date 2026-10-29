@@ -105,18 +105,27 @@ fn run_command_bounded(
         }
     };
 
-    // The leader may be reaped while descendants still exist or hold pipes.
-    // Use a fresh post-exit bound so near-deadline success still drains; the
-    // main process deadline is not extended for hung leaders.
-    let cleanup_deadline = std::time::Instant::now() + POST_EXIT_CLEANUP_GRACE;
-    terminate_owned_group(&group);
-    let stdout = recv_pipe_drain(stdout, cleanup_deadline, "stdout")?;
-    let stderr = recv_pipe_drain(stderr, cleanup_deadline, "stderr")?;
+    let (stdout, stderr) = finish_after_leader_exit(&group, stdout, stderr, deadline)?;
     Ok(TmuxCommandOutput {
         status_success: status.success(),
         stdout,
         stderr,
     })
+}
+
+fn finish_after_leader_exit(
+    group: &tty_utils::ProcessGroup,
+    stdout: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    stderr: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    _process_deadline: std::time::Instant,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    // Leader exit ends the process deadline. Descendants may still hold its
+    // pipes, so cleanup has one fresh, shared post-exit drain allowance.
+    let cleanup_deadline = std::time::Instant::now() + POST_EXIT_CLEANUP_GRACE;
+    terminate_owned_group(group);
+    let stdout = recv_pipe_drain(stdout, cleanup_deadline, "stdout")?;
+    let stderr = recv_pipe_drain(stderr, cleanup_deadline, "stderr")?;
+    Ok((stdout, stderr))
 }
 
 fn spawn_pipe_drain(
@@ -533,32 +542,109 @@ mod tests {
         );
     }
 
-    /// A leader near the process deadline must still return captured output
-    /// when its descendant holds the pipes until process-group cleanup.
+    /// A descendant holding the output pipe is drained under a fresh cleanup
+    /// budget even when the completed leader's process deadline has expired.
     #[cfg(unix)]
     #[test]
-    fn successful_near_deadline_exit_still_returns_captured_output() {
-        // An explicit interpreter keeps first execution of a temporary script
-        // out of the simulated leader's time budget on macOS. Exercise the
-        // same bounded runner, pipes, environment and detached process group.
-        let timeout = Duration::from_millis(1500);
+    fn completed_leader_uses_post_exit_cleanup_after_expired_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("descendant.pid");
+        let terminated_path = directory.path().join("descendant.terminated");
+        let ready_path = directory.path().join("descendant.ready");
         let mut command = Command::new("/bin/sh");
         command
             .args([
                 "-c",
-                "/usr/bin/perl -e 'select(undef, undef, undef, 1.2)'\n\
-                 ( exec sleep 30 ) &\n\
-                 printf 'tmux 3.4\\n'\n\
-                 exit 0\n",
+                r#"/usr/bin/perl -e '
+                   $SIG{TERM} = sub { open my $f, ">", $ARGV[0] or die $!; print {$f} "terminated"; close $f; exit 0 };
+                   $| = 1; print "tmux 3.4\n";
+                   open my $ready, ">", $ARGV[1] or die $!; print {$ready} "ready"; close $ready;
+                   while (1) { select undef, undef, undef, 0.1 }
+                 ' "$2" "$3" &
+                 echo $! > "$1"
+                 while [ ! -f "$3" ]; do sleep 0.01; done
+                 exit 0
+                "#,
             ])
+            .arg("tmux-cleanup-fixture")
+            .arg(&pid_path)
+            .arg(&terminated_path)
+            .arg(&ready_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .envs(tty_utils::pager_env());
         tty_utils::detach_std_command(&mut command);
-        let output = run_command_bounded(command, timeout)
-            .expect("near-deadline success must not become a drain error");
-        assert!(output.status_success, "expected successful status");
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tmux 3.4");
+        struct OwnedFixture {
+            child: std::process::Child,
+            group: tty_utils::ProcessGroup,
+        }
+
+        impl Drop for OwnedFixture {
+            fn drop(&mut self) {
+                let _ = self.group.kill();
+                let _ = self.child.wait();
+            }
+        }
+
+        let mut child = command.spawn().expect("spawn shell leader");
+        let mut group = match tty_utils::ProcessGroup::new() {
+            Ok(group) => group,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("create owned test process group: {error}");
+            }
+        };
+        if let Err(error) = group.attach_std(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("attach owned test process group: {error}");
+        }
+        let mut owner = OwnedFixture { child, group };
+        let stdout = spawn_pipe_drain(
+            owner.child.stdout.take().expect("capture stdout"),
+            "stdout",
+            Arc::new(AtomicBool::new(false)),
+        );
+        let stderr = spawn_pipe_drain(
+            owner.child.stderr.take().expect("capture stderr"),
+            "stderr",
+            Arc::new(AtomicBool::new(false)),
+        );
+        let ready_deadline = std::time::Instant::now() + TMUX_QUERY_TIMEOUT;
+        loop {
+            if ready_path.exists() {
+                break;
+            }
+            if let Some(status) = owner.child.try_wait().expect("poll shell leader") {
+                panic!("shell leader exited with {status} before descendant readiness");
+            }
+            assert!(
+                std::time::Instant::now() < ready_deadline,
+                "descendant did not install its TERM handler within the query timeout"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(owner.child.wait().expect("wait for shell leader").success());
+
+        let descendant_pid: i32 = std::fs::read_to_string(pid_path)
+            .expect("read descendant PID")
+            .trim()
+            .parse()
+            .expect("parse descendant PID");
+        // SAFETY: signal 0 only checks that the known fixture descendant is alive.
+        assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+
+        let expired_process_deadline = std::time::Instant::now() - Duration::from_secs(1);
+        let (stdout, stderr) =
+            finish_after_leader_exit(&owner.group, stdout, stderr, expired_process_deadline)
+                .expect("post-exit cleanup must use its own drain budget");
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "tmux 3.4");
+        assert!(stderr.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(terminated_path).expect("descendant handled group TERM"),
+            "terminated"
+        );
     }
 }

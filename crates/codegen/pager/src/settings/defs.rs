@@ -767,8 +767,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Appearance,
             owner: SettingOwner::Pager,
             label: "Respect manual folds",
-            description: "Keep manually folded blocks as-is while streaming and stop \
-                          auto-scroll when expanding a block. Experimental.",
+            description: "Keep manual folds outside tool activities and stop auto-scroll \
+                          when expanding a block. Experimental.",
             keywords: &[
                 "fold", "pin", "collapse", "expand", "thinking", "follow", "scroll",
             ],
@@ -784,8 +784,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
             label: "Group tool calls",
-            description: "Fold consecutive read/search/list tool calls and subagent rows into \
-                          one summary row; finished thoughts fold into the group too.",
+            description: "Fold consecutive tool calls and subagent rows into one summary row; \
+                          interleaved thoughts keep their order and active or opened content stays visible.",
             keywords: &[
                 "group", "tool", "verbs", "fold", "collapse", "read", "search", "summary",
                 "thinking", "subagent",

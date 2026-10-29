@@ -215,55 +215,76 @@ fn internal_reload_request_line(id: &str, method: &str, params: serde_json::Valu
     format!("{}\n", msg)
 }
 
-/// Start a skills file watcher and wire it to inject `grow/internal/reload_skills`
-/// messages into the shared ACP incoming stream when SKILL.md files change on disk.
-///
-/// or `None` if no directories could be watched.
-fn spawn_skills_file_watcher<W>(
-    acp_incoming_tx: &Arc<TokioMutex<W>>,
+/// Construct the skills filesystem watcher. Callers do this on the blocking
+/// pool, then transfer the watcher and receiver to a LocalSet-owned consumer.
+/// Returns `None` if no directories could be watched.
+fn start_skills_file_watcher(
     skills_paths: &[String],
-) -> Option<tokio::task::JoinHandle<()>>
-where
-    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
+) -> Option<(
+    crate::config::watcher::SkillsFileWatcher,
+    mpsc::UnboundedReceiver<crate::config::watcher::DiscoveryChange>,
+)> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let workspace_user_dir = agent::prompt::workspace_user::optional_workspace_user_dir();
-    let (mut watcher, mut skills_rx) = crate::config::watcher::SkillsFileWatcher::start(
+    crate::config::watcher::SkillsFileWatcher::start(
         Some(cwd.as_path()),
         workspace_user_dir.as_deref(),
         skills_paths,
-    )?;
-    let skills_tx = acp_incoming_tx.clone();
-    let task = tokio::spawn(async move {
-        while let Some(change) = skills_rx.recv().await {
-            let created_discovery_dir = watcher.refresh_new_discovery_dirs();
-            let (id, method) = match change {
-                crate::config::watcher::DiscoveryChange::Skills if !created_discovery_dir => {
-                    info!("Skill directory changed on disk, reloading skills for all sessions");
-                    ("skills-reload", "grow/internal/reload_skills")
-                }
-                crate::config::watcher::DiscoveryChange::Skills => {
-                    info!("Discovery directory created on disk, reloading skills and workflows");
-                    ("skills-reload", "grow/internal/reload_skills")
-                }
-                crate::config::watcher::DiscoveryChange::Workflows => {
-                    info!(
-                        "Workflow directory changed on disk, re-advertising commands for all sessions"
-                    );
-                    ("workflows-reload", "grow/internal/reload_workflows")
-                }
-            };
-            let line = internal_reload_request_line(id, method, serde_json::json!({}));
-            let mut tx = skills_tx.lock().await;
-            if let Err(e) = tx.write_all(line.as_bytes()).await {
-                warn!(
-                    error = %e,
-                    "failed to inject skills reload into ACP stream"
-                );
+    )
+}
+
+async fn run_skills_file_watcher<W>(
+    mut watcher: crate::config::watcher::SkillsFileWatcher,
+    mut skills_rx: mpsc::UnboundedReceiver<crate::config::watcher::DiscoveryChange>,
+    skills_tx: Arc<TokioMutex<W>>,
+) where
+    W: tokio::io::AsyncWrite + Unpin + 'static,
+{
+    while let Some(change) = skills_rx.recv().await {
+        let created_discovery_dir = watcher.refresh_new_discovery_dirs();
+        let (id, method) = match change {
+            crate::config::watcher::DiscoveryChange::Skills if !created_discovery_dir => {
+                info!("Skill directory changed on disk, reloading skills for all sessions");
+                ("skills-reload", "grow/internal/reload_skills")
             }
+            crate::config::watcher::DiscoveryChange::Skills => {
+                info!("Discovery directory created on disk, reloading skills and workflows");
+                ("skills-reload", "grow/internal/reload_skills")
+            }
+            crate::config::watcher::DiscoveryChange::Workflows => {
+                info!(
+                    "Workflow directory changed on disk, re-advertising commands for all sessions"
+                );
+                ("workflows-reload", "grow/internal/reload_workflows")
+            }
+        };
+        let line = internal_reload_request_line(id, method, serde_json::json!({}));
+        let mut tx = skills_tx.lock().await;
+        if let Err(e) = tx.write_all(line.as_bytes()).await {
+            warn!(
+                error = %e,
+                "failed to inject skills reload into ACP stream"
+            );
         }
-    });
-    Some(task)
+    }
+}
+
+/// Keep the watcher result in its blocking task if cancellation wins. Tokio
+/// cannot cancel an in-flight OS registration call; dropping this handle lets
+/// the LocalSet shut down while the blocking task retains and eventually drops
+/// any watcher it constructs.
+pub async fn finish_blocking_registration<T: Send + 'static>(
+    mut registration: tokio::task::JoinHandle<T>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<Option<T>> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            drop(registration);
+            Ok(None)
+        },
+        result = &mut registration => return Ok(Some(result?)),
+    }
 }
 
 /// Register the process-lifetime runtime so shared filesystem watchers
@@ -345,12 +366,13 @@ pub async fn run_stdio_agent(
         let _ = stdin_closed_tx.send(());
     });
 
-    let _skills_watcher = spawn_skills_file_watcher(&acp_incoming_tx, &agent_config.skills.paths);
+    let skills_paths = agent_config.skills.paths.clone();
 
     let local_set = tokio::task::LocalSet::new();
     let result = local_set
         .run_until(async move {
             // Shut down the simplex writer on the LocalSet so it's cooperative with ACP handlers.
+            let skills_tx = acp_incoming_tx.clone();
             let simplex_tx = acp_incoming_tx;
             tokio::task::spawn_local(async move {
                 let _ = stdin_closed_rx.await;
@@ -360,7 +382,26 @@ pub async fn run_stdio_agent(
             });
 
             let handle_io = spawn_agent_local(agent_config, memory_config, outgoing, incoming);
-            handle_io.await?;
+            let mut agent_io = tokio::task::spawn_local(handle_io);
+            let mut skills_start =
+                tokio::task::spawn_blocking(move || start_skills_file_watcher(&skills_paths));
+            let skills_watcher = tokio::select! {
+                biased;
+                result = &mut agent_io => {
+                    result??;
+                    return Ok::<(), anyhow::Error>(());
+                }
+                result = &mut skills_start => result?,
+            };
+            let mut skills_task = skills_watcher.map(|(watcher, events)| {
+                tokio::task::spawn_local(run_skills_file_watcher(watcher, events, skills_tx))
+            });
+            let agent_result = agent_io.await;
+            if let Some(task) = skills_task.as_mut() {
+                task.abort();
+                let _ = task.await;
+            }
+            agent_result??;
             Ok::<(), anyhow::Error>(())
         })
         .await;
@@ -706,6 +747,7 @@ pub async fn run_leader(
             let watch_paths = crate::config::find_project_configs(&cwd_for_watcher);
             let (config_update_tx, mut config_update_rx) =
                 mpsc::unbounded_channel::<crate::config::reloader::ConfigUpdate>();
+            let startup_config_update_tx = config_update_tx.clone();
 
             // `mcp.recursive_config_watch` (default
             // `true`) was resolved above (before the async block) so
@@ -714,19 +756,31 @@ pub async fn run_leader(
             // on. When disabled, behavior reverts to the prior
             // default: only explicit `extra_paths` are watched (kill
             // switch for the rollout).
-            let watcher_cwd = recursive_config_watch_enabled.then_some(cwd_for_watcher.as_path());
+            let watcher_cwd = recursive_config_watch_enabled.then_some(cwd_for_watcher);
 
-            let _config_watcher = if let Some(watcher) =
+            let watcher_home = grow_home::grow_home();
+            let watcher_cancel = cancel_clone.clone();
+            let experimental_memory = agent_config.cli_experimental_memory;
+            let no_memory = agent_config.cli_no_memory;
+            let config_registration = tokio::task::spawn_blocking(move || {
                 crate::config::reloader::start_config_reload(
-                    &grow_home::grow_home(),
+                    &watcher_home,
                     &watch_paths,
-                    watcher_cwd,
+                    watcher_cwd.as_deref(),
                     None, // settings stream in after readiness via background refresh
                     config_update_tx,
-                    agent_config.cli_experimental_memory,
-                    agent_config.cli_no_memory,
-                    cancel_clone.clone(),
-                ) {
+                    experimental_memory,
+                    no_memory,
+                    watcher_cancel,
+                )
+            });
+            let Some(config_watcher) =
+                finish_blocking_registration(config_registration, &cancel_clone).await?
+            else {
+                return Ok(());
+            };
+
+            let _config_watcher = if let Some(watcher) = config_watcher {
                 // Share ownership between the leader's
                 // long-lived binding and the per-cwd dynamic
                 // registration drain task. `Rc<RefCell<>>` is safe
@@ -741,6 +795,9 @@ pub async fn run_leader(
                 // there's no rx to drain and no `PathBuf` ever
                 // queued (no leak).
                 if let Some(mut rx) = config_watcher_path_rx.take() {
+                    while let Ok(update) = rx.try_recv() {
+                        watcher.borrow_mut().apply_session_update(update);
+                    }
                     let cancel_for_drain = cancel_clone.clone();
                     let watcher_for_drain = watcher.clone();
                     tokio::task::spawn_local(async move {
@@ -764,8 +821,10 @@ pub async fn run_leader(
                 None
             };
 
-            let _skills_watcher =
-                spawn_skills_file_watcher(&acp_incoming_tx, &agent_config.skills.paths);
+            let skills_paths = agent_config.skills.paths.clone();
+            let skills_registration = tokio::task::spawn_blocking(move || {
+                start_skills_file_watcher(&skills_paths)
+            });
 
             let ipc_tx_for_config = agent_to_ipc_tx.clone();
             let acp_tx_for_config = acp_incoming_tx.clone();
@@ -852,6 +911,23 @@ pub async fn run_leader(
                 }
             });
 
+            let _ = startup_config_update_tx.send(
+                crate::config::reloader::ConfigUpdate::McpCatalogChanged { project_root: None },
+            );
+
+            let Some(skills_watcher) =
+                finish_blocking_registration(skills_registration, &cancel_clone).await?
+            else {
+                return Ok(());
+            };
+            let mut skills_task = skills_watcher.map(|(watcher, events)| {
+                tokio::task::spawn_local(run_skills_file_watcher(
+                    watcher,
+                    events,
+                    acp_incoming_tx.clone(),
+                ))
+            });
+
             // Wait for IPC server shutdown or cancellation.
             // ipc_handle is a JoinHandle from tokio::spawn — awaitable directly.
             tokio::select! {
@@ -862,6 +938,11 @@ pub async fn run_leader(
                 _ = update_cancel.cancelled() => {
                     info!("Leader cancelled");
                 }
+            }
+
+            if let Some(task) = skills_task.as_mut() {
+                task.abort();
+                let _ = task.await;
             }
 
             anyhow::Ok(())
@@ -881,6 +962,84 @@ mod tests {
     /// Create a throwaway shutdown_tx for tests that don't care about the reason.
     fn dummy_shutdown_tx() -> watch::Sender<crate::leader::ShutdownReason> {
         watch::channel(crate::leader::ShutdownReason::Manual).0
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_watcher_registration_yields_and_allows_agent_exit() {
+        struct RegistrationOwner {
+            dropped: Arc<AtomicU32>,
+            dropped_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for RegistrationOwner {
+            fn drop(&mut self) {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+                if let Some(dropped_tx) = self.dropped_tx.take() {
+                    let _ = dropped_tx.send(());
+                }
+            }
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (registration_started_tx, registration_started_rx) =
+                    tokio::sync::oneshot::channel();
+                let (registration_release_tx, registration_release_rx) = std::sync::mpsc::channel();
+                let (owner_dropped_tx, owner_dropped_rx) = tokio::sync::oneshot::channel();
+                let dropped = Arc::new(AtomicU32::new(0));
+                let registration_dropped = dropped.clone();
+                let mut registration = tokio::task::spawn_blocking(move || {
+                    let _ = registration_started_tx.send(());
+                    registration_release_rx.recv().unwrap();
+                    RegistrationOwner {
+                        dropped: registration_dropped,
+                        dropped_tx: Some(owner_dropped_tx),
+                    }
+                });
+                registration_started_rx.await.unwrap();
+
+                let (agent_ready_tx, agent_ready_rx) = tokio::sync::oneshot::channel();
+                let (agent_finished_tx, agent_finished_rx) = tokio::sync::oneshot::channel();
+                let mut agent_io = tokio::task::spawn_local(async move {
+                    let _ = agent_ready_tx.send(());
+                    agent_finished_rx.await.unwrap();
+                });
+                agent_ready_rx
+                    .await
+                    .expect("ACP agent task should progress during blocked registration");
+
+                agent_finished_tx.send(()).unwrap();
+                tokio::select! {
+                    biased;
+                    result = &mut agent_io => result.unwrap(),
+                    result = &mut registration => {
+                        drop(result.unwrap());
+                        panic!("blocked registration must not finish before the agent")
+                    }
+                }
+                assert!(!registration.is_finished());
+
+                let shutdown = CancellationToken::new();
+                let registration_shutdown = shutdown.clone();
+                let mut registration_task = tokio::task::spawn_local(async move {
+                    finish_blocking_registration(registration, &registration_shutdown).await
+                });
+
+                shutdown.cancel();
+                tokio::task::yield_now().await;
+                assert!(
+                    registration_task.is_finished(),
+                    "shutdown must return while OS registration is still blocked"
+                );
+                assert!(registration_task.await.unwrap().unwrap().is_none());
+                assert_eq!(dropped.load(Ordering::SeqCst), 0);
+
+                registration_release_tx.send(()).unwrap();
+                owner_dropped_rx
+                    .await
+                    .expect("the blocking task must drop its eventual watcher result");
+                assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            })
+            .await;
     }
 
     /// Helper: build a LeaderAutoUpdateConfig whose check_fn always returns the given value.

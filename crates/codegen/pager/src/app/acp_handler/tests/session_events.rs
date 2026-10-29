@@ -982,6 +982,32 @@
         );
     }
 
+    #[test]
+    fn finish_turn_clears_only_compaction_live_feedback_after_started() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        let update = GrowSessionUpdate::AutoCompactStarted {
+            tokens_used: 90_000,
+            context_window: 131_072,
+            percentage: 85,
+            reason: "threshold".into(),
+        };
+
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
+        assert!(session.live_status(100).is_some());
+
+        session.finish_turn(&mut scrollback);
+        assert_eq!(session.live_status(100), None);
+
+        session.set_live_feedback(
+            "another-domain",
+            crate::scrollback::blocks::NoticeTone::Info,
+            "Other feedback",
+        );
+        session.finish_turn(&mut scrollback);
+        assert_eq!(session.live_status(100).as_deref(), Some("Other feedback"));
+    }
+
     /// Compact failure keeps the held prompt for the terminal response path.
     #[test]
     fn apply_compaction_failed_keeps_held_prompt() {

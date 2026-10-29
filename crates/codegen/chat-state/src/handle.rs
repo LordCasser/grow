@@ -169,7 +169,7 @@ impl ChatStateHandle {
         &self,
         kind: TimelineEventKind,
     ) -> Result<crate::TimelineEvent, TimelineWriteError> {
-        self.record_timeline_event_durably_with_deadline(kind, None)
+        self.record_timeline_event_durably_with_deadline(kind, None, None)
             .await
     }
 
@@ -178,18 +178,34 @@ impl ChatStateHandle {
         kind: TimelineEventKind,
         deadline: tokio::time::Instant,
     ) -> Result<crate::TimelineEvent, TimelineWriteError> {
-        self.record_timeline_event_durably_with_deadline(kind, Some(deadline))
+        self.record_timeline_event_durably_with_deadline(kind, Some(deadline), None)
             .await
+    }
+
+    /// Commit control context and its authorized Goal projection at one ACK boundary.
+    pub async fn record_control_event_durably(
+        &self,
+        control: crate::ControlEvent,
+        active_goal: Option<GoalDirectiveTag>,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.record_timeline_event_durably_with_deadline(
+            TimelineEventKind::Control(control),
+            None,
+            Some(active_goal),
+        )
+        .await
     }
 
     async fn record_timeline_event_durably_with_deadline(
         &self,
         kind: TimelineEventKind,
         deadline: Option<tokio::time::Instant>,
+        request_goal_scope: Option<Option<GoalDirectiveTag>>,
     ) -> Result<crate::TimelineEvent, TimelineWriteError> {
         self.query("RecordTimelineEventDurably", |reply| {
             ChatStateCommand::RecordTimelineEventDurably {
                 kind,
+                request_goal_scope,
                 deadline,
                 reply,
             }
@@ -655,6 +671,18 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    /// Initialize or reconcile request scope without constructing a model request.
+    pub async fn set_request_goal_scope(
+        &self,
+        active_goal: Option<GoalDirectiveTag>,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("SetRequestGoalScope", |reply| {
+            ChatStateCommand::SetRequestGoalScope { active_goal, reply }
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)
+    }
+
     /// Replace the active provider route and start a fresh continuation epoch.
     pub fn replace_sampling_route(&self, config: SamplingConfig) {
         let _ = self
@@ -982,6 +1010,22 @@ impl ChatStateHandle {
         })
         .await
         .flatten()
+    }
+
+    /// Outer None indicates owner unavailability; inner None is no durable consumer.
+    pub async fn consumed_notification_turn(
+        &self,
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+    ) -> Option<Option<crate::TurnId>> {
+        self.query("GetConsumedNotificationTurn", |reply| {
+            ChatStateCommand::GetConsumedNotificationTurn {
+                source,
+                source_version,
+                reply,
+            }
+        })
+        .await
     }
 
     pub async fn pending_notifications(&self) -> Option<Vec<crate::PendingNotification>> {

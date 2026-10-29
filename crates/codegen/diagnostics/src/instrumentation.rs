@@ -547,13 +547,14 @@ pub struct InstrumentationTimer {
 
 impl InstrumentationTimer {
     pub fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            start: Instant::now(),
-            fields: Vec::new(),
-            mode: mode(),
-            _span_guard: None,
-        }
+        Self::new_with_mode(name, mode())
+    }
+
+    fn new_with_mode(name: &'static str, mode: InstrumentationMode) -> Self {
+        let span_guard = (mode == InstrumentationMode::Chrome).then(|| {
+            tracing::info_span!(target: TARGET, "instrumentation.timer", name = %name).entered()
+        });
+        Self::new_with_span(name, mode, span_guard)
     }
 
     pub fn new_with_span(
@@ -616,4 +617,46 @@ impl Drop for InstrumentationTimer {
 
 pub fn timer(name: &'static str) -> InstrumentationTimer {
     InstrumentationTimer::new(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InstrumentationMode, InstrumentationTimer, TARGET, TargetFilterLayer};
+    use tracing_chrome::{ChromeLayerBuilder, TraceStyle};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn chrome_timer_emits_a_timed_span() {
+        let trace_file = tempfile::NamedTempFile::new().expect("create trace file");
+        let (chrome_layer, flush_guard) = ChromeLayerBuilder::default()
+            .writer(trace_file.reopen().expect("reopen trace file"))
+            .include_args(true)
+            .trace_style(TraceStyle::Async)
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(TargetFilterLayer::new(chrome_layer, TARGET));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let timer = InstrumentationTimer::new_with_mode(
+                "diagnostics.test_timer",
+                InstrumentationMode::Chrome,
+            );
+            drop(timer);
+        });
+        drop(flush_guard);
+
+        let trace: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(trace_file.path()).expect("read trace file"))
+                .expect("parse Chrome trace");
+        let events = trace.as_array().expect("Chrome event array");
+        let timer_events = events
+            .iter()
+            .filter(|event| {
+                event["name"] == "instrumentation.timer"
+                    && event["args"]["name"] == "diagnostics.test_timer"
+            })
+            .collect::<Vec<_>>();
+        assert!(timer_events.iter().any(|event| event["ph"] == "b"));
+        assert!(timer_events.iter().any(|event| event["ph"] == "e"));
+    }
 }

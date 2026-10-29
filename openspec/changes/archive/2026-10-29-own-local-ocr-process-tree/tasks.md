@@ -1,0 +1,4 @@
+- [x] Enroll each local OCR helper in the existing process-group/job lifecycle and retain RAII cleanup across cancellation, errors, and normal completion.
+- [x] Add deterministic descendant coverage for caller cancellation, OCR deadline timeout, and successful direct-child exit with a detached descendant, with test fixture cleanup on assertion panic.
+- [x] Inspect the synchronous concurrent asset-batch fixture for panic cleanup and make any necessary test-local change.
+- [x] Review the final diff and report focused test names for root validation.

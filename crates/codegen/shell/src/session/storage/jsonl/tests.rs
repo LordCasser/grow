@@ -2046,6 +2046,22 @@ async fn timeline_round_trip_folds_the_current_surface() {
             ..
         }) if id == "test-compaction" && error == "process_interrupted"
     )));
+    for repair in repairs {
+        interrupted_adapter
+            .append_timeline_event_durable(&info, &repair)
+            .await
+            .unwrap();
+    }
+    let recovered_again = interrupted_adapter
+        .load_session_for_write_without_updates(&info)
+        .await
+        .expect("a recovered Failed summary-only transaction remains loadable");
+    assert_eq!(recovered_again.timeline.surface().len(), 2);
+    assert!(recovered_again.timeline.events().iter().any(|event| matches!(
+        &event.kind,
+        chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Failed { id, .. })
+            if id == "test-compaction"
+    )));
 
     timeline
         .replace_compaction_range(target, vec![ConversationItem::user_meta(replacement_content.clone())])

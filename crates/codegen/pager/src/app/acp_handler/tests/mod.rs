@@ -1803,6 +1803,7 @@ mod announcements;
 mod scheduled_tasks;
 mod plan_mode;
 mod reconnect;
+mod resumed_usage;
 mod turn_completion;
 mod interjection;
 mod session_routing;

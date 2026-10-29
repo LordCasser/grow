@@ -2695,6 +2695,7 @@ impl AgentSession {
     /// Called when `PromptResponse` is received.
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.tracker.finish_turn(scrollback);
+        self.clear_live_feedback("compaction");
         self.state = AgentState::Idle;
         self.model_failure_reported = false;
         self.in_flight_prompt = None;

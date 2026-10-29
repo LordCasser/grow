@@ -77,33 +77,37 @@ fn estimate_wire_items(items: &[ConversationItem], include_reasoning: bool) -> u
         .sum()
 }
 
-fn estimate_effective_conversation_tokens(request: &ConversationRequest) -> u64 {
-    let Some(native) = &request.native_continuation else {
-        return estimate_wire_items(&request.items, false);
+pub(super) fn estimate_effective_conversation_tokens(request: &ConversationRequest) -> u64 {
+    estimate_effective_items(&request.items, request.native_continuation.as_ref())
+}
+
+fn estimate_effective_items(
+    items: &[ConversationItem],
+    native: Option<&NativeContinuationProjection>,
+) -> u64 {
+    let Some(native) = native else {
+        return estimate_wire_items(items, false);
     };
     let reasoning_backend = native.portable_reasoning_backend.clone();
     let replay_reasoning = reasoning_backend.is_some();
-    let Some(portable_end) = native.portable_prefix_end(&request.items) else {
+    let Some(portable_end) = native.portable_prefix_end(items) else {
         return estimate_wire_items(
-            &project_portable_history_with_reasoning(&request.items, reasoning_backend),
+            &project_portable_history_with_reasoning(items, reasoning_backend),
             replay_reasoning,
         );
     };
     let mut total = estimate_wire_items(
-        &project_portable_history_with_reasoning(&request.items[..portable_end], reasoning_backend),
+        &project_portable_history_with_reasoning(&items[..portable_end], reasoning_backend),
         replay_reasoning,
     );
     let mut cursor = portable_end;
     for span in &native.spans {
         total = total
-            .saturating_add(estimate_wire_items(
-                &request.items[cursor..span.start],
-                false,
-            ))
+            .saturating_add(estimate_wire_items(&items[cursor..span.start], false))
             .saturating_add(span.fragment.estimated_tokens());
         cursor = span.end;
     }
-    total.saturating_add(estimate_wire_items(&request.items[cursor..], false))
+    total.saturating_add(estimate_wire_items(&items[cursor..], false))
 }
 
 fn estimate_tool_tokens(
@@ -273,17 +277,23 @@ pub(crate) struct ChatState {
     /// Request-only image replacements for the current append-only Surface and
     /// image presentation domain. Native continuation resets do not own this.
     pub image_budget: Option<ImageBudgetSelection>,
+    /// Goal scope of the current request projection, initialized from restored
+    /// authority and updated by request build or control reconciliation. Kept
+    /// apart from image-budget choices invalidated by route changes.
+    pub request_active_goal: Option<GoalDirectiveTag>,
     /// Current sampling configuration (model, context window, etc.).
     pub sampling_config: SamplingConfig,
     /// Provider-anchored projection of the current model-visible context.
     /// Lifetime and per-prompt billing live exclusively in `UsageLedger`.
     pub projected_tokens: u64,
-    /// Canonical Surface estimate at initialization or the last request projection.
-    pub projected_request_surface_tokens: u64,
-    /// Portable input estimate at initialization or the last final request estimate.
-    /// The difference from `projected_request_surface_tokens` is the sole
-    /// request-envelope adjustment carried across provider anchors.
+    /// Current effective input estimate, without provider calibration.
     pub projected_request_input_tokens: u64,
+    /// Tools, tool choice and output-schema input from the latest request.
+    pub request_envelope_tokens: u64,
+    /// One rolling calibration reference: (local estimate, calibrated context).
+    /// Seeded by provider measurement and advanced after each projection so
+    /// growth after a shrink is still charged at its full local cost.
+    pub provider_context_anchor: Option<(u64, u64)>,
     /// Timestamp when the current stream started (epoch ms).
     pub stream_start_ms: Option<i64>,
     /// Timestamp when the current turn started (epoch ms).
@@ -327,7 +337,6 @@ type ReplacedImageSource = (std::sync::Weak<str>, Option<std::sync::Weak<str>>);
 #[derive(Clone)]
 pub(crate) struct ImageBudgetSelection {
     pub route: ModelImageInputKey,
-    pub active_goal: Option<GoalDirectiveTag>,
     pub use_image_descriptions: bool,
     pub surface_ids: Vec<SurfaceId>,
     /// Source identity and part position, checked against the original Arc
@@ -853,7 +862,7 @@ impl ChatState {
         let timeline = Timeline::from_seed(conversation)
             .expect("an in-memory seed conversation must form a valid timeline");
 
-        Self::from_timeline(timeline, sampling_config)
+        Self::from_timeline(timeline, sampling_config, None)
             .expect("an in-memory seed has no persisted usage observations")
     }
 
@@ -861,15 +870,8 @@ impl ChatState {
     pub fn from_timeline(
         timeline: Timeline,
         sampling_config: SamplingConfig,
+        active_goal: Option<GoalDirectiveTag>,
     ) -> Result<Self, crate::TimelineWriteError> {
-        let surface_tokens = estimate_conversation_tokens(timeline.surface());
-        // A restored continuation lane starts with portable replay, not the
-        // raw history's retained reasoning. Keep both baselines so later
-        // Surface deltas and request envelopes still apply exactly once.
-        let initial_tokens = estimate_wire_items(
-            &project_portable_history_with_reasoning(timeline.surface(), None),
-            false,
-        );
         let (
             settled_model_attempts,
             auxiliary_attempts,
@@ -878,17 +880,19 @@ impl ChatState {
             session_usage,
         ) = usage_from_timeline(&timeline)?;
 
-        Ok(Self {
+        let mut state = Self {
             continuation: ContinuationLane::new(
                 sampling_config.api_backend.clone(),
                 timeline.surface_len(),
             ),
             image_budget: None,
+            request_active_goal: active_goal,
             timeline,
             sampling_config,
-            projected_tokens: initial_tokens,
-            projected_request_surface_tokens: surface_tokens,
-            projected_request_input_tokens: initial_tokens,
+            projected_tokens: 0,
+            request_envelope_tokens: 0,
+            provider_context_anchor: None,
+            projected_request_input_tokens: 0,
             stream_start_ms: None,
             turn_start_ms: None,
             agent_edited_paths: BTreeSet::new(),
@@ -901,7 +905,72 @@ impl ChatState {
             settled_auxiliary_attempts,
             settled_subagent_usage,
             turn_capture: None,
-        })
+        };
+        state.rebase_context_pressure_to_portable();
+        Ok(state)
+    }
+
+    /// A new branch or route cannot reuse the previous provider observation.
+    pub(super) fn rebase_context_pressure_to_portable(&mut self) {
+        self.request_envelope_tokens = 0;
+        self.provider_context_anchor = None;
+        self.refresh_context_pressure();
+    }
+
+    /// Append growth uses its local cost. When a measured footprint is below
+    /// its heuristic, shrinking scales that footprint instead of subtracting a
+    /// negative offset until saturation erases all retained content.
+    pub(super) fn calibrated_context_tokens(&mut self, estimated: u64) -> u64 {
+        let Some((reference, measured)) = self.provider_context_anchor else {
+            return estimated;
+        };
+        let calibrated = if estimated >= reference {
+            measured.saturating_add(estimated - reference)
+        } else if measured >= reference {
+            estimated.saturating_add(measured - reference)
+        } else {
+            (u128::from(measured) * u128::from(estimated)).div_ceil(u128::from(reference)) as u64
+        };
+        self.provider_context_anchor = Some((estimated, calibrated));
+        calibrated
+    }
+
+    /// Recompute in request coordinates. Raw Surface deltas cannot be applied
+    /// to a provider anchor: omitted reasoning can make that delta larger than
+    /// the entire request, irreversibly losing the balance through saturation.
+    pub(super) fn refresh_context_pressure(&mut self) -> u64 {
+        let mut items = sampling_types::project_conversation_for_goal_scope(
+            self.timeline.surface().to_vec(),
+            self.request_active_goal.as_ref(),
+        );
+        if let Some(projection) = &self.image_budget {
+            if projection.use_image_descriptions {
+                // A missing description remains conservatively image-bearing;
+                // real request assembly reports that unavailable input.
+                let mut described = items.clone();
+                if sampling_types::conversation::select_image_descriptions(&mut described).is_ok() {
+                    items = described;
+                }
+            }
+            if self
+                .timeline
+                .surface_ids()
+                .starts_with(&projection.surface_ids)
+            {
+                super::request_builder::apply_image_budget_choices(
+                    &mut items,
+                    self.timeline.surface_ids(),
+                    projection,
+                );
+            }
+        }
+        let native = self
+            .continuation
+            .request_projection(self.timeline.surface_ids());
+        self.projected_request_input_tokens = estimate_effective_items(&items, Some(&native))
+            .saturating_add(self.request_envelope_tokens);
+        self.projected_tokens = self.calibrated_context_tokens(self.projected_request_input_tokens);
+        self.projected_tokens
     }
 }
 
@@ -975,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn new_state_estimates_portable_tokens_and_preserves_raw_baseline() {
+    fn new_state_estimates_portable_tokens_without_provider_calibration() {
         // 4000 bytes of text per item, bytes / 4 = 1000 tokens each
         let items = vec![
             ConversationItem::system("x".repeat(4000).as_str()),
@@ -986,7 +1055,7 @@ mod tests {
         let state = ChatState::new(items, test_sampling_config());
         // The orphan result remains in history, but portable replay omits it.
         assert_eq!(state.timeline.surface_len(), 4);
-        assert_eq!(state.projected_request_surface_tokens, 4000);
+        assert_eq!(state.provider_context_anchor, None);
         assert_eq!(state.projected_request_input_tokens, 3000);
         assert_eq!(state.projected_tokens, 3000);
     }

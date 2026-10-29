@@ -1,0 +1,2 @@
+- [x] 扩展既有Core测试包清单，核对release contract脚本。
+- [ ] 本地测试与同SHA正式CI通过后记录、归档。

@@ -1,0 +1,62 @@
+
+#[cfg(test)]
+mod adversarial_audit_probes {
+    use super::*;
+
+    #[test]
+    fn adversarial_audit_quoted_analysis_closer_preserves_summary_evidence() {
+        let raw = format!("<summary>\nTask: MUST_KEEP_EVIDENCE is complete.\nThe source quoted `</analysis>` literally.\n{}\n</summary>", "Current retained details remain relevant. ".repeat(40));
+        let cleaned = ::compaction::format_compact_summary(&raw);
+        assert!(!::compaction::is_degenerate_summary(&raw), "fixture passes the real acceptance gate");
+        assert!(cleaned.contains("MUST_KEEP_EVIDENCE"), "summary cleanup deleted real evidence while accepting the remaining {} chars", cleaned.chars().count());
+    }
+
+    #[test]
+    fn adversarial_audit_summary_budget_ignores_reasoning_that_will_not_be_sent() {
+        let mut old = ConversationItem::user("old task");
+        old.set_prompt_index(0);
+        let mut recent = ConversationItem::user("current task");
+        recent.set_prompt_index(1);
+        let surface = vec![
+            ConversationItem::system("system"), old,
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("r".repeat(400_000))),
+            ConversationItem::assistant("e".repeat(40_000)), recent,
+            ConversationItem::assistant("t".repeat(40_000)),
+        ];
+        let ids: Vec<_> = (0..surface.len()).map(|index| chat_state::SurfaceId {event: chat_state::EventSeq::new(1), item: index as u32}).collect();
+        let plan = plan_compaction_range(&surface, &ids, 3_200, 5_000).expect("closed source exists");
+        let actual_source = compaction_summary_source(&surface, &plan, &surface[0], true, true, None);
+        let sent_tokens = chat_state::estimate_conversation_tokens(&actual_source);
+        assert!(sent_tokens < 12_000, "real Messages source fits: {sent_tokens}");
+        assert!(plan.source_tokens > 100_000);
+        let fit = fit_compaction_range_to_budget(&surface, &ids, &plan, 12_000, 5_000);
+        assert!(fit.is_some(), "raw range has {} tokens but actual summary source only {sent_tokens}; a valid fitting source was rejected", plan.source_tokens);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn adversarial_audit_ordinary_cancel_signals_unpromoted_generation() {
+        tokio::task::LocalSet::new().run_until(async {
+            let (actor, _notifications) = crate::session::actor::tests::support::build_actor().await;
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let worker_cancel = cancellation.clone();
+            let worker = tokio::task::spawn_local(async move {
+                worker_cancel.cancelled().await;
+                Err(crate::session::helpers::session_compact::CompactFailure::cancelled_error())
+            });
+            let surface_id = chat_state::SurfaceId {event: chat_state::EventSeq::new(1), item: 0};
+            *actor.compaction.background.borrow_mut() = Some(BackgroundCompaction {
+                id: "audit-unpromoted".into(), source_items: 1,
+                started: std::time::Instant::now(), cancel: cancellation.clone(),
+                background: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                authority: vec![], target: chat_state::SurfaceRange {start: surface_id, end: surface_id, shadowed: vec![surface_id]},
+                model_key: (sampling_types::ModelImageInputKey::new("model", "messages", "endpoint"), 100_000), worker,
+            });
+            actor.cancel_background_compaction("user_stop").await.unwrap();
+            let signalled = cancellation.is_cancelled();
+            let mut pending = actor.compaction.background.borrow_mut().take().expect("unfinished owner retained");
+            pending.worker.abort();
+            let _ = (&mut pending.worker).await;
+            assert!(signalled, "ordinary invalidation left the unpromoted generation token uncancelled");
+        }).await;
+    }
+}

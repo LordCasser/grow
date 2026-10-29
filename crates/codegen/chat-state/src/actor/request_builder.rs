@@ -52,7 +52,6 @@ impl ChatStateActor {
                 )
             });
             if !already_present {
-                let item_tokens = super::state::estimate_item_tokens(&item);
                 let event = self
                     .state
                     .timeline
@@ -63,7 +62,6 @@ impl ChatStateActor {
                         response_admission: None,
                     }))?;
                 self.commit_timeline_event(event).await?;
-                self.apply_projected_token_delta(0, item_tokens);
             }
         }
         let mut items = self.state.timeline.surface().to_vec();
@@ -78,7 +76,7 @@ impl ChatStateActor {
         let route = sampling_types::model_image_input_key(&self.state.sampling_config);
         let same_domain = self.state.image_budget.as_ref().is_some_and(|previous| {
             previous.route == route
-                && previous.active_goal == active_goal
+                && self.state.request_active_goal == active_goal
                 && previous.use_image_descriptions == use_image_descriptions
                 && surface_ids.starts_with(&previous.surface_ids)
         });
@@ -87,7 +85,6 @@ impl ChatStateActor {
         } else {
             ImageBudgetSelection {
                 route,
-                active_goal: active_goal.clone(),
                 use_image_descriptions,
                 surface_ids: Vec::new(),
                 replaced: Default::default(),
@@ -109,14 +106,7 @@ impl ChatStateActor {
         if !valid_choices {
             selection.replaced.clear();
         }
-        let placeholder = ContentPart::Text {
-            text: IMAGE_COMPACT_PLACEHOLDER.into(),
-        };
-        for (source, part_index) in selection.replaced.keys() {
-            if let Some(index) = surface_ids.iter().position(|id| id == source) {
-                image_content_mut(&mut items[index])[*part_index] = placeholder.clone();
-            }
-        }
+        apply_image_budget_choices(&mut items, &surface_ids, &selection);
 
         // Measure the effective request after replaying previous choices and
         // evict as it approaches
@@ -232,9 +222,32 @@ impl ChatStateActor {
             native_continuation,
         };
         let request_input_tokens = super::state::estimate_request_input_tokens(&request);
-        self.apply_request_projection(request_input_tokens);
+        self.state.request_envelope_tokens = request_input_tokens.saturating_sub(
+            super::state::estimate_effective_conversation_tokens(&request),
+        );
+        self.state.request_active_goal = active_goal.clone();
         self.state.image_budget = Some(selection);
+        self.apply_request_projection(request_input_tokens);
         Ok(request)
+    }
+}
+
+/// Replay the same identity-bound image choices for request assembly and
+/// context pressure; replacements do not inherit old image coordinates.
+pub(super) fn apply_image_budget_choices(
+    items: &mut [ConversationItem],
+    surface_ids: &[crate::SurfaceId],
+    selection: &ImageBudgetSelection,
+) {
+    for ((source, part_index), identity) in &selection.replaced {
+        if let Some(index) = surface_ids.iter().position(|id| id == source)
+            && let Some(part) = image_content_mut(&mut items[index]).get_mut(*part_index)
+            && image_part_matches(part, identity)
+        {
+            *part = ContentPart::Text {
+                text: IMAGE_COMPACT_PLACEHOLDER.into(),
+            };
+        }
     }
 }
 

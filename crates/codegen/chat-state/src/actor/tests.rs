@@ -716,6 +716,177 @@ async fn cold_context_pressure_matches_portable_request_and_preserves_real_overf
 }
 
 #[tokio::test]
+async fn rewind_across_compaction_then_switch_uses_portable_context_pressure() {
+    for backend in [
+        sampling_types::ApiBackend::ChatCompletions,
+        sampling_types::ApiBackend::Responses,
+        sampling_types::ApiBackend::Messages,
+    ] {
+        for (user_bytes, reasoning_bytes) in [(800, 80_000), (48_000, 0)] {
+            let mut h = TestHarness::with_context_window(10_000);
+            seed_test_system(&h.handle, &"s".repeat(512)).await;
+            h.handle
+                .push_user_message(marked_user("u".repeat(user_bytes), 0));
+            record_prompt(&h.handle, "first").await;
+            if reasoning_bytes > 0 {
+                h.handle
+                    .push_assistant_response(ConversationItem::Reasoning(
+                        sampling_types::synthesized_reasoning_item("r".repeat(reasoning_bytes)),
+                    ));
+            }
+            h.handle
+                .push_assistant_response(ConversationItem::assistant("a".repeat(400)));
+            let retained = h.handle.get_conversation().await;
+            h.handle.push_user_message(marked_user("second", 1));
+            record_prompt(&h.handle, "second").await;
+            commit_compaction_range(&h.handle, vec![ConversationItem::user_meta("summary")]).await;
+            h.handle
+                .build_request("rewind-pressure", vec![], None, None, None)
+                .await
+                .unwrap();
+            h.handle.record_provider_context_anchor(20_000);
+            assert_eq!(h.handle.get_projected_tokens().await, 20_000);
+            h.drain_events();
+
+            h.handle.rewind_durably(1).await.unwrap();
+            let expected = (512 + user_bytes as u64 + 400) / 4;
+            assert_eq!(
+                serde_json::to_value(h.handle.get_conversation().await).unwrap(),
+                serde_json::to_value(retained).unwrap(),
+            );
+            assert_eq!(
+                h.handle.get_projected_tokens().await,
+                expected,
+                "after rewind"
+            );
+            let pressure = h
+                .drain_events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    ChatStateEvent::ContextPressureUpdated { projected_tokens } => {
+                        Some(projected_tokens)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(pressure, [expected], "publish only the rebased pressure");
+            assert_eq!(expected > 10_000, reasoning_bytes == 0);
+
+            h.handle.replace_sampling_route(SamplingConfig {
+                api_backend: backend.clone(),
+                model: "replacement-model".into(),
+                ..test_config_with_window(10_000)
+            });
+            assert_eq!(
+                h.handle.get_projected_tokens().await,
+                expected,
+                "after switch"
+            );
+            h.handle
+                .push_user_message_durably(ConversationItem::user("n".repeat(400)))
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                let request = h
+                    .handle
+                    .build_request("rewind-pressure", vec![], None, None, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    crate::estimate_request_input_tokens(&request),
+                    expected + 100
+                );
+                assert_eq!(h.handle.get_projected_tokens().await, expected + 100);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn route_replacement_rebases_pressure_but_parameter_update_preserves_anchor() {
+    let mut h = TestHarness::with_conversation(vec![
+        ConversationItem::user("u".repeat(800)),
+        ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+            "r".repeat(80_000),
+        )),
+        ConversationItem::assistant("a".repeat(400)),
+    ]);
+    h.handle
+        .build_request("route-pressure", vec![], None, None, None)
+        .await
+        .unwrap();
+    h.handle.record_provider_context_anchor(50_000);
+    assert_eq!(h.handle.get_projected_tokens().await, 50_000);
+    h.handle.update_sampling_config(SamplingConfig {
+        temperature: Some(0.5),
+        ..test_config()
+    });
+    assert_eq!(h.handle.get_projected_tokens().await, 50_000);
+    h.drain_events();
+    h.drain_persistence();
+    h.handle.replace_sampling_route(SamplingConfig {
+        model: "replacement-model".into(),
+        ..test_config()
+    });
+    assert_eq!(h.handle.get_projected_tokens().await, 300);
+    assert!(matches!(
+        h.next_event().await,
+        ChatStateEvent::ContextPressureUpdated {
+            projected_tokens: 300
+        }
+    ));
+    assert!(
+        h.drain_persistence().is_empty(),
+        "rebase writes no Timeline facts"
+    );
+    h.handle
+        .build_request("route-pressure", vec![], None, None, None)
+        .await
+        .unwrap();
+    h.handle.record_provider_context_anchor(500);
+    assert_eq!(h.handle.get_projected_tokens().await, 500);
+    h.handle
+        .build_request("route-pressure", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(h.handle.get_projected_tokens().await, 500);
+}
+
+#[tokio::test]
+async fn rewind_pressure_includes_reasoning_required_by_the_retained_route() {
+    let backend = sampling_types::ApiBackend::ChatCompletions;
+    let h = TestHarness::with_config(
+        vec![
+            marked_user("u".repeat(800), 0),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "r".repeat(80_000),
+            )),
+            ConversationItem::assistant("a".repeat(400)),
+        ],
+        SamplingConfig {
+            api_backend: backend.clone(),
+            ..test_config()
+        },
+    );
+    record_prompt(&h.handle, "first").await;
+    assert_eq!(
+        h.handle.enable_portable_reasoning(backend).await,
+        Some(true)
+    );
+    h.handle.push_user_message(marked_user("second", 1));
+    record_prompt(&h.handle, "second").await;
+    h.handle.rewind_durably(1).await.unwrap();
+    assert_eq!(h.handle.get_projected_tokens().await, 20_300);
+    let request = h
+        .handle
+        .build_request("rewind-reasoning", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(crate::estimate_request_input_tokens(&request), 20_300);
+    assert_eq!(h.handle.get_projected_tokens().await, 20_300);
+}
+
+#[tokio::test]
 async fn restored_actor_durably_repairs_dangling_tool_surface_before_launch() {
     let timeline = crate::Timeline::from_seed(vec![ConversationItem::Assistant(
         sampling_types::AssistantItem {
@@ -831,6 +1002,20 @@ async fn host_completion_result_waits_for_durable_ack_and_reports_failure() {
             event_tx,
             tokio_util::sync::CancellationToken::new(),
         );
+        handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            sampling_types::ToolCall {
+                id: "finish".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        ]));
+        persistence_rx
+            .next_timeline_ack()
+            .await
+            .unwrap()
+            .send(Ok(()))
+            .unwrap();
+        let _ = handle.get_conversation().await;
         let write = {
             let handle = handle.clone();
             tokio::spawn(async move {
@@ -856,8 +1041,8 @@ async fn host_completion_result_waits_for_durable_ack_and_reports_failure() {
         assert_eq!(write.await.unwrap().is_err(), fail);
         if !fail {
             let history = handle.get_conversation().await;
-            assert_eq!(history.len(), 1);
-            assert_eq!(history[0].text_content(), "accepted");
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[1].text_content(), "accepted");
             assert!(handle.get_projected_tokens().await > 0);
         }
     }
@@ -1313,7 +1498,7 @@ async fn provider_context_anchor_emits_event() {
 }
 
 #[tokio::test]
-async fn provider_anchor_below_final_request_estimate_is_ignored() {
+async fn provider_anchor_below_final_request_estimate_is_accepted() {
     use sampling_types::ToolSpec;
 
     let h = TestHarness::with_conversation(vec![ConversationItem::user("hello")]);
@@ -1335,7 +1520,7 @@ async fn provider_anchor_below_final_request_estimate_is_ignored() {
     assert!(projected > 1_000);
 
     h.handle.record_provider_context_anchor(10);
-    assert_eq!(h.handle.get_projected_tokens().await, projected);
+    assert_eq!(h.handle.get_projected_tokens().await, 10);
 }
 
 #[tokio::test]
@@ -2677,6 +2862,14 @@ async fn restored_usage_ignores_unrelated_diagnostic_observations() {
 #[tokio::test]
 async fn projected_tokens_track_tool_result_growth() {
     let h = TestHarness::new();
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            sampling_types::ToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        ]));
     h.handle.record_provider_context_anchor(100_000);
 
     // Push a tool result with 4000 chars → ~1000 estimated tokens
@@ -2689,6 +2882,14 @@ async fn projected_tokens_track_tool_result_growth() {
 #[tokio::test]
 async fn provider_anchor_replaces_local_projection() {
     let h = TestHarness::new();
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            sampling_types::ToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        ]));
     h.handle.record_provider_context_anchor(100_000);
     h.handle
         .push_tool_result(ConversationItem::tool_result("call-1", "x".repeat(4000)));
@@ -2770,7 +2971,7 @@ async fn response_items_without_provider_usage_remain_estimated() {
 }
 
 #[tokio::test]
-async fn rewind_applies_signed_surface_delta() {
+async fn rewind_discards_previous_branch_provider_anchor() {
     let mut h = TestHarness::new();
     h.handle.record_provider_context_anchor(100_000);
     h.handle.push_user_message(marked_user("q1", 0));
@@ -2782,15 +2983,15 @@ async fn rewind_applies_signed_surface_delta() {
 
     assert_eq!(h.handle.get_projected_tokens().await, 101_000);
 
-    // Rewind removes Surface content but preserves provider overhead.
+    // The previous branch's provider overhead does not measure the new branch.
     h.drain_events();
-    let surface_before = crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
     h.handle.rewind_durably(0).await.unwrap();
-    let surface_after = crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
-    assert_eq!(
-        h.handle.get_projected_tokens().await,
-        101_000u64.saturating_sub(surface_before - surface_after)
-    );
+    assert_eq!(h.handle.get_projected_tokens().await, 0);
+    h.handle
+        .build_request("rewound-empty", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(h.handle.get_projected_tokens().await, 0);
 }
 
 #[tokio::test]
@@ -3329,11 +3530,30 @@ async fn durable_rewind_retries_an_uncertain_persistence_failure() {
     let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 3);
     h.handle.push_user_message(original.clone());
     record_prompt(&h.handle, "original").await;
+    h.handle.record_provider_context_anchor(50_000);
+    assert_eq!(h.handle.get_projected_tokens().await, 50_000);
+    h.drain_events();
     let handle = h.handle.clone();
     let mut replace = std::pin::pin!(async move { handle.rewind_durably(0).await });
-    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let retry = async {
+        let first = h.persistence_rx.next_timeline_ack().await.unwrap();
+        assert!(
+            h.event_rx.try_recv().is_err(),
+            "no pressure reset before durable ACK"
+        );
+        first
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+        let retry = h.persistence_rx.next_timeline_ack().await.unwrap();
+        assert!(
+            h.event_rx.try_recv().is_err(),
+            "failed write must not publish a reset"
+        );
+        retry.send(Ok(())).unwrap();
+    };
     let (result, ()) = tokio::join!(&mut replace, retry);
     result.unwrap();
+    assert_eq!(h.handle.get_projected_tokens().await, 0);
 }
 
 #[tokio::test]
@@ -4568,6 +4788,13 @@ async fn pruning_projects_signed_surface_delta_from_provider_anchor() {
     let mut conv = Vec::new();
     for i in 0..12 {
         conv.push(ConversationItem::user(format!("q{i}")));
+        conv.push(ConversationItem::assistant_tool_calls(vec![
+            sampling_types::ToolCall {
+                id: format!("call-{i}").into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        ]));
         conv.push(ConversationItem::tool_result(
             format!("call-{i}"),
             "x".repeat(200_000),
@@ -4912,6 +5139,7 @@ async fn truncate_to_zero_keeps_only_system() {
 async fn rewind_rejects_non_earlier_targets() {
     let mut h = TestHarness::new();
     record_prompt(&h.handle, "q1").await;
+    h.handle.record_provider_context_anchor(50_000);
 
     let _ = h.handle.get_prompt_index().await;
     h.drain_events();
@@ -4934,6 +5162,7 @@ async fn rewind_rejects_non_earlier_targets() {
 
     let idx = h.handle.get_prompt_index().await;
     assert_eq!(idx, 1);
+    assert_eq!(h.handle.get_projected_tokens().await, 50_000);
 
     let events = h.drain_events();
     assert!(events.is_empty());
@@ -8744,6 +8973,11 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
     let content = format!("{}{}{}", "H".repeat(400), "M".repeat(400), "T".repeat(400));
     let conv = vec![
         ConversationItem::user("hello"),
+        ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]),
         ConversationItem::tool_result_with_images(
             "call-1",
             content.as_str(),
@@ -8762,7 +8996,7 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
         1,
         "only the oversized tool result is selected"
     );
-    assert_eq!(plan.items[0].index, 1);
+    assert_eq!(plan.items[0].index, 2);
 
     let before = h.handle.get_projected_tokens().await;
     let report = h
@@ -8778,9 +9012,9 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
     );
 
     let conversation = h.handle.get_conversation().await;
-    assert_eq!(conversation.len(), 2, "conversation length is preserved");
-    let ConversationItem::ToolResult(tr) = &conversation[1] else {
-        panic!("expected tool result at index 1");
+    assert_eq!(conversation.len(), 3, "conversation length is preserved");
+    let ConversationItem::ToolResult(tr) = &conversation[2] else {
+        panic!("expected tool result at index 2");
     };
     assert_eq!(
         tr.tool_call_id, "call-1",
@@ -8880,10 +9114,9 @@ async fn prune_tool_results_is_idempotent() {
     );
 }
 
-/// An under-reported provider anchor is ignored, then pruning applies the
-/// signed Surface delta while retaining the bounded replacement marker.
+/// A low measured context stays calibrated when pruning the retained content.
 #[tokio::test]
-async fn prune_tool_results_clamps_after_underreported_anchor_is_ignored() {
+async fn prune_tool_results_scales_low_anchor_without_erasing_retained_content() {
     use crate::actor::state::EstimatedItemTokenCounter;
     use compaction::plan_tool_result_pruning;
 
@@ -8898,7 +9131,7 @@ async fn prune_tool_results_clamps_after_underreported_anchor_is_ignored() {
     let mut h = TestHarness::with_conversation(conv.clone());
     h.handle.record_provider_context_anchor(10);
     // Sync point: the query is ordered after the fire-and-forget anchor.
-    assert_eq!(h.handle.get_projected_tokens().await, 1000);
+    assert_eq!(h.handle.get_projected_tokens().await, 10);
     h.drain_events();
 
     let plan = plan_tool_result_pruning(&conv, &EstimatedItemTokenCounter, 50, 100);
@@ -8908,8 +9141,8 @@ async fn prune_tool_results_clamps_after_underreported_anchor_is_ignored() {
         .await
         .expect("prune succeeds");
     assert_eq!(report.pruned_count, 1, "content is still pruned");
-    assert_eq!(report.tokens_before, 1000);
-    assert!(report.tokens_after < report.tokens_before);
+    assert_eq!(report.tokens_before, 10);
+    assert!(report.tokens_after > 0 && report.tokens_after < report.tokens_before);
     assert_eq!(h.handle.get_projected_tokens().await, report.tokens_after);
     assert!(h.drain_events().is_empty());
 }
@@ -9010,6 +9243,11 @@ async fn prune_tool_results_defensively_skips_bad_plan_entries() {
 
     let h = TestHarness::with_conversation(vec![
         ConversationItem::user("not a tool result"),
+        ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]),
         ConversationItem::tool_result("call-1", "x".repeat(4000).as_str()),
     ]);
     let plan = PrunePlan {
@@ -9030,14 +9268,14 @@ async fn prune_tool_results_defensively_skips_bad_plan_entries() {
             },
             // Stale token count: actual content (1000) decides, still prunes.
             PruneItem {
-                index: 1,
+                index: 2,
                 tokens_before: u32::MAX,
                 budget_tokens: 50,
                 estimated_savings: 950,
             },
             // Duplicate of the real target: marker already present, skipped.
             PruneItem {
-                index: 1,
+                index: 2,
                 tokens_before: 1000,
                 budget_tokens: 50,
                 estimated_savings: 950,
@@ -9054,7 +9292,7 @@ async fn prune_tool_results_defensively_skips_bad_plan_entries() {
     assert!(report.tokens_after < report.tokens_before);
 
     let conversation = h.handle.get_conversation().await;
-    assert_eq!(conversation.len(), 2);
+    assert_eq!(conversation.len(), 3);
     let ConversationItem::User(user) = &conversation[0] else {
         panic!("user item must be untouched");
     };
@@ -9062,8 +9300,8 @@ async fn prune_tool_results_defensively_skips_bad_plan_entries() {
         user.content.as_slice(),
         [sampling_types::ContentPart::Text { text }] if text.as_ref() == "not a tool result"
     ));
-    let ConversationItem::ToolResult(tr) = &conversation[1] else {
-        panic!("expected tool result at index 1");
+    let ConversationItem::ToolResult(tr) = &conversation[2] else {
+        panic!("expected tool result at index 2");
     };
     assert!(tr.content.contains(super::mutations::PRUNE_MARKER));
     assert_eq!(
@@ -11927,3 +12165,12 @@ async fn chat_runtime_only_reasoning_recovery_is_acknowledged_once() {
         );
     }
 }
+
+#[path = "context_pressure_tests.rs"]
+mod context_pressure;
+
+#[path = "compaction_ack_tests.rs"]
+mod compaction_ack_tests;
+
+#[path = "low_anchor_tests.rs"]
+mod low_anchor_tests;

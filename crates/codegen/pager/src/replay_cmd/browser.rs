@@ -417,6 +417,10 @@ impl Browser {
             state.toggle_group_expansion();
             return BrowseAction::None;
         }
+        self.open_selected_entry(state)
+    }
+
+    fn open_selected_entry(&mut self, state: &mut ScrollbackState) -> BrowseAction {
         let Some(entry) = state.selected().and_then(|index| state.entry(index)) else {
             return BrowseAction::None;
         };
@@ -688,19 +692,21 @@ impl Browser {
                         && let Some(index) = state.index_of_id(id)
                     {
                         state.set_selected(Some(index));
-                        // Expanded verb groups share an entry with member 0; only
-                        // their actual header row collapses the group.
-                        if state
+                        // The first activity member can stay visible while folded.
+                        // Route its summary and body independently, including when
+                        // the summary has already scrolled out of view.
+                        let info = state
                             .get_cached_entry_layouts()
                             .and_then(|items| items.get(index))
-                            .is_some_and(|info| {
-                                info.verb_group_header && info.group_collapse_header
-                            })
-                            && state
-                                .entry_screen_area(index, self.area)
-                                .is_some_and(|(rect, _, _)| rect.y == row)
-                        {
-                            state.collapse_group_if_expanded();
+                            .copied();
+                        let header_click = info.is_some_and(|info| info.verb_group_header)
+                            && state.entry_screen_area(index, self.area).is_some_and(
+                                |(rect, top_clipped, _)| !top_clipped && rect.y == row,
+                            );
+                        if header_click {
+                            state.toggle_group_header_expansion();
+                        } else if info.is_some_and(|info| info.has_group_content()) {
+                            return self.open_selected_entry(state);
                         } else {
                             return self.open_selected(state);
                         }
@@ -981,5 +987,53 @@ mod tests {
         click(&mut browser, &mut state, first.y);
         assert!(browser.viewer.is_none(), "header row only folds group");
         assert!(state.is_selected_group_header());
+    }
+    #[test]
+    fn folded_activity_first_body_opens_details_even_with_its_summary_clipped() {
+        crate::appearance::cache::set_group_tool_verbs(true);
+        crate::appearance::cache::set_show_thinking_blocks(false);
+        for clipped in [false, true] {
+            let mut state = ScrollbackState::new();
+            let first = state.push_block(RenderBlock::ToolCall(
+                crate::scrollback::ToolCallBlock::Read(
+                    crate::scrollback::blocks::ReadToolCallBlock::new("first.rs")
+                        .with_content("one\ntwo\nthree\nfour\nfive\nsix".into(), 6),
+                ),
+            ));
+            state
+                .get_by_id_mut(first)
+                .unwrap()
+                .set_display_mode(crate::scrollback::types::DisplayMode::Expanded);
+            state.push_block(RenderBlock::execute("next"));
+            let area = Rect::new(0, 0, 80, 5);
+            state.prepare_layout(80, 4);
+            state.goto_top();
+            state.set_scroll_offset(usize::from(clipped));
+            let mut browser = Browser::default();
+            let mut buffer = Buffer::empty(area);
+            browser.draw(area, &mut buffer, &mut state, FrameStamp::default());
+            let (member_area, top_clipped, _) = state.entry_screen_area(0, browser.area).unwrap();
+            assert_eq!(top_clipped, clipped);
+            let row = member_area.y + u16::from(!clipped);
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                browser.handle(
+                    Event::Mouse(crossterm::event::MouseEvent {
+                        kind,
+                        column: member_area.x + 2,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                    &mut state,
+                );
+            }
+            assert!(browser.viewer.is_some(), "member body opens its own detail");
+            assert!(
+                !state.group_spans()[0].expanded,
+                "member click does not open the group"
+            );
+        }
     }
 }

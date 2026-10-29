@@ -1,0 +1,6 @@
+
+running 1 test
+test session::actor::tests::compaction_ack_fault_tests::compaction_reprojection_and_repair_failure_leaves_only_the_committed_timeline_prefix ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4391 filtered out; finished in 0.22s
+

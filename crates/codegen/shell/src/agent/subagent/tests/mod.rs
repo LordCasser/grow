@@ -1288,7 +1288,7 @@ async fn completed_recovery_publishes_artifact_before_exact_child_result() {
         "parent-recovery",
         spawn_seq,
         &spawn,
-        fallback,
+        Some(fallback),
         child_dir.path(),
     )
     .await
@@ -1353,7 +1353,7 @@ async fn completed_recovery_publishes_artifact_before_exact_child_result() {
         "parent-recovery",
         spawn_seq,
         &spawn,
-        different,
+        Some(different),
         child_dir.path(),
     )
     .await
@@ -1393,7 +1393,7 @@ async fn invalid_child_seed_does_not_publish_a_result() {
         "parent",
         spawn_seq,
         &spawn,
-        RecoveredInspectionResult {
+        Some(RecoveredInspectionResult {
             event: chat_state::SubagentResultEvent {
                 subagent_id: spawn.subagent_id.clone(),
                 outcome: chat_state::SubagentOutcome::Cancelled,
@@ -1406,7 +1406,7 @@ async fn invalid_child_seed_does_not_publish_a_result() {
                 planning_summary: None,
             },
             output: None,
-        },
+        }),
         child_dir.path(),
     )
     .await
@@ -3634,10 +3634,10 @@ async fn recovery_refuses_live_child_writer_then_preserves_interrupted_provenanc
     owner.claim_recovery_writer(&info).unwrap();
     let before = std::fs::read(dir.path().join("timeline.jsonl")).unwrap();
     let fallback = result_from_inspection(&spawn, None, 99_000).unwrap();
-    assert!(ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback.clone(), dir.path()).await.is_err());
+    assert!(ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, Some(fallback.clone()), dir.path()).await.is_err());
     assert_eq!(std::fs::read(dir.path().join("timeline.jsonl")).unwrap(), before);
     drop(owner);
-    let (_, result, output) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback, dir.path()).await.unwrap();
+    let (_, result, output) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, Some(fallback), dir.path()).await.unwrap();
     assert_eq!(result.outcome, chat_state::SubagentOutcome::Failed);
     assert_eq!(result.duration_ms, 0, "offline duration is not execution time");
     assert!(result.error.as_deref().unwrap().contains("interrupted"));
@@ -3801,7 +3801,7 @@ async fn recovery_result_survives_independent_worktree_gc_and_delivers_once() {
         &parent_id,
         spawn_seq,
         &spawn,
-        fallback.clone(),
+        Some(fallback.clone()),
         &child_dir,
     )
     .await
@@ -3817,7 +3817,7 @@ async fn recovery_result_survives_independent_worktree_gc_and_delivers_once() {
         &parent_id,
         spawn_seq,
         &spawn,
-        fallback.clone(),
+        Some(fallback.clone()),
         &child_dir,
     )
     .await
@@ -3934,7 +3934,7 @@ async fn recovery_result_survives_independent_worktree_gc_and_delivers_once() {
         &parent_id,
         spawn_seq,
         &spawn,
-        changed_fallback,
+        Some(changed_fallback),
         &child_dir,
     )
     .await
@@ -3988,16 +3988,43 @@ async fn canonical_completed_result_survives_missing_and_corrupt_output() {
             event: chat_state::SubagentResultEvent { subagent_id: spawn.subagent_id.clone(), outcome: chat_state::SubagentOutcome::Completed, duration_ms: 12, tool_calls: 2, turns: 1, tokens_used: 31, error: None, output_ref: None, planning_summary: None },
             output: Some("{\"structured\":true}".into()),
         };
-        let (reference, original, _) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback, &dir).await.unwrap();
+        let (reference, original, _) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, Some(fallback), &dir).await.unwrap();
         let hash = original.output_ref.as_ref().unwrap().rsplit(':').next().unwrap();
         let artifact = dir.join("artifacts/subagent-output").join(format!("{hash}.json"));
         if corrupt { std::fs::write(artifact, b"corrupt").unwrap(); } else { std::fs::remove_file(artifact).unwrap(); }
         let before = std::fs::read(dir.join("timeline.jsonl")).unwrap();
+        let (unavailable_ref, unavailable_result, unavailable_output) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, None, &dir).await.unwrap();
+        assert_eq!(unavailable_ref, reference);
+        assert_eq!(unavailable_result, original);
+        assert!(unavailable_output.is_none());
+        assert_eq!(std::fs::read(dir.join("timeline.jsonl")).unwrap(), before);
         let replacement = result_from_inspection(&spawn, None, 999).unwrap();
-        let (again, result, output) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, replacement, &dir).await.unwrap();
+        let (again, result, output) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, Some(replacement), &dir).await.unwrap();
         assert_eq!(again, reference);
         assert_eq!(result, original);
         assert!(output.is_none(), "missing structured output must never be guessed");
         assert_eq!(std::fs::read(dir.join("timeline.jsonl")).unwrap(), before);
     }
+}
+
+#[tokio::test]
+async fn unavailable_inspection_cannot_publish_a_result_into_existing_child_storage() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("child-session"); std::fs::create_dir(&dir).unwrap();
+    let spawn = recovery_spawn("sa-unavailable-existing", "child-unavailable-existing");
+    let seq = chat_state::EventSeq::new(7);
+    write_recovery_child(&dir, "parent-recovery", seq, &spawn);
+    let inspection = SubagentInspection {
+        snapshot: SubagentSnapshot {
+            subagent_id: spawn.subagent_id.clone(), description: spawn.description.clone(), subagent_type: spawn.subagent_type.clone(),
+            status: SubagentSnapshotStatus::CompletedOutputUnavailable { error: "artifact hash mismatch".into(), tool_calls: 4, turns: 2, tokens_used: 500, worktree_path: None },
+            started_at_epoch_ms: 1, duration_ms: 20,
+        },
+        parent_session_id: "parent-recovery".into(), child_session_id: spawn.child_session_id.clone(), fork_parent_prompt_id: None, resumed_from: None,
+    };
+    let before = std::fs::read(dir.join("timeline.jsonl")).unwrap();
+    let fallback = result_from_inspection(&spawn, Some(&inspection), 999);
+    let result = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback, &dir).await;
+    assert!(matches!(result, Err(ChildResultRecoveryError::Unpublished(_))), "unverifiable completion cannot manufacture a successful result: {result:?}");
+    assert_eq!(std::fs::read(dir.join("timeline.jsonl")).unwrap(), before);
 }

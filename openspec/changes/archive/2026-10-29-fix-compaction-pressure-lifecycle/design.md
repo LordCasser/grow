@@ -1,0 +1,11 @@
+## 现状与决定
+证据见已归档audit-compaction-pressure-transitions。raw Surface包含不回放reasoning；两次饱和差分不可逆。保留当前Runtime与Timeline，改为current effective input estimate + provider calibration overhead。provider低于当前有效估值的观测沿现有拒绝规则；route/rewind清校准，非rewind replacement保留校准。估值复用请求的Goal/image/native/portable规则，工具/schema envelope只保留其token估值，不复制整份请求或新建账本。Surface变化后刷新；完整request build覆盖当前envelope，重复请求幂等。累计用量不变。
+
+所有provider派发前在当前完整投影上检查硬窗口；root可先尝试现有compaction，suppression/子任务不允许明确超窗派发。model-switch压缩错误不能吞掉，取消/persistence沿原终止边界。硬输入检查不在本次扩大为跨协议输出额度重构，现有摘要与skill输出预留保持。
+
+已提交replacement与enclosing turn结果独立。所有foreground Started配对Completed/Failed/Cancelled；committed+error仍发Completed并向上返回错误。pending async notice在新replacement提交点失效；后台成功通知仍按既有下一request投影契约。Pager finish_turn清理compaction域feedback作为终态兜底，不清其他域反馈。
+
+一次有界摘要仍无法适配时，保留现有规范的本轮失败与下一turn可恢复；不以重复相同摘要或丢未摘要历史实现收敛。实现中若发现独立架构债务，登记而不混入。
+
+## 验证
+先加reasoning占比高时compaction归零/重复projection、model switch失败零普通请求、committed+error通知序列回归，再覆盖route/rewind、prune/image、ACK失败、async notice归属与Pager终态。执行ChatState全库与Shell/Pager相关套件，最后production构建、OpenSpec校验归档及target清理。

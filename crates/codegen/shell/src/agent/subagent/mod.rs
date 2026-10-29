@@ -3127,19 +3127,7 @@ fn result_from_inspection(
                 *tokens_used,
                 (!output.is_empty()).then(|| output.clone()),
             ),
-            Some(SubagentSnapshotStatus::CompletedOutputUnavailable {
-                tool_calls,
-                turns,
-                tokens_used,
-                ..
-            }) => (
-                chat_state::SubagentOutcome::Completed,
-                None,
-                *tool_calls,
-                *turns,
-                *tokens_used,
-                None,
-            ),
+            Some(SubagentSnapshotStatus::CompletedOutputUnavailable { .. }) => return None,
             Some(
                 SubagentSnapshotStatus::FinalizationPending { .. }
                 | SubagentSnapshotStatus::Suspended { .. },
@@ -3204,7 +3192,7 @@ async fn ensure_recovered_child_result(
     parent_timeline_id: &str,
     parent_spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
-    fallback: RecoveredInspectionResult,
+    fallback: Option<RecoveredInspectionResult>,
 ) -> Result<
     (
         chat_state::TimelineRangeRef,
@@ -3241,7 +3229,7 @@ async fn ensure_recovered_child_result_in_dir(
     parent_timeline_id: &str,
     parent_spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
-    fallback: RecoveredInspectionResult,
+    fallback: Option<RecoveredInspectionResult>,
     child_dir: &Path,
 ) -> Result<
     (
@@ -3284,7 +3272,7 @@ async fn ensure_recovered_child_result_with_opened(
     parent_timeline_id: &str,
     parent_spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
-    fallback: RecoveredInspectionResult,
+    fallback: Option<RecoveredInspectionResult>,
     opened: &crate::session::storage::jsonl::OpenedSession,
     storage: &crate::session::storage::jsonl::JsonlStorageAdapter,
     deadline: Option<tokio::time::Instant>,
@@ -3365,6 +3353,11 @@ async fn ensure_recovered_child_result_with_opened(
             output,
         ));
     }
+    let Some(fallback) = fallback else {
+        return Err(ChildResultRecoveryError::Unpublished(
+            "completed child output is unavailable and no canonical result exists".into(),
+        ));
+    };
     let mut fallback_event = fallback.event;
     // A new lease proves the prior writer has relinquished ownership. Close
     // scopes and settle interrupted attempts before the child Result fact.
@@ -3830,10 +3823,18 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             .timestamp_millis()
             .saturating_sub(*spawned_at_ms)
             .max(0) as u64;
-        let Some(fallback) = result_from_inspection(spawn, inspection.as_ref(), duration_ms) else {
+        let fallback = result_from_inspection(spawn, inspection.as_ref(), duration_ms);
+        if fallback.is_none()
+            && !inspection.as_ref().is_some_and(|value| {
+                matches!(
+                    value.snapshot.status,
+                    SubagentSnapshotStatus::CompletedOutputUnavailable { .. }
+                )
+            })
+        {
             tracing::warn!(%subagent_id, "finalization evidence is pending; leaving parent spawn open");
             continue;
-        };
+        }
         let recovered =
             ensure_recovered_child_result(parent_session_id, *spawn_seq, spawn, fallback).await;
         let (result_ref, result) = match recovered {

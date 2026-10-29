@@ -1,0 +1,3 @@
+- [x] 用真实child文件构造存在但无result的Unavailable组合反例。
+- [x] 修复fallback授权并验证已有合法result与缺失/损坏输出。
+- [x] 完成回归、文档与归档。

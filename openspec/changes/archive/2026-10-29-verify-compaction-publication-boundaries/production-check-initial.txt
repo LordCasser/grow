@@ -1,0 +1,1051 @@
+ Downloading crates ...
+  Downloaded paste v1.0.15 (registry `ustc`)
+  Downloaded tikv-jemalloc-sys v0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7 (registry `ustc`)
+  Downloaded tikv-jemalloc-ctl v0.6.1 (registry `ustc`)
+  Downloaded tikv-jemallocator v0.6.1 (registry `ustc`)
+    Blocking waiting for file lock on build directory
+   Compiling libc v0.2.189
+    Checking cfg-if v1.0.4
+    Checking serde_core v1.0.229
+    Checking memchr v2.8.3
+    Checking bitflags v2.13.1
+    Checking equivalent v1.0.2
+    Checking allocator-api2 v0.2.21
+    Checking portable-atomic v1.14.0
+    Checking scopeguard v1.2.0
+    Checking lock_api v0.4.14
+    Checking once_cell v1.21.4
+    Checking foldhash v0.2.0
+    Checking itoa v1.0.18
+    Checking hashbrown v0.17.1
+    Checking thiserror v2.0.20
+    Checking log v0.4.34
+    Checking aho-corasick v1.1.5
+    Checking regex-syntax v0.8.11
+    Checking serde v1.0.229
+    Checking rand_core v0.10.1
+    Checking pin-project-lite v0.2.17
+    Checking crossbeam-utils v0.8.22
+    Checking smallvec v1.15.2
+    Checking crc32fast v1.5.1
+    Checking stable_deref_trait v1.2.1
+    Checking indexmap v2.14.1
+    Checking fastrand v2.5.0
+    Checking futures-core v0.3.34
+    Checking typenum v1.20.1
+    Checking parking_lot_core v0.9.12
+    Checking errno v0.3.14
+    Checking regex-automata v0.4.16
+    Checking parking_lot v0.12.5
+    Checking getrandom v0.4.3
+    Checking signal-hook-registry v1.4.8
+    Checking tinyvec_macros v0.1.1
+    Checking tinyvec v1.12.0
+    Checking mio v1.2.2
+    Checking generic-array v0.14.7
+    Checking bytes v1.12.1
+    Checking same-file v1.0.6
+   Compiling rustix v1.1.4
+    Checking walkdir v2.5.0
+    Checking crypto-common v0.1.7
+    Checking unicode-normalization v0.1.25
+    Checking zmij v1.0.23
+    Checking serde_json v1.0.151
+    Checking tracing-core v0.1.36
+    Checking futures-io v0.3.34
+    Checking socket2 v0.6.5
+    Checking bstr v1.13.1
+    Checking tokio v1.53.1
+    Checking block-buffer v0.10.4
+    Checking tracing v0.1.44
+    Checking digest v0.10.7
+    Checking cpufeatures v0.2.17
+    Checking slab v0.4.12
+    Checking futures-sink v0.3.34
+    Checking futures-channel v0.3.34
+    Checking zlib-rs v0.6.7
+    Checking futures-task v0.3.34
+    Checking simd-adler32 v0.3.10
+    Checking futures-util v0.3.34
+    Checking crossbeam-channel v0.5.16
+    Checking adler2 v2.0.1
+    Checking fnv v1.0.7
+    Checking percent-encoding v2.3.2
+    Checking gix-trace v0.1.21
+    Checking gix-validate v0.11.3
+    Checking jiff-core v0.1.0
+    Checking gix-path v0.12.3
+    Checking miniz_oxide v0.9.1
+    Checking gix-utils v0.3.5
+    Checking jiff v0.2.35
+    Checking zerofrom v0.1.8
+    Checking ryu v1.0.23
+    Checking yoke v0.8.3
+    Checking flate2 v1.1.10
+    Checking num-traits v0.2.19
+    Checking zerovec v0.11.6
+    Checking prodash v31.0.0
+    Checking gix-features v0.49.0
+    Checking hashbrown v0.16.1
+    Checking http v1.5.0
+    Checking core-foundation-sys v0.8.7
+    Checking byteorder v1.5.0
+    Checking zerocopy v0.8.55
+    Checking tinystr v0.8.3
+    Checking tokio-util v0.7.19
+    Checking gix-error v0.2.5
+    Checking litemap v0.8.2
+    Checking writeable v0.6.3
+    Checking potential_utf v0.1.5
+    Checking icu_locale_core v2.2.0
+    Checking zerotrie v0.2.4
+    Checking tempfile v3.27.0
+    Checking sha1 v0.10.7
+    Checking utf8_iter v1.0.4
+    Checking hash32 v0.3.1
+    Checking icu_collections v2.2.0
+    Checking strum v0.28.0
+    Checking num_threads v0.1.7
+    Checking icu_provider v2.2.0
+    Checking deranged v0.5.8
+    Checking sha1_smol v1.0.1
+    Checking powerfmt v0.2.0
+    Checking time-core v0.1.9
+    Checking atomic-waker v1.1.2
+    Checking zeroize v1.9.0
+    Checking num-conv v0.2.2
+    Checking either v1.17.0
+    Checking uuid v1.26.0
+    Checking heapless v0.8.0
+    Checking getrandom v0.3.4
+   Compiling getrandom v0.2.17
+    Checking time v0.3.55
+    Checking icu_normalizer_data v2.2.0
+    Checking icu_properties_data v2.2.0
+    Checking memmap2 v0.9.11
+    Checking siphasher v1.0.3
+    Checking unicode-width v0.2.2
+    Checking icu_properties v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking faster-hex v0.10.0
+    Checking http-body v1.1.0
+    Checking form_urlencoded v1.2.2
+    Checking arrayvec v0.7.8
+    Checking base64 v0.22.1
+    Checking ref-cast v1.0.26
+    Checking httparse v1.10.1
+    Checking tower-service v0.3.3
+    Checking idna_adapter v1.2.2
+    Checking untrusted v0.9.0
+    Checking rustls-pki-types v1.15.1
+    Checking ring v0.17.14
+    Checking idna v1.1.0
+    Checking sha1-checked v0.10.0
+    Checking alloc-no-stdlib v2.0.4
+    Checking ipnet v2.12.1
+    Checking alloc-stdlib v0.2.4
+    Checking gix-hash v0.26.0
+   Compiling derive_more-impl v2.1.1
+    Checking url v2.5.8
+    Checking crossbeam-epoch v0.9.20
+    Checking subtle v2.6.1
+    Checking try-lock v0.2.5
+    Checking tower-layer v0.3.3
+    Checking rustls-webpki v0.103.13
+    Checking want v0.3.1
+    Checking brotli-decompressor v5.0.3
+    Checking http-body-util v0.1.4
+    Checking phf_shared v0.13.1
+    Checking rustls v0.23.43
+    Checking h2 v0.4.15
+    Checking sync_wrapper v1.0.2
+    Checking httpdate v1.0.3
+    Checking mime v0.3.17
+    Checking dyn-clone v1.0.20
+    Checking schemars v1.2.2
+    Checking brotli v8.0.4
+    Checking nix v0.31.3
+    Checking derive_more v2.1.1
+    Checking hyper v1.11.0
+   Compiling const-random-macro v0.1.16
+    Checking anyhow v1.0.104
+    Checking crossbeam-deque v0.8.7
+    Checking gix-date v0.15.6
+    Checking futures-executor v0.3.34
+    Checking compression-core v0.4.32
+    Checking unicase v2.9.0
+    Checking futures v0.3.34
+    Checking compression-codecs v0.4.38
+    Checking gix-actor v0.41.2
+    Checking const-random v0.1.18
+    Checking hyper-util v0.1.20
+    Checking phf v0.13.1
+    Checking tower v0.5.3
+    Checking gix-hashtable v0.16.0
+    Checking core-foundation v0.10.1
+    Checking security-framework-sys v2.17.0
+    Checking encoding_rs v0.8.35
+   Compiling bytemuck_derive v1.12.0
+    Checking utf8parse v0.2.2
+    Checking anstyle v1.0.14
+    Checking new_debug_unreachable v1.0.6
+    Checking ahash v0.8.12
+    Checking security-framework v3.7.0
+    Checking gix-object v0.63.0
+    Checking async-compression v0.4.43
+    Checking tokio-rustls v0.26.4
+    Checking bytemuck v1.25.2
+    Checking serde_urlencoded v0.7.1
+    Checking iana-time-zone v0.1.65
+    Checking regex v1.13.1
+    Checking bit-vec v0.8.0
+    Checking parking v2.2.1
+    Checking shell-words v1.1.1
+    Checking dunce v1.0.5
+    Checking precomputed-hash v0.1.1
+    Checking bit-set v0.8.0
+    Checking chrono v0.4.45
+    Checking rustls-platform-verifier v0.7.0
+    Checking hyper-rustls v0.27.9
+    Checking tower-http v0.6.11
+    Checking mime_guess v2.0.5
+    Checking num-integer v0.1.46
+    Checking constant_time_eq v0.4.2
+    Checking option-ext v0.2.0
+    Checking winnow v1.0.4
+    Checking blake3 v1.8.7
+    Checking dirs-sys v0.5.0
+    Checking reqwest v0.13.4
+    Checking string_cache v0.9.0
+    Checking anstyle-parse v1.0.0
+    Checking tty-utils v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tty-utils)
+    Checking ppv-lite86 v0.2.21
+    Checking rand_core v0.9.5
+    Checking block-padding v0.3.3
+    Checking toml_datetime v1.1.1+spec-1.1.0
+    Checking serde_spanned v1.1.1
+    Checking anstyle-query v1.1.5
+    Checking colorchoice v1.0.5
+    Checking toml_writer v1.1.2+spec-1.1.0
+    Checking rustc-hash v2.1.3
+    Checking toml_parser v1.1.3+spec-1.1.0
+    Checking is_terminal_polyfill v1.70.2
+    Checking hashbrown v0.14.5
+    Checking anstream v1.0.0
+    Checking inout v0.1.4
+    Checking rand_chacha v0.9.0
+    Checking web_atoms v0.2.5
+    Checking dirs v6.0.0
+    Checking num-bigint v0.4.8
+    Checking tendril v0.5.1
+    Checking dashmap v6.2.1
+    Checking gix-fs v0.22.0
+    Checking miniz_oxide v0.8.9
+    Checking which v8.0.6
+    Checking semver v1.0.28
+    Checking unicode-bidi v0.3.18
+    Checking version v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/version)
+    Checking rand v0.9.5
+    Checking shellexpand v3.1.2
+    Checking toml v1.1.4+spec-1.1.0
+    Checking num-rational v0.4.2
+    Checking cipher v0.4.4
+    Checking num-iter v0.1.46
+    Checking gix-chunk v0.7.3
+    Checking num-complex v0.4.6
+    Checking urlencoding v2.1.3
+    Checking nonempty v0.12.0
+    Checking unicode-segmentation v1.13.3
+    Checking data-encoding v2.11.1
+    Checking weezl v0.1.12
+    Checking web-time v1.1.0
+    Checking num v0.4.3
+    Checking config v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config)
+    Checking rayon-core v1.13.0
+    Checking gix-tempfile v24.0.0
+    Checking event-listener v5.4.2
+    Checking tool-types v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-types)
+    Checking gix-quote v0.7.2
+    Checking sha2 v0.10.9
+    Checking globset v0.4.19
+    Checking hybrid-array v0.4.14
+    Checking quick-xml v0.41.0
+    Checking minimal-lexical v0.2.1
+    Checking borrow-or-share v0.2.4
+    Checking fluent-uri v0.4.1
+    Checking nom v7.1.3
+    Checking ignore v0.4.32
+    Checking rayon v1.12.0
+    Checking event-listener-strategy v0.5.4
+    Checking gix-lock v24.0.0
+    Checking fraction v0.17.0
+    Checking futures-lite v2.6.1
+    Checking arc-swap v1.9.2
+    Checking gix-glob v0.27.0
+    Checking tokio-stream v0.1.19
+    Checking fdeflate v0.3.7
+    Checking concurrent-queue v2.5.0
+    Checking chacha20 v0.10.1
+    Checking bytecount v0.6.9
+    Checking micromap v0.3.0
+    Checking const-oid v0.9.6
+    Checking unicode-properties v0.1.4
+    Checking vsimd v0.8.0
+    Checking num-cmp v0.1.0
+    Checking flagset v0.4.7
+    Checking outref v0.5.2
+    Checking jsonschema-value v0.52.1
+    Checking stringprep v0.1.5
+    Checking uuid-simd v0.8.0
+    Checking referencing v0.52.1
+    Checking rand v0.10.2
+    Checking png v0.18.1
+    Checking der v0.7.10
+    Checking eventsource-stream v0.2.3
+    Checking derive_builder v0.20.2
+    Checking unicode-general-category v1.1.0
+    Checking io-lifetimes v3.0.1
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking io-lifetimes v2.0.4
+    Checking gix-commitgraph v0.38.0
+    Checking aes v0.8.4
+    Checking cbc v0.1.2
+    Checking markup5ever v0.38.0
+    Checking fancy-regex v0.19.0
+    Checking tool-protocol v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-protocol)
+    Checking secrecy v0.10.3
+    Checking jsonschema-regex v0.52.1
+    Checking email_address v0.2.9
+    Checking nom v8.0.0
+    Checking static_assertions v1.1.0
+    Checking lazy_static v1.5.0
+    Checking dtoa v1.0.11
+    Checking const-oid v0.10.2
+    Checking unicode-bom v2.0.3
+    Checking bitflags v1.3.2
+    Checking digest v0.11.3
+    Checking dtoa-short v0.3.5
+    Checking jsonschema v0.52.1
+    Checking async-openai v0.41.3 (https://github.com/LordCasser/async-openai.git?rev=a2bae9966f435bc343aa095065d96700bfb81aed#a2bae996)
+    Checking gix-revwalk v0.34.0
+    Checking spki v0.7.3
+    Checking fs-set-times v0.20.3
+    Checking io-extras v0.19.0
+    Checking ecb v0.1.2
+    Checking compaction v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/common/compaction)
+    Checking env_filter v2.0.0
+    Checking getopts v0.2.24
+    Checking polling v3.11.0
+    Checking md-5 v0.10.6
+    Checking cpufeatures v0.3.0
+    Checking no_std_io2 v0.9.4
+    Checking ambient-authority v0.0.2
+    Checking rle-decode-fast v1.0.3
+    Checking zune-core v0.5.1
+    Checking ttf-parser v0.25.1
+    Checking quick-error v2.0.1
+    Checking rangemap v1.7.1
+    Checking fax v0.2.7
+    Checking bumpalo v3.20.3
+    Checking unsafe-libyaml v0.2.11
+    Checking fixedbitset v0.5.7
+    Checking adler32 v1.2.0
+    Checking maybe-owned v0.3.4
+    Checking lopdf v0.42.0
+    Checking cap-primitives v4.0.3
+    Checking serde_yaml v0.9.34+deprecated
+    Checking zopfli v0.8.3
+    Checking zune-jpeg v0.5.15
+    Checking libflate_lz77 v2.3.0
+    Checking cssparser v0.37.0
+    Checking pin-project v1.1.13
+    Checking sha2 v0.11.0
+    Checking async-io v2.6.0
+    Checking env_logger v0.11.11
+    Checking datasize v0.2.15
+    Checking x509-cert v0.2.5
+    Checking html5ever v0.38.0
+    Checking xml5ever v0.38.0
+    Checking async-lock v3.4.2
+    Checking cfb v0.14.0
+    Checking sampling-types v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampling-types)
+    Checking markup5ever v0.39.0
+    Checking half v2.7.1
+    Checking regress v0.11.1
+    Checking servo_arc v0.4.3
+    Checking csv-core v0.1.13
+    Checking color_quant v1.1.0
+    Checking pulldown-cmark-escape v0.11.0
+    Checking typed-path v0.12.3
+    Checking dary_heap v0.3.9
+    Checking byteorder-lite v0.1.0
+    Checking foldhash v0.1.5
+    Checking pxfm v0.1.30
+    Checking zip v8.6.0
+    Checking nono v0.53.0 (/Users/lordcasser/workspace/projects/grow/third_party/nono)
+    Checking hashbrown v0.15.5
+    Checking image-webp v0.2.4
+    Checking libflate v2.3.1
+    Checking pulldown-cmark v0.13.4
+    Checking gif v0.14.2
+    Checking csv v1.4.0
+    Checking moxcms v0.8.1
+    Checking lsp-types v0.95.1
+    Checking async-stream v0.3.6
+    Checking selectors v0.38.0
+    Checking tiff v0.11.3
+    Checking snafu v0.8.9
+    Checking html5ever v0.39.0
+    Checking markup5ever_rcdom v0.38.0+unofficial
+    Checking pdf-inspector v1.17.0
+    Checking serde_with v3.22.0
+    Checking istring v0.3.4
+    Checking async-signal v0.2.14
+    Checking cap-std v4.0.3
+    Checking deflate v1.0.0
+    Checking libz-sys v1.1.29
+    Checking gix-attributes v0.34.0
+    Checking async-channel v2.5.0
+    Checking itertools v0.13.0
+    Checking piper v0.2.5
+    Checking waitpid-any v0.3.0
+    Checking gix-sec v0.14.2
+    Checking filetime v0.2.29
+    Checking serde_path_to_error v0.1.20
+    Checking vte v0.14.1
+    Checking async-task v4.7.1
+    Checking md5 v0.7.0
+    Checking similar v2.7.0
+    Checking memo-map v0.3.3
+    Checking token-estimation v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/token-estimation)
+    Checking ego-tree v0.11.0
+    Checking jpeg-decoder v0.3.2
+    Checking minijinja v2.24.0
+    Checking scraper v0.27.0
+    Checking async-lsp v0.2.4
+    Checking pdf v0.10.0
+    Checking anydoc v0.2.4
+    Checking blocking v1.6.2
+    Checking strip-ansi-escapes v0.2.1
+    Checking libgit2-sys v0.18.7+1.9.6
+    Checking agent-client-protocol-schema v1.5.0
+    Checking cap-fs-ext v4.0.3
+    Checking async-process v2.5.0
+    Checking image v0.25.10
+    Checking htmd v0.5.5
+    Checking sandbox v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sandbox)
+    Checking infer v0.22.0
+    Checking futures-concurrency v7.7.1
+    Checking tool-runtime v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-runtime)
+    Checking gix-ref v0.66.0
+    Checking command-fds v0.3.3
+    Checking castaway v0.2.4
+    Checking itertools v0.14.0
+    Checking gix-config-value v0.19.0
+    Checking fs2 v0.4.3
+    Checking wildmatch v2.6.1
+    Checking tools v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tools)
+    Checking unicode-truncate v2.0.1
+    Checking compact_str v0.9.1
+    Checking git2 v0.21.0
+    Checking gix-traverse v0.60.0
+    Checking agent-client-protocol v2.0.0
+    Checking sharded-slab v0.1.7
+    Checking gix-command v0.9.1
+    Checking gix-packetline v0.22.0
+    Checking gix-bitmap v0.3.3
+    Checking kasuari v0.4.12
+   Compiling darling_core v0.24.0
+    Checking matchers v0.2.0
+    Checking tracing-serde v0.2.0
+    Checking tracing-log v0.2.0
+    Checking lru v0.18.2
+    Checking thread_local v1.1.10
+    Checking critical-section v1.2.0
+    Checking nu-ansi-term v0.50.3
+    Checking tracing-subscriber v0.3.23
+    Checking ratatui-core v0.1.2
+    Checking gix-index v0.54.0
+    Checking gix-pathspec v0.19.0
+    Checking gix-ignore v0.22.0
+    Checking tree-sitter-language v0.1.7
+   Compiling signal-hook v0.3.18
+   Compiling instability v0.3.13
+   Compiling darling_macro v0.24.0
+   Compiling darling v0.24.0
+    Checking gix-worktree v0.55.0
+    Checking gix-url v0.37.0
+   Compiling litrs v1.0.0
+   Compiling indoc v2.0.7
+    Checking config-types v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config-types)
+   Compiling document-features v0.2.12
+    Checking gix-filter v0.33.0
+    Checking gix-discover v0.54.0
+    Checking gix-imara-diff v0.2.4
+    Checking gix-revision v0.48.0
+    Checking clru v0.6.3
+    Checking gix-zlib v0.1.0
+    Checking symlink v0.1.0
+    Checking objc2-encode v4.1.0
+    Checking tracing-appender v0.2.5
+    Checking gix-pack v0.73.0
+    Checking gix-refspec v0.44.0
+    Checking bisync v0.3.0
+    Checking gix-diff v0.66.0
+    Checking gix-dir v0.28.0
+    Checking signal-hook-mio v0.2.5
+    Checking gix-transport v0.58.0
+    Checking tracing-chrome v0.7.2
+    Checking gix-config v0.59.0
+    Checking gix-shallow v0.13.0
+    Checking fsevent-sys v4.1.0
+    Checking line-clipping v0.3.8
+    Checking notify-types v2.1.0
+    Checking clap_lex v1.1.0
+    Checking strsim v0.11.1
+    Checking base64 v0.23.1
+    Checking clap_builder v4.6.6
+    Checking gix-submodule v0.33.0
+    Checking notify v8.2.0
+    Checking ratatui-widgets v0.3.2
+    Checking gix-protocol v0.64.0
+    Checking diagnostics v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/diagnostics)
+    Checking gix-status v0.33.0
+    Checking crossterm v0.29.0
+    Checking gix-odb v0.83.0
+    Checking libsqlite3-sys v0.38.2
+    Checking font-types v0.12.4
+    Checking hashlink v0.12.1
+   Compiling slotmap v1.1.1
+    Checking rustc-demangle v0.1.28
+    Checking gimli v0.32.3
+    Checking fallible-iterator v0.3.0
+   Compiling objc-sys v0.3.5
+    Checking float-cmp v0.9.0
+    Checking fallible-streaming-iterator v0.1.9
+    Checking rusqlite v0.40.2
+    Checking strict-num v0.1.1
+    Checking ratatui-crossterm v0.1.2
+    Checking read-fonts v0.41.0
+    Checking clap v4.6.6
+    Checking gix v0.86.0
+    Checking addr2line v0.25.1
+    Checking ratatui-macros v0.7.2
+    Checking camino v1.2.5
+    Checking object v0.37.3
+    Checking plist v1.10.0
+    Checking tungstenite v0.29.0
+    Checking fancy-regex v0.16.2
+    Checking polycool v0.4.0
+    Checking debugid v0.8.0
+    Checking crossbeam-queue v0.3.13
+    Checking bincode v1.3.3
+    Checking spin v0.9.9
+    Checking arrayref v0.3.9
+    Checking tiny-skia-path v0.12.0
+    Checking syntect v5.3.0
+    Checking multer v3.1.0
+    Checking equator v0.4.2
+    Checking crossbeam v0.8.4
+    Checking symbolic-common v12.18.3
+    Checking kurbo v0.13.1
+    Checking backtrace v0.3.76
+    Checking tokio-tungstenite v0.29.0
+    Checking grow-gix-status v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/grow-gix-status)
+    Checking paths v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/paths)
+    Checking ratatui v0.30.2
+    Checking libmimalloc-sys v0.1.49
+    Checking objc2 v0.6.4
+    Checking sqlite-journal v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sqlite-journal)
+    Checking cpp_demangle v0.4.5
+    Checking zstd-sys v2.0.16+zstd.1.5.7
+    Checking hooks v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hooks)
+    Checking reqwest-middleware v0.5.2
+    Checking axum-core v0.5.6
+    Checking sse-stream v0.2.5
+   Compiling rand_core v0.6.4
+    Checking num_cpus v1.17.0
+    Checking streaming-iterator v0.1.9
+    Checking ordered_hashmap v0.0.3
+    Checking unicode-linebreak v0.1.5
+    Checking file-id v0.2.3
+    Checking smawk v0.3.3
+    Checking matchit v0.8.4
+    Checking notify-debouncer-full v0.5.0
+    Checking textwrap v0.16.2
+   Compiling itertools v0.15.0
+    Checking tree-sitter v0.26.9
+    Checking axum v0.8.9
+    Checking fastant v0.1.11
+    Checking graphlib_rust v0.0.2
+   Compiling rand_chacha v0.3.1
+    Checking agent v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/agent)
+    Checking thiserror v1.0.69
+    Checking symbolic-demangle v12.18.3
+    Checking rmcp v3.5.1
+    Checking client-support v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/client-support)
+    Checking auth v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/auth)
+    Checking zstd-safe v7.2.4
+    Checking svgtypes v0.16.1
+    Checking fontdb v0.24.0
+    Checking objc2 v0.5.2
+    Checking mimalloc v0.1.52
+    Checking skrifa v0.44.0
+    Checking harfrust v0.12.0
+    Checking smartstring v1.0.1
+    Checking aligned-vec v0.6.4
+    Checking tree-sitter-javascript v0.25.0
+    Checking findshlibs v0.10.2
+    Checking tree-sitter-go v0.25.0
+    Checking tree-sitter-python v0.25.0
+    Checking tree-sitter-rust v0.24.2
+    Checking tree-sitter-typescript v0.23.2
+    Checking petgraph v0.8.3
+    Checking nix v0.26.4 (/Users/lordcasser/workspace/projects/grow/third_party/nix-ohos)
+    Checking nucleo-matcher v0.3.1 (https://github.com/helix-editor/nucleo.git?rev=5b74652#5b74652e)
+    Checking workspace-types v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workspace-types)
+    Checking rapidhash v4.5.1
+   Compiling convert_case v0.11.0
+    Checking xattr v1.6.1
+    Checking wait-timeout v0.2.1
+   Compiling tikv-jemalloc-sys v0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7
+    Checking simplecss v0.2.2
+    Checking spin v0.10.1
+    Checking roxmltree v0.21.1
+    Checking reflink-copy v0.1.30
+   Compiling optfield v0.4.0
+    Checking is_ci v1.2.0
+    Checking nohash-hasher v0.2.0
+    Checking unicode-vo v0.1.0
+    Checking imagesize v0.15.0
+    Checking data-url v0.3.2
+    Checking xmlwriter v0.1.0
+   Compiling dark-light v2.0.0
+    Checking pico-args v0.5.0
+    Checking thin-vec v0.2.19
+    Checking rtrb v0.3.4
+    Checking unicode-script v0.5.8
+    Checking cached_proc_macro_types v0.1.1
+    Checking fastrace v0.7.19
+    Checking cached v0.56.0
+    Checking usvg v0.48.1
+    Checking rhai v1.26.0
+    Checking mcp v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/mcp)
+   Compiling documented-macros v0.10.0
+    Checking codebase-graph v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/codebase-graph)
+    Checking supports-color v3.0.2
+    Checking fast-worktree v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/fast-worktree)
+    Checking pprof v0.15.0
+    Checking tar v0.4.46
+    Checking nucleo v0.5.0 (https://github.com/helix-editor/nucleo.git?rev=5b74652#5b74652e)
+    Checking nix v0.28.0
+    Checking objc2-foundation v0.2.2
+    Checking zstd v0.13.3
+    Checking grow-http v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/grow-http)
+    Checking stop-words v0.9.0
+    Checking tree-sitter-bash v0.25.1
+    Checking sqlite-vec v0.1.10-alpha.4 (/Users/lordcasser/workspace/projects/grow/third_party/sqlite-vec)
+    Checking filedescriptor v0.8.3
+   Compiling rand v0.8.8
+    Checking dagre_rust v0.0.5 (/Users/lordcasser/workspace/projects/grow/third_party/dagre_rust)
+    Checking prometheus v0.14.0
+    Checking fsnotify v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/fsnotify)
+    Checking two-face v0.5.2+bat-0.26.1
+    Checking anstyle-syntect v1.0.5
+    Checking hunk-tracker v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hunk-tracker)
+    Checking tiny-skia v0.12.0
+    Checking tui-scrollbar v0.2.7
+    Checking acp-transport v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/acp-transport)
+    Checking toml_edit v0.25.13+spec-1.1.0
+    Checking rgb v0.8.53
+    Checking anstyle-lossy v1.1.5
+    Checking anstyle-parse v0.2.7
+    Checking console v0.16.4
+    Checking fxhash v0.2.1
+    Checking serial2 v0.2.38
+    Checking rust-stemmers v1.2.0
+    Checking extension-types v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/extension-types)
+    Checking linkify v0.10.0
+    Checking downcast-rs v1.2.1
+    Checking deunicode v1.6.2
+    Checking tagptr v0.2.0
+    Checking html-escape v0.2.15
+    Checking glob v0.3.4
+   Compiling signal-hook v0.4.4
+    Checking unit-prefix v0.5.2
+    Checking markdown v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/markdown)
+    Checking indicatif v0.18.6
+    Checking workspace v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workspace)
+    Checking bm25 v2.3.2
+    Checking plugin-marketplace v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/plugin-marketplace)
+    Checking moka v0.12.16
+    Checking portable-pty v0.9.0
+    Checking ratatui-inline v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/ratatui-inline)
+    Checking resvg v0.48.1
+    Checking ratatui-textarea v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/ratatui-textarea)
+    Checking workflow v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workflow)
+   Compiling enum_delegate_lib v0.2.0
+    Checking mermaid-to-svg v0.1.0 (/Users/lordcasser/workspace/projects/grow/third_party/mermaid-to-svg)
+    Checking memory v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/memory)
+    Checking shell-base v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell-base)
+    Checking documented v0.10.0
+    Checking announcements v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/announcements)
+    Checking notify-debouncer-mini v0.6.0
+    Checking sampler v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampler)
+    Checking chat-state v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state)
+    Checking process-wrap v9.1.0
+    Checking vte v0.15.0
+    Checking backon v1.6.0
+    Checking gethostname v1.1.0
+    Checking prompt-queue v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/prompt-queue)
+    Checking kanal v0.1.1
+    Checking serde_ignored v0.1.14
+   Compiling paste v1.0.15
+    Checking shlex v1.3.0
+    Checking simdutf8 v0.1.5
+   Compiling pager v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+    Checking tdigests v1.0.1
+    Checking tracing-macros v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tracing-macros)
+    Checking ansi-to-tui v8.0.1
+    Checking pager-render v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-render)
+    Checking shell v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+    Checking mermaid v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/mermaid)
+   Compiling enum_delegate v0.2.0
+    Checking update v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/update)
+    Checking crash-handler v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/crash-handler)
+    Checking clap_complete v4.6.9
+   Compiling cli v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/cli)
+warning: tikv-jemalloc-sys@0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7: "Unprefixed `malloc` requested on unsupported platform `aarch64-apple-darwin` => using prefixed `malloc`"
+error: failed to run custom build command for `tikv-jemalloc-sys v0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7`
+
+Caused by:
+  process didn't exit successfully: `/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-55ae9595ace481f9/build-script-build` (exit status: 101)
+  --- stdout
+  TARGET=aarch64-apple-darwin
+  HOST=aarch64-apple-darwin
+  NUM_JOBS=4
+  OUT_DIR="/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out"
+  BUILD_DIR="/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/build"
+  SRC_DIR="/Users/lordcasser/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/tikv-jemalloc-sys-0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+  cargo:warning="Unprefixed `malloc` requested on unsupported platform `aarch64-apple-darwin` => using prefixed `malloc`"
+  cargo:rustc-cfg=prefixed
+  cargo:rerun-if-env-changed=AARCH64_APPLE_DARWIN_JEMALLOC_OVERRIDE
+  cargo:rerun-if-env-changed=JEMALLOC_OVERRIDE
+  cargo:rerun-if-env-changed=CC_aarch64-apple-darwin
+  CC_aarch64-apple-darwin = None
+  cargo:rerun-if-env-changed=CC_aarch64_apple_darwin
+  CC_aarch64_apple_darwin = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = Some(gcc)
+  cargo:rerun-if-env-changed=CC_KNOWN_WRAPPER_CUSTOM
+  CC_KNOWN_WRAPPER_CUSTOM = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET
+  MACOSX_DEPLOYMENT_TARGET = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_apple_darwin
+  CFLAGS_aarch64_apple_darwin = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-apple-darwin
+  CFLAGS_aarch64-apple-darwin = None
+  CC="gcc"
+  CFLAGS="-O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall"
+  JEMALLOC_REPO_DIR="jemalloc"
+  cargo:rerun-if-env-changed=AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_MALLOC_CONF
+  cargo:rerun-if-env-changed=JEMALLOC_SYS_WITH_MALLOC_CONF
+  cargo:rerun-if-env-changed=AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE
+  --with-lg-page=14
+  cargo:rerun-if-env-changed=AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_HUGEPAGE
+  cargo:rerun-if-env-changed=JEMALLOC_SYS_WITH_LG_HUGEPAGE
+  cargo:rerun-if-env-changed=AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_QUANTUM
+  cargo:rerun-if-env-changed=JEMALLOC_SYS_WITH_LG_QUANTUM
+  cargo:rerun-if-env-changed=AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_VADDR
+  cargo:rerun-if-env-changed=JEMALLOC_SYS_WITH_LG_VADDR
+  --with-jemalloc-prefix=_rjem_
+  CARGO_FEATURE_PROFILING set
+  CARGO_FEATURE_STATS set
+  running: cd "/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/build" && CC="gcc" CFLAGS="-O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall" CPPFLAGS="-O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall" LDFLAGS="-O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall" "sh" "/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/build/configure" "--with-version=5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7" "--disable-cxx" "--enable-doc=no" "--enable-shared=no" "--with-lg-page=14" "--with-jemalloc-prefix=_rjem_" "--with-private-namespace=_rjem_" "--enable-prof" "--enable-stats" "--host=aarch64-apple-darwin" "--build=aarch64-apple-darwin" "--prefix=/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out"
+  checking for xsltproc... /usr/bin/xsltproc
+  checking for aarch64-apple-darwin-gcc... gcc
+  checking whether the C compiler works... yes
+  checking for C compiler default output file name... a.out
+  checking for suffix of executables... 
+  checking whether we are cross compiling... no
+  checking for suffix of object files... o
+  checking whether we are using the GNU C compiler... yes
+  checking whether gcc accepts -g... yes
+  checking for gcc option to accept ISO C89... none needed
+  checking whether compiler is cray... no
+  checking whether compiler supports -std=gnu11... yes
+  checking whether compiler supports -Werror=unknown-warning-option... yes
+  checking whether compiler supports -Wall... yes
+  checking whether compiler supports -Wextra... yes
+  checking whether compiler supports -Wshorten-64-to-32... yes
+  checking whether compiler supports -Wsign-compare... yes
+  checking whether compiler supports -Wundef... yes
+  checking whether compiler supports -Wno-format-zero-length... yes
+  checking whether compiler supports -Wpointer-arith... yes
+  checking whether compiler supports -Wno-missing-braces... yes
+  checking whether compiler supports -Wno-missing-field-initializers... yes
+  checking whether compiler supports -Wno-missing-attributes... no
+  checking whether compiler supports -pipe... yes
+  checking whether compiler supports -g3... yes
+  checking how to run the C preprocessor... gcc -E
+  checking for grep that handles long lines and -e... /opt/homebrew/bin/ggrep
+  checking for egrep... /opt/homebrew/bin/ggrep -E
+  checking for ANSI C header files... yes
+  checking for sys/types.h... yes
+  checking for sys/stat.h... yes
+  checking for stdlib.h... yes
+  checking for string.h... yes
+  checking for memory.h... yes
+  checking for strings.h... yes
+  checking for inttypes.h... yes
+  checking for stdint.h... yes
+  checking for unistd.h... yes
+  checking whether byte ordering is bigendian... no
+  checking size of void *... 8
+  checking size of int... 4
+  checking size of long... 8
+  checking size of long long... 8
+  checking size of intmax_t... 8
+  checking build system type... aarch64-apple-darwin
+  checking host system type... aarch64-apple-darwin
+  checking whether isb instruction is compilable... yes
+  checking number of significant virtual address bits... 48
+  checking for aarch64-apple-darwin-ar... no
+  checking for ar... ar
+  checking for aarch64-apple-darwin-nm... no
+  checking for nm... nm
+  checking for gawk... gawk
+  checking malloc.h usability... no
+  checking malloc.h presence... no
+  checking for malloc.h... no
+  checking for library containing log... none required
+  checking whether __attribute__ syntax is compilable... yes
+  checking whether compiler supports -Werror... yes
+  checking whether compiler supports -herror_on_warning... no
+  checking whether tls_model attribute is compilable... yes
+  checking whether compiler supports -Werror... yes
+  checking whether compiler supports -herror_on_warning... no
+  checking whether alloc_size attribute is compilable... yes
+  checking whether compiler supports -Werror... yes
+  checking whether compiler supports -herror_on_warning... no
+  checking whether format(gnu_printf, ...) attribute is compilable... no
+  checking whether compiler supports -Werror... yes
+  checking whether compiler supports -herror_on_warning... no
+  checking whether format(printf, ...) attribute is compilable... yes
+  checking whether compiler supports -Werror... yes
+  checking whether compiler supports -herror_on_warning... no
+  checking whether format(printf, ...) attribute is compilable... yes
+  checking whether compiler supports -Wimplicit-fallthrough... yes
+  checking whether fallthrough attribute is compilable... yes
+  checking whether compiler supports -Wimplicit-fallthrough... yes
+  checking whether compiler supports -Wimplicit-fallthrough... yes
+  checking whether compiler supports -Werror... yes
+  checking whether compiler supports -herror_on_warning... no
+  checking whether cold attribute is compilable... yes
+  checking whether vm_make_tag is compilable... yes
+  checking for a BSD-compatible install... /opt/homebrew/bin/ginstall -c
+  checking for aarch64-apple-darwin-ranlib... no
+  checking for ranlib... ranlib
+  checking for ld... /usr/bin/ld
+  checking for autoconf... /opt/homebrew/bin/autoconf
+  checking for memalign... no
+  checking for valloc... yes
+  checking for malloc_size... yes
+  checking whether compiler supports -O3... yes
+  checking whether compiler supports -O3... yes
+  checking whether compiler supports -funroll-loops... yes
+  checking unwind.h usability... yes
+  checking unwind.h presence... yes
+  checking for unwind.h... yes
+  checking for _Unwind_Backtrace in -lgcc... no
+  checking whether compiler supports -fno-omit-frame-pointer... yes
+  checking configured backtracing method... gcc intrinsics
+  checking for sbrk... yes
+  Disabling dss allocation because sbrk is deprecated
+  checking whether utrace(2) is compilable... no
+  checking whether utrace(2) with label is compilable... no
+  checking whether a program using __builtin_unreachable is compilable... yes
+  checking whether a program using __builtin_ffsl is compilable... yes
+  checking whether a program using __builtin_popcountl is compilable... yes
+  checking pthread.h usability... yes
+  checking pthread.h presence... yes
+  checking for pthread.h... yes
+  checking for pthread_create in -lpthread... yes
+  checking dlfcn.h usability... yes
+  checking dlfcn.h presence... yes
+  checking for dlfcn.h... yes
+  checking for dlsym... yes
+  checking whether pthread_atfork(3) is compilable... yes
+  checking whether pthread_setname_np(3) is compilable... no
+  checking whether pthread_getname_np(3) is compilable... yes
+  checking whether pthread_get_name_np(3) is compilable... no
+  checking for library containing clock_gettime... none required
+  checking whether clock_gettime(CLOCK_MONOTONIC_COARSE, ...) is compilable... no
+  checking whether clock_gettime(CLOCK_MONOTONIC, ...) is compilable... no
+  checking whether mach_absolute_time() is compilable... yes
+  checking whether clock_gettime(CLOCK_REALTIME, ...) is compilable... yes
+  checking whether compiler supports -Werror... yes
+  checking whether syscall(2) is compilable... no
+  checking for secure_getenv... no
+  checking for sched_getcpu... no
+  checking for sched_setaffinity... no
+  checking for issetugid... yes
+  checking for _malloc_thread_cleanup... no
+  checking for _pthread_mutex_init_calloc_cb... no
+  checking for memcntl... no
+  checking whether C11 atomics is compilable... yes
+  checking whether GCC __atomic atomics is compilable... yes
+  checking whether GCC 8-bit __atomic atomics is compilable... yes
+  checking whether GCC __sync atomics is compilable... yes
+  checking whether GCC 8-bit __sync atomics is compilable... yes
+  checking whether Darwin OSAtomic*() is compilable... yes
+  checking whether madvise(2) is compilable... yes
+  checking whether madvise(..., MADV_FREE) is compilable... yes
+  checking whether madvise(..., MADV_DONTNEED) is compilable... yes
+  checking whether madvise(..., MADV_DO[NT]DUMP) is compilable... no
+  checking whether madvise(..., MADV_[NO]HUGEPAGE) is compilable... no
+  checking whether madvise(..., MADV_[NO]CORE) is compilable... no
+  checking whether mprotect(2) is compilable... yes
+  checking for __builtin_clz... yes
+  checking whether Darwin os_unfair_lock_*() is compilable... yes
+  checking whether pthreads adaptive mutexes is compilable... no
+  checking whether compiler supports -D_GNU_SOURCE... yes
+  checking whether compiler supports -Werror... yes
+  checking whether compiler supports -herror_on_warning... no
+  checking whether strerror_r returns char with gnu source is compilable... no
+  checking whether strerror_r header only is compilable... yes
+  checking for stdbool.h that conforms to C99... yes
+  checking for _Bool... yes
+  configure: creating ./config.status
+  config.status: creating Makefile
+  config.status: creating jemalloc.pc
+  config.status: creating doc/html.xsl
+  config.status: creating doc/manpages.xsl
+  config.status: creating doc/jemalloc.xml
+  config.status: creating include/jemalloc/jemalloc_macros.h
+  config.status: creating include/jemalloc/jemalloc_protos.h
+  config.status: creating include/jemalloc/jemalloc_typedefs.h
+  config.status: creating include/jemalloc/internal/jemalloc_preamble.h
+  config.status: creating test/test.sh
+  config.status: creating test/include/test/jemalloc_test.h
+  config.status: creating config.stamp
+  config.status: creating bin/jemalloc-config
+  config.status: creating bin/jemalloc.sh
+  config.status: creating bin/jeprof
+  config.status: creating include/jemalloc/jemalloc_defs.h
+  config.status: include/jemalloc/jemalloc_defs.h is unchanged
+  config.status: creating include/jemalloc/internal/jemalloc_internal_defs.h
+  config.status: include/jemalloc/internal/jemalloc_internal_defs.h is unchanged
+  config.status: creating test/include/test/jemalloc_test_defs.h
+  config.status: test/include/test/jemalloc_test_defs.h is unchanged
+  config.status: executing include/jemalloc/internal/public_symbols.txt commands
+  config.status: executing include/jemalloc/internal/private_symbols.awk commands
+  config.status: executing include/jemalloc/internal/private_symbols_jet.awk commands
+  config.status: executing include/jemalloc/internal/public_namespace.h commands
+  config.status: executing include/jemalloc/internal/public_unnamespace.h commands
+  config.status: executing include/jemalloc/jemalloc_protos_jet.h commands
+  config.status: executing include/jemalloc/jemalloc_rename.h commands
+  config.status: executing include/jemalloc/jemalloc_mangle.h commands
+  config.status: executing include/jemalloc/jemalloc_mangle_jet.h commands
+  config.status: executing include/jemalloc/jemalloc.h commands
+  ===============================================================================
+  jemalloc version   : 5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7
+  library revision   : 2
+
+  CONFIG             : --with-version=5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7 --disable-cxx --enable-doc=no --enable-shared=no --with-lg-page=14 --with-jemalloc-prefix=_rjem_ --with-private-namespace=_rjem_ --enable-prof --enable-stats --host=aarch64-apple-darwin --build=aarch64-apple-darwin --prefix=/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out build_alias=aarch64-apple-darwin host_alias=aarch64-apple-darwin CC=gcc 'CFLAGS=-O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall' 'LDFLAGS=-O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall' 'CPPFLAGS=-O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall' CXX=g++
+  CC                 : gcc
+  CONFIGURE_CFLAGS   : -std=gnu11 -Werror=unknown-warning-option -Wall -Wextra -Wshorten-64-to-32 -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -pipe -g3 -Wimplicit-fallthrough -O3 -funroll-loops -fno-omit-frame-pointer
+  SPECIFIED_CFLAGS   : -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall
+  EXTRA_CFLAGS       : 
+  CPPFLAGS           : -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall -D_REENTRANT
+  CXX                : g++
+  CONFIGURE_CXXFLAGS : -Wimplicit-fallthrough -O3
+  SPECIFIED_CXXFLAGS : 
+  EXTRA_CXXFLAGS     : 
+  LDFLAGS            : -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall
+  EXTRA_LDFLAGS      : 
+  DSO_LDFLAGS        : -shared -Wl,-install_name,$(LIBDIR)/$(@F)
+  LIBS               : -pthread
+  RPATH_EXTRA        : 
+
+  XSLTPROC           : /usr/bin/xsltproc
+  XSLROOT            : 
+
+  PREFIX             : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out
+  BINDIR             : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/bin
+  DATADIR            : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/share
+  INCLUDEDIR         : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/include
+  LIBDIR             : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/lib
+  MANDIR             : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/share/man
+
+  srcroot            : 
+  abs_srcroot        : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/build/
+  objroot            : 
+  abs_objroot        : /Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/build/
+
+  JEMALLOC_PREFIX    : _rjem_
+  JEMALLOC_PRIVATE_NAMESPACE
+                     : _rjem_je_
+  install_suffix     : 
+  malloc_conf        : 
+  documentation      : 0
+  shared libs        : 0
+  static libs        : 1
+  autogen            : 0
+  debug              : 0
+  stats              : 1
+  experimental_smallocx : 0
+  prof               : 1
+  prof-libunwind     : 0
+  prof-libgcc        : 0
+  prof-gcc           : 1
+  fill               : 1
+  utrace             : 0
+  xmalloc            : 0
+  log                : 0
+  lazy_lock          : 0
+  cache-oblivious    : 1
+  cxx                : 0
+  ===============================================================================
+  running: cd "/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/build" && MAKEFLAGS="-j --jobserver-fds=8,10 --jobserver-auth=8,10" "make"
+  gcc -std=gnu11 -Werror=unknown-warning-option -Wall -Wextra -Wshorten-64-to-32 -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -pipe -g3 -Wimplicit-fallthrough -O3 -funroll-loops -fno-omit-frame-pointer -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall -c -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall -D_REENTRANT -Iinclude -Iinclude -DJEMALLOC_NO_PRIVATE_NAMESPACE -o src/jemalloc.sym.o src/jemalloc.c
+  gcc -std=gnu11 -Werror=unknown-warning-option -Wall -Wextra -Wshorten-64-to-32 -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -pipe -g3 -Wimplicit-fallthrough -O3 -funroll-loops -fno-omit-frame-pointer -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall -c -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall -D_REENTRANT -Iinclude -Iinclude -DJEMALLOC_NO_PRIVATE_NAMESPACE -o src/arena.sym.o src/arena.c
+  gcc -std=gnu11 -Werror=unknown-warning-option -Wall -Wextra -Wshorten-64-to-32 -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -pipe -g3 -Wimplicit-fallthrough -O3 -funroll-loops -fno-omit-frame-pointer -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall -c -O0 -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=27.0 -Wall -D_REENTRANT -Iinclude -Iinclude -DJEMALLOC_NO_PRIVATE_NAMESPACE -o src/background_thread.sym.o src/background_thread.c
+
+  --- stderr
+  cat: include/jemalloc/jemalloc_defs.h: No such file or directory
+  In file included from src/arena.c:1:
+  include/jemalloc/internal/jemalloc_preamble.h:4:10: fatal error: 'jemalloc_internal_defs.h' file not found
+      4 | #include "jemalloc_iIn file included from src/background_thread.c:1:
+  ninclude/jemalloc/internal/jemalloc_preamble.ht:e4r:n10a:l _fatal error: In file included from 'jemalloc_internal_defs.h' file not found
+  defs.h"src/jemalloc.c
+  :      2:
+      include/jemalloc/internal/jemalloc_preamble.h4 | #include "jemallo|          ^~~~~~~~~~~~~~~~~~~~~~~~~~:c
+  4:10_:interna l_defs.h"
+        |          ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  fatal error: 'jemalloc_internal_defs.h' file not found
+      4 | #include "jemalloc_internal_defs.h"
+        |          ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  1 error generated.
+  make: *** [src/background_thread.sym.o] Error 1
+  make: *** Waiting for unfinished jobs....
+  1 error generated.
+  make: *** [src/arena.sym.o] Error 1
+  1 error generated.
+  make: *** [src/jemalloc.sym.o] Error 1
+
+  thread 'main' (3318071) panicked at /Users/lordcasser/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/tikv-jemalloc-sys-0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7/build.rs:411:9:
+  command did not execute successfully: cd "/Users/lordcasser/workspace/projects/grow/target/debug/build/tikv-jemalloc-sys-a9048746bd89e5ae/out/build" && MAKEFLAGS="-j --jobserver-fds=8,10 --jobserver-auth=8,10" "make"
+  expected success, got: exit status: 2
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...

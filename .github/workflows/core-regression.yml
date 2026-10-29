@@ -103,6 +103,7 @@ jobs:
           cargo test --locked --lib
           -p chat-state -p sampling-types -p sampler -p memory -p workflow
           -p shell -p pager -p pager-minimal -p agent -p tools -p tool-types
+          -p diagnostics -p pager-render -p tty-utils -p test-support
           -- --test-threads=4
       - name: Run Settings integration regressions
         run: cargo test --locked -p pager --test settings_e2e -- --test-threads=4
@@ -125,6 +126,7 @@ jobs:
           PAGER_BINARY: ${{ github.workspace }}/target/debug/grow
         run: |
           set -euo pipefail
+          python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --lib --ignored leader::ownership_tests::leader_cluster_reaps_dedicated_daemon_on_drop_and_unwind
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_thinking_is_visually_distinct_from_output::minimal_thinking_is_visually_distinct_from_output
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_transcript_opens_in_pager::minimal_transcript_opens_in_pager
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_parked_plan_commits_to_scrollback::minimal_parked_plan_commits_to_scrollback

@@ -1,0 +1,21 @@
+
+#[cfg(test)]
+mod adversarial_audit_queue_probes {
+    use super::*;
+    #[test]
+    fn adversarial_audit_pending_manual_compact_does_not_spin_automatic_recovery() {
+        run_with_session_stack(|| {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(tokio::task::LocalSet::new().run_until(async {
+                let server = MockInferenceServer::start().await.unwrap();
+                let (actor, _) = actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+                actor.chat_state_handle.record_provider_context_anchor(90_000);
+                actor.state.lock().await.pending_manual_compact = Some(None);
+                let result = tokio::time::timeout(std::time::Duration::from_millis(500), run_user_turn(&actor, "audit-manual-queue")).await;
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let steps = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Step(chat_state::StepEvent::Started { .. }))).count();
+                assert!(result.is_ok(), "queued manual compaction prevented auto compaction but ordinary loop kept retrying: {steps} Steps, {} provider requests", server.messages_request_count());
+            }));
+        });
+    }
+}

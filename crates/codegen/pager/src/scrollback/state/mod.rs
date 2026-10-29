@@ -798,7 +798,10 @@ impl ScrollbackState {
             // heights as well so prepare_layout takes its structural path.
             if let Some((_, new_e)) = self.entries.get_index(new_idx)
                 && new_e.block.is_groupable()
-                && new_e.display_mode == DisplayMode::Collapsed
+                && (new_e.display_mode == DisplayMode::Collapsed
+                    || new_e.block.is_tool_call()
+                    || new_e.block.is_thinking()
+                    || new_e.block.is_subagent())
             {
                 self.gaps_may_be_dirty = true;
                 self.dirty_heights.insert(id);
@@ -1640,6 +1643,9 @@ impl ScrollbackState {
         } else if !running && was_running {
             self.running.remove(&entry.id);
         }
+        if running != was_running {
+            self.mark_structurally_dirty(id);
+        }
     }
 
     /// Get entry by ID. O(1) average via IndexMap.
@@ -1705,6 +1711,12 @@ impl ScrollbackState {
         };
         block.set_raw_mode(entry.raw);
         entry.block = block;
+        let respect_manual_folds = respect_manual_folds
+            || (crate::appearance::cache::load_group_tool_verbs()
+                && !matches!(
+                    verb_group::run_step(entry, true),
+                    verb_group::RunStep::Break
+                ));
         if edit_to_edit {
             // Keep the current mode: the entry was already an Edit, so any
             // change since materialization is a user gesture — except on the
@@ -1788,6 +1800,7 @@ impl ScrollbackState {
         }
         let thinking_mode = self.thinking_display_mode;
         let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
+        let group_activities = crate::appearance::cache::load_group_tool_verbs();
         if let Some(entry) = self.get_by_id_mut(id) {
             entry.is_running = false;
             entry.finished_at = Some(Instant::now());
@@ -1820,7 +1833,14 @@ impl ScrollbackState {
             // so Ctrl+E is respected across the session — except an
             // already-Expanded thinking block keeps its mode. Entries the
             // user manually folded (pinned) keep their mode.
-            if respect_manual_folds && entry.display_mode_pinned {
+            if entry.display_mode_pinned
+                && (respect_manual_folds
+                    || (group_activities
+                        && !matches!(
+                            verb_group::run_step(entry, true),
+                            verb_group::RunStep::Break
+                        )))
+            {
                 let would_be_mode = if matches!(entry.block, RenderBlock::Thinking(_)) {
                     (entry.display_mode != DisplayMode::Expanded).then_some(thinking_mode)
                 } else {
@@ -1875,9 +1895,8 @@ impl ScrollbackState {
         entry.is_pending_user_input = pending;
         // No `invalidate_cache()` — the cached output is identical, only
         // the post-pass bullet styling differs frame to frame.
-        // The flip IS structural though: `run_step` keeps pending rows out
-        // of verb-group runs, so an already-folded run must re-run its folds
-        // to surface the prompt row (and refold once it resolves).
+        // The flip changes visibility inside the existing activity span.
+        // Re-project without changing membership or its expansion key.
         self.mark_structurally_dirty(id);
         true
     }
@@ -2196,7 +2215,7 @@ impl ScrollbackState {
         let Some(info) = cache.entries.get(idx) else {
             return false;
         };
-        info.is_group_header() || info.height == 0
+        (info.is_group_header() && !info.has_group_content()) || info.height == 0
     }
 
     /// Whether entry `idx` overlaps the current viewport (cached offsets + the
@@ -4061,6 +4080,7 @@ mod tests {
         assert!(!state.is_committed(anchor));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "already committed")]
     fn insert_block_before_rejects_an_already_committed_anchor() {
@@ -4172,6 +4192,8 @@ mod tests {
 
     #[test]
     fn running_thinking_toggled_back_to_truncated_collapses_on_finish() {
+        // Preserve the non-activity fallback contract when grouping is disabled.
+        crate::appearance::cache::set_group_tool_verbs(false);
         let mut state = ScrollbackState::new();
         let id = state.push_block(RenderBlock::thinking_streaming());
         state.set_last_running(true);

@@ -820,6 +820,99 @@ async fn complete_request_headroom_rejects_user_skill_group_before_sampling() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn complete_skill_request_rejects_explicit_output_overflow_after_publication() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
+            let actor = configured_actor(
+                &server,
+                review_skill("/skills/review/SKILL.md", "small guidance"),
+            )
+            .await;
+            let mut route = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("sampling route");
+            route.context_window = std::num::NonZeroU64::new(100_000).unwrap();
+            route.output_limit = Some(100_000);
+            actor.chat_state_handle.replace_sampling_route(route);
+
+            let prompt_id = "skill-output-window-overflow";
+            let text = "/review inspect";
+            let input_id = admit_prompt(&actor, prompt_id, text).await;
+            let result = run_prompt_text(&actor, prompt_id, input_id.clone(), text).await;
+            let error = result.expect_err("explicit output plus input exceeds the window");
+            let message = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .expect("context rejection includes its input/output accounting");
+            let (required, detail) = message
+                .strip_prefix("model request requires ")
+                .and_then(|message| message.split_once(" tokens ("))
+                .expect("error names the projected request size");
+            let required = required
+                .parse::<u64>()
+                .expect("required token count is numeric");
+            let (input, output) = detail
+                .split_once(" input + ")
+                .expect("error separates input from output tokens");
+            let input = input
+                .parse::<u64>()
+                .expect("input token count is numeric");
+            assert!(input > 0 && input < 100_000 && required > 100_000);
+            assert!(
+                output.starts_with("100000 output)")
+                    && message.contains("context window is 100000"),
+                "error explains the combined input/output window rejection: {message}"
+            );
+
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(
+                events.iter().any(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                        input_ids,
+                        skill_loads,
+                        ..
+                    }) if input_ids.contains(&input_id)
+                        && skill_loads.iter().any(|skill| skill.prepared_body.contains("small guidance"))
+                )),
+                "the complete SkillLoad group is durable before final request admission: {events:#?}"
+            );
+            assert!(
+                events.iter().any(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
+                        cause: chat_state::MessageCause::SkillLoadSettlement,
+                        ..
+                    })
+                )),
+                "terminal settlement withdraws the unconsumed skill after request rejection: {events:#?}"
+            );
+            let surface = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                surface
+                    .iter()
+                    .all(|item| !matches!(item, ConversationItem::SkillLoad(_)))
+                    && surface
+                        .iter()
+                        .all(|item| !item.text_content().contains("small guidance")),
+                "settlement withdraws unconsumed guidance from the current Surface"
+            );
+            assert!(
+                server.request_bodies().is_empty(),
+                "the over-window SkillLoad request never reaches the provider"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn user_skill_remains_pinned_until_first_accepted_response_then_compacts() {
     tokio::task::LocalSet::new()
         .run_until(async {

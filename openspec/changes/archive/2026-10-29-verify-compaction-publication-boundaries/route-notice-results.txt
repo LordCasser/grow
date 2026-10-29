@@ -1,0 +1,7 @@
+
+running 2 tests
+test session::actor::tests::compaction_pre_prune_tests::compaction_route_notice_tests::smaller_window_model_switch_replacement_supersedes_pending_async_notice ... ok
+test session::actor::tests::compaction_pre_prune_tests::compaction_route_notice_tests::committed_async_notice_survives_same_window_model_selection_until_projection ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4390 filtered out; finished in 0.68s
+

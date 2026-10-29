@@ -412,7 +412,29 @@ impl SessionActor {
             })
             .collect();
         if notification_ids.is_empty() {
-            return Err(chat_state::TimelineWriteError::AcknowledgementLost);
+            let source = chat_state::NotificationSource::PlanHandoff {
+                artifact_hash: handoff.artifact_hash.clone(),
+                artifact_revision: handoff.artifact_revision,
+                handoff: handoff.kind,
+            };
+            let source_version = chat_state::NotificationSourceVersion::Ordinal {
+                value: handoff
+                    .submission_id
+                    .ok_or(chat_state::TimelineWriteError::Invalid(
+                        chat_state::TimelineError::InvalidNotification,
+                    ))?,
+            };
+            return match self
+                .chat_state_handle
+                .consumed_notification_turn(source, source_version)
+                .await
+            {
+                Some(Some(consumed_by)) if consumed_by == turn => Ok(()),
+                Some(_) => Err(chat_state::TimelineWriteError::Invalid(
+                    chat_state::TimelineError::InvalidNotification,
+                )),
+                None => Err(chat_state::TimelineWriteError::AcknowledgementLost),
+            };
         }
         self.consume_notifications_durably(notification_ids, turn, None)
             .await
@@ -2222,6 +2244,25 @@ mod tests {
                     .consume_live_plan_handoff_for_next_step()
                     .await
                     .unwrap();
+                let committed_count = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap()
+                    .len();
+                actor
+                    .consume_live_plan_handoff_for_next_step()
+                    .await
+                    .expect("same-turn active drain must be idempotent");
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap()
+                        .len(),
+                    committed_count
+                );
                 actor.emit_event(crate::session::events::Event::LoopStarted { loop_index: 1 });
                 actor
                     .events
@@ -2299,6 +2340,179 @@ mod tests {
                         chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. })
                     )
                 }));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_live_handoff_recheck_rejects_dismissal_and_other_turn_consumption() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for resolution in ["dismissed", "other_turn"] {
+                    let (actor, _gateway_rx) =
+                        crate::session::actor::tests::support::build_actor().await;
+                    crate::session::actor::tests::support::begin_test_active_causal_turn(&actor)
+                        .await;
+                    *actor.turn_behavior.lock() = tool_types::BehaviorId::Plan;
+                    crate::session::behavior::write_plan_artifact(
+                        &actor.session_directory,
+                        "# approved plan",
+                    )
+                    .unwrap();
+                    {
+                        let mut behavior = actor.behavior.lock();
+                        behavior.select_behavior(tool_types::BehaviorId::Plan);
+                        behavior.record_plan_artifact("# approved plan");
+                        assert!(behavior.submit_initial_plan());
+                        assert!(behavior.approve_submitted_plan_with_feedback(None));
+                    }
+                    let snapshot = actor.behavior.lock().snapshot();
+                    actor
+                        .persist_plan_phase_transition_durably(snapshot.clone(), None)
+                        .await
+                        .unwrap();
+                    actor
+                        .admit_plan_handoff_notification(&snapshot)
+                        .await
+                        .unwrap();
+                    let ids = actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .map(|receipt| receipt.id)
+                        .collect();
+                    if resolution == "dismissed" {
+                        let handoff = snapshot.last_plan_handoff.unwrap();
+                        actor
+                            .dismiss_notifications_durably(
+                                ids,
+                                chat_state::NotificationDismissReason::PlanSuperseded {
+                                    artifact_hash: handoff.artifact_hash,
+                                    artifact_revision: handoff.artifact_revision,
+                                    handoff: handoff.kind,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    } else {
+                        actor
+                            .consume_live_plan_handoff_for_next_step()
+                            .await
+                            .unwrap();
+                        actor
+                            .events
+                            .emit_turn_ended(
+                                crate::session::events::TurnOutcomeLabel::Completed,
+                                chat_state::TurnTerminal {
+                                    source: chat_state::TurnTerminalSource::Host,
+                                    stop_reason: "end_turn".into(),
+                                    completion_kind: "text".into(),
+                                },
+                                None,
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                        crate::session::actor::tests::support::begin_test_active_causal_turn(
+                            &actor,
+                        )
+                        .await;
+                    }
+                    let count = actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap()
+                        .len();
+                    assert!(
+                        actor
+                            .consume_live_plan_handoff_for_next_step()
+                            .await
+                            .is_err(),
+                        "{resolution} cannot authorize another Step"
+                    );
+                    assert_eq!(
+                        actor
+                            .chat_state_handle
+                            .timeline_events()
+                            .await
+                            .unwrap()
+                            .len(),
+                        count
+                    );
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_control_live_handoff_uses_submission_id_across_plan_cycles() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+                *actor.turn_behavior.lock() = tool_types::BehaviorId::Plan;
+                let body = "## Plan\n\nImplement the approved work.";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, body)
+                    .unwrap();
+                for submission_id in [1, 2] {
+                    {
+                        let mut behavior = actor.behavior.lock();
+                        assert!(behavior.select_behavior(tool_types::BehaviorId::Plan));
+                        behavior.record_plan_artifact(body);
+                        assert!(behavior.submit_initial_plan());
+                        assert!(behavior.approve_submitted_plan_with_feedback(None));
+                    }
+                    let snapshot = actor.behavior.lock().snapshot();
+                    assert_eq!(snapshot.plan_artifact_revision, 1);
+                    assert_eq!(snapshot.plan_submission_id, Some(submission_id));
+                    actor
+                        .persist_plan_phase_transition_durably(snapshot, None)
+                        .await
+                        .unwrap();
+                    actor
+                        .consume_live_plan_handoff_for_next_step()
+                        .await
+                        .unwrap();
+                    assert!(
+                        actor
+                            .chat_state_handle
+                            .pending_notifications()
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    );
+                    assert!(actor.behavior.lock().finish_plan());
+                    let normal = actor.behavior.lock().snapshot();
+                    actor
+                        .persist_behavior_transition_durably(normal, None)
+                        .await
+                        .unwrap();
+                }
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let versions = events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Received {
+                                source: chat_state::NotificationSource::PlanHandoff { .. },
+                                source_version,
+                                ..
+                            },
+                        ) => Some(source_version.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    versions,
+                    [
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 2 }
+                    ]
+                );
             })
             .await;
     }

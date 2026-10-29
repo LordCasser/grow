@@ -106,8 +106,15 @@ async fn poll_diagnostics(client: &LspClient, path: &Path, expected: usize) -> V
 
 /// Creates a single-server LspManager with the mock TS server, already initialized.
 async fn single_server_manager(script_path: &Path, workspace: &tempfile::TempDir) -> LspManager {
+    single_server_manager_with_config(mock_server_config(script_path), workspace).await
+}
+
+async fn single_server_manager_with_config(
+    config: LspServerConfig,
+    workspace: &tempfile::TempDir,
+) -> LspManager {
     let mut servers = BTreeMap::new();
-    servers.insert("mock-ts".to_string(), mock_server_config(script_path));
+    servers.insert("mock-ts".to_string(), config);
 
     let mut mgr = LspManager::new(
         servers,
@@ -1722,9 +1729,15 @@ async fn a_report_from_before_we_opened_a_file_does_not_settle_our_first_edit() 
 /// so its reports stand.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refresh_we_cannot_act_on_does_not_discard_what_we_know() {
-    let (_dir, script_path) = write_refresh_without_pull_server();
+    let (server_dir, script_path) = write_refresh_without_pull_server();
     let workspace = tempfile::tempdir().unwrap();
-    let mgr = tokio::sync::Mutex::new(single_server_manager(&script_path, &workspace).await);
+    let refresh_ack = server_dir.path().join("refresh-answered");
+    let mut config = mock_server_config(&script_path);
+    config.env.insert(
+        "REFRESH_ACK_PATH".to_string(),
+        refresh_ack.to_string_lossy().into_owned(),
+    );
+    let mgr = tokio::sync::Mutex::new(single_server_manager_with_config(config, &workspace).await);
 
     let file = workspace.path().join("kept.ts");
     std::fs::write(&file, "const y = 1;\n").unwrap();
@@ -1735,9 +1748,10 @@ async fn a_refresh_we_cannot_act_on_does_not_discard_what_we_know() {
     let summary = drain_until_reported(&mgr, "a real problem").await;
     assert!(summary.contains("a real problem"), "{summary}");
 
-    // The refresh request has been answered by now; the diagnostics it could
-    // not replace must still be there.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // The mock writes this only after receiving the client's response to its
+    // refresh request, so the assertion follows the protocol event rather than
+    // guessing how long the server task needs to run.
+    wait_until("the mock's refresh response", || refresh_ack.exists()).await;
     let uri = file_uri(&file).unwrap().to_string();
     assert_eq!(
         mgr.lock().await.clients["mock-ts"]

@@ -609,6 +609,7 @@ pub(crate) async fn generate_session_compact(
                                     usage = reported;
                                     usage_meter.observe(&usage);
                                 }
+                                stop_reason = Some("stop".to_string());
                             }
                             ResponseStreamEvent::ResponseFailed(failed_event) => {
                                 if let Some(reported) =
@@ -676,7 +677,7 @@ pub(crate) async fn generate_session_compact(
             CompactOutput {
                 content,
                 usage,
-                stop_reason: stop_reason.or_else(|| Some("stop".to_string())),
+                stop_reason,
                 truncated,
                 ttft_ms: timing.ttft_ms(),
                 stream_ms: timing.stream_ms(),
@@ -1251,6 +1252,7 @@ mod reasoning_compaction_regression_tests {
         .await
         .unwrap_or_else(|_| panic!("compaction must succeed"));
         assert_eq!(output.content, "<summary>ok</summary>");
+        assert_eq!(output.stop_reason.as_deref(), Some("stop"));
         let _ = shutdown_tx.send(());
     }
     #[test]
@@ -1530,7 +1532,7 @@ mod reasoning_compaction_regression_tests {
             ConversationItem::user("Summarize the conversation so far."),
         ];
         let client = SamplingClient::new(config.clone()).unwrap();
-        generate_session_compact(
+        let output = generate_session_compact(
             input_surface,
             client,
             &config,
@@ -1541,6 +1543,7 @@ mod reasoning_compaction_regression_tests {
         )
         .await
         .unwrap_or_else(|_| panic!("tool-free Responses compaction must succeed"));
+        assert_eq!(output.stop_reason.as_deref(), Some("stop"));
         let bodies = captured.lock().unwrap();
         assert_eq!(bodies.len(), 1, "mock must receive one request");
         let request = &bodies[0];
@@ -1555,6 +1558,53 @@ mod reasoning_compaction_regression_tests {
             request.get("tool_choice").is_none(),
             "Sideband compaction must not advertise tool_choice"
         );
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn responses_eof_without_completed_event_has_no_success_stop() {
+        let app = Router::new().route(
+            "/v1/responses",
+            post(|| async {
+                let stream = stream::iter(
+                    responses_summary_stream()
+                        .into_iter()
+                        .take(2)
+                        .map(Ok::<_, std::convert::Infallible>),
+                );
+                Sse::new(stream).keep_alive(KeepAlive::default())
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config_responses(&base_url);
+        let client = SamplingClient::new(config.clone()).unwrap();
+        let output = generate_session_compact(
+            vec![
+                ConversationItem::system("You are a helpful assistant."),
+                ConversationItem::user("Summarize the conversation so far."),
+            ],
+            client,
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
+        )
+        .await
+        .expect("text output is retained for adapter classification");
+        assert_eq!(output.content, "<summary>ok</summary>");
+        assert_eq!(output.stop_reason, None);
         let _ = shutdown_tx.send(());
     }
     #[tokio::test]

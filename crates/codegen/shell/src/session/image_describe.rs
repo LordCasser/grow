@@ -835,19 +835,23 @@ mod tests {
                 let session = session.clone();
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
+                    let mut rendezvous = BarrierOnExit::new(&barrier);
                     let image = ImageContent::new(
                         base64::engine::general_purpose::STANDARD.encode(b"same"),
                         "image/png",
                     );
                     persist_user_images_with(&session, &[image], |batch, name, bytes| {
-                        barrier.wait();
+                        rendezvous.wait();
                         batch.write_atomic(name, bytes, true, false)
                     })
                     .unwrap()
                 })
             })
             .collect();
-        let mut results = handles.into_iter().map(|handle| handle.join().unwrap());
+        let joined: Vec<_> = handles.into_iter().map(|handle| handle.join()).collect();
+        let mut results = joined
+            .into_iter()
+            .map(|result| result.expect("asset batch worker must not panic"));
         let first = results.next().unwrap();
         assert_eq!(first, results.next().unwrap());
         assert_eq!(std::fs::read(&first[0]).unwrap(), b"same");
@@ -963,11 +967,39 @@ mod tests {
         assert!(out.is_empty());
         assert!(!dir.path().join("assets").exists());
     }
+
+    struct BarrierOnExit<'a> {
+        barrier: &'a std::sync::Barrier,
+        waited: bool,
+    }
+
+    impl<'a> BarrierOnExit<'a> {
+        fn new(barrier: &'a std::sync::Barrier) -> Self {
+            Self {
+                barrier,
+                waited: false,
+            }
+        }
+
+        fn wait(&mut self) {
+            self.waited = true;
+            self.barrier.wait();
+        }
+    }
+
+    impl Drop for BarrierOnExit<'_> {
+        fn drop(&mut self) {
+            if !self.waited {
+                self.barrier.wait();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static TEST_LOCAL_OCR_PROGRAM: PathBuf;
+    static TEST_LOCAL_OCR_SPAWNED: tokio::sync::mpsc::UnboundedSender<u32>;
 }
 
 #[cfg(test)]
@@ -1023,18 +1055,47 @@ async fn run_local_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String>
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     const OUTPUT_LIMIT: u64 = 64 * 1024;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "Bounded foreground OCR owns and waits the child; kill_on_drop terminates it on timeout or cancellation"
-    )]
-    let mut child = tokio::process::Command::new(program)
+
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(["stdin", "stdout"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    tty_utils::new_process_group(&mut command);
+    tty_utils::suspend_until_process_group_enrolled(&mut command);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Bounded foreground OCR owns and waits the child; its process-group guard also terminates descendants on timeout or cancellation"
+    )]
+    let mut child = command
         .spawn()
         .map_err(|error| format!("local OCR unavailable: {error}"))?;
+    let group = match tty_utils::ProcessGroup::new().and_then(|mut group| {
+        group.attach(&child)?;
+        Ok(group)
+    }) {
+        Ok(group) => group,
+        Err(error) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(format!("local OCR process-group setup failed: {error}"));
+        }
+    };
+    if let Err(error) = group.resume_enrolled(&child) {
+        let _ = group.kill();
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(format!("local OCR process-group resume failed: {error}"));
+    }
+    let _process_guard = LocalOcrProcessGuard::new(group);
+    #[cfg(test)]
+    let _ = TEST_LOCAL_OCR_SPAWNED.try_with(|spawned| {
+        if let Some(pid) = child.id() {
+            let _ = spawned.send(pid);
+        }
+    });
     let mut input = child.stdin.take().ok_or("local OCR stdin unavailable")?;
     let output = child.stdout.take().ok_or("local OCR stdout unavailable")?;
     let errors = child.stderr.take().ok_or("local OCR stderr unavailable")?;
@@ -1075,6 +1136,25 @@ async fn run_local_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String>
     Ok(text.to_owned())
 }
 
+/// Cancellation-safe ownership for the local OCR helper tree. Tokio's
+/// `kill_on_drop` remains responsible for the direct child; this guard
+/// terminates any remaining descendants on every exit path.
+struct LocalOcrProcessGuard {
+    group: tty_utils::ProcessGroup,
+}
+
+impl LocalOcrProcessGuard {
+    fn new(group: tty_utils::ProcessGroup) -> Self {
+        Self { group }
+    }
+}
+
+impl Drop for LocalOcrProcessGuard {
+    fn drop(&mut self) {
+        let _ = self.group.kill();
+    }
+}
+
 #[cfg(all(test, unix))]
 mod local_ocr_tests {
     use super::*;
@@ -1103,16 +1183,36 @@ mod local_ocr_tests {
         .await
         .expect("OCR pipe protocol must not hang")
     }
-    #[tokio::test]
-    async fn cancellation_terminates_the_local_ocr_process() {
-        use std::process::Stdio;
-        let dir = tempfile::tempdir().unwrap();
-        let path = executable(dir.path(), "echo $$ > \"$0.pid\"; exec sleep 30");
-        let pid_path = path.with_extension("pid");
-        let task = tokio::spawn(async move { run_local_ocr(&path, vec![1]).await });
-        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+
+    struct FixtureProcessGroup {
+        group: tty_utils::ProcessGroup,
+        armed: bool,
+    }
+
+    impl FixtureProcessGroup {
+        fn new(pid: u32) -> Self {
+            let mut group = tty_utils::ProcessGroup::new().unwrap();
+            group.attach_pid(pid).unwrap();
+            Self { group, armed: true }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for FixtureProcessGroup {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = self.group.kill();
+            }
+        }
+    }
+
+    async fn fixture_pid(path: &Path) -> u32 {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await
+                if let Ok(text) = tokio::fs::read_to_string(path).await
                     && let Ok(pid) = text.trim().parse::<u32>()
                 {
                     break pid;
@@ -1121,27 +1221,135 @@ mod local_ocr_tests {
             }
         })
         .await
-        .expect("OCR fixture must start");
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        .expect("OCR fixture must publish its process id")
+    }
+
+    async fn assert_process_stopped(pid: u32) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let alive = tokio::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
+                let output = tokio::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
                     .await
-                    .unwrap()
-                    .success();
-                if !alive {
+                    .unwrap();
+                let state = String::from_utf8_lossy(&output.stdout);
+                if state.trim().is_empty() || state.trim_start().starts_with('Z') {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("cancelled OCR must not leave a running process");
+        .unwrap_or_else(|_| panic!("OCR process {pid} must stop"));
+    }
+
+    fn hanging_tree_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let path = executable(
+            dir,
+            "echo $$ > \"$0.parent.pid\"; sleep 30 & echo $! > \"$0.descendant.pid\"; wait",
+        );
+        let parent_pid = path.with_extension("parent.pid");
+        let descendant_pid = path.with_extension("descendant.pid");
+        (path, parent_pid, descendant_pid)
+    }
+
+    async fn start_hanging_tree(
+        path: PathBuf,
+    ) -> (
+        tokio::task::JoinHandle<Result<String, String>>,
+        u32,
+        u32,
+        FixtureProcessGroup,
+        tokio::sync::oneshot::Sender<tokio::time::Instant>,
+    ) {
+        let (spawned_tx, mut spawned_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (deadline_tx, deadline_rx) = tokio::sync::oneshot::channel();
+        let (parent_pid_path, descendant_pid_path) = (
+            path.with_extension("parent.pid"),
+            path.with_extension("descendant.pid"),
+        );
+        let program = path.clone();
+        let task = tokio::spawn(TEST_LOCAL_OCR_PROGRAM.scope(
+            path,
+            TEST_LOCAL_OCR_SPAWNED.scope(spawned_tx, async move {
+                let run = run_local_ocr(&program, vec![1]);
+                tokio::pin!(run);
+                let deadline = tokio::select! {
+                    result = &mut run => return result,
+                    deadline = deadline_rx => match deadline {
+                        Ok(deadline) => deadline,
+                        Err(_) => std::future::pending().await,
+                    },
+                };
+                tokio::time::timeout_at(deadline, &mut run)
+                    .await
+                    .map_err(|_| "local OCR timed out".to_owned())?
+            }),
+        ));
+        let group_pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned_rx.recv())
+            .await
+            .expect("OCR spawn handshake must arrive")
+            .expect("OCR spawn handshake sender must remain alive");
+        let cleanup = FixtureProcessGroup::new(group_pid);
+        let parent_pid = fixture_pid(&parent_pid_path).await;
+        let descendant_pid = fixture_pid(&descendant_pid_path).await;
+        (task, parent_pid, descendant_pid, cleanup, deadline_tx)
+    }
+
+    #[tokio::test]
+    async fn cancellation_terminates_local_ocr_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _, _) = hanging_tree_fixture(dir.path());
+        let (task, parent_pid, descendant_pid, mut cleanup, _deadline) =
+            start_hanging_tree(path).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_process_stopped(parent_pid).await;
+        assert_process_stopped(descendant_pid).await;
+        cleanup.disarm();
+    }
+
+    #[tokio::test]
+    async fn timeout_terminates_the_local_ocr_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _, _) = hanging_tree_fixture(dir.path());
+        let (task, parent_pid, descendant_pid, mut cleanup, deadline) =
+            start_hanging_tree(path).await;
+        // The run future has already spawned the process and published both
+        // fixture PIDs; begin the deadline only after startup is observable.
+        deadline
+            .send(tokio::time::Instant::now() + std::time::Duration::from_millis(50))
+            .unwrap();
+        assert!(task.await.unwrap().unwrap_err().contains("timed out"));
+        assert_process_stopped(parent_pid).await;
+        assert_process_stopped(descendant_pid).await;
+        cleanup.disarm();
+    }
+
+    #[tokio::test]
+    async fn successful_local_ocr_terminates_detached_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = executable(
+            dir.path(),
+            "while [ ! -e \"$0.release\" ]; do sleep 0.01; done; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > \"$0.descendant.pid\"; exec /bin/echo recognized text",
+        );
+        let descendant_pid_path = path.with_extension("descendant.pid");
+        let release_path = path.with_extension("release");
+        let program = path.clone();
+        let (spawned_tx, mut spawned_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(TEST_LOCAL_OCR_SPAWNED.scope(spawned_tx, async move {
+            run_local_ocr(&program, b"image".to_vec()).await
+        }));
+        let group_pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned_rx.recv())
+            .await
+            .expect("OCR spawn handshake must arrive")
+            .expect("OCR spawn handshake sender must remain alive");
+        let mut cleanup = FixtureProcessGroup::new(group_pid);
+        std::fs::write(release_path, b"").unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), "recognized text");
+        let descendant_pid = fixture_pid(&descendant_pid_path).await;
+        assert_process_stopped(descendant_pid).await;
+        cleanup.disarm();
     }
 
     #[tokio::test]

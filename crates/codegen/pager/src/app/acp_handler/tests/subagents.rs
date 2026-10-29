@@ -342,6 +342,101 @@
                 child_sid,
                 &persisted.to_string(),
             );
+            // A child lifecycle can only be restored through its canonical
+            // parent link. Give this fixture the same summary and Seed that a
+            // real child session carries instead of relying on presentation
+            // history alone.
+            let root_dir = home
+                .join("sessions")
+                .join(shell::util::grow_home::encode_cwd_dirname("/tmp"))
+                .join(root_sid);
+            let root_timeline = shell::session::testkit::read_timeline_fixture(
+                &root_dir.join("timeline.jsonl"),
+            )
+            .unwrap();
+            let (spawn_seq, spawn) = root_timeline
+                .events()
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Spawned(spawn),
+                    ) if spawn.child_session_id == child_sid => {
+                        Some((event.seq.get(), spawn))
+                    }
+                    _ => None,
+                })
+                .expect("root fixture has the canonical child spawn");
+            let child_dir = home
+                .join("sessions")
+                .join(shell::util::grow_home::encode_cwd_dirname("/tmp"))
+                .join(child_sid);
+            let summary_path = child_dir.join("summary.json");
+            let mut summary: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&summary_path).unwrap(),
+            )
+            .unwrap();
+            summary["parent_session_id"] = serde_json::Value::String(root_sid.to_owned());
+            std::fs::write(&summary_path, serde_json::to_vec(&summary).unwrap()).unwrap();
+            let mut child_timeline = shell::session::testkit::read_timeline_fixture(
+                &child_dir.join("timeline.jsonl"),
+            )
+            .unwrap();
+            let seed = child_timeline
+                .record(chat_state::TimelineEventKind::SubagentSeed(
+                    chat_state::SubagentSeedEvent {
+                        parent_timeline_id: root_sid.to_owned(),
+                        parent_spawn_seq: spawn_seq,
+                        subagent_id: spawn.subagent_id.clone(),
+                        security_parent_session_id: root_sid.to_owned(),
+                        context_source: spawn.context_source.clone(),
+                        source_ref: spawn.source_ref.clone(),
+                        normalized: spawn.context_normalized,
+                    },
+                ))
+                .unwrap();
+            let nested_spawn = child_timeline
+                .record(chat_state::TimelineEventKind::Subagent(
+                    chat_state::SubagentEvent::Spawned(Box::new(
+                        chat_state::SubagentSpawnEvent {
+                            subagent_id: grandchild_sid.to_owned(),
+                            child_session_id: grandchild_sid.to_owned(),
+                            origin_tool_call_id: None,
+                            security_parent_session_id: child_sid.to_owned(),
+                            parent_step_id: None,
+                            subagent_type: "explore".into(),
+                            description: "scan src/".into(),
+                            prompt: "restore grandchild".into(),
+                            execution_recipe: serde_json::json!({}),
+                            context_source: chat_state::SubagentContextSource::New,
+                            source_ref: None,
+                            context_normalized: false,
+                            resumed_from: None,
+                            parent_prompt_id: None,
+                            capability_mode: None,
+                            permission_mode: None,
+                            effective_permission_mode: None,
+                            workflow_run_id: None,
+                            goal_id: None,
+                            goal_definition_revision: None,
+                            surface_completion: true,
+                            child_cwd: "/tmp".into(),
+                            worktree_path: None,
+                            effective_model_id: "grow-3".into(),
+                            model_transport_key: tools::types::resources::ModelImageInputKey::new(
+                                "grow-3",
+                                "responses",
+                                "test-endpoint",
+                            ),
+                            reasoning_effort: None,
+                        },
+                    )),
+                ))
+                .unwrap();
+            shell::session::testkit::append_timeline_domain_fixture(
+                &child_dir.join("timeline.jsonl"),
+                &[seed, nested_spawn],
+            )
+            .unwrap();
 
             let mut app = make_app_with_agent(root_sid);
             handle(
@@ -383,7 +478,7 @@
                     child_sid,
                     "the reconnect cursor belongs to the restored child"
                 );
-                assert_eq!(cursor["cut"], 1);
+                assert_eq!(cursor["cut"], 3);
                 assert_eq!(cursor["record"], 0);
                 assert_eq!(cursor["part"], 0);
                 assert_eq!(cursor["complete"], true);

@@ -1839,6 +1839,7 @@ impl SessionActor {
                     context_window: cw,
                     percentage,
                     source: "sampler_error_recovery",
+                    max_output_tokens: None,
                 };
                 return Ok(SamplerFailureRecovery::CompactAndResubmit(trigger_info));
             }

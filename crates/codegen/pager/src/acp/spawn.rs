@@ -226,6 +226,138 @@ fn config_reload_request(update: shell::config::reloader::ConfigUpdate) -> Optio
     ))
 }
 
+async fn apply_config_update(
+    agent: &MvpAgent,
+    update: shell::config::reloader::ConfigUpdate,
+) -> std::result::Result<(), acp::Error> {
+    let Some(request) = config_reload_request(update) else {
+        return Ok(());
+    };
+    shell::extensions::session_admin::handle(agent, &request)
+        .await
+        .map(|_| ())
+}
+
+enum GatewayRegistrationRace<R> {
+    Gateway(std::result::Result<(), tokio::task::JoinError>),
+    Registration(R),
+}
+
+async fn race_gateway_with_registration<R>(
+    gateway: &mut tokio::task::JoinHandle<()>,
+    registration: impl std::future::Future<Output = R>,
+) -> GatewayRegistrationRace<R> {
+    tokio::select! {
+        biased;
+        result = gateway => GatewayRegistrationRace::Gateway(result),
+        result = registration => GatewayRegistrationRace::Registration(result),
+    }
+}
+
+async fn cancel_gateway_and_flush(
+    gateway: &mut tokio::task::JoinHandle<()>,
+    agent: &MvpAgent,
+    cancel: &CancellationToken,
+    watcher_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    cancel.cancel();
+    gateway.abort();
+    let _ = gateway.await;
+    stop_watchers_and_flush(agent, cancel, watcher_tasks).await;
+}
+
+async fn stop_watchers_and_flush(
+    agent: &MvpAgent,
+    cancel: &CancellationToken,
+    watcher_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    cancel.cancel();
+    for task in watcher_tasks.drain(..) {
+        task.abort();
+        let _ = task.await;
+    }
+    agent.flush_all_sessions(SESSION_FLUSH_GRACE).await;
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WatcherRegistrationKind {
+    Config,
+    Skills,
+}
+
+#[cfg(test)]
+struct ConfigWatcherRegistrationGate {
+    home: std::path::PathBuf,
+    kind: WatcherRegistrationKind,
+    started: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static CONFIG_WATCHER_REGISTRATION_GATE: std::sync::OnceLock<
+    std::sync::Mutex<Option<ConfigWatcherRegistrationGate>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct ConfigWatcherRegistrationGateGuard;
+
+#[cfg(test)]
+impl Drop for ConfigWatcherRegistrationGateGuard {
+    fn drop(&mut self) {
+        CONFIG_WATCHER_REGISTRATION_GATE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap()
+            .take();
+    }
+}
+
+#[cfg(test)]
+fn arm_config_watcher_registration_gate(
+    home: std::path::PathBuf,
+    kind: WatcherRegistrationKind,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    ConfigWatcherRegistrationGateGuard,
+) {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *CONFIG_WATCHER_REGISTRATION_GATE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(ConfigWatcherRegistrationGate {
+        home,
+        kind,
+        started: started_tx,
+        release: release_rx,
+    });
+    (started_rx, release_tx, ConfigWatcherRegistrationGateGuard)
+}
+
+#[cfg(test)]
+fn block_watcher_registration_for_test(home: &std::path::Path, kind: WatcherRegistrationKind) {
+    let gate = {
+        let mut slot = CONFIG_WATCHER_REGISTRATION_GATE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|gate| gate.home.as_path() == home && gate.kind == kind)
+        {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some(gate) = gate {
+        let _ = gate.started.send(());
+        let _ = gate.release.recv();
+    }
+}
+
 /// Spawn an agent in a dedicated thread with direct RPC dispatch.
 ///
 /// The agent runs on a single-threaded tokio LocalSet runtime.
@@ -249,70 +381,146 @@ fn spawn_agent_thread_direct(
                 let client_tx = channel.tx.clone();
                 let mut agent = spawn_agent(client_tx)?;
 
-                // Keep the same catalog reloader and narrow project watches as
-                // the leader. Wire cwd registration before accepting sessions.
+                // Install path updates before the gateway can accept sessions.
+                // They stay queued until blocking config watcher registration
+                // completes and the LocalSet starts its consumer.
                 let (config_update_tx, mut config_update_rx) =
                     tokio::sync::mpsc::unbounded_channel();
                 let project_watch_enabled = shell::util::config::resolve_mcp_recursive_config_watch(
                     shell::config::load_from_disk().ok().as_ref(),
                 );
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let _config_watcher = shell::config::reloader::start_config_reload(
-                    &shell::util::grow_home::grow_home(),
-                    &[],
-                    project_watch_enabled.then_some(cwd.as_path()),
-                    None,
-                    config_update_tx,
-                    experimental_memory,
-                    no_memory,
-                    cancel.clone(),
-                ).map(|watcher| {
-                    let watcher = Rc::new(std::cell::RefCell::new(watcher));
-                    if project_watch_enabled {
-                        let (path_tx, mut path_rx) = tokio::sync::mpsc::unbounded_channel();
-                        agent.set_config_watcher_path_tx(path_tx);
-                        let watcher_for_paths = watcher.clone();
-                        let cancel_paths = cancel.clone();
-                        tokio::task::spawn_local(async move {
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    _ = cancel_paths.cancelled() => break,
-                                    path = path_rx.recv() => match path {
-                                        Some(update) => watcher_for_paths.borrow_mut().apply_session_update(update),
-                                        None => break,
-                                    },
-                                }
-                            }
-                        });
-                    }
-                    watcher
-                });
+                let config_path_rx = if project_watch_enabled {
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    agent.set_config_watcher_path_tx(tx);
+                    Some(rx)
+                } else {
+                    None
+                };
                 let agent_rc = Rc::new(agent);
                 let gw_rx = AcpGatewayReceiver::new(channel.rx, agent_rc.clone()).with_tracing(true);
-                tokio::task::spawn_local(gw_rx.run());
-                if _config_watcher.is_some() {
-                    let agent = agent_rc.clone();
-                    let cancel_updates = cancel.clone();
-                    tokio::task::spawn_local(async move {
+                let mut gateway_task = tokio::task::spawn_local(gw_rx.run());
+                let mut watcher_tasks = Vec::new();
+
+                let watcher_home = shell::util::grow_home::grow_home();
+                let watcher_cancel = cancel.clone();
+                let watcher_cwd = project_watch_enabled.then_some(cwd);
+                let startup_config_update_tx = config_update_tx.clone();
+                let config_registration = tokio::task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    block_watcher_registration_for_test(
+                        &watcher_home,
+                        WatcherRegistrationKind::Config,
+                    );
+                    shell::config::reloader::start_config_reload(
+                        &watcher_home,
+                        &[],
+                        watcher_cwd.as_deref(),
+                        None,
+                        config_update_tx,
+                        experimental_memory,
+                        no_memory,
+                        watcher_cancel,
+                    )
+                });
+                let config_result = race_gateway_with_registration(
+                    &mut gateway_task,
+                    shell::agent::app::finish_blocking_registration(
+                        config_registration,
+                        &cancel,
+                    ),
+                )
+                .await;
+                let config_watcher = match config_result {
+                    GatewayRegistrationRace::Gateway(result) => {
+                        stop_watchers_and_flush(&agent_rc, &cancel, &mut watcher_tasks).await;
+                        result?;
+                        return Ok(());
+                    }
+                    GatewayRegistrationRace::Registration(Ok(Some(watcher))) => watcher,
+                    GatewayRegistrationRace::Registration(Ok(None)) => {
+                        cancel_gateway_and_flush(
+                            &mut gateway_task,
+                            &agent_rc,
+                            &cancel,
+                            &mut watcher_tasks,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    GatewayRegistrationRace::Registration(Err(error)) => {
+                        cancel_gateway_and_flush(
+                            &mut gateway_task,
+                            &agent_rc,
+                            &cancel,
+                            &mut watcher_tasks,
+                        )
+                        .await;
+                        return Err(error.into());
+                    }
+                };
+                let _config_watcher = if let Some(watcher) = config_watcher {
+                    Some(Rc::new(std::cell::RefCell::new(watcher)))
+                } else {
+                    None
+                };
+
+                // Start config processing as soon as its watcher is ready.
+                // Skills watcher registration is an independent blocking OS
+                // call and must not pause MCP catalog or policy hot reloads.
+                if let (Some(watcher), Some(mut path_rx)) =
+                    (_config_watcher.as_ref(), config_path_rx)
+                {
+                    while let Ok(update) = path_rx.try_recv() {
+                        watcher.borrow_mut().apply_session_update(update);
+                    }
+                    let watcher_for_paths = watcher.clone();
+                    let cancel_paths = cancel.clone();
+                    watcher_tasks.push(tokio::task::spawn_local(async move {
                         loop {
-                            let update = tokio::select! {
+                            tokio::select! {
                                 biased;
-                                _ = cancel_updates.cancelled() => break,
-                                update = config_update_rx.recv() => match update {
-                                    Some(update) => update,
+                                _ = cancel_paths.cancelled() => break,
+                                path = path_rx.recv() => match path {
+                                    Some(update) => watcher_for_paths.borrow_mut().apply_session_update(update),
                                     None => break,
                                 },
-                            };
-                            let Some(request) = config_reload_request(update) else { continue };
-                            if let Err(error) = shell::extensions::session_admin::handle(&agent, &request).await {
-                                tracing::warn!(error = ?error, "failed to apply in-process config reload");
                             }
                         }
-                    });
+                    }));
                 }
 
-                let _skills_watcher = {
+                let agent_for_updates = agent_rc.clone();
+                let cancel_updates = cancel.clone();
+                watcher_tasks.push(tokio::task::spawn_local(async move {
+                    loop {
+                        let update = tokio::select! {
+                            biased;
+                            _ = cancel_updates.cancelled() => break,
+                            update = config_update_rx.recv() => match update {
+                                Some(update) => update,
+                                None => break,
+                            },
+                        };
+                        if let Err(error) = apply_config_update(&agent_for_updates, update).await {
+                            tracing::warn!(error = ?error, "failed to apply in-process config reload");
+                        }
+                    }
+                }));
+                let _ = startup_config_update_tx.send(
+                    shell::config::reloader::ConfigUpdate::McpCatalogChanged {
+                        project_root: None,
+                    },
+                );
+
+                #[cfg(test)]
+                let skills_home = shell::util::grow_home::grow_home();
+                let skills_registration = tokio::task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    block_watcher_registration_for_test(
+                        &skills_home,
+                        WatcherRegistrationKind::Skills,
+                    );
                     let cwd = std::env::current_dir().unwrap_or_default();
                     let workspace_user_dir =
                         agent::prompt::workspace_user::optional_workspace_user_dir();
@@ -321,30 +529,71 @@ fn spawn_agent_thread_direct(
                         workspace_user_dir.as_deref(),
                         &skills_paths,
                     )
-                    .map(|(mut watcher, mut skills_rx)| {
-                        let agent = agent_rc.clone();
-                        tokio::task::spawn_local(async move {
-                            while let Some(change) = skills_rx.recv().await {
-                                watcher.refresh_new_discovery_dirs();
-                                match change {
-                                    shell::config::watcher::DiscoveryChange::Skills => {
-                                        tracing::info!(
-                                            "skill directory changed on disk; reloading skills for all sessions"
-                                        );
-                                        agent.reload_skills_all_sessions();
-                                    }
-                                    shell::config::watcher::DiscoveryChange::Workflows => {
-                                        tracing::info!(
-                                            "workflow directory changed on disk; re-advertising commands for all sessions"
-                                        );
-                                        agent.advertise_commands_all_sessions();
-                                    }
+                });
+                let skills_result = race_gateway_with_registration(
+                    &mut gateway_task,
+                    shell::agent::app::finish_blocking_registration(skills_registration, &cancel),
+                )
+                .await;
+                let skills_watcher = match skills_result {
+                    GatewayRegistrationRace::Gateway(result) => {
+                        stop_watchers_and_flush(&agent_rc, &cancel, &mut watcher_tasks).await;
+                        result?;
+                        return Ok(());
+                    }
+                    GatewayRegistrationRace::Registration(Ok(Some(watcher))) => watcher,
+                    GatewayRegistrationRace::Registration(Ok(None)) => {
+                        cancel_gateway_and_flush(
+                            &mut gateway_task,
+                            &agent_rc,
+                            &cancel,
+                            &mut watcher_tasks,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    GatewayRegistrationRace::Registration(Err(error)) => {
+                        cancel_gateway_and_flush(
+                            &mut gateway_task,
+                            &agent_rc,
+                            &cancel,
+                            &mut watcher_tasks,
+                        )
+                        .await;
+                        return Err(error.into());
+                    }
+                };
+                if let Some((mut watcher, mut skills_rx)) = skills_watcher {
+                    let agent = agent_rc.clone();
+                    let cancel_skills = cancel.clone();
+                    watcher_tasks.push(tokio::task::spawn_local(async move {
+                        loop {
+                            let change = tokio::select! {
+                                biased;
+                                _ = cancel_skills.cancelled() => break,
+                                change = skills_rx.recv() => match change {
+                                    Some(change) => change,
+                                    None => break,
+                                },
+                            };
+                            watcher.refresh_new_discovery_dirs();
+                            match change {
+                                shell::config::watcher::DiscoveryChange::Skills => {
+                                    tracing::info!(
+                                        "skill directory changed on disk; reloading skills for all sessions"
+                                    );
+                                    agent.reload_skills_all_sessions();
+                                }
+                                shell::config::watcher::DiscoveryChange::Workflows => {
+                                    tracing::info!(
+                                        "workflow directory changed on disk; re-advertising commands for all sessions"
+                                    );
+                                    agent.advertise_commands_all_sessions();
                                 }
                             }
-                        })
-                    })
-                };
-                tokio::task::yield_now().await;
+                        }
+                    }));
+                }
 
                 // Keep running until cancelled, then flush every live session
                 // actor (SessionEnd hooks + memory save) before the LocalSet /
@@ -352,8 +601,20 @@ fn spawn_agent_thread_direct(
                 // only exit cleanly on SessionCommand::Shutdown; without this
                 // flush, /quit and headless quit race process death and skip
                 // SessionEnd. Mirrors leader auto-update / relaunch.
-                cancel.cancelled().await;
-                agent_rc.flush_all_sessions(SESSION_FLUSH_GRACE).await;
+                let gateway_result = tokio::select! {
+                    biased;
+                    result = &mut gateway_task => Some(result),
+                    _ = cancel.cancelled() => None,
+                };
+                cancel.cancel();
+                if gateway_result.is_none() {
+                    gateway_task.abort();
+                    let _ = gateway_task.await;
+                }
+                stop_watchers_and_flush(&agent_rc, &cancel, &mut watcher_tasks).await;
+                if let Some(result) = gateway_result {
+                    result?;
+                }
                 anyhow::Result::Ok(())
             })
         })?)
@@ -400,6 +661,57 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "join must return at its budget, not wait out the worker"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_completion_preempts_blocked_watcher_registration() {
+        struct RegistrationOwner(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for RegistrationOwner {
+            fn drop(&mut self) {
+                if let Some(dropped_tx) = self.0.take() {
+                    let _ = dropped_tx.send(());
+                }
+            }
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_started_tx, gateway_started_rx) = tokio::sync::oneshot::channel();
+                let (gateway_finished_tx, gateway_finished_rx) = tokio::sync::oneshot::channel();
+                let mut gateway = tokio::task::spawn_local(async move {
+                    let _ = gateway_started_tx.send(());
+                    gateway_finished_rx.await.unwrap();
+                });
+                gateway_started_rx.await.unwrap();
+
+                let (registration_started_tx, registration_started_rx) =
+                    tokio::sync::oneshot::channel();
+                let (registration_release_tx, registration_release_rx) = std::sync::mpsc::channel();
+                let (owner_dropped_tx, owner_dropped_rx) = tokio::sync::oneshot::channel();
+                let registration = tokio::task::spawn_blocking(move || {
+                    let _ = registration_started_tx.send(());
+                    registration_release_rx.recv().unwrap();
+                    RegistrationOwner(Some(owner_dropped_tx))
+                });
+                registration_started_rx.await.unwrap();
+
+                gateway_finished_tx.send(()).unwrap();
+
+                let cancel = CancellationToken::new();
+                let outcome = race_gateway_with_registration(
+                    &mut gateway,
+                    shell::agent::app::finish_blocking_registration(registration, &cancel),
+                )
+                .await;
+                assert!(matches!(outcome, GatewayRegistrationRace::Gateway(Ok(()))));
+
+                cancel.cancel();
+                registration_release_tx.send(()).unwrap();
+                owner_dropped_rx
+                    .await
+                    .expect("the blocking registration task must drop its eventual watcher");
+            })
+            .await;
     }
 
     #[test]

@@ -75,7 +75,7 @@ impl fmt::Display for LineRange {
     }
 }
 
-/// Semantic class of a verb-groupable (non-destructive) run member, naming
+/// Semantic class of an activity member, naming
 /// what a folded run of consecutive rows touched: "Read 3 files", "Searched
 /// 4 patterns". Most kinds classify tool blocks via
 /// [`ToolCallBlock::verb_group_kind`]; `Subagent` classifies subagent
@@ -96,15 +96,13 @@ pub enum VerbGroupKind {
     IntegrationSearch,
     /// Subagent lifecycle rows (`RenderBlock::Subagent`).
     Subagent,
-    /// Shell commands. Label-only: commands never fold eagerly
-    /// ([`ToolCallBlock::verb_group_kind`] excludes them), but a truncation
-    /// header describing hidden rows buckets them ("Ran 6 commands").
+    /// Shell command calls.
     Command,
-    /// File edits. Label-only, like [`Self::Command`].
+    /// File edit calls.
     EditFile,
-    /// MCP tool dispatches (`use_tool`). Label-only, like [`Self::Command`].
+    /// MCP tool dispatches (`use_tool`).
     McpCall,
-    /// Unclassified tools. Label-only, like [`Self::Command`].
+    /// Unclassified tool calls.
     OtherTool,
 }
 
@@ -282,7 +280,8 @@ impl BlockContent for ToolCallBlock {
     }
 
     fn is_groupable(&self) -> bool {
-        !matches!(self, Self::Other(block) if block.coordination.is_some())
+        !matches!(self, Self::Skill(_) | Self::Lifecycle(_))
+            && !matches!(self, Self::Other(block) if block.coordination.is_some())
     }
 
     fn image_references(&self) -> &[crate::prompt_images::ScrollbackImageRef] {
@@ -596,47 +595,28 @@ impl ToolCallBlock {
         }
     }
 
-    /// Verb-group kind; `None` renders standalone and splits verb-group runs
-    /// (still dense-packs via `is_groupable`).
+    /// Activity bucket. Tool identity affects the summary, never the run's
+    /// boundary. Skills and independent lifecycle/coordination rows stay visible.
     pub fn verb_group_kind(&self) -> Option<VerbGroupKind> {
         match self {
-            ToolCallBlock::Read(_) => Some(VerbGroupKind::File),
-            ToolCallBlock::ListDir(_) => Some(VerbGroupKind::Dir),
-            ToolCallBlock::Search(_) => Some(VerbGroupKind::Search),
-            ToolCallBlock::WebFetch(_) => Some(VerbGroupKind::WebFetch),
-            ToolCallBlock::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
-            ToolCallBlock::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
-            // Preserve each skill's identity, status, and expandable body.
-            ToolCallBlock::Skill(_) => None,
-            ToolCallBlock::Execute(_)
-            | ToolCallBlock::Edit(_)
-            | ToolCallBlock::UseTool(_)
-            | ToolCallBlock::Other(_)
-            | ToolCallBlock::Lifecycle(_) => None,
+            Self::Read(_) => Some(VerbGroupKind::File),
+            Self::ListDir(_) => Some(VerbGroupKind::Dir),
+            Self::Search(_) => Some(VerbGroupKind::Search),
+            Self::WebFetch(_) => Some(VerbGroupKind::WebFetch),
+            Self::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
+            Self::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
+            Self::Execute(_) => Some(VerbGroupKind::Command),
+            Self::Edit(_) => Some(VerbGroupKind::EditFile),
+            Self::UseTool(_) => Some(VerbGroupKind::McpCall),
+            Self::Other(b) => (b.coordination.is_none() && b.immutable_event_id().is_none())
+                .then_some(VerbGroupKind::OtherTool),
+            Self::Skill(_) | Self::Lifecycle(_) => None,
         }
     }
 
-    /// Bucket identity for aggregated header LABELS. Superset of
-    /// [`Self::verb_group_kind`]: the action kinds excluded from eager verb
-    /// folding still get a bucket when a truncation header describes the
-    /// rows it hides. `None` only for lifecycle chrome, which is never
-    /// worth labeling. Variants are listed explicitly so a new
-    /// `ToolCallBlock` variant must decide here too.
+    /// The same vocabulary describes activity groups and legacy dense folds.
     pub fn label_kind(&self) -> Option<VerbGroupKind> {
-        match self {
-            ToolCallBlock::Execute(_) => Some(VerbGroupKind::Command),
-            ToolCallBlock::Edit(_) => Some(VerbGroupKind::EditFile),
-            ToolCallBlock::UseTool(_) => Some(VerbGroupKind::McpCall),
-            ToolCallBlock::Other(b) => b.coordination.is_none().then_some(VerbGroupKind::OtherTool),
-            ToolCallBlock::Lifecycle(_) => None,
-            ToolCallBlock::Read(_)
-            | ToolCallBlock::ListDir(_)
-            | ToolCallBlock::Search(_)
-            | ToolCallBlock::WebFetch(_)
-            | ToolCallBlock::IntegrationSearch(_)
-            | ToolCallBlock::MemorySearch(_)
-            | ToolCallBlock::Skill(_) => self.verb_group_kind(),
-        }
+        self.verb_group_kind()
     }
 }
 
@@ -742,12 +722,11 @@ mod tests {
                 ToolCallBlock::WebFetch(_) => Some(VerbGroupKind::WebFetch),
                 ToolCallBlock::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
                 ToolCallBlock::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
-                ToolCallBlock::Skill(_) => None,
-                ToolCallBlock::Execute(_)
-                | ToolCallBlock::Edit(_)
-                | ToolCallBlock::UseTool(_)
-                | ToolCallBlock::Other(_)
-                | ToolCallBlock::Lifecycle(_) => None,
+                ToolCallBlock::Execute(_) => Some(VerbGroupKind::Command),
+                ToolCallBlock::Edit(_) => Some(VerbGroupKind::EditFile),
+                ToolCallBlock::UseTool(_) => Some(VerbGroupKind::McpCall),
+                ToolCallBlock::Other(_) => Some(VerbGroupKind::OtherTool),
+                ToolCallBlock::Skill(_) | ToolCallBlock::Lifecycle(_) => None,
             };
             assert_eq!(block.verb_group_kind(), expected, "block: {block:?}");
         }

@@ -1172,7 +1172,7 @@ User and model skill publication SHALL check existing context using ChatState's 
 
 ### Requirement: Cold context pressure follows portable replay
 
-When cold restoration starts a new native continuation lane, ChatState SHALL initialize context pressure from the provider-neutral portable history that this lane can replay, without counting omitted historical reasoning. It SHALL retain the raw Surface estimate separately as the signed mutation baseline. The first real request SHALL add its current request envelope through the existing projection path, and later provider observations SHALL remain authoritative anchors. Initialization SHALL NOT delete history, start provider work, fabricate usage, or clamp genuine overflow to the model window.
+When cold restoration starts a new native continuation lane, ChatState SHALL initialize context pressure from the provider-neutral portable history that this lane can replay, without counting omitted historical reasoning. It SHALL retain effective input and request-envelope estimates in the same coordinate. The first real request SHALL add its current request envelope through the existing projection path, and later provider observations SHALL remain authoritative anchors. Initialization SHALL NOT delete history, start provider work, fabricate usage, or clamp genuine overflow to the model window.
 
 #### Scenario: Resume retains reasoning that is omitted from replay
 
@@ -1188,3 +1188,155 @@ When cold restoration starts a new native continuation lane, ChatState SHALL ini
 
 - **WHEN** portable replay itself exceeds the configured model window
 - **THEN** the restored context count remains above the window rather than being clipped for display.
+
+#### Scenario: Restored active Goal is visible before the first request
+- **WHEN** 冷恢复的控制授权为 Goal 模式且目标状态 Active，尚未发出模型请求
+- **THEN** 首次上下文快照保留匹配该 id/revision 的最新指令，shadow 其他指令；不通过历史最后 tag 猜授权，不启动 provider；已完成/暂停/缺失目标不保留活动指令。
+
+#### Scenario: Recovery reconciliation pauses the Goal
+- **WHEN** 初始持久 Goal 为 Active，但恢复协调因执行条件不可用将其暂停
+- **THEN** 会话暴露和首次请求前的最终压力按暂停后的授权重新同步，不残留活动 scope。
+
+### Requirement: Rewind and route replacement rebase context pressure to portable replay
+
+After a durable conversation rewind or a sampling route replacement, ChatState SHALL initialize context pressure and request-estimate baselines from the new continuation lane's portable history, using any portable reasoning rule retained by that lane. It SHALL publish the resulting pressure before a new provider request. Raw retained reasoning omitted by replay and the previous branch or route's provider anchor SHALL NOT inflate the new count. Subsequent mutations and request envelopes SHALL use effective input estimates with same-route provider calibration, without raw Surface delta adjustments.
+
+This initialization SHALL NOT change cumulative consumption or durable conversation content, start provider work, or clamp genuine portable overflow. Failed rewind SHALL NOT reset pressure. Ordinary sampling parameter updates and non-rewind compaction SHALL retain their existing provider-anchor behavior.
+
+#### Scenario: Rewind crosses compaction before switching models
+
+- **WHEN** rewind restores pre-compaction history with large reasoning omitted by portable replay and the user then replaces the model route
+- **THEN** rewind and route replacement each publish portable context pressure, preserving original history, and the first and repeated requests do not reintroduce the omitted reasoning.
+
+#### Scenario: Route replacement invalidates the previous provider anchor
+
+- **WHEN** the selected provider, model or backend route is replaced after a provider context observation
+- **THEN** the counter immediately reflects portable history before the first new request, and later provider observations calibrate it normally.
+
+#### Scenario: Portable content really exceeds the new window
+
+- **WHEN** portable history itself exceeds the new model's context window
+- **THEN** the count remains above that window rather than being capped for display.
+
+#### Scenario: Failed rewind and ordinary configuration updates
+
+- **WHEN** rewind is rejected or cannot durably commit, or only same-route sampling parameters change
+- **THEN** the current context pressure and provider calibration remain intact.
+
+### Requirement: Context mutations use effective request estimates
+ChatState SHALL compute context pressure from the effective current request input estimate with the current route's provider calibration. Raw Surface content omitted from replay SHALL NOT be subtracted from provider-visible pressure. Surface mutation, request assembly, native reset and learned reasoning changes SHALL preserve this coordinate; repeated request projection SHALL be idempotent. Route replacement and rewind SHALL reset calibration; other replacements SHALL retain valid same-route calibration. Failed durable writes SHALL NOT publish changed pressure. Lifetime usage SHALL remain independent.
+
+#### Scenario: Compaction removes mostly omitted reasoning
+- **WHEN** raw removed history exceeds the current pressure while portable retained history is nonempty
+- **THEN** pressure reflects retained effective content and overhead without an intermediate saturated subtraction, and a later request cannot recover phantom tokens.
+
+#### Scenario: Explicit request projection changes
+- **WHEN** an image route invalidates cached selection, native continuation resets, or portable reasoning replay changes
+- **THEN** context pressure is recomputed immediately and a changed count is published before another request is built.
+
+#### Scenario: Projection and mutation boundaries
+- **WHEN** append, pruning, image projection, repair, schema changes or repeated builds alter the effective request
+- **THEN** changed content is counted once, omitted history stays omitted, and valid provider overhead is preserved.
+
+#### Scenario: Active Goal projection survives image cache invalidation
+- **WHEN** 当前请求保留活动 Goal 的长指令，模型路由或图片缓存变化但 Goal 授权范围未变化
+- **THEN** 重算压力仍保留当前 Goal 指令并 shadow 已过期指令；不能因图片缓存被清除而遗漏当前指令；随后构建相同作用域请求时计数保持一致。
+
+#### Scenario: Complete provider context is lower than the heuristic
+- **WHEN** 已接纳响应提供完整可信 context count，数值低于当前有效本地估值
+- **THEN** 压力精确接纳该锚点，消费账本不因此改写；后续追加按本地增量计入，缩小 footprint 按当前校准参考比例重算，不以负差分饱和丢失保留内容；重复 build 不重复调整。
+
+#### Scenario: Low provider calibration survives multiple compactions and regrowth
+- **WHEN** 低值provider锚点后执行多次合法压缩、增长和重复请求构建
+- **THEN** 各次变化使用最新滚动参考，追加计入完整本地增量，正的保留footprint不被负差分算成零，重复构建和失败写入不重复调整，累计消费不变。
+
+#### Scenario: Restored Goal crosses route and rewind in either order
+- **WHEN** 冷恢复的当前Goal授权不变，模型切换与用户rewind先后请求，历史含其他Goal标签
+- **THEN** 用户入口按既有Goal约束拒绝rewind并保留历史/压力；新lane清旧校准但按当前授权投影。独立的内部durable历史重放不能从恢复的旧标签激活旧Goal。
+
+#### Scenario: Clearing a restored Goal updates pressure before route or rewind
+- **WHEN** 冷恢复后 `/goal clear` 已持久化并清除运行时授权，随后切模型或用户 rewind
+- **THEN** 在下一次请求构建或命令状态公布之前，ChatState 作用域同步为 None；恢复到历史 Goal 标签不重新激活授权，累计消费保持不变；clear 的持久化失败不清除原授权和投影。
+
+### Requirement: Known input overflow cannot bypass provider admission
+Before ordinary provider dispatch the Session SHALL check the current calibrated input pressure plus the actual explicit output limit against its current configured window independently of auto-compaction suppression and task output budgeting. Model-switch compaction errors SHALL propagate through existing cancellation and failure boundaries rather than authorize sampling. Automatic recovery MAY attempt existing bounded compaction; a still oversized request SHALL fail without provider dispatch.
+
+#### Scenario: Smaller model and failed compaction
+- **WHEN** 600K context on a 1M model switches to a 500K model and compaction fails or leaves a known overflow
+- **THEN** the turn fails without sending the ordinary oversized request, even if compaction suppression is active.
+
+#### Scenario: Suppression or child budget disables automatic compaction
+- **WHEN** a fully projected ordinary request exceeds its configured window and automatic compaction is unavailable
+- **THEN** provider dispatch is rejected while existing history and usage remain intact.
+#### Scenario: Explicit output limit consumes the same window for ordinary and skill requests
+- **WHEN** 普通或带技能请求的校准输入符合窗口，但加上 task clamp 后实际显式输出上限会超过总窗口
+- **THEN** 两者均按同一总预算准入，无法恢复时在 provider 派发前拒绝；相等边界可发送；不添加未声明的固定输出预留或额外 256。
+
+#### Scenario: Provider output limit is implicit
+- **WHEN** 请求未设置显式输出上限且路由未提供该上限
+- **THEN** 最终准入检查已知输入，不虚构某后端的默认输出值；本地无法据此保证未知输出预算。
+
+#### Scenario: Explicit output overflow enters existing automatic precompaction
+- **WHEN** 已投影输入低于普通压缩阈值但加实际显式输出预留超过窗口，输出预留小于窗口且既有自动压缩准入允许
+- **THEN** 先跨闭合Step边界执行一次有界预压缩，prune和图片重投影按相同总预算复核；重新投影后只有总需求符合窗口才发送普通请求。
+
+#### Scenario: One compaction cannot fit the reserved output
+- **WHEN** 为输出预留触发的压缩或后台提升已完成，但总需求仍超窗
+- **THEN** 保留已提交压缩及其Completed，结束本轮且不派发普通请求，不反复重发摘要；自动恢复被抑制或受子任务输出规则禁用时仍由最终准入拒绝。
+
+### Requirement: Side question work follows its response receiver
+
+A `/btw` side-question execution SHALL remain active only while its response receiver is open. Closing the receiver before execution starts SHALL prevent the question from starting; closing it during context preparation, Sideband execution, provider work, or retry backoff SHALL cancel the in-flight question. Cancellation SHALL release its execution ownership and preserve existing Sideband usage settlement and terminal cleanup. Session-level Sideband cancellation SHALL retain its existing behavior.
+
+#### Scenario: Receiver closes before the worker starts
+
+- **WHEN** a SideQuestion command's response receiver closes before its detached worker is first polled
+- **THEN** the worker does not start context or provider work and creates no Sideband
+
+#### Scenario: Receiver closes during side-question work
+
+- **WHEN** the response receiver closes while the question is waiting or executing
+- **THEN** the in-flight future is dropped, its Sideband-owned admitted usage is settled and terminal cleanup proceeds, with no further retry or provider work
+
+#### Scenario: Session cancellation remains effective
+
+- **WHEN** the caller still awaits the answer but the owning session cancels Sideband work
+- **THEN** the question follows the existing session cancellation path and returns its existing cancellation failure when the receiver remains open
+
+### Requirement: Durable control transitions update Goal request scope atomically
+A Session control transition SHALL publish its authorized Goal request scope through the same ChatState durable commit boundary as its Control fact. Scope SHALL follow active Goal identity/revision and selected Behavior before another request or context advertisement. Failed Control writes SHALL NOT publish a changed scope or pressure; route changes SHALL retain the current committed scope while clearing provider calibration. Lifetime usage SHALL remain unchanged.
+
+#### Scenario: Stop or leave the active Goal
+- **WHEN** pause, completion, budget stop, clear or a Behavior transition durably removes active Goal authorization
+- **THEN** pressure before the next request uses no active Goal scope, without a transient old-scope update from the new Control content.
+
+#### Scenario: Restart or change definition
+- **WHEN** a durable Control activates a Goal or changes its active definition revision
+- **THEN** the new tag governs context projection before the next build and survives model-route replacement.
+
+#### Scenario: Persistence does not confirm control
+- **WHEN** a proposed Control fails validation or durable persistence
+- **THEN** no changed request scope/pressure is published; permanent storage failure retains existing owner shutdown and cold recovery semantics.
+
+#### Scenario: Request projection overlaps a Goal control
+- **WHEN** Goal scope capture and ChatState request preparation overlap a pause, clear or definition transition
+- **THEN** the same existing Step control gate serializes scope capture with preparation so an older captured tag cannot overwrite the committed Control scope after an asynchronous image-mode query.
+
+### Requirement: Local OCR owns its helper process tree
+
+Local OCR SHALL execute its helper in a process group/job whose lifetime is owned by the OCR operation. Timeout, cancellation, dropping the operation, or normal completion SHALL terminate any remaining helper descendants. The direct helper SHALL retain the existing kill-on-drop and wait/reap behavior; normal completion SHALL preserve bounded input/output behavior and recognized text.
+
+#### Scenario: OCR operation is cancelled
+
+- **WHEN** the caller cancels or drops local OCR while its helper is running
+- **THEN** the helper process group/job is terminated, including descendants, and the direct child remains subject to the existing wait/reap behavior
+
+#### Scenario: OCR deadline expires
+
+- **WHEN** the local OCR deadline expires while the helper or a descendant is keeping the operation pending
+- **THEN** the owned process group/job is terminated and the caller receives the existing timeout result
+
+#### Scenario: OCR completes with a detached descendant
+
+- **WHEN** the direct helper returns valid text while a descendant remains in the process group with its output pipes closed
+- **THEN** local OCR returns the recognized text and terminates the remaining process group before releasing ownership

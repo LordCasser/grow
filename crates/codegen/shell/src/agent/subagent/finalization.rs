@@ -275,7 +275,7 @@ async fn advance(
                             &parent_session_id,
                             spawn_seq,
                             &spawn_for_worker,
-                            fallback,
+                            Some(fallback),
                             &opened,
                             &storage,
                             Some(deadline),

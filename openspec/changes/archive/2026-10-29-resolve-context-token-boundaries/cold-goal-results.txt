@@ -1,0 +1,7 @@
+
+running 2 tests
+test session::actor::tests::cold_goal_pressure_tests::cold_goal_pressure_is_initialized_before_first_advertisement ... ok
+test session::actor::tests::cold_goal_pressure_tests::cold_goal_scope_reconciles_runtime_pause_before_advertisement ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4401 filtered out; finished in 0.69s
+

@@ -4,6 +4,19 @@
 use super::*;
 use futures_util::FutureExt as _;
 
+async fn deliver_side_question<F>(
+    mut respond_to: tokio::sync::oneshot::Sender<Result<String, crate::session::SideQuestionError>>,
+    question: F,
+) where
+    F: std::future::Future<Output = Result<String, crate::session::SideQuestionError>>,
+{
+    tokio::select! {
+        biased;
+        _ = respond_to.closed() => {}
+        result = question => { let _ = respond_to.send(result); }
+    }
+}
+
 /// Returns the authoritative mode only when the manager accepted a real
 /// transition. Callers pass the post-clamp read-back, never the request.
 pub(super) fn permission_mode_change(
@@ -2714,8 +2727,8 @@ pub(super) async fn run_session(
                         };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
-                            let result = s.handle_side_question(&question).await;
-                            let _ = respond_to.send(result);
+                            deliver_side_question(respond_to, s.handle_side_question(&question))
+                                .await;
                         });
                     }
                     SessionCommand::RunCoordinationInquiry { inquiry } => {
@@ -2945,4 +2958,57 @@ pub(super) async fn run_session(
         }
     };
     finish_graceful_shutdown(&session, &mut replay_buffer, &mut cmd_rx, shutdown).await;
+}
+
+#[cfg(test)]
+mod side_question_lifecycle_tests {
+    use super::deliver_side_question;
+
+    #[tokio::test]
+    async fn closed_receiver_prevents_question_from_being_polled() {
+        let (respond_to, receiver) = tokio::sync::oneshot::channel();
+        drop(receiver);
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let question_polls = polls.clone();
+        let question = std::future::poll_fn(move |_| {
+            question_polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::task::Poll::<Result<String, crate::session::SideQuestionError>>::Pending
+        });
+
+        deliver_side_question(respond_to, question).await;
+
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn closed_receiver_drops_running_question_future() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (respond_to, receiver) = tokio::sync::oneshot::channel();
+                let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+                let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let question_dropped = dropped.clone();
+                let question = async move {
+                    struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                    impl Drop for DropSignal {
+                        fn drop(&mut self) {
+                            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+
+                    let _drop_signal = DropSignal(question_dropped);
+                    let _ = started_tx.send(());
+                    std::future::pending::<Result<String, crate::session::SideQuestionError>>()
+                        .await
+                };
+                let worker = tokio::task::spawn_local(deliver_side_question(respond_to, question));
+
+                started_rx.await.unwrap();
+                drop(receiver);
+                worker.await.unwrap();
+
+                assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+            })
+            .await;
+    }
 }

@@ -1,0 +1,7 @@
+
+running 2 tests
+test session::actor::tests::compaction_pre_prune_tests::compaction_repromotion_tests::dropped_promotion_waiter_can_await_the_same_generation_again ... ok
+test session::actor::tests::compaction_pre_prune_tests::compaction_repromotion_tests::cancelled_generation_cannot_publish_when_promoted_again ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4389 filtered out; finished in 0.14s
+

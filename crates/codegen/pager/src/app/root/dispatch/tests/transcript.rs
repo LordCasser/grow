@@ -300,6 +300,8 @@ fn make_test_jpeg(width: u32, height: u32) -> Vec<u8> {
 
 #[test]
 fn open_block_viewer_on_group_header_toggles_group() {
+    // The dense fallback retains its independent synthetic collapse header.
+    crate::appearance::cache::set_group_tool_verbs(false);
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {

@@ -65,6 +65,7 @@ fn compute_layouts(
                 .desired_height(entry_width);
             EntryLayoutInfo {
                 height,
+                unfolded_height: height,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,

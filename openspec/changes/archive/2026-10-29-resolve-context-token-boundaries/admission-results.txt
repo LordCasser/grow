@@ -1,0 +1,10 @@
+
+running 5 tests
+test session::actor::tests::compaction_pre_prune_tests::pressure_admission::context_admission_accepts_exact_fit_and_does_not_guess_unset_output ... ok
+test session::actor::tests::compaction_pre_prune_tests::pressure_admission::explicit_output_limit_blocks_ordinary_request_before_provider_dispatch ... ok
+test session::actor::tests::compaction_pre_prune_tests::pressure_admission::same_model_window_reduction_rejects_known_pressure_before_provider_dispatch ... ok
+test session::actor::tests::compaction_pre_prune_tests::pressure_admission::task_output_budget_disables_compaction_but_known_pressure_still_blocks_provider ... ok
+test session::actor::tests::compaction_pre_prune_tests::pressure_admission::task_output_clamp_is_the_output_reserve_used_for_admission ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 4393 filtered out; finished in 0.63s
+

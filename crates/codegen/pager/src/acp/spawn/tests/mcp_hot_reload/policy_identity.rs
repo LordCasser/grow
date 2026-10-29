@@ -1,6 +1,7 @@
 use super::*;
 
-async fn wait_enabled(tx: &AcpAgentTx, session: &str, name: &str, enabled: bool) {
+pub(super) async fn wait_enabled(tx: &AcpAgentTx, session: &str, name: &str, enabled: bool) {
+    let mut last_catalog = Value::Null;
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let list = mcp_list(tx, session).await;
@@ -14,11 +15,14 @@ async fn wait_enabled(tx: &AcpAgentTx, session: &str, name: &str, enabled: bool)
             }) {
                 return;
             }
+            last_catalog = list;
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
     })
     .await
-    .expect("tool enable policy did not converge");
+    .unwrap_or_else(|_| {
+        panic!("tool enable policy did not converge; last catalog: {last_catalog:#}")
+    });
 }
 
 async fn wait_slow_call(tx: &AcpAgentTx, session: &str, server: &str, success: bool) {

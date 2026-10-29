@@ -1205,17 +1205,38 @@ fn handle_session_notification_inner(
                         is_background,
                     )
                     .with_event_id(meta.event_id.clone());
-                    let outcome = agent
-                        .scrollback
-                        .push_block_if_absent(RenderBlock::Subagent(block));
-                    if !outcome.inserted {
-                        tracing::debug!(
-                            child_session_id = %child_session_id,
-                            "reused replayed SubagentStarted row by immutable event id"
-                        );
-                    }
+                    let existing_id = (meta.is_replay && meta.event_id.is_none())
+                        .then(|| {
+                            agent.scrollback.iter_entries().find_map(|(entry_id, entry)| {
+                                matches!(
+                                    &entry.block,
+                                    RenderBlock::Subagent(existing)
+                                        if existing.child_session_id == child_session_id
+                                            && matches!(
+                                                &existing.kind,
+                                                crate::scrollback::blocks::SubagentBlockKind::Started
+                                            )
+                                )
+                                .then_some(entry_id)
+                            })
+                        })
+                        .flatten();
+                    let entry_id = if let Some(entry_id) = existing_id {
+                        entry_id
+                    } else {
+                        let outcome = agent
+                            .scrollback
+                            .push_block_if_absent(RenderBlock::Subagent(block));
+                        if !outcome.inserted {
+                            tracing::debug!(
+                                child_session_id = %child_session_id,
+                                "reused replayed SubagentStarted row by immutable event id"
+                            );
+                        }
+                        outcome.entry_id
+                    };
                     if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
-                        info.scrollback_entry_id = Some(outcome.entry_id);
+                        info.scrollback_entry_id = Some(entry_id);
                         if !meta.is_replay {
                             info.is_background = is_background;
                         }

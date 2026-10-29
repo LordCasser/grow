@@ -4293,24 +4293,31 @@ Pager SHALL complete every delivered historical assistant/thinking source, inclu
 - **THEN** rendered content, links, source maps and logical selection/entry anchors stay equivalent to eager processing; estimates do not change merely because a cache was warmed, and normal input remains governed by the existing full-history load boundary.
 
 ### Requirement: Descendant restoration reuses only boundary-bound validated facts
-
-Session load MAY reuse root child-ownership facts already validated for the same session and history frontier, and MAY derive descendant ownership and ordered lifecycle/control presentation from the same validated read. Reuse SHALL NOT infer authority from UI rows, cross session/load boundaries or bypass storage identity, complete record validation and child ownership checks. Missing reuse data SHALL NOT establish an empty verified tree. Restoration SHALL preserve source-local replay identities, child identity/CWD/worktree/control semantics, history order and the existing full-history readiness barrier without pagination or background history restoration.
+Session load MAY reuse root child-ownership facts already validated for the same session and history frontier, and MAY derive descendant ownership and ordered lifecycle/control presentation from the same validated read. Reuse SHALL NOT infer authority from UI rows, cross session/load boundaries or bypass storage identity, complete record validation, immediate parent/child canonical Seed/Result link checks, and child ownership checks. Lifecycle presentation SHALL be applied only when its parent session, subagent identity and child session match the canonical owned spawn for that source. Missing reuse data SHALL NOT establish an empty verified tree. Restoration SHALL preserve source-local replay identities, child identity/CWD/worktree/control semantics, history order and the existing full-history readiness barrier without pagination or background history restoration. Repeating forced restoration SHALL NOT add duplicate task rows for valid lifecycle facts that lack eventId. Restoration remains a presentation projection and SHALL NOT grant child execution or resume authority.
 
 #### Scenario: Root history is reused at its captured frontier
 - **WHEN** a successful load supplies validated ownership facts for its exact root session and emitted history frontier
-- **THEN** descendant restoration uses those facts without rereading the root, and later appends cannot enter that earlier boundary or be confused with an empty result.
+- **THEN** descendant restoration uses those facts without rereading the root, and later appends cannot enter that earlier boundary or be confused with an empty result
 
 #### Scenario: Descendant ownership and control share one read
 - **WHEN** recovery visits a valid child parent containing nested lifecycle and model/Agent control facts
-- **THEN** one complete validated read supplies ownership/enrichment and the ordered source-local projection, preserving identity and preventing duplicate live/replay rows.
+- **THEN** one complete validated read supplies ownership/enrichment and the ordered source-local projection, preserving identity and preventing duplicate live/replay rows
+
+#### Scenario: Lifecycle presentation disagrees with canonical child ownership
+- **WHEN** a descendant replay record names a different parent, subagent identity or child session than the validated canonical spawn
+- **THEN** Pager does not project that lifecycle row or traverse the mismatched child, while unrelated valid child presentation remains available
+
+#### Scenario: Forced restoration repeats an ID-less lifecycle record
+- **WHEN** Pager restores the same canonical child lifecycle more than once and the replayed Spawned record has no eventId
+- **THEN** the existing Started row is reused and no duplicate task row is added
 
 #### Scenario: Reuse is absent, stale or foreign
 - **WHEN** ownership data belongs to another session/load boundary, is malformed, or a required child read/link is missing or conflicting
-- **THEN** recovery does not accept that data as ownership authority or a verified empty tree; it validates through the existing fallback or rejects the affected recovery without fabricating success or releasing input before required history and checks finish.
+- **THEN** recovery does not accept that data as ownership authority or a verified empty tree; it validates through the existing fallback or rejects the affected recovery without fabricating success or releasing input before required history and checks finish
 
 #### Scenario: Optional ownership exceeds the response budget
 - **WHEN** the root ownership projection would exceed the bounded optional response payload
-- **THEN** the server omits the whole optimization and restoration uses the independently validated fallback, without truncating ownership into an incomplete or empty verified tree.
+- **THEN** the server omits the whole optimization and restoration uses the independently validated fallback, without truncating ownership into an incomplete or empty verified tree
 
 ### Requirement: Busy Sampling control terminals release matching model projections
 
@@ -4371,3 +4378,143 @@ Pager SHALL 通过现有状态栏 `Goal: Done` 点击入口，在 Goal 详情中
 - **THEN** 详情明确说明该 Goal 没有归档的完成报告。
 
 实施入口：`shell/src/session/goal_notification.rs`、`shell/src/session/history/grow_facts.rs`、`pager/src/app/acp_handler/session_notification.rs`、`pager/src/views/goal_detail.rs`。
+
+### Requirement: Continuous tool and Thought activity forms a stable group
+
+终端 SHALL 将连续工具调用与 Thought 按原始时序呈现为可折叠活动组。组边界 SHALL 由对话、Skill 或独立交互记录决定；附着在工具成员上的待响应或 Hook 状态只改变可见性；工具类型、运行或终态、成员展开状态 SHALL NOT 拆分该组。Skill SHALL 保留独立行，并隔开其前后的活动组。纯 Thought 段 SHALL NOT 伪造成工具组；单次工具调用 MAY 保留现有单项动作呈现。真实工具类型 SHALL 来自工具的结构化身份，而非描述推断。失败工具 SHALL 保留在组内并可检查。
+
+#### Scenario: Interleaved tools and Thought remain together
+- **WHEN** 一段连续活动包含 Thought、不同类型的工具调用及其状态更新
+- **THEN** 它们属于同一活动组，按原始事件时序展示；工具种类变化和运行转终态均不拆组或重排成员。
+
+#### Scenario: Leading or trailing Thought retains the activity identity
+- **WHEN** 工具活动以 Thought 开始或结束，且 Thought 正在流式更新、完成或因 `show_thinking_blocks` 被隐藏
+- **THEN** Thought 仍保留在原始时序位置，组首 `EntryId` 与展开状态保持稳定；隐藏 Thought 正文不隐藏组摘要及其展开入口。
+
+#### Scenario: Conversation, Skill, or standalone interaction separates activity
+- **WHEN** 连续活动之间出现新的对话、独立 Skill 行或独立交互边界
+- **THEN** 边界两侧的工具与 Thought 不合并，Skill 仍以独立行及既有身份和结果呈现。
+
+#### Scenario: Thought-only activity has no tool group
+- **WHEN** 连续活动只有 Thought 成员而没有工具调用
+- **THEN** 按 Thought 的既有显示语义呈现，不显示虚构的工具组或工具数量。
+
+#### Scenario: Group summary counts the whole group
+- **WHEN** 活动组折叠，且组成员有一部分被折叠规则隐藏
+- **THEN** 摘要仍覆盖整组成员；工具数量只计算真实工具调用，Thought 不计为工具。
+
+#### Scenario: Failed tool remains inspectable
+- **WHEN** 活动组内的工具调用失败
+- **THEN** 失败状态和可检查内容仍属于原组，不被摘要、折叠或分组更新丢弃。
+
+### Requirement: Activity group folding preserves active and manually revealed content
+
+在 `show_thinking_blocks` 允许显示的前提下，折叠的活动组 SHALL 隐藏已完成 Thought，并保留活跃 Thought/工具预览、用户手动展开的成员、待用户响应内容及 Hook 信息。展开活动组 SHALL 按原始时序显示全部成员，并允许查看单项正文。`show_thinking_blocks` SHALL 保持其既有 Thought 显示语义；组聚合 SHALL NOT 使 Thought 绕过该语义。活动组经 dense truncation 后 SHALL NOT 再按组内成员被二次裁剪。
+
+#### Scenario: Folded group retains active and explicitly revealed items
+- **WHEN** 组处于折叠状态，组内存在活跃成员、用户手动展开的成员，或待响应/Hook 信息
+- **THEN** 对应预览、显式展开成员和交互信息仍可见，已完成且未显式展开的 Thought 正文按折叠规则隐藏。
+
+#### Scenario: Expanded group exposes ordered members and individual bodies
+- **WHEN** 用户展开一个活动组并打开某一成员正文
+- **THEN** 所有成员按原始事件顺序呈现，且该成员正文可查看，不改变其他成员的顺序或身份。
+
+#### Scenario: Thinking blocks remain disabled or enabled as configured
+- **WHEN** `show_thinking_blocks` 禁用或启用 Thought 显示
+- **THEN** 活动分组沿用相同隐藏/显示语义；启用时展开组可查看完整 Thought 内容，切换 Thought 可见性不清除活动组的手动展开状态。
+
+#### Scenario: Dense layout truncation encounters a grouped activity
+- **WHEN** dense layout 对包含多个工具与 Thought 的活动组应用裁剪
+- **THEN** 活动组不会在聚合后再被按成员二次裁剪，组摘要和适用的活跃预览仍可见。
+
+### Requirement: Live activity updates and replay preserve grouping and user expansion
+
+live 与 replay SHALL 基于相同事件序列得出一致的活动分组、原始顺序和组摘要。启用活动聚合时，手动展开工具或 Thought SHALL 不依赖另行开启 `respect_manual_folds`。流式追加、成员完成、工具类型细化及布局 resize SHALL 稳定保留组和成员的手动展开状态，不得因更新而重排成员、拆分组或收起用户已展开的内容。
+
+#### Scenario: Live append and completion retain an expanded group
+- **WHEN** 用户展开活动组后有 Thought/工具事件追加或成员从运行变为终态
+- **THEN** 新成员按原序加入，原组和用户展开状态保持不变。
+
+#### Scenario: Tool identity is refined after its description arrives
+- **WHEN** 工具成员的结构化类型在后续更新中细化
+- **THEN** 只更新该成员的真实工具身份，不改变组边界、工具调用身份、顺序或展开状态。
+
+#### Scenario: Layout resize and replay agree with live presentation
+- **WHEN** 活动组发生布局 resize，或同一事件序列通过 replay 呈现
+- **THEN** resize 不改变分组和手动展开状态；replay 得到与 live 一致的成员顺序、分组和摘要。
+
+### Requirement: Turn termination clears foreground compaction feedback
+Pager SHALL clear foreground compaction live feedback when its turn terminates, in addition to normal compaction terminal handling. Unrelated feedback SHALL remain governed by its own lifecycle.
+
+#### Scenario: Turn fails after compaction started
+- **WHEN** a turn terminates while foreground compaction feedback is still displayed
+- **THEN** the session is idle without stale Compacting feedback and later terminal notifications do not reopen the activity.
+
+### Requirement: Restored usage remains consistent through resume presentation
+冷恢复后的 usage SHALL 从已持久化账本到恢复快照、Pager 累计状态和 usage 分段展示保持一致；旧快照不得回退已展示的消费、完整性、缓存覆盖或恢复分段。
+
+#### Scenario: Durable ledger reaches the resumed client
+- **WHEN** 含多次调用、缓存字段可用性、未知消费与 resume segments 的账本恢复，并发送正常恢复快照
+- **THEN** Pager 状态和 usage lifetime/segments 与该恢复账本一致，不将当前上下文压力当累计消费。
+
+#### Scenario: An earlier snapshot arrives after the restored snapshot
+- **WHEN** 新恢复快照已接纳，来自同一会话的早期延迟 usage 快照随后到达
+- **THEN** 不回退累计消费、缓存覆盖或恢复分段，也不把已知不完整状态伪造成完整。
+
+### Requirement: Pager precise navigation follows visible sticky geometry
+Pager scrollback entry-top and center navigation SHALL account for sticky prompt rows only when the renderer displays sticky headers: sticky headers are enabled and compact prompt mode is off.
+
+#### Scenario: Top navigation with sticky headers disabled
+- **WHEN** Pager navigates an entry to the viewport top while sticky headers are disabled
+- **THEN** the entry is positioned at the viewport top without reserving sticky-header rows
+
+#### Scenario: Center navigation with sticky headers disabled
+- **WHEN** Pager centers an entry while sticky headers are disabled
+- **THEN** the entry is centered against the full viewport without reserving sticky-header rows
+
+#### Scenario: Precise navigation with visible sticky headers
+- **WHEN** Pager navigates an entry with sticky headers enabled and compact prompt mode off
+- **THEN** top navigation places it at the sticky content area's top and center navigation accounts for the displayed header
+
+#### Scenario: Precise navigation with compact prompts
+- **WHEN** Pager navigates an entry while compact prompt mode is active
+- **THEN** top and center navigation use the full viewport because the renderer displays no sticky header
+
+### Requirement: Ready ACP service is not blocked by watcher registration
+
+After a leader publishes readiness, ACP initialization SHALL be able to progress while filesystem watcher registration is pending. Watcher registration SHALL run outside the LocalSet executor. While registration is pending, its Tokio blocking task SHALL own the eventual watcher result. If shutdown begins first, the LocalSet SHALL stop awaiting registration promptly; the blocking task SHALL drop any watcher it later constructs when the OS call returns. The OS registration call itself is not cancellable, so this behavior does not bound blocking-worker or Tokio-runtime shutdown time.
+
+#### Scenario: ACP initialization overlaps slow watcher registration
+
+- **WHEN** the leader is ready and config or skills watch registration has not completed
+- **THEN** the ACP agent and bridges continue to make progress while registration runs on the blocking pool
+
+#### Scenario: Shutdown arrives during watcher registration
+
+- **WHEN** leader cancellation arrives before a blocking watcher constructor returns
+- **THEN** LocalSet startup returns without waiting for the constructor, while its blocking task retains ownership and drops any returned watcher when registration returns
+
+#### Scenario: Stdio agent finishes before skills registration
+
+- **WHEN** the stdio agent I/O task completes while skills watcher registration remains blocked
+- **THEN** the LocalSet returns the agent outcome promptly, while the blocking task retains ownership and drops any eventual watcher when registration returns
+
+#### Scenario: In-process Pager gateway starts before watcher registration
+
+- **WHEN** config or skills watcher registration is still pending in the in-process Pager worker
+- **THEN** the ACP gateway is already polling and can initialize or serve sessions; config cwd path updates remain queued until the config watcher is ready
+
+#### Scenario: Sessions arrive during in-process config watcher registration
+
+- **WHEN** a session is created or a global/project MCP config changes before the in-process worker finishes registering its watchers
+- **THEN** once the config watcher is ready and queued cwd interests are established, one all-session reload is queued through the live config consumer to reconcile each active session from its current effective config and auxiliary tool policy, preserving per-project scope and existing MCP connections for identical config
+
+#### Scenario: Skills registration is blocked while config changes
+
+- **WHEN** the config watcher is ready, skills watcher registration remains blocked, and global or project MCP configuration changes
+- **THEN** the live config consumer applies the change without waiting for skills registration
+
+#### Scenario: In-process worker terminates during watcher startup
+
+- **WHEN** cancellation, a watcher registration error, or gateway completion ends the in-process worker after gateway polling starts
+- **THEN** the worker flushes live session actors before returning, and any still-running blocking registration task retains and drops its eventual watcher result when the OS call returns

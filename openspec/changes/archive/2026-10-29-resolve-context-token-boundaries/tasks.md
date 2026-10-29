@@ -1,0 +1,5 @@
+- [x] 验证并修复低值 provider anchor，覆盖追加/缩小/压缩/重复投影/route reset/零值/累计用量独立。
+- [x] 验证并修复冷恢复 Goal bootstrap 和恢复协调后的暂停状态，首次请求前的快照准确。
+- [x] 统一已校准输入与实际显式输出预留准入，覆盖普通/技能/子任务/None 和精确边界。
+- [x] 跑通真实 ledger restore → AdvertiseCommands → Pager status 与 usage → 旧快照路径并修复反例。
+- [x] 完成跨层回归、生产检查、开发说明、规范归档及构建清理。

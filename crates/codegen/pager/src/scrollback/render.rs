@@ -453,6 +453,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             .with_mouse_pos(mouse_pos)
             .with_group_header_count(entry_layout_info.group_header_count)
             .with_group_collapse_header(entry_layout_info.group_collapse_header)
+            .with_group_member_visible(entry_layout_info.has_group_content())
             .with_group_header_label(header_label.as_ref())
             .with_cwd(cwd);
         renderer.render(entry_content_area, buf);
@@ -512,8 +513,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         // sits above member 0's own content, which stays mapped (selectable
         // like every other member row) one row below.
         let is_group_header = entry_layout_info.is_group_header();
-        let verb_expanded_slot =
-            entry_layout_info.verb_group_header && entry_layout_info.group_collapse_header;
+        let verb_expanded_slot = entry_layout_info.has_group_content();
 
         let mapped_lines = if is_group_header && !verb_expanded_slot {
             &[][..]
@@ -1230,6 +1230,7 @@ mod tests {
                 let height = renderer.desired_height(content_width);
                 EntryLayoutInfo {
                     height,
+                    unfolded_height: height,
                     gap_after: 1,
                     group_header_count: 0,
                     group_collapse_header: false,
@@ -1695,12 +1696,10 @@ mod tests {
         );
     }
 
-    /// A collapsed truncation header on the viewport's last row must label
-    /// its FULL hidden prefix: the height-0 hidden rows share the tail's
-    /// virtual_y past the window bottom, so `paint_window`'s gate must
-    /// extend the slice for truncation headers too — not just verb headers.
+    /// An activity header on the viewport's last row must label every
+    /// off-screen member, so `paint_window` must extend through the full span.
     #[test]
-    fn windowed_paint_labels_truncation_header_on_last_viewport_row() {
+    fn windowed_paint_labels_activity_header_on_last_viewport_row() {
         use crate::scrollback::ScrollbackState;
 
         crate::appearance::cache::set_group_tool_verbs(true);
@@ -1715,23 +1714,29 @@ mod tests {
         let header = state.len();
         for i in 0..6 {
             state.push_block(RenderBlock::execute(format!("cmd{i}")));
+            if i % 2 == 0 {
+                state.push_block(RenderBlock::thinking(format!("thought{i}")));
+            }
         }
         let viewport = Rect::new(0, 0, 80, 24);
         state.prepare_layout(viewport.width, viewport.height);
 
         let virtual_y = state.get_cached_virtual_y().expect("layout cache");
         let layouts = state.get_cached_entry_layouts().expect("layout cache");
-        assert!(!layouts[header].verb_group_header, "truncation, not verb");
-        assert_eq!(layouts[header].group_header_count, 2);
-        // Header row on the viewport's last row: the hidden prefix and tail
-        // sit past the window bottom.
+        assert!(
+            layouts[header].verb_group_header,
+            "one activity group, not truncation"
+        );
+        assert_eq!(layouts[header].group_header_count, 6);
+        // Header row on the viewport's last row: the rest of the activity
+        // span sits past the window bottom.
         let scroll = virtual_y[header] + 1 - viewport.height as usize;
         let (paint_range, content_y0) =
             state.paint_window(0..state.len(), scroll, viewport.height as usize);
         assert_eq!(
             paint_range.end,
-            header + 6,
-            "window must cover the whole run"
+            header + 9,
+            "window must cover the whole activity span"
         );
 
         let window = state.entries_in_range(paint_range.clone());
@@ -1758,8 +1763,8 @@ mod tests {
 
         let header_row = buffer_row_text(&buf, viewport.height - 1);
         assert!(
-            header_row.contains("Ran 3 commands"),
-            "label must cover the full off-screen hidden prefix: {header_row:?}"
+            header_row.contains("Ran 6 commands"),
+            "label must cover the full off-screen activity group: {header_row:?}"
         );
     }
 
@@ -1875,11 +1880,10 @@ mod tests {
         }
     }
 
-    /// A single groupable tool call folds on its own: the run renders the
-    /// aggregated header label — not the tool's own row — and finished
-    /// thoughts fold behind it just like in a multi-member run.
+    /// A single tool plus its Thought entries forms an activity fold; the
+    /// Thought entries contribute to the fold threshold but not the tool count.
     #[test]
-    fn rendered_verb_group_singleton_folds_tool_and_trailing_thoughts() {
+    fn rendered_single_tool_activity_folds_tool_and_trailing_thoughts() {
         use crate::scrollback::ScrollbackState;
 
         crate::appearance::cache::set_group_tool_verbs(true);
@@ -1897,7 +1901,10 @@ mod tests {
         state.prepare_layout(viewport.width, viewport.height);
 
         let layouts = state.get_cached_entry_layouts().expect("layout cache");
-        assert!(layouts[0].verb_group_header, "singleton run folds");
+        assert!(
+            layouts[0].verb_group_header,
+            "tool plus Thoughts forms a group"
+        );
         assert_eq!(layouts[1].height, 0, "thoughts claim into the fold");
         assert_eq!(layouts[2].height, 0, "thoughts claim into the fold");
 
@@ -2026,8 +2033,8 @@ mod tests {
 
     /// Render a prepared state — feeding the fold's spans when `with_spans` —
     /// and return the frame buffer plus the full render result (selection
-    /// model included). The span-less path is what harnesses exercise and
-    /// must keep the legacy plain-count header text.
+    /// model included). Without spans, verb headers use their local run walk;
+    /// dense truncation headers retain the plain-count fallback.
     fn render_state(
         state: &crate::scrollback::ScrollbackState,
         viewport: Rect,
@@ -2058,9 +2065,8 @@ mod tests {
         (buf, result)
     }
 
-    /// Render the header row (row 0) of a truncation-grouped state, with or
-    /// without the fold's spans.
-    fn truncation_header_row(
+    /// Render the header row (row 0) with or without the fold's spans.
+    fn group_header_row(
         state: &crate::scrollback::ScrollbackState,
         viewport: Rect,
         with_spans: bool,
@@ -2068,12 +2074,10 @@ mod tests {
         buffer_row_text(&render_state(state, viewport, with_spans).0, 0)
     }
 
-    /// A collapsed truncation ("N more") header fed with the fold's spans
-    /// renders the aggregated bucket label for exactly its hidden prefix —
-    /// the header row plus the rows folded behind it — while the span-less
-    /// path keeps the plain count.
+    /// A collapsed activity header includes every tool in the run, even when
+    /// Thought rows are folded; span-backed and fallback walks agree.
     #[test]
-    fn truncation_header_renders_bucket_label_with_spans_and_plain_count_without() {
+    fn activity_header_renders_whole_group_label_with_or_without_spans() {
         use crate::scrollback::ScrollbackState;
 
         crate::appearance::cache::set_group_tool_verbs(true);
@@ -2084,25 +2088,29 @@ mod tests {
         state.set_appearance(appearance);
         for i in 0..6 {
             state.push_block(RenderBlock::execute(format!("cmd{i}")));
+            if i % 2 == 0 {
+                state.push_block(RenderBlock::thinking(format!("reasoning{i}")));
+            }
         }
         let viewport = Rect::new(0, 0, 80, 10);
         state.prepare_layout(viewport.width, viewport.height);
 
         let layouts = state.get_cached_entry_layouts().expect("layout cache");
-        assert!(!layouts[0].verb_group_header, "commands never verb-fold");
-        // 6 participants, max_visible=3 → hidden=3; the plain count shows
-        // hidden-1 while the label describes all 3 hidden participants.
-        assert_eq!(layouts[0].group_header_count, 2);
-
-        let labeled = truncation_header_row(&state, viewport, true);
         assert!(
-            labeled.contains("Ran 3 commands"),
-            "spans feed the hidden-prefix bucket label: {labeled:?}"
+            layouts[0].verb_group_header,
+            "tools and Thought share a group"
         );
-        let plain = truncation_header_row(&state, viewport, false);
+        assert_eq!(layouts[0].group_header_count, 6);
+
+        let labeled = group_header_row(&state, viewport, true);
         assert!(
-            plain.contains("2 more"),
-            "span-less render keeps the legacy count: {plain:?}"
+            labeled.contains("Ran 6 commands"),
+            "span-backed label counts the whole activity: {labeled:?}"
+        );
+        let plain = group_header_row(&state, viewport, false);
+        assert!(
+            plain.contains("Ran 6 commands"),
+            "fallback label walk counts the whole activity: {plain:?}"
         );
     }
 
@@ -2129,28 +2137,30 @@ mod tests {
         let layouts = state.get_cached_entry_layouts().expect("layout cache");
         assert_eq!(layouts[0].group_header_count, 2, "run still truncates");
 
-        let row = truncation_header_row(&state, viewport, true);
+        let row = group_header_row(&state, viewport, true);
         assert!(
             row.contains("2 more") && !row.contains("Ran"),
             "toggle off keeps the legacy count even with spans: {row:?}"
         );
     }
 
-    /// The expanded truncation collapse header describes the WHOLE run —
-    /// every participant, visible tail included — when spans are present,
-    /// and keeps the legacy "N tool calls & thoughts" count without them.
+    /// Expanding a grouped activity exposes all native member rows; the
+    /// summary line remains stacked above the first member's native height.
     #[test]
-    fn expanded_truncation_collapse_header_renders_whole_run_label() {
+    fn expanded_activity_header_renders_whole_group_label() {
         use crate::scrollback::ScrollbackState;
 
         crate::appearance::cache::set_group_tool_verbs(true);
-        crate::appearance::cache::set_show_thinking_blocks(false);
+        crate::appearance::cache::set_show_thinking_blocks(true);
         let mut state = ScrollbackState::new();
         let mut appearance = AppearanceConfig::default();
         appearance.scrollback.display.group_max_visible = 3;
         state.set_appearance(appearance);
         for i in 0..6 {
             state.push_block(RenderBlock::execute(format!("cmd{i}")));
+            if i % 2 == 0 {
+                state.push_block(RenderBlock::thinking(format!("reasoning{i}")));
+            }
         }
         let viewport = Rect::new(0, 0, 80, 10);
         state.prepare_layout(viewport.width, viewport.height);
@@ -2160,17 +2170,23 @@ mod tests {
 
         let layouts = state.get_cached_entry_layouts().expect("layout cache");
         assert!(layouts[0].group_collapse_header);
-        assert_eq!(layouts[0].group_header_count, 5);
+        assert_eq!(layouts[0].group_header_count, 6);
+        assert_eq!(layouts[0].height, layouts[0].unfolded_height + 1);
+        assert!(
+            layouts[1..]
+                .iter()
+                .all(|layout| layout.height == layout.unfolded_height)
+        );
 
-        let labeled = truncation_header_row(&state, viewport, true);
+        let labeled = group_header_row(&state, viewport, true);
         assert!(
             labeled.contains("Ran 6 commands"),
-            "expanded header must describe the whole run: {labeled:?}"
+            "expanded header must describe the whole activity: {labeled:?}"
         );
-        let plain = truncation_header_row(&state, viewport, false);
+        let plain = group_header_row(&state, viewport, false);
         assert!(
-            plain.contains("5 tool calls & thoughts"),
-            "span-less render keeps the legacy count: {plain:?}"
+            plain.contains("Ran 6 commands"),
+            "fallback label walk also describes the whole activity: {plain:?}"
         );
     }
 
@@ -2197,11 +2213,10 @@ mod tests {
         }
     }
 
-    /// A labeled truncation header gets copy parity with verb headers: its
-    /// synthetic selectable row carries the aggregated label as the copy
-    /// text, hitbox shifted past the diamond chrome, in both fold states.
+    /// A labeled activity header exposes the complete summary as a synthetic
+    /// selectable line, with matching paint and copy text in both fold states.
     #[test]
-    fn labeled_truncation_header_synthetic_line_copies_label_text() {
+    fn activity_header_synthetic_line_copies_whole_group_label() {
         use crate::scrollback::ScrollbackState;
         use crate::scrollback::text_selection::reconstruct_selection_text;
 
@@ -2213,16 +2228,19 @@ mod tests {
         state.set_appearance(appearance);
         for i in 0..6 {
             state.push_block(RenderBlock::execute(format!("cmd{i}")));
+            if i % 2 == 0 {
+                state.push_block(RenderBlock::thinking(format!("reasoning{i}")));
+            }
         }
         let viewport = Rect::new(0, 0, 80, 10);
         state.prepare_layout(viewport.width, viewport.height);
 
-        // Collapsed: the header row copies its hidden-prefix label.
+        // Collapsed: the header row copies the full activity label.
         let (buf, result) = render_state(&state, viewport, true);
         let model = &result.selection_model;
         let header = model.range(0, GROUP_HEADER_RANGE_ID).expect("header range");
         assert_eq!(header.lines.len(), 1);
-        assert_eq!(header.lines[0].text, "Ran 3 commands");
+        assert_eq!(header.lines[0].text, "Ran 6 commands");
         assert_eq!(header.lines[0].screen_y, 0);
         // Pin the hitbox to the DRAWN glyphs, not just to the chrome helper:
         // the frame's own cells must spell the label starting at screen_x, so
@@ -2232,7 +2250,7 @@ mod tests {
             .map(|x| buf[(x, 0)].symbol())
             .collect();
         assert_eq!(
-            drawn, "Ran 3 commands",
+            drawn, "Ran 6 commands",
             "synthetic hitbox must start exactly where the drawn label starts"
         );
         let expected_x = HorizontalLayout::ACCENT
@@ -2244,7 +2262,7 @@ mod tests {
         );
         let copy = reconstruct_selection_text(model, &full_row_drag(&header.lines[0]))
             .expect("header copy");
-        assert_eq!(copy, "Ran 3 commands");
+        assert_eq!(copy, "Ran 6 commands");
 
         // Expanded: the collapse header describes the whole run and copies it.
         state.set_selected(Some(0));
@@ -2306,11 +2324,10 @@ mod tests {
         );
     }
 
-    /// Both fold families feed the single label channel in one frame: the
-    /// verb header and the labeled truncation header each render their
-    /// aggregated label and expose it through the shared reserved range.
+    /// Interleaved tool kinds feed one activity label and one synthetic
+    /// selectable range, retaining the source order of the label buckets.
     #[test]
-    fn verb_and_truncation_headers_share_one_label_channel() {
+    fn unified_activity_header_aggregates_tool_kinds_in_one_label() {
         use crate::scrollback::ScrollbackState;
 
         crate::appearance::cache::set_group_tool_verbs(true);
@@ -2320,18 +2337,25 @@ mod tests {
         appearance.scrollback.display.group_max_visible = 3;
         state.set_appearance(appearance);
         state.push_block(RenderBlock::read("a.rs", None));
+        state.push_block(RenderBlock::thinking("considering the file"));
+        state.push_block(RenderBlock::execute("cmd0"));
         state.push_block(RenderBlock::read("b.rs", None));
-        for i in 0..6 {
+        state.push_block(RenderBlock::thinking("checking the result"));
+        for i in 1..3 {
             state.push_block(RenderBlock::execute(format!("cmd{i}")));
         }
         let viewport = Rect::new(0, 0, 80, 12);
         state.prepare_layout(viewport.width, viewport.height);
 
         let layouts = state.get_cached_entry_layouts().expect("layout cache");
-        assert!(layouts[0].verb_group_header, "reads verb-fold");
         assert!(
-            !layouts[2].verb_group_header && layouts[2].is_group_header(),
-            "commands truncation-fold behind the verb run"
+            layouts[0].verb_group_header,
+            "one group starts at the first tool"
+        );
+        assert!(
+            layouts
+                .iter()
+                .all(|layout| !layout.is_group_header() || layout.verb_group_header)
         );
 
         let (buf, result) = render_state(&state, viewport, true);
@@ -2339,23 +2363,121 @@ mod tests {
             .map(|y| buffer_row_text(&buf, y))
             .collect();
         assert!(
-            rows.iter().any(|r| r.contains("Read 2 files")),
-            "verb header must render its label: {rows:?}"
-        );
-        assert!(
-            rows.iter().any(|r| r.contains("Ran 3 commands")),
-            "truncation header must render its label: {rows:?}"
+            rows.iter()
+                .any(|r| r.contains("Read 2 files, Ran 3 commands")),
+            "single activity header must aggregate both tool kinds: {rows:?}"
         );
 
         let model = &result.selection_model;
-        let verb = model
+        let activity = model
             .range(0, GROUP_HEADER_RANGE_ID)
-            .expect("verb header range");
-        assert_eq!(verb.lines[0].text, "Read 2 files");
-        let trunc = model
-            .range(2, GROUP_HEADER_RANGE_ID)
-            .expect("truncation header range");
-        assert_eq!(trunc.lines[0].text, "Ran 3 commands");
+            .expect("activity header range");
+        assert_eq!(activity.lines[0].text, "Read 2 files, Ran 3 commands");
+    }
+
+    #[test]
+    fn leading_thought_keeps_activity_header_when_thinking_is_hidden() {
+        use crate::scrollback::ScrollbackState;
+
+        crate::appearance::cache::set_group_tool_verbs(true);
+        crate::appearance::cache::set_show_thinking_blocks(false);
+        let mut state = ScrollbackState::new();
+        state.push_block(RenderBlock::thinking("hidden lead thought"));
+        state.push_block(RenderBlock::execute("inspect"));
+        let viewport = Rect::new(0, 0, 80, 10);
+        state.prepare_layout(viewport.width, viewport.height);
+
+        let layouts = state.get_cached_entry_layouts().expect("layout cache");
+        assert!(layouts[0].verb_group_header);
+        assert_eq!(
+            layouts[0].height, 1,
+            "header remains when its Thought anchor is hidden"
+        );
+        let (buf, _) = render_state(&state, viewport, true);
+        let row = buffer_row_text(&buf, 0);
+        assert!(
+            row.contains("Ran 1 command"),
+            "hidden leading Thought still anchors the header: {row:?}"
+        );
+        assert!(!row.contains("hidden lead thought"));
+    }
+
+    #[test]
+    fn opened_multiline_first_member_remains_selectable_and_copyable() {
+        use crate::scrollback::ScrollbackState;
+        use crate::scrollback::blocks::tool::{ReadToolCallBlock, ToolCallBlock};
+        use crate::scrollback::text_selection::reconstruct_selection_text;
+
+        crate::appearance::cache::set_group_tool_verbs(true);
+        crate::appearance::cache::set_show_thinking_blocks(false);
+        let mut state = ScrollbackState::new();
+        let first = state.push_block(RenderBlock::ToolCall(ToolCallBlock::Read(
+            ReadToolCallBlock::new("/tmp/first.rs")
+                .with_content("first_body_line\nsecond_body_line".into(), 2),
+        )));
+        state
+            .get_by_id_mut(first)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        state.push_block(RenderBlock::execute("next"));
+        let viewport = Rect::new(0, 0, 80, 20);
+        state.prepare_layout(viewport.width, viewport.height);
+        let layouts = state.get_cached_entry_layouts().unwrap();
+        assert_eq!(layouts[0].height, layouts[0].unfolded_height + 1);
+        let (buf, result) = render_state(&state, viewport, true);
+        let frame = (0..viewport.height)
+            .map(|y| buffer_row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(frame.contains("first_body_line"));
+        assert!(frame.contains("second_body_line"));
+        // Read already exposes its path as selectable text; body selection
+        // remains owned by the existing source viewer.
+        let path = result
+            .selection_model
+            .ranges
+            .iter()
+            .filter(|range| range.entry_idx == 0)
+            .flat_map(|range| &range.lines)
+            .find(|line| line.text.contains("first.rs"))
+            .expect("opened first member retains its selectable path");
+        let copy =
+            reconstruct_selection_text(&result.selection_model, &full_row_drag(path)).unwrap();
+        assert!(copy.contains("first.rs"));
+    }
+
+    #[test]
+    fn opened_first_thought_body_keeps_selection_below_the_summary() {
+        use crate::scrollback::ScrollbackState;
+        use crate::scrollback::text_selection::reconstruct_selection_text;
+        crate::appearance::cache::set_group_tool_verbs(true);
+        crate::appearance::cache::set_show_thinking_blocks(true);
+        let mut state = ScrollbackState::new();
+        let first = state.push_block(RenderBlock::thinking("first_body_line\n\nsecond_body_line"));
+        state
+            .get_by_id_mut(first)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        state.push_block(RenderBlock::execute("next"));
+        let viewport = Rect::new(0, 0, 80, 20);
+        state.prepare_layout(viewport.width, viewport.height);
+        let (_, result) = render_state(&state, viewport, true);
+        let body_lines = result
+            .selection_model
+            .ranges
+            .iter()
+            .filter(|range| range.entry_idx == 0 && range.range_id != GROUP_HEADER_RANGE_ID)
+            .flat_map(|range| &range.lines)
+            .filter(|line| line.text.contains("body_line"))
+            .collect::<Vec<_>>();
+        assert_eq!(body_lines.len(), 2);
+        for line in body_lines {
+            assert!(line.screen_y > 0);
+            let copy =
+                reconstruct_selection_text(&result.selection_model, &full_row_drag(line)).unwrap();
+            assert!(copy.contains("body_line"));
+        }
+        crate::appearance::cache::set_show_thinking_blocks(false);
     }
 
     #[test]
@@ -3377,6 +3499,7 @@ mod tests {
         let layouts = vec![
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 0,
                 group_header_count: 1,
                 group_collapse_header: false,
@@ -3384,6 +3507,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 0,
+                unfolded_height: 0,
                 gap_after: 0,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3391,6 +3515,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3478,6 +3603,7 @@ mod tests {
         let layouts = vec![
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 0,
                 group_header_count: 2,
                 group_collapse_header: true,
@@ -3485,6 +3611,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 0,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3492,6 +3619,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3577,6 +3705,7 @@ mod tests {
         let layouts = vec![
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 0,
                 group_header_count: 1,
                 group_collapse_header: false,
@@ -3584,6 +3713,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 0,
+                unfolded_height: 0,
                 gap_after: 0,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3591,6 +3721,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3672,6 +3803,7 @@ mod tests {
                 EntryLayoutInfo {
                     // Expanded slot = header line + entry 0's own row.
                     height: if expanded { 2 } else { 1 },
+                    unfolded_height: if expanded { 2 } else { 1 },
                     gap_after: 0,
                     // Verb headers carry the run's tool-member count.
                     group_header_count: 2,
@@ -3680,6 +3812,7 @@ mod tests {
                 },
                 EntryLayoutInfo {
                     height: if expanded { 1 } else { 0 },
+                    unfolded_height: if expanded { 1 } else { 0 },
                     gap_after: 1,
                     group_header_count: 0,
                     group_collapse_header: false,
@@ -3858,6 +3991,7 @@ mod tests {
         let layouts = vec![
             EntryLayoutInfo {
                 height: 2,
+                unfolded_height: 2,
                 gap_after: 0,
                 group_header_count: 2,
                 group_collapse_header: true,
@@ -3865,6 +3999,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3944,6 +4079,7 @@ mod tests {
         let layouts = vec![
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 0,
                 group_header_count: 1,
                 group_collapse_header: false,
@@ -3951,6 +4087,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 0,
+                unfolded_height: 0,
                 gap_after: 0,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -3958,6 +4095,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -4034,6 +4172,7 @@ mod tests {
         let layouts = vec![
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 0,
                 group_header_count: 1,
                 group_collapse_header: false,
@@ -4041,6 +4180,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 0,
+                unfolded_height: 0,
                 gap_after: 0,
                 group_header_count: 0,
                 group_collapse_header: false,
@@ -4048,6 +4188,7 @@ mod tests {
             },
             EntryLayoutInfo {
                 height: 1,
+                unfolded_height: 1,
                 gap_after: 1,
                 group_header_count: 0,
                 group_collapse_header: false,

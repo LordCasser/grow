@@ -14,7 +14,7 @@
 //! go stale between an incremental entry append and the next structural
 //! rebuild (`gaps_may_be_dirty` covers both).
 //!
-//! Per-entry run classification ([`run_step`]) and the rendered header label
+//! Per-entry run classification ([`super::verb_group::run_step`]) and the rendered header label
 //! stay in [`super::verb_group`]; this module owns run *shapes*.
 
 use std::collections::HashSet;
@@ -23,7 +23,7 @@ use std::ops::Range;
 use indexmap::IndexMap;
 
 use super::types::EntryLayoutInfo;
-use super::verb_group::{RunStep, run_step, scan_run_forward};
+use super::verb_group::scan_run_forward;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::types::DisplayMode;
@@ -31,10 +31,8 @@ use crate::scrollback::types::DisplayMode;
 /// One folded region of the transcript, in entry indices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupSpan {
-    /// Entries the fold walked. For verb runs this ends one past the last
-    /// claimed entry (trailing transparent entries stay outside). For
-    /// truncation it is the whole dense run, visible tail included, and may
-    /// end with trailing hidden-thinking entries the walk skipped over.
+    /// Original contiguous activity range, including leading/trailing Thought.
+    /// Dense fallback spans also include their visible tail.
     pub range: Range<usize>,
     /// Which fold produced this span and its count data.
     pub kind: GroupKind,
@@ -48,7 +46,7 @@ pub struct GroupSpan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupKind {
     /// Eagerly folded run of verb-groupable members (tool calls and subagent
-    /// rows) — the aggregated "Read 2 skills" header. `members` counts
+    /// rows) — the aggregated "Read 2 files" header. `members` counts
     /// label-bearing members only; claimed thoughts fold in but never count.
     VerbRun { members: usize },
     /// Budget truncation of an over-long dense run — the "N more" header.
@@ -78,6 +76,7 @@ pub(super) fn apply(
     expanded_groups: &HashSet<EntryId>,
 ) -> Vec<GroupSpan> {
     for info in layout_cache.iter_mut() {
+        info.height = info.unfolded_height;
         info.group_header_count = 0;
         info.group_collapse_header = false;
         info.verb_group_header = false;
@@ -95,10 +94,8 @@ pub(super) fn apply(
     spans
 }
 
-/// Scan the transcript for every fold, in the order the folds take
-/// precedence: permission runs claim entries first, verb runs next, and
-/// truncation runs over the
-/// rest (claimed entries break truncation runs). Returns spans sorted by
+/// Activity runs claim their entries first; dense truncation covers the rest.
+/// A grouped activity can never be truncated again. Returns spans sorted by
 /// start index; spans never overlap.
 pub(super) fn scan(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
@@ -127,11 +124,9 @@ pub(super) fn scan(
     spans
 }
 
-/// Find maximal runs of verb-groupable member entries — plus any finished
-/// collapsed thoughts among them — that fold per `RunScan::folds`, gated on
-/// the `group_tool_verbs` setting. Also returns the claimed-entry mask
-/// (members and thought members of folding runs): the truncation scan
-/// treats claimed entries as run breakers.
+/// Find continuous activities independently of member visibility. Claim their
+/// full ranges even when a singleton keeps its own action row, so dense
+/// truncation cannot introduce a second fold inside the activity.
 fn scan_verb_runs(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
     expanded_groups: &HashSet<EntryId>,
@@ -148,31 +143,17 @@ fn scan_verb_runs(
     let entry_at = |i: usize| entries.get_index(i).map(|(_, e)| e);
     let mut i = 0;
     while i < n {
-        // Trailing transparent thinking stays outside the run (`scan.end`).
         let Some(scan) = scan_run_forward(entry_at, i, show_thinking) else {
             i += 1;
             continue;
         };
+        // Membership is stable even when individual members remain visible.
+        claimed[i..scan.end].fill(true);
+
         if !scan.folds() {
-            i = scan.stop;
+            i = scan.end;
             continue;
         }
-
-        // Which in-run entries claim must agree with the member arms in
-        // `scan_run_forward`; transparent entries stay unclaimed inside the
-        // span and keep rendering their own rows.
-        for (offset, slot) in claimed[i..scan.end].iter_mut().enumerate() {
-            if matches!(
-                run_step(
-                    entry_at(i + offset).expect("index within entries"),
-                    show_thinking
-                ),
-                RunStep::Member(_) | RunStep::ThoughtMember
-            ) {
-                *slot = true;
-            }
-        }
-
         let first_id = *entries.get_index(i).expect("index within entries").0;
         spans.push(GroupSpan {
             range: i..scan.end,
@@ -257,9 +238,8 @@ fn scan_truncations(
 }
 
 /// The single writer of group heights, gaps, and header flags. Every layout
-/// consequence of a fold happens here, driven only by the spans (plus
-/// per-entry `run_step` classification for verb runs, whose transparent
-/// entries keep their own rows).
+/// consequence of a fold happens here, driven by stable spans and member
+/// visibility. Native heights remain independent of the projected layout.
 pub(super) fn project_to_layout(
     spans: &[GroupSpan],
     entries: &IndexMap<EntryId, ScrollbackEntry>,
@@ -288,17 +268,9 @@ pub(super) fn project_to_layout(
     }
 }
 
-/// Collapsed: header renders the aggregated label at `height=1`; other
-/// claimed entries fold to `height=0`. Expanded: the header slot is an
-/// absolute `height=2` — the header line plus entry 0's own row — so ALL
-/// members, including the first, reveal below it (unlike the N-more
-/// expanded shape, which replaces entry 0's content); members keep their
-/// normal heights. Gaps zero only WITHIN the run: `virtual_y` accumulates
-/// `gap_after` even for height-0 entries, so the LAST claimed entry keeps
-/// the pairwise boundary gap `recompute_gap_after` computed against the
-/// entry after the run — zeroing it glued the folded header to whatever
-/// followed. Transparent entries (live/opened thinking, opened members)
-/// keep their rows but donate their trailing gap while collapsed.
+/// Project visibility without changing the group's membership or anchor.
+/// The first slot contains a synthetic summary and, when visible, the first
+/// member's complete native content. All other rows retain source order.
 fn project_verb_run(
     span: &GroupSpan,
     members: usize,
@@ -306,38 +278,19 @@ fn project_verb_run(
     layout_cache: &mut [EntryLayoutInfo],
     show_thinking: bool,
 ) {
-    let last_claimed = span.range.end - 1;
     for idx in span.range.clone() {
-        let (_, e) = entries.get_index(idx).unwrap();
+        let (_, entry) = entries.get_index(idx).unwrap();
         let cached = &mut layout_cache[idx];
-        match run_step(e, show_thinking) {
-            RunStep::Member(_) | RunStep::ThoughtMember => {}
-            RunStep::Transparent => {
-                if !span.expanded {
-                    cached.gap_after = 0;
-                }
-                continue;
-            }
-            // Unreachable: a span's range never spans a Break (arm kept for
-            // match exhaustiveness).
-            RunStep::Break => continue,
-        }
+        let visible = super::verb_group::member_visible(entry, span.expanded, show_thinking);
+        cached.height = if visible { cached.unfolded_height } else { 0 };
         if idx == span.range.start {
             cached.verb_group_header = true;
             cached.group_collapse_header = span.expanded;
             cached.group_header_count = members.min(u16::MAX as usize) as u16;
-            cached.height = if span.expanded { 2 } else { 1 };
-            // A singleton run's header is also its last claimed entry: it
-            // keeps the pairwise boundary gap, else the header glues to what
-            // follows.
-            if idx != last_claimed {
-                cached.gap_after = 0;
-            }
-        } else if !span.expanded {
-            cached.height = 0;
-            if idx != last_claimed {
-                cached.gap_after = 0;
-            }
+            cached.height = cached.height.saturating_add(1);
+        }
+        if idx + 1 != span.range.end {
+            cached.gap_after = 0;
         }
     }
 }
@@ -392,11 +345,13 @@ fn project_truncation(
 mod tests {
     use super::*;
     use crate::scrollback::block::RenderBlock;
-    use crate::scrollback::blocks::tool::{ReadToolCallBlock, ToolCallBlock};
+    use crate::scrollback::blocks::tool::{
+        ReadToolCallBlock, SkillDisplayStatus, ToolCallBlock, hook::ToolCallHookData,
+    };
 
-    fn skill_read() -> ScrollbackEntry {
+    fn read() -> ScrollbackEntry {
         ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Read(
-            ReadToolCallBlock::new("/x/skills/deploy/SKILL.md"),
+            ReadToolCallBlock::new("/x/src/main.rs"),
         )))
         .with_display_mode(DisplayMode::Collapsed)
     }
@@ -407,6 +362,17 @@ mod tests {
 
     fn thought() -> ScrollbackEntry {
         ScrollbackEntry::new(RenderBlock::thinking("hmm")).with_display_mode(DisplayMode::Collapsed)
+    }
+
+    fn skill() -> ScrollbackEntry {
+        ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::skill_call(
+            Some("deploy"),
+            None,
+            Some("/x/skills/deploy/SKILL.md"),
+            None,
+            SkillDisplayStatus::Loaded,
+            None,
+        )))
     }
 
     fn map(entries: Vec<ScrollbackEntry>) -> IndexMap<EntryId, ScrollbackEntry> {
@@ -423,6 +389,7 @@ mod tests {
         vec![
             EntryLayoutInfo {
                 height: 5,
+                unfolded_height: 5,
                 gap_after: 1,
                 ..Default::default()
             };
@@ -441,144 +408,222 @@ mod tests {
         spans
     }
 
-    /// The "Read 2 skills / 8 more" transcript shape: a verb run followed by
-    /// a 19-row dense run of commands and thoughts with the default budget.
-    #[test]
-    fn verb_run_breaks_truncation_and_both_spans_project() {
-        let mut list = vec![skill_read(), skill_read()];
-        for i in 0..19 {
-            list.push(if i % 3 == 2 { thought() } else { execute() });
+    fn reset_and_project(
+        spans: &[GroupSpan],
+        entries: &IndexMap<EntryId, ScrollbackEntry>,
+        layout: &mut [EntryLayoutInfo],
+    ) {
+        for info in layout.iter_mut() {
+            info.height = info.unfolded_height;
+            info.group_header_count = 0;
+            info.group_collapse_header = false;
+            info.verb_group_header = false;
         }
-        let entries = map(list);
+        project_to_layout(spans, entries, layout, true);
+    }
+
+    #[test]
+    fn mixed_tool_activity_keeps_leading_interleaved_and_trailing_thoughts() {
+        let mut failed_read = read().with_display_mode(DisplayMode::Expanded);
+        let RenderBlock::ToolCall(ToolCallBlock::Read(block)) = &mut failed_read.block else {
+            unreachable!();
+        };
+        block.error = Some("permission denied".into());
+        let entries = map(vec![
+            thought(),
+            execute().with_display_mode(DisplayMode::Expanded),
+            thought(),
+            failed_read,
+            thought(),
+        ]);
         let mut layout = seeded_layout(entries.len());
         let spans = scan_and_project(&entries, &mut layout, 10, &HashSet::new());
 
+        assert_eq!(
+            spans,
+            vec![GroupSpan {
+                range: 0..5,
+                kind: GroupKind::VerbRun { members: 2 },
+                expanded: false,
+            }]
+        );
+
+        // The leading Thought anchors the summary. Its completed body is
+        // folded, while the expanded native tool keeps its own full height.
+        assert!(layout[0].verb_group_header);
+        assert_eq!(layout[0].group_header_count, 2);
+        assert_eq!(layout[0].height, 1);
+        assert_eq!(layout[1].height, 5);
+        assert_eq!(layout[2].height, 0);
+        assert_eq!(
+            layout[3].height, 5,
+            "expanded failed tool remains inspectable"
+        );
+        assert_eq!(layout[4].height, 0);
+    }
+
+    #[test]
+    fn skill_rows_and_conversation_entries_separate_activity_groups() {
+        let entries = map(vec![
+            execute(),
+            thought(),
+            read(),
+            skill(),
+            execute(),
+            thought(),
+            execute(),
+            ScrollbackEntry::new(RenderBlock::user_prompt("next turn")),
+            execute(),
+            execute(),
+        ]);
+        let spans = scan(&entries, 10, &HashSet::new(), true, true);
         assert_eq!(
             spans,
             vec![
                 GroupSpan {
-                    range: 0..2,
+                    range: 0..3,
                     kind: GroupKind::VerbRun { members: 2 },
                     expanded: false,
                 },
                 GroupSpan {
-                    range: 2..21,
-                    kind: GroupKind::Truncation {
-                        participants: 19,
-                        hidden: 9,
-                    },
+                    range: 4..7,
+                    kind: GroupKind::VerbRun { members: 2 },
+                    expanded: false,
+                },
+                GroupSpan {
+                    range: 8..10,
+                    kind: GroupKind::VerbRun { members: 2 },
                     expanded: false,
                 },
             ]
         );
-
-        // Verb header row plus its folded member.
-        assert!(layout[0].verb_group_header);
-        assert_eq!(layout[0].group_header_count, 2);
-        assert_eq!(layout[0].height, 1);
-        assert_eq!(layout[1].height, 0);
-
-        // Truncation header reads "8 more" and hides the 8 rows behind it.
-        assert!(!layout[2].verb_group_header);
-        assert_eq!(layout[2].group_header_count, 8);
-        assert_eq!(layout[2].height, 1);
-        for info in &layout[3..11] {
-            assert_eq!((info.height, info.group_header_count), (0, 0));
-        }
-        // The newest `max_visible` rows keep their seeded layout.
-        for info in &layout[11..21] {
-            assert_eq!((info.height, info.gap_after), (5, 1));
-        }
     }
 
     #[test]
-    fn runs_at_or_under_budget_produce_no_truncation_span() {
-        let entries = map((0..11).map(|_| execute()).collect());
-        let mut layout = seeded_layout(entries.len());
-        let spans = scan_and_project(&entries, &mut layout, 10, &HashSet::new());
-        assert!(spans.is_empty());
-        assert!(layout.iter().all(|i| i.height == 5));
-    }
-
-    #[test]
-    fn verb_toggle_off_feeds_members_to_truncation() {
-        let mut list = vec![skill_read(), skill_read()];
-        list.extend((0..12).map(|_| execute()));
-        let entries = map(list);
-        let spans = scan(&entries, 10, &HashSet::new(), false, true);
-        assert_eq!(
-            spans,
-            vec![GroupSpan {
-                range: 0..14,
-                kind: GroupKind::Truncation {
-                    participants: 14,
-                    hidden: 4,
-                },
-                expanded: false,
-            }]
-        );
-    }
-
-    #[test]
-    fn expanded_verb_run_stacks_header_and_keeps_member_rows() {
-        let entries = map(vec![skill_read(), skill_read()]);
-        let mut layout = seeded_layout(entries.len());
-        let expanded: HashSet<EntryId> = [EntryId::new(0)].into();
-        let spans = scan_and_project(&entries, &mut layout, 10, &expanded);
-        assert!(spans[0].expanded);
-        assert!(layout[0].group_collapse_header);
-        assert_eq!(layout[0].height, 2);
-        assert_eq!(layout[1].height, 5, "expanded members keep their rows");
-    }
-
-    #[test]
-    fn expanded_truncation_becomes_collapse_header_counting_rest() {
-        let entries = map((0..13).map(|_| execute()).collect());
-        let mut layout = seeded_layout(entries.len());
-        let expanded: HashSet<EntryId> = [EntryId::new(0)].into();
-        let spans = scan_and_project(&entries, &mut layout, 10, &expanded);
+    fn single_tool_with_thought_forms_a_group_but_pure_thought_does_not() {
+        let entries = map(vec![thought(), execute()]);
+        let spans = scan(&entries, 10, &HashSet::new(), true, true);
+        assert_eq!(spans.len(), 1);
         assert_eq!(
             spans[0].kind,
-            GroupKind::Truncation {
-                participants: 13,
-                hidden: 3,
-            }
+            GroupKind::VerbRun { members: 1 },
+            "Thought contributes to the fold threshold but not the tool count"
         );
-        assert!(layout[0].group_collapse_header);
-        assert_eq!(layout[0].group_header_count, 12);
-        assert_eq!(layout[0].height, 1);
-        assert!(layout[1..].iter().all(|i| i.height == 5));
+
+        let thoughts = map(vec![thought(), thought()]);
+        assert!(scan(&thoughts, 10, &HashSet::new(), true, true).is_empty());
+
+        let single_tool = map(vec![execute()]);
+        assert!(scan(&single_tool, 10, &HashSet::new(), true, true).is_empty());
     }
 
     #[test]
-    fn hidden_thinking_flows_through_truncation_without_participating() {
-        // 12 executes with a hidden thought interleaved: the run still
-        // truncates, the thought neither counts nor gets written.
-        let mut list: Vec<ScrollbackEntry> = (0..6).map(|_| execute()).collect();
+    fn disabling_verb_groups_routes_activity_through_dense_truncation() {
+        let mut list = vec![execute(); 6];
         list.push(thought());
         list.extend((0..6).map(|_| execute()));
         let entries = map(list);
         let mut layout = seeded_layout(entries.len());
-        let spans = scan(
-            &entries,
-            10,
-            &HashSet::new(),
-            true,
-            /*show_thinking=*/ false,
-        );
+        let spans = scan(&entries, 10, &HashSet::new(), false, false);
         project_to_layout(&spans, &entries, &mut layout, false);
         assert_eq!(
-            spans[0].kind,
-            GroupKind::Truncation {
-                participants: 12,
-                hidden: 2,
-            }
+            spans,
+            vec![GroupSpan {
+                range: 0..13,
+                kind: GroupKind::Truncation {
+                    participants: 12,
+                    hidden: 2,
+                },
+                expanded: false,
+            }]
         );
-        assert_eq!(layout[6].height, 5, "hidden thought layout untouched");
-        // Header + one hidden row land on the participating executes around it.
         assert_eq!(layout[0].group_header_count, 1);
+        assert_eq!(layout[0].height, 1);
         assert_eq!(layout[1].height, 0);
+        assert_eq!(
+            layout[6].height, 5,
+            "hidden Thought is transparent to dense projection"
+        );
         assert_eq!(layout[2].height, 5);
+    }
+
+    #[test]
+    fn grouped_activity_is_not_truncated_again_by_dense_budget() {
+        let mut list = Vec::new();
+        for _ in 0..6 {
+            list.push(execute());
+            list.push(thought());
+        }
+        let entries = map(list);
+        let mut layout = seeded_layout(entries.len());
+        let spans = scan_and_project(&entries, &mut layout, 2, &HashSet::new());
+        assert_eq!(
+            spans,
+            vec![GroupSpan {
+                range: 0..12,
+                kind: GroupKind::VerbRun { members: 6 },
+                expanded: false,
+            }]
+        );
+        assert!(layout.iter().all(|info| !info.group_collapse_header));
+        assert_eq!(
+            layout.iter().filter(|info| info.verb_group_header).count(),
+            1
+        );
+        assert_eq!(layout[0].height, 1);
+        assert!(layout[1..].iter().all(|info| info.height == 0));
+    }
+
+    #[test]
+    fn expanded_activity_restores_native_member_heights_and_keeps_anchor() {
+        let entries = map(vec![thought(), execute(), thought(), read()]);
+        let expanded: HashSet<EntryId> = [EntryId::new(0)].into();
+        let spans = scan(&entries, 10, &expanded, true, true);
+        assert_eq!(spans[0].range, 0..4);
+        assert!(spans[0].expanded);
+
+        let mut layout = seeded_layout(entries.len());
+        reset_and_project(&spans, &entries, &mut layout);
+        assert!(layout[0].group_collapse_header);
+        assert_eq!(
+            layout[0].height, 6,
+            "header is stacked above the first native row"
+        );
+        assert!(layout[1..].iter().all(|info| info.height == 5));
+    }
+
+    #[test]
+    fn folded_activity_keeps_running_explicit_pending_and_hook_members_visible() {
+        let mut running = execute();
+        running.is_running = true;
+        let expanded = execute().with_display_mode(DisplayMode::Expanded);
+        let mut pending = execute();
+        pending.is_pending_user_input = true;
+        let mut hooked = execute();
+        hooked.hook_data = Some(ToolCallHookData::default());
+        let entries = map(vec![running, expanded, pending, hooked, execute()]);
+        let mut layout = seeded_layout(entries.len());
+        let spans = scan_and_project(&entries, &mut layout, 10, &HashSet::new());
+        assert_eq!(spans[0].kind, GroupKind::VerbRun { members: 5 });
+        assert_eq!(
+            layout[0].height, 6,
+            "running first member keeps its preview below the summary"
+        );
+        assert_eq!(layout[1].height, 5);
+        assert_eq!(layout[2].height, 5);
+        assert_eq!(layout[3].height, 5);
+        assert_eq!(layout[4].height, 0, "ordinary collapsed member folds away");
+    }
+
+    #[test]
+    fn repeated_reset_and_projection_is_idempotent_for_the_same_spans() {
+        let entries = map(vec![thought(), execute(), thought(), read()]);
+        let spans = scan(&entries, 10, &HashSet::new(), true, true);
+        let mut layout = seeded_layout(entries.len());
+        reset_and_project(&spans, &entries, &mut layout);
+        let projected = layout.clone();
+        reset_and_project(&spans, &entries, &mut layout);
+        assert_eq!(layout, projected);
     }
 
     #[test]
@@ -601,15 +646,37 @@ mod tests {
 
     #[test]
     fn spans_are_sorted_and_disjoint() {
-        let mut list = vec![skill_read(), skill_read(), execute()];
+        let mut list = vec![execute(), execute(), skill(), execute()];
         list.extend((0..12).map(|_| execute()));
-        list.push(skill_read());
-        list.push(skill_read());
+        list.extend([execute(), execute()]);
         let entries = map(list);
         let spans = scan(&entries, 10, &HashSet::new(), true, true);
         assert!(spans.len() >= 2);
         for pair in spans.windows(2) {
             assert!(pair[0].range.end <= pair[1].range.start);
         }
+    }
+    #[test]
+    fn standalone_receipt_separates_activity_without_hiding_the_interaction() {
+        let receipt = ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Other(
+            crate::scrollback::blocks::tool::OtherToolCallBlock::new("Received", "message")
+                .with_immutable_event_id("parent-message:receipt"),
+        )))
+        .with_display_mode(DisplayMode::Collapsed);
+        let entries = map(vec![execute(), read(), receipt, execute(), read()]);
+        let mut layout = seeded_layout(entries.len());
+        let spans = scan_and_project(&entries, &mut layout, 10, &HashSet::new());
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.range.clone())
+                .collect::<Vec<_>>(),
+            vec![0..2, 3..5]
+        );
+        assert_eq!(
+            layout[2].height, 5,
+            "independent interaction remains visible"
+        );
+        assert!(!layout[2].is_group_header());
     }
 }

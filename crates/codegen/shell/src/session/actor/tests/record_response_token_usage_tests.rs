@@ -291,62 +291,73 @@ async fn anchors_projected_context_from_response_usage() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
-            record_test_prompt(&actor, "anchor").await;
-            let _sync = actor.chat_state_handle.get_projected_tokens().await;
-            assert!(
-                actor.chat_state_handle.get_projected_tokens().await > 0,
-                "the immutable System governance head contributes to projected context"
-            );
-
-            let response = response_with_usage(150_000);
-            settle_attempt(
-                &actor,
-                "anchor-attempt",
-                captured_prompt_index,
-                "provider/model",
-                &response,
-            )
-            .await;
-            actor
-                .record_response_token_usage(
-                    &response,
-                    None,
-                    Some("provider/model".into()),
-                    None,
-                    true,
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(
-                actor.chat_state_handle.get_projected_tokens().await,
-                150_000
-            );
-            let prompt = actor
-                .chat_state_handle
-                .try_get_prompt_usage()
-                .await
-                .expect("chat-state alive")
-                .expect("prompt ledger opened");
-            assert_eq!(prompt.totals.model_calls, 1);
-            assert_eq!(prompt.totals.input_tokens, 149_950);
-            assert!(prompt.totals.cost_usd_ticks.is_none());
-            assert_eq!(prompt.by_model["provider/model"].model_calls, 1);
-            assert_eq!(
+            for measured in [150_000u32, 1_000] {
+                let (gateway_tx, _) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+                record_test_prompt(&actor, "anchor").await;
                 actor
                     .chat_state_handle
-                    .try_get_session_usage()
+                    .push_user_message_durably(ConversationItem::user("q".repeat(40_000)))
                     .await
-                    .expect("chat-state actor alive")
-                    .totals
-                    .model_calls,
-                1
-            );
+                    .unwrap();
+                let _sync = actor.chat_state_handle.get_projected_tokens().await;
+                assert!(
+                    _sync > 1_000,
+                    "the low wire count is below the local estimate"
+                );
+                assert!(
+                    actor.chat_state_handle.get_projected_tokens().await > 0,
+                    "the immutable System governance head contributes to projected context"
+                );
+
+                let response = response_with_usage(measured);
+                settle_attempt(
+                    &actor,
+                    "anchor-attempt",
+                    captured_prompt_index,
+                    "provider/model",
+                    &response,
+                )
+                .await;
+                actor
+                    .record_response_token_usage(
+                        &response,
+                        None,
+                        Some("provider/model".into()),
+                        None,
+                        true,
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    actor.chat_state_handle.get_projected_tokens().await,
+                    u64::from(measured)
+                );
+                let prompt = actor
+                    .chat_state_handle
+                    .try_get_prompt_usage()
+                    .await
+                    .expect("chat-state alive")
+                    .expect("prompt ledger opened");
+                assert_eq!(prompt.totals.model_calls, 1);
+                assert_eq!(prompt.totals.input_tokens, u64::from(measured - 50));
+                assert!(prompt.totals.cost_usd_ticks.is_none());
+                assert_eq!(prompt.by_model["provider/model"].model_calls, 1);
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .try_get_session_usage()
+                        .await
+                        .expect("chat-state actor alive")
+                        .totals
+                        .model_calls,
+                    1
+                );
+            }
         })
         .await;
 }
@@ -615,7 +626,7 @@ async fn final_request_schema_is_visible_to_pre_sampling_pressure() {
                 .unwrap();
 
             let trigger = actor
-                .check_auto_compact_needed()
+                .check_auto_compact_needed(None)
                 .await
                 .expect("the final request envelope must cross the 85% threshold");
             assert!(trigger.tokens_used >= 90_000);

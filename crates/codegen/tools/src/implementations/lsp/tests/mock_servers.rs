@@ -841,7 +841,16 @@ pub(super) fn write_refresh_without_pull_server() -> (tempfile::TempDir, PathBuf
     write_python_server(
         "refresh_without_pull_lsp.py",
         r#"
+import os
+
 def handle(msg, method):
+    if method is None and msg.get("id") == 9002:
+        # The client has processed and answered our refresh request. The test
+        # waits for this protocol event instead of sleeping after a push.
+        reply(msg, None)
+        with open(os.environ["REFRESH_ACK_PATH"], "w") as ack:
+            ack.write("answered")
+        return
     if method in ("textDocument/didOpen", "textDocument/didChange"):
         uri = msg["params"]["textDocument"]["uri"]
         publish(uri, "a real problem")

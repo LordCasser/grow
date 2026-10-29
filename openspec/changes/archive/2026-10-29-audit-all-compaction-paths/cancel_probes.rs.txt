@@ -1,0 +1,147 @@
+// Temporary adversarial probe. Append this child module to
+// actor/tests/compaction_pre_prune_tests.rs to run it; it is deliberately kept
+// outside Rust source until the audit owner chooses to mount it.
+//
+// Expected current failure: ordinary cancellation may leave the background
+// generation token unset. Releasing the already-blocked summary then lets the
+// ready generation publish at the next boundary, producing both Completed and
+// the summary in the Surface. The final explicit drain is cleanup only; it must
+// not be what makes the boundary assertion pass.
+#[cfg(test)]
+mod adversarial_audit_background_cancel_probe {
+    use super::*;
+    use test_support::{InferenceEndpoint, InferenceRequestMatcher};
+
+    #[test]
+    fn adversarial_audit_ordinary_cancel_discards_released_background_summary() {
+        run_with_session_stack(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+                let server = MockInferenceServer::start().await.unwrap();
+                let summary = format!(
+                    "adversarial_audit_late_summary: old work complete. {}",
+                    "verified old evidence. ".repeat(35)
+                );
+                let mut blocked_summary = server.expect_response_blocked(
+                    "adversarial audit background summary",
+                    InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                    messages_turn(&[(&summary, END_TURN)], END_TURN),
+                );
+                let (actor, _notifications) = actor_with_sampler_cw(
+                    &server,
+                    sampling_types::ApiBackend::Messages,
+                    100_000,
+                )
+                .await;
+                actor.compaction.threshold_percent.set(80);
+                actor.compaction.pre_prune.set(false);
+                seed_closed_compaction_range(&actor, 88_000).await;
+                actor
+                    .chat_state_handle
+                    .record_provider_context_anchor(75_000);
+                actor.state.lock().await.foreground =
+                    ForegroundState::RegularTurn(running_task_stub("adversarial-audit-cancel"));
+
+                let start_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.background_compaction_boundary(),
+                )
+                .await;
+                let summary_started = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    blocked_summary.wait_blocked(),
+                )
+                .await
+                .is_ok();
+
+                // Invalidation happens while the server holds the summary's
+                // terminal response event. Release only after ordinary cancel
+                // returns, so this is a deterministic late-result race.
+                let cancel_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.cancel_background_compaction("adversarial_audit_invalidation"),
+                )
+                .await;
+                blocked_summary.release();
+                let generation_drained = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    actor.session_activities.wait_idle(),
+                )
+                .await
+                .is_ok();
+
+                // Force the ready result through the real publication gate.
+                // A slot-presence assertion alone would miss a late commit.
+                let boundary_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.background_compaction_boundary(),
+                )
+                .await;
+
+                // Cleanup is deliberately after the assertion observations:
+                // it may cancel/join a still-owned worker, but cannot mask a
+                // result that the publication boundary already committed.
+                let cleanup_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(12),
+                    actor.cancel_background_compaction_before(
+                        "adversarial_audit_probe_cleanup",
+                        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10)),
+                    ),
+                )
+                .await;
+                let owner_drained = actor.compaction.background.borrow().is_none();
+                let activities_drained = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.session_activities.wait_idle(),
+                )
+                .await
+                .is_ok();
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let completed = events.iter().any(|event| matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::Compaction(
+                        chat_state::CompactionEvent::Completed { .. }
+                    )
+                ));
+                let surface = actor.chat_state_handle.get_conversation().await;
+                let late_summary_installed = surface
+                    .iter()
+                    .any(|item| item.text_content().contains("adversarial_audit_late_summary"));
+
+                assert!(summary_started, "summary provider must be blocked before cancel");
+                assert!(
+                    start_result
+                        .as_ref()
+                        .is_ok_and(|result| matches!(result, Ok(false))),
+                    "soft-threshold boundary must start without publishing: {start_result:?}"
+                );
+                assert!(
+                    cancel_result
+                        .as_ref()
+                        .is_ok_and(|result| result.is_ok()),
+                    "ordinary cancellation should return: {cancel_result:?}"
+                );
+                assert!(generation_drained, "released generation must settle before publication");
+                assert!(
+                    boundary_result
+                        .as_ref()
+                        .is_ok_and(|result| matches!(result, Ok(false))),
+                    "cancelled ready generation must not publish: {boundary_result:?}"
+                );
+                assert!(!completed, "ordinary-cancelled summary must not reach Completed");
+                assert!(!late_summary_installed, "ordinary-cancelled summary must not replace the Surface");
+                assert!(
+                    cleanup_result
+                        .as_ref()
+                        .is_ok_and(|result| result.is_ok()),
+                    "probe cleanup must drain the owner: {cleanup_result:?}"
+                );
+                assert!(owner_drained, "probe must leave no background compaction owner");
+                assert!(activities_drained, "probe must leave no Sideband activity");
+            }));
+        });
+    }
+}

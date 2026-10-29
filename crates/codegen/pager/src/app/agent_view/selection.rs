@@ -944,7 +944,7 @@ impl AgentView {
         // foldable path below.
         if header_row_click {
             if click_count == 2 {
-                self.scrollback.collapse_group_if_expanded();
+                self.scrollback.toggle_group_header_expansion();
                 return (None, show_word_select_tip);
             }
             if click_count >= 3 {
@@ -955,7 +955,12 @@ impl AgentView {
         // Double-click on a group header → expand/collapse the group.
         // Both expand ("N more") and collapse ("▾ N tool calls") headers
         // are standalone entries with their own index.
-        let is_group_header = self.scrollback.is_selected_group_header();
+        let is_group_header = self.scrollback.is_selected_group_header()
+            && !self
+                .scrollback
+                .get_cached_entry_layouts()
+                .and_then(|layouts| layouts.get(idx))
+                .is_some_and(|layout| layout.has_group_content());
         if is_group_header {
             if click_count == 2 {
                 self.scrollback.toggle_group_expansion();
@@ -1705,6 +1710,130 @@ mod tests {
         );
         agent.last_click = last;
         tip2
+    }
+
+    fn double_click_gesture_on_group_row(
+        agent: &mut AgentView,
+        t: Instant,
+        idx: usize,
+        header_row_click: bool,
+    ) {
+        let (last, tip1) = agent.handle_scrollback_click(t, idx, header_row_click, None);
+        assert!(!tip1, "a single click must never tip");
+        agent.last_click = last;
+        let (last, tip2) = agent.handle_scrollback_click(
+            t + Duration::from_millis(100),
+            idx,
+            header_row_click,
+            None,
+        );
+        assert!(
+            !tip2,
+            "activity group clicks must not trigger word select tip"
+        );
+        agent.last_click = last;
+    }
+
+    fn agent_with_folded_running_activity() -> AgentView {
+        crate::appearance::cache::set_group_tool_verbs(true);
+        crate::appearance::cache::set_show_thinking_blocks(false);
+        let mut agent = make_agent();
+        let first = agent
+            .scrollback
+            .push_block(RenderBlock::execute_with_output(
+                "cargo test",
+                "working\noutput",
+                None::<&str>,
+            ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::execute("cargo fmt --check"));
+        let entry = agent.scrollback.get_by_id_mut(first).expect("first tool");
+        entry.is_running = true;
+        agent.scrollback.mark_structurally_dirty(first);
+        agent.pane_areas.scrollback = Rect::new(0, 0, 80, 12);
+        agent.scrollback.prepare_layout(80, 12);
+        agent
+    }
+
+    #[test]
+    fn activity_header_hit_requires_the_header_row_to_be_visible() {
+        let visible = Some((Rect::new(0, 4, 80, 3), false, false));
+        assert!(super::super::mouse::is_verb_group_header_row_click(
+            true, 4, visible
+        ));
+        assert!(!super::super::mouse::is_verb_group_header_row_click(
+            true,
+            0,
+            Some((Rect::new(0, 0, 80, 2), true, false)),
+        ));
+        assert!(!super::super::mouse::is_verb_group_header_row_click(
+            true, 5, visible,
+        ));
+    }
+
+    #[test]
+    fn folded_running_activity_preview_keeps_header_and_member_click_routes_distinct() {
+        let now = Instant::now();
+        let mut header_agent = agent_with_folded_running_activity();
+        let layouts = header_agent
+            .scrollback
+            .get_cached_entry_layouts()
+            .expect("activity layout");
+        assert!(layouts[0].verb_group_header);
+        assert!(layouts[0].has_group_content(), "running preview is visible");
+        let (area, top_clipped, _) = header_agent
+            .scrollback
+            .entry_screen_area(0, header_agent.pane_areas.scrollback)
+            .expect("visible activity");
+        assert!(!top_clipped);
+        assert!(super::super::mouse::is_verb_group_header_row_click(
+            true,
+            area.y,
+            Some((area, top_clipped, false)),
+        ));
+        double_click_gesture_on_group_row(&mut header_agent, now, 0, true);
+        assert!(
+            header_agent
+                .scrollback
+                .get_cached_entry_layouts()
+                .expect("expanded activity layout")[0]
+                .group_collapse_header
+        );
+
+        let mut member_agent = agent_with_folded_running_activity();
+        let (area, top_clipped, _) = member_agent
+            .scrollback
+            .entry_screen_area(0, member_agent.pane_areas.scrollback)
+            .expect("visible activity");
+        assert!(area.height > 1, "running preview follows the header");
+        let member_row = area.y + 1;
+        assert!(!super::super::mouse::is_verb_group_header_row_click(
+            true,
+            member_row,
+            Some((area, top_clipped, false)),
+        ));
+        let member_mode_before = member_agent.scrollback.entry(0).unwrap().display_mode;
+        assert!(!double_click_gesture(
+            &mut member_agent,
+            now + Duration::from_secs(1),
+            0,
+        ));
+        let layouts = member_agent
+            .scrollback
+            .get_cached_entry_layouts()
+            .expect("member-folded activity layout");
+        assert!(
+            !layouts[0].group_collapse_header,
+            "member click keeps group folded"
+        );
+        assert_ne!(
+            member_agent.scrollback.entry(0).unwrap().display_mode,
+            member_mode_before,
+            "member click toggles the first tool's own body",
+        );
+        crate::appearance::cache::set_group_tool_verbs(false);
+        crate::appearance::cache::set_show_thinking_blocks(true);
     }
 
     #[test]

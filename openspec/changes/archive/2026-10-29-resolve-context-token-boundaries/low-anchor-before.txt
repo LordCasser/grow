@@ -1,0 +1,28 @@
+   Compiling chat-state v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state)
+    Finished `test` profile [unoptimized] target(s) in 7.47s
+     Running unittests src/lib.rs (target/debug/deps/chat_state-70408bffa0679435)
+
+running 2 tests
+
+thread 'actor::tests::low_anchor_tests::low_context_anchor_zero_and_maximum_growth_do_not_wrap_or_freeze' (3634499) panicked at crates/codegen/chat-state/src/actor/low_anchor_tests.rs:38:5:
+assertion `left == right` failed
+  left: 100
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test actor::tests::low_anchor_tests::low_context_anchor_zero_and_maximum_growth_do_not_wrap_or_freeze ... FAILED
+
+thread 'actor::tests::low_anchor_tests::low_context_anchor_survives_growth_compaction_and_repeated_projection' (3634498) panicked at crates/codegen/chat-state/src/actor/low_anchor_tests.rs:16:5:
+assertion `left == right` failed: complete low measurement is authoritative
+  left: 10002
+ right: 2500
+test actor::tests::low_anchor_tests::low_context_anchor_survives_growth_compaction_and_repeated_projection ... FAILED
+
+failures:
+
+failures:
+    actor::tests::low_anchor_tests::low_context_anchor_survives_growth_compaction_and_repeated_projection
+    actor::tests::low_anchor_tests::low_context_anchor_zero_and_maximum_growth_do_not_wrap_or_freeze
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 600 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p chat-state --lib`

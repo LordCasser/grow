@@ -1172,10 +1172,19 @@ pub(crate) async fn spawn_session_actor(
     let timeline_persistence = Box::new(
         super::timeline_persistence::ChannelTimelinePersistence::new(persistence.tx.clone()),
     );
+    let initial_goal_scope = super::goal_support::goal_directive_scope(
+        persisted_behavior
+            .as_ref()
+            .map_or(tool_types::BehaviorId::Normal, |behavior| {
+                behavior.behavior()
+            }),
+        persisted_goal_mode.as_ref(),
+    );
     let chat_state_handle = if let Some(timeline) = validated_timeline {
         chat_state::ChatStateActor::spawn_from_validated_timeline(
             *timeline,
             chat_state_sampling_config,
+            initial_goal_scope,
             timeline_persistence,
             chat_state_event_tx,
             tokio_util::sync::CancellationToken::new(),
@@ -2950,6 +2959,17 @@ pub(crate) async fn spawn_session_actor(
             )))
         })?;
     }
+    // Runtime/tool reconciliation can pause a restored Active Goal. Publish
+    // only the current control-owned request scope before session admission.
+    session
+        .chat_state_handle
+        .set_request_goal_scope(session.active_goal_directive_tag())
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "restored Goal request scope could not be initialized: {error}"
+            )))
+        })?;
     if goal_was_restored {
         let tokens_used = session.goal_tokens_used();
         // The durable write above also captures any fail-closed sanitization

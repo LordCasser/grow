@@ -1,0 +1,4 @@
+- [x] 建立真实子进程、文件持久化及独占 writer 切点测试。
+- [x] 验证 replacement / Summary / Promoted / Control / Completed ACK 中断及恢复再次中断，发现根因即修复。
+- [x] 核对重复恢复、不可变 prefix、Control 和来源 artifact；运行相关回归与生产检查。
+- [x] 更新验证说明、规范归档校验并清理构建残留。

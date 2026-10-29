@@ -88,15 +88,15 @@ impl ImageProjectionReport {
 /// Result of an actor-serialized tool-result prune.
 ///
 /// `tokens_before` / `tokens_after` are the actor's projected context pressure
-/// before and after the command. `tokens_after` is the provider anchor minus
-/// the signed Surface reduction, clamped at zero.
+/// before and after the command, using effective request estimates and the
+/// same-route provider calibration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PruneReport {
     /// Number of tool results actually trimmed in this execution.
     pub pruned_count: usize,
     /// Projected context pressure before pruning.
     pub tokens_before: u64,
-    /// Provider-anchored context pressure after applying the Surface delta.
+    /// Provider-calibrated effective context pressure after pruning.
     pub tokens_after: u64,
 }
 
@@ -170,6 +170,8 @@ pub enum ChatStateCommand {
     /// not process another command while awaiting this acknowledgement.
     RecordTimelineEventDurably {
         kind: TimelineEventKind,
+        /// Outer None preserves scope; Some(None) clears it with this commit.
+        request_goal_scope: Option<Option<GoalDirectiveTag>>,
         deadline: Option<tokio::time::Instant>,
         reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
@@ -352,6 +354,12 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
+    /// Reconcile the current request Goal projection from its control authority.
+    SetRequestGoalScope {
+        active_goal: Option<GoalDirectiveTag>,
+        reply: oneshot::Sender<()>,
+    },
+
     /// Replace the active provider route and start a fresh continuation epoch.
     ReplaceSamplingRoute { config: SamplingConfig },
 
@@ -506,6 +514,12 @@ pub enum ChatStateCommand {
     GetAdmittedResponse {
         identity: crate::ResponseAdmissionIdentity,
         reply: oneshot::Sender<Option<crate::AdmittedResponse>>,
+    },
+
+    GetConsumedNotificationTurn {
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+        reply: oneshot::Sender<Option<crate::TurnId>>,
     },
 
     GetPendingNotifications {

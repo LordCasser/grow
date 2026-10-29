@@ -1,29 +1,42 @@
-# 未解决边界
+# Backlog
 
-- **LSP mock diagnostics 的限时回归稳定性（独立测试债务）**：2.5.0 发布 run `39770985598` 的 Core 首次执行中，`a_refresh_we_cannot_act_on_does_not_discard_what_we_know` 在约 8 秒内未收到 mock 的 `a real problem` summary；同一提交的 push Core library suite 已通过该测试，且 LSP 目录相对 2.4.3 未修改。疑似调度相关超时，根因尚未证实；后续独立核对 mock 启动与通知同步，不通过放宽断言或绕过发布门禁处理。本次发布只允许原提交重试并记录结果。
+截至 2026-10-29，本轮已清完登记的缺陷与测试债务。用户确认“清完缺陷与测试债务，暂缓项保留说明”。已解决项保留逐项证据；原始清单见 [清理前快照](changes/close-backlog-and-release-patch/backlog-before.md)。新的问题仍须独立建立 change，不以本次审计结论推断未来改动无风险。
 
-截至 2026-10-20，此前 backlog 缺陷的完成记录见下表。退出挂起节点修复之后的扩散审计又确认三个待修边界，保留用户此前明确暂缓的 Remote Control，以及依赖真实路由与负载证据的 Provider/Recap 缓存优化。MCP 不在本轮修改范围。
+## 保留的暂缓项
 
+- **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：保留方向，不实施、不设日期；未来启动时另建 change，明确身份、权限、执行 owner、断线和恢复边界。不得据此引入 Dock、Memory 或远端控制框架。决策见 [上游主题评审](changes/archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
+- **Provider 缓存策略与 native epoch（待真实路由证据）**：[理论 review](changes/archive/2026-09-28-evaluate-provider-cache-affinity/results.md) 仅证明本地 key/breakpoint/retention 机制。先取得具体 provider/model/deployment、字段透传和真实负载证据，再做该 route 的最小优化，不预建 registry。
+- **Recap 与主请求缓存（待真实共享前缀及收益证据）**：recap 保持独立 key、tool-free Sideband 契约；不为假设中的缓存复用添加主请求 tools。先测真实收益。
+- **跨多个合法选区连续摘要（契约选择，未启动）**：当前一次有界摘要后仍超窗会保留已提交事实并终止回合；继续压缩更多选区需另立契约，不增加无界重试。
+- **MCP 多轮 elicitation（现有独立提案）**：宿主 SDK 接点仍未通过既定门槛，保留 [提案与任务](changes/add-mcp-multi-round-elicitation/tasks.md)，不把未实现功能列为本轮缺陷。
 
+## 本轮闭合的缺陷与测试债务
 
-- **SideQuestion 接收端生命周期（独立跟踪）**：`actor/run_loop.rs` 的 SideQuestion 使用独立 `spawn_local`，不监听 `respond_to.closed()`；请求接收端退出后任务仍可能继续。/btw 已改为只读复用主图片分支，等待主转换时响应 session Sideband cancellation；接收端关闭与请求任务生命周期仍需另项明确及验证，不混入图片分支复用修复。
+以下路径将随对应变更归档固定；正式发布和完整验证汇总见 [发布记录](changes/close-backlog-and-release-patch/verification.md)。
 
-- **Runtime native 分段与收件消息交错（待证实生产可达性）**：此前审计的真实结果保全、Responses AgentMessage 和 Chat Runtime reasoning 三项已由 [修复记录](changes/archive/2026-10-21-fix-runtime-projection-integrity/verification.md) 处理。剩余 native assistant 分段后插入 AgentMessage 的 adapter 排序反例见 [定向审计](changes/archive/2026-10-21-audit-runtime-thinking-projections/audit.md)；常规通知/用户插话受整批边界保护，生产可达性尚未证实，独立跟踪，不作为线上已复现。
+| 问题 | 修复与验证 |
+| --- | --- |
+| ACP 初始化被同步 watcher 注册阻塞；注册间隙 config/policy 漏同步 | [unblock-acp-during-watcher-registration](changes/archive/2026-10-29-unblock-acp-during-watcher-registration/verification.md) |
+| LSP refresh mock 使用固定 sleep | [synchronize-lsp-refresh-test](changes/archive/2026-10-29-synchronize-lsp-refresh-test/verification.md) |
+| SideQuestion 接收者关闭后仍运行 | [cancel-abandoned-side-questions](changes/archive/2026-10-29-cancel-abandoned-side-questions/verification.md) |
+| 不可验证 child 完成被固化为成功 | [require-canonical-unavailable-child-result](changes/archive/2026-10-29-require-canonical-unavailable-child-result/verification.md) |
+| release 运行 debug-only panic 测试 | [clarify-committed-anchor-release-test](changes/archive/2026-10-29-clarify-committed-anchor-release-test/verification.md) |
+| Chrome duration 入口无计时 span | [emit-chrome-instrumentation-timers](changes/archive/2026-10-29-emit-chrome-instrumentation-timers/verification.md) |
+| sticky 关闭/compact 时导航几何不一致 | [fix-pager-sticky-navigation-geometry](changes/archive/2026-10-29-fix-pager-sticky-navigation-geometry/verification.md) |
+| 后代展示跨实体校验与无 ID 重入重复 | [fix-descendant-presentation-replay](changes/archive/2026-10-29-fix-descendant-presentation-replay/verification.md) |
+| tmux post-exit 清理预算缺少确定性区分 | [test-tmux-post-exit-cleanup-budget](changes/archive/2026-10-29-test-tmux-post-exit-cleanup-budget/verification.md) |
+| Git/worktree 构建身份监听无效路径（原两条合并） | [fix-build-git-identity-invalidation](changes/archive/2026-10-29-fix-build-git-identity-invalidation/verification.md) |
+| PTY 独立 daemon fixture 无 owner | [own-pty-leader-test-daemons](changes/archive/2026-10-29-own-pty-leader-test-daemons/verification.md) |
+| OCR 后代与并发 fixture 失败清理 | [own-local-ocr-process-tree](changes/archive/2026-10-29-own-local-ocr-process-tree/verification.md) |
+| Plan live handoff 同 Turn 已消费后误报 ACK 丢失 | [fix-plan-handoff-consumption-recheck](changes/archive/2026-10-29-fix-plan-handoff-consumption-recheck/verification.md) |
+| Goal Control 后首请求前 scope 未同步 | [fix-goal-control-context-scope](changes/archive/2026-10-29-fix-goal-control-context-scope/verification.md) |
+| Runtime 回归未进入正式 Core 门禁 | [gate-backlog-runtime-regressions](changes/gate-backlog-runtime-regressions/verification.md) |
 
-- **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：用户认可从其他设备连接和操作已有 Grow 会话的方向，但当前不实施、不设日期，不纳入 MCP 多轮或保留计划提案。本次不展开远端控制架构，也不因此引入统一 Dock、Memory 或其他大型功能。未来明确启动时另建 change，重新界定身份、权限、执行 owner、断线和恢复边界；本条不构成实现授权。决策见 [2026-10-11 上游主题评审](changes/archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
-
-- **Provider 缓存策略与 native epoch 的关系（暂缓、待真实路由证据）**：[理论 review](changes/archive/2026-09-28-evaluate-provider-cache-affinity/results.md) 只能确认当前 key、breakpoint 与 retention 的本地机制及各官方契约，不能证明统一调整会改善多 provider 的成本与延迟。若要优化，先确认具体 provider/model/deployment、字段透传与负载，再按该 route 的真实证据另开最小行为 change；不预建通用 cache policy registry。
-- **Subagent 完成但输出不可验证时的恢复终态（独立债务）**：当 backend 返回 `CompletedOutputUnavailable`，而 child session 存在但尚无合法 `SubagentResult` 时，恢复可能把该观察固化为成功结果和 parent terminal。应保留 spawn 未闭合，直到存在可验证的 canonical child result；已有合法 result 可照常恢复。补充覆盖该组合的测试后另建行为 change；不属于 unified Timeline storage/reconcile reorder 的本轮实现。
-- **Recap 与主请求缓存的关系（暂缓、待真实共享前缀与收益证据）**：recap 使用独立 key 且没有主请求 tools，已修正把本地 wire 形状表述成远端复用的注释和测试名。真实共享前缀与收益仍未验证；保留 Sideband tool-free 契约，不能为缓存假设增加工具定义。
-
-
-- **Release 测试选择与诊断 Chrome 计时（独立工具债务）**：`insert_block_before_rejects_an_already_committed_anchor` 的无条件 `should_panic` 依赖 release 已关闭的 `debug_assert!`，需单独明确测试的构建条件；本轮 release 明确排除且保留失败证据。`instrumentation::timer()` 在 Chrome 模式没有 span guard，现有 duration 埋点不输出该模式的 timing；本轮只使用 log 模式，不顺带改诊断基础设施。证据见 [P0 对抗审查](changes/archive/2026-10-22-profile-resume-presentation-attribution/adversarial-review.md)。
-- **Pager 精确导航与缓存的独立余项**：`entry_top_scroll_offset` / center 导航直接计算 sticky prompt 余量，即使关闭 sticky display 也可能给目标保留该余量；须另项核对产品预期，不混入 P1。`StreamingMarkdownRenderer::clone` 会重建中间 view，克隆 pending 历史块可能提前并重复解析；普通 resume 未发现此热调用，先按实际 clone/search 调用归因再决定是否优化。P1 保留内容等价和有界视口校准，未新增克隆缓存框架。
-
-
-- **子树展示恢复的跨实体校验与无身份重入（独立债务）**：`restore_descendant_state` 是 best-effort 展示路径，canonical parent spawn 授予遍历，但不等同执行/导出的严格 Seed/Result 交叉链接校验；是否加强该策略须独立明确，不能复用展示 payload 获得执行权威。其 forced replay 对缺少 `eventId` 的合法 lifecycle presentation 无 source-local numeric highwater，重复恢复可重复添加后代任务行；现代 producer 有稳定身份，本轮现代基准保留该身份和重入断言。失败证据见 [P2对抗审查](changes/archive/2026-10-22-reuse-validated-descendant-recovery/adversarial-review.md) 与 [原始失败](changes/archive/2026-10-22-reuse-validated-descendant-recovery/descendant-before-corrected.log)，不在重复读取优化中改身份/显示策略。
-
-- **tmux 清理期限的确定性判别（测试债务）**：近期限成功回归保持 1.5s 主期限、1.2s 模拟 leader 和持 pipe 子孙，但名义 300ms 余量大于 TERM 等待的 100ms，不能严格区分共用期限与独立 post-exit 期限。2.5.0 准备仅改用显式 shell 消除临时脚本启动成本，不扩大超时或修改生产清理；未来独立以可控同步验证该差异，不引入通用时钟框架。
+- **Native 分段与 AgentMessage 交错候选**：真实生产 drain 位于整批工具边界，未发现反例生产可达性；关闭待证实项，保留直接构造 adapter 历史/未来新调用方的限制。见 [通路审计](changes/archive/2026-10-29-audit-runtime-native-message-tool-batch-boundary/audit.md)。
+- **Markdown clone 候选**：普通 resume 移交 entries，搜索 clone 为 Arc；重建 Markdown view 的调用未进入该生产热点。不引入缓存框架，见 [调用归因](changes/archive/2026-10-29-fix-pager-sticky-navigation-geometry/audit.md)。
+- **压缩、计数与模型切换**：假零计数、replacement/Completed/Control 的 ACK 边界、取消后重新提升、异步通知、rewind/route 的 portable 重估和独立硬窗口准入已闭合，见 [状态修复](changes/archive/2026-10-29-fix-compaction-pressure-lifecycle/verification.md)、[组合故障注入](changes/archive/2026-10-29-verify-compaction-publication-boundaries/verification.md)。
+- **真实持久化与中断恢复**：Summary 失败事务重复冷加载及跨事务 replacement 归属已修复；真实文件/SIGKILL 六组边界通过，见 [验证](changes/archive/2026-10-29-verify-compaction-process-recovery/verification.md)。不等同整机断电。
+- **低值 provider 校准与输出预留**：低值回执、连续压缩再增长、冷恢复 Goal 首请求、usage 到 Pager 的恢复快照，以及输出预留触发预压缩均已闭合，见 [四项验证](changes/archive/2026-10-29-resolve-context-token-boundaries/verification.md)、[组合验证](changes/archive/2026-10-29-verify-composed-context-transitions/verification.md)。未配置输出上限时不猜后端默认值。
 
 ## 算法优化候选与进度（2026-10-21）
 
@@ -43,10 +56,7 @@
 | 工具与文件系统 / T1–T4 | 多 hunk 共用行表、普通条目 metadata 复用、初始 watch 有界选择分别小步实施；tool manifest 共享先测拷贝成本。 |
 | Dashboard / U3 | 历史 child 足够多时评估稳定 top-8，保留运行状态优先、tie 顺序及总数；不因只显示八项就预先截断输入。 |
 
-## 本轮已解决
-
-- **Pager/CLI 构建身份失效路径（独立债务）**：build.rs 以 crate 相对 `.git/HEAD` 注册并不存在的路径，使重复 Cargo 调用重新编译；发布门禁已观察 pager 在 no-run 后的枚举阶段再次编译。exact runner 将直接运行已编译产物以隔离阶段预算；Git/worktree/branch ref 的精确失效追踪另项修正，不混入本次 runner 改动。
-
+## 历史完成记录
 
 | 问题 | 归档与验证 |
 | --- | --- |
@@ -78,9 +88,3 @@
 原审计证据见 [v2.4.0 后续审计](changes/archive/2026-10-19-audit-post-v2-4-0-boundaries/audit.md)。
 
 本轮后续维护不修改已经发布的 v2.4.1 tag 或产物；历史 release 验证记录保持原样。
-
-- Pager build identity: `crates/codegen/pager/build.rs` watches crate-relative `.git/HEAD`, which is absent in this checkout; consecutive exact tests on clean source repeatedly rebuild Pager (~25s each). Confirm Cargo fingerprint diagnostics and reuse the existing release identity approach with correct worktree/ref tracking in a separate change. This release preparation only reuses verified test executables locally; no build-script change.
-
-- PTY 测试的独立 Leader 清理所有者：本机发布验证发现五个带 `--no-exit-on-disconnect` 的专用测试 Leader 在 sandbox 删除后仍驻留。后续单独补齐测试 harness 的独立 daemon shutdown/owner，不改变产品的常驻语义；本轮已按 candidate 路径、隔离 GROW_HOME 和启动时间确认并终止，无用户实例被清理。
-
-- 局部辅助进程与测试的后代清理边界：质量清理逐处核对发现，本地 OCR 的现有 kill_on_drop/timeout/wait 只保证直接子进程，部分同步并发 fixture 只在正常断言路径显式 wait/kill，未统一证明 panic 或任意后代回收。后续按真实失败证据独立验证现有 ProcessScope 能否复用；不在 lint 清理中新增进程管理层或改独立 helper 所有者。见 [资源与路径复核](changes/archive/2026-10-22-clean-resource-path-clippy-diagnostics/review.md)。

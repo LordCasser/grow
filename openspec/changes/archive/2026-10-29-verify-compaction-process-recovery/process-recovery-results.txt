@@ -1,0 +1,17 @@
+   Compiling shell v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+    Finished `test` profile [unoptimized] target(s) in 1m 22s
+     Running unittests src/lib.rs (target/debug/deps/shell-361a98a001547f23)
+
+running 1 test
+test session::actor::tests::compaction_process_recovery_tests::compaction_real_files_process_recovery ... real file/process boundary passed: promoted; writer_pid=51893; recovered_pid=51927; durable_bytes=3664; prefix_bytes=2944; prefix_hash=2b6564898ad4fca09aba4b413cf134948e823b9e2d84af4c3e9a6b67280ed0be
+real file/process same-range retry passed with different summary
+missing failed-summary Sideband evidence rejected without rewriting parent ledger
+real file/process boundary passed: summary; writer_pid=51939; recovered_pid=51996; durable_bytes=4660; prefix_bytes=3935; prefix_hash=7dcbb83170308095ec34b70a8f70f16ad8fc7297a1898f03d1feb846b0a15129
+real file/process boundary passed: replacement; writer_pid=52068; recovered_pid=52110; durable_bytes=6148; prefix_bytes=4636; prefix_hash=a65326dc8b71b64e9d47d61a2d002cf2b7cc990c877ca65a3870a1981984b000
+real file/process boundary passed: control; writer_pid=52115; recovered_pid=52117; durable_bytes=6148; prefix_bytes=5416; prefix_hash=375bf5a5418408c9dd5a2e4d7c06477570d79dee30f25d7c8cc34cd60fc45175
+real file/process boundary passed: completed; writer_pid=52121; recovered_pid=52128; durable_bytes=5722; prefix_bytes=5722; prefix_hash=b2b478deedfc109a403ac02e9b54fd06177d3ff78864c54a17a400cbff20734c
+real file/process boundary passed: recovery-completed; writer_pid=52130; recovered_pid=52141; durable_bytes=6148; prefix_bytes=4636; prefix_hash=cad7981592afa0d19f100e00d7a1d15d3a3c4b6eb463e6524923e5bc80128b44
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4392 filtered out; finished in 2.94s
+

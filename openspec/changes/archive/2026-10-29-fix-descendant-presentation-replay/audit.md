@@ -1,0 +1,13 @@
+# Audit evidence
+
+## Descendant replay boundary
+
+- The archived `client-surfaces` contract requires descendant restoration to use complete validated records and child ownership checks, and prohibits treating UI rows as authority. The previous implementation validated each session's journal, but did not validate a replayed child's canonical Seed/optional Result against its immediate parent before projection.
+- `restore_descendant_state` is reached from the session load and task completion dispatch paths. It used the root's validated spawn ownership to find child sessions, but dispatched all typed lifecycle facts before checking whether the fact's parent, subagent ID, and child ID matched that source's canonical Spawn.
+- The ownership projection carries the exact typed Spawn and any linked terminal Result from its already-validated source snapshot. The child reader passes those facts to the existing Timeline Seed/Result validators in one child-session read, without rereading the captured root or reopening an already-visited parent during BFS. The Pager gate then checks the typed lifecycle envelope and identity tuple against that source's validated ownership before calling the existing presentation handler.
+- `SubagentSpawned` presentation creates the Started row through `push_block_if_absent`, whose deduplication key is the immutable event ID. For valid ID-less history there is no key to reuse, so forced restore used to append a row again. The handler now reuses the existing Started row for that child only for replayed updates without an event ID; terminal lifecycle handling remains unchanged.
+- These paths update Pager's presentation and ownership projection only. The storage reader uses shared read capabilities and does not issue execution or resume grants.
+
+## StreamingMarkdownRenderer clone finding
+
+`StreamingMarkdownRenderer::clone` in `crates/codegen/markdown/src/streaming.rs` reconstructs parser/render state by feeding the already-normalized source to a fresh renderer, rendering once, then copying the normalizer state. `MarkdownContent` derives `Clone`, so cloning that wrapper reaches this implementation. The production search found no `MarkdownContent::clone` or direct renderer clone call site; the only MarkdownContent clone usage found is in the markdown-content replay tests. Production construction sites create renderers directly, and the `raw.clone()` in `communication.rs` clones the source string before constructing MarkdownContent. The parse-on-clone path is therefore not presently reachable in a production hot path, and there is no justified behavioral fix in this change.

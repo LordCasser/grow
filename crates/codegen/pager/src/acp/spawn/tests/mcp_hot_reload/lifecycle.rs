@@ -921,5 +921,109 @@ async fn stale_blocked_initialize_cannot_restore_replaced_or_deleted_project_ser
     stop_worker(worker).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn watcher_ready_reconciles_sessions_created_during_registration() {
+    let test_name = concat!(
+        module_path!(),
+        "::watcher_ready_reconciles_sessions_created_during_registration"
+    );
+    if isolated(test_name).await {
+        return;
+    }
+    let _project_watch = test_support::EnvGuard::set("GROW_MCP_RECURSIVE_CONFIG_WATCH", "1");
+    let _folder_trust = test_support::EnvGuard::unset("GROW_FOLDER_TRUST");
+    write_global_mcp("");
+
+    let home = shell::util::grow_home::grow_home();
+    let (registration_started, registration_release, _registration_gate) =
+        arm_config_watcher_registration_gate(home, WatcherRegistrationKind::Config);
+    let global_server = MockMcpServer::start_with_identity("gap-global").await;
+    let project_server = MockMcpServer::start_with_identity("gap-project").await;
+    let worker = start_worker().await;
+    registration_started
+        .await
+        .expect("config watcher registration should reach its test gate");
+
+    initialize(&worker.tx).await;
+    let cwd_a = tempfile::tempdir().unwrap();
+    let cwd_b = tempfile::tempdir().unwrap();
+    shell::agent::folder_trust::grant_folder_trust(cwd_a.path());
+    shell::agent::folder_trust::grant_folder_trust(cwd_b.path());
+    let session_a = new_session(&worker.tx, cwd_a.path(), vec![]).await;
+    let session_b = new_session(&worker.tx, cwd_b.path(), vec![]).await;
+
+    let latest_global = format!(
+        "{}\n[disabled_mcp_tools]\ngap-global = [\"echo\"]\n",
+        mcp_config("gap-global", &global_server.url, true)
+    );
+    write_global_mcp(&latest_global);
+    write_project_mcp(
+        cwd_a.path(),
+        &mcp_config("gap-project", &project_server.url, true),
+    );
+    registration_release
+        .send(())
+        .expect("config watcher test gate should still be waiting");
+
+    wait_for_ready_server(&worker.tx, &session_a, "gap-global").await;
+    wait_for_ready_server(&worker.tx, &session_b, "gap-global").await;
+    policy_identity::wait_enabled(&worker.tx, &session_a, "gap-global", false).await;
+    policy_identity::wait_enabled(&worker.tx, &session_b, "gap-global", false).await;
+    wait_for_ready_server(&worker.tx, &session_a, "gap-project").await;
+    let session_b_catalog = mcp_list(&worker.tx, &session_b).await;
+    assert!(ready_server(&session_b_catalog, "gap-project").is_none());
+
+    let before = global_server.wire_call_count();
+    assert_call_fails_without_dispatch(&worker.tx, &session_a, "gap-global").await;
+    assert_eq!(global_server.wire_call_count(), before);
+    assert_eq!(global_server.initialize_count(), 2);
+    assert_eq!(project_server.initialize_count(), 1);
+    stop_worker(worker).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn config_policy_hot_reload_continues_while_skills_registration_is_blocked() {
+    let test_name = concat!(
+        module_path!(),
+        "::config_policy_hot_reload_continues_while_skills_registration_is_blocked"
+    );
+    if isolated(test_name).await {
+        return;
+    }
+    let _project_watch = test_support::EnvGuard::set("GROW_MCP_RECURSIVE_CONFIG_WATCH", "1");
+    let _folder_trust = test_support::EnvGuard::unset("GROW_FOLDER_TRUST");
+
+    let global_server = MockMcpServer::start_with_identity("skills-gate").await;
+    write_global_mcp(&mcp_config("skills-gate", &global_server.url, true));
+    let home = shell::util::grow_home::grow_home();
+    let (registration_started, registration_release, _registration_gate) =
+        arm_config_watcher_registration_gate(home, WatcherRegistrationKind::Skills);
+
+    let worker = start_worker().await;
+    registration_started
+        .await
+        .expect("skills watcher registration should reach its test gate");
+
+    initialize(&worker.tx).await;
+    let cwd = tempfile::tempdir().unwrap();
+    shell::agent::folder_trust::grant_folder_trust(cwd.path());
+    let session = new_session(&worker.tx, cwd.path(), vec![]).await;
+    wait_for_ready_server(&worker.tx, &session, "skills-gate").await;
+    policy_identity::wait_enabled(&worker.tx, &session, "skills-gate", true).await;
+
+    write_global_mcp(&format!(
+        "{}\n[disabled_mcp_tools]\nskills-gate = [\"echo\"]\n",
+        mcp_config("skills-gate", &global_server.url, true)
+    ));
+    policy_identity::wait_enabled(&worker.tx, &session, "skills-gate", false).await;
+
+    registration_release
+        .send(())
+        .expect("skills watcher test gate should still be waiting");
+    stop_worker(worker).await;
+}
+
 #[path = "policy_identity.rs"]
 mod policy_identity;

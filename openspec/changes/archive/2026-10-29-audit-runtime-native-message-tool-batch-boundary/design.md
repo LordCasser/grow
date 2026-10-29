@@ -1,0 +1,9 @@
+## Conclusion
+
+The audited production path cannot drain an AgentMessage into the conversation Surface between tool results from one admitted batch. A received message is persisted to the notification inbox and may raise `parent_message_interrupt`, but `maybe_drain_notifications` promotes inbox contents only when `is_session_idle_for_injection` is true. That predicate requires an idle foreground, no queued user inputs, and open execution.
+
+The active-turn drains occur at admission boundaries or immediately before another model sample. In the turn loop, a model response's entire tool-call vector is passed to `execute_tool_calls`; that function completes its sequential/concurrent dispatch batches before returning. The loop then reaches the next sampling boundary and drains notifications. In the only final-response drain (`close_steering_and_drain`), the turn has already completed with no tool calls to execute. `drain_pending_interjections` separately refuses to consume while an active tool exists and does not consume notification inbox messages.
+
+An interrupting ParentMessage can end an interruptible wait tool, but this only settles that tool result; it does not call `drain_active_notifications`. Any other sibling calls in the batch still finish before the next sampling drain. Admission's two direct drain sites run before the admitted prompt's model/tool execution, or after its durable primary-input commit and before its turn runner proceeds.
+
+Therefore the archived adapter sequence remains a valid synthetic projection edge case, but the source-level production path audited here does not produce it by draining a notification between results. No actor regression was added: it would assert an unreachable scheduling interleave rather than protect production behavior. Adapter-level fixture behavior remains out of scope for this reachability closure.

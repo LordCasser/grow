@@ -1,0 +1,7 @@
+   Compiling tikv-jemalloc-sys v0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7
+   Compiling pager v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+    Checking pager-minimal v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-minimal)
+   Compiling cli v2.5.1 (/Users/lordcasser/workspace/projects/grow/crates/codegen/cli)
+    Checking tikv-jemalloc-ctl v0.6.1
+    Checking tikv-jemallocator v0.6.1
+    Finished `dev` profile [unoptimized] target(s) in 24.21s

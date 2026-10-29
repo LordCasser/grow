@@ -1,0 +1,18 @@
+
+running 13 tests
+test session::actor::tests::record_response_token_usage_tests::build_session_info_used_reflects_recorded_response ... ok
+test session::actor::tests::record_response_token_usage_tests::descendant_model_usage_is_submitted_to_the_root_goal_window ... ok
+test session::actor::tests::record_response_token_usage_tests::build_session_info_sources_show_model_fingerprint_from_catalog ... ok
+test session::actor::tests::record_response_token_usage_tests::preserves_projection_when_response_has_no_usage ... ok
+test session::actor::tests::record_response_token_usage_tests::anchors_projected_context_from_response_usage ... ok
+test session::actor::tests::record_response_token_usage_tests::final_request_schema_is_visible_to_pre_sampling_pressure ... ok
+test session::actor::tests::record_response_token_usage_tests::goal_usage_accumulates_model_consumption_when_context_pressure_falls ... ok
+test session::actor::tests::record_response_token_usage_tests::sampling_usage_sink_deduplicates_known_usage_and_debits_output_grant_once ... ok
+test session::actor::tests::record_response_token_usage_tests::quarantined_response_is_billed_without_restoring_its_context_anchor ... ok
+test session::actor::tests::record_response_token_usage_tests::sampling_usage_sink_marks_unknown_usage_and_exhausts_output_grant ... ok
+test session::actor::tests::record_response_token_usage_tests::stashes_per_turn_usage_in_chat_state ... ok
+test session::actor::tests::record_response_token_usage_tests::usage_keeps_selected_provider_models_separate_from_wire_aliases ... ok
+test session::actor::tests::record_response_token_usage_tests::resumed_context_usage_is_portable_before_first_prompt ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 4390 filtered out; finished in 0.23s
+

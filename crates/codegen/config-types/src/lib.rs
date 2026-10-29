@@ -661,8 +661,8 @@ pub struct RemoteSettings {
     /// `resolve_show_thinking_blocks` (env > user > remote > default true).
     #[serde(default)]
     pub show_thinking_blocks: Option<bool>,
-    /// Whether the TUI folds runs of consecutive non-destructive tool calls
-    /// (reads/searches/lists) into one transcript row. `None` defers to local
+    /// Whether the TUI groups consecutive tool calls, subagent rows and
+    /// interleaved Thought while preserving active/opened content. `None` defers to local
     /// config / env / default (`true`). `Some(false)` is a remote
     /// kill-switch. Resolved via `resolve_group_tool_verbs` (env > user >
     /// remote > default true).

@@ -316,16 +316,18 @@ pub(in crate::app::root::dispatch) fn set_ask_user_question_timeout_enabled(
 
 pub(super) fn set_show_thinking_blocks_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_show_thinking_blocks(new);
-    // Thinking visibility reshapes verb-group runs (shown thoughts claim
-    // into folds) AND dense N-more runs (hidden thoughts drop out of
-    // truncation participation), so expansion ids describe the OLD grouping
-    // shape even with `group_tool_verbs` off — drop them like
-    // `set_group_tool_verbs_inner`.
+    // Thought visibility never changes activity membership. Only the dense
+    // fallback changes shape when hidden Thought rows enter/leave its budget.
+    let dense_fallback = !crate::appearance::cache::load_group_tool_verbs();
     for agent in app.agents.values_mut() {
-        agent.scrollback.clear_group_expansion();
+        if dense_fallback {
+            agent.scrollback.clear_group_expansion();
+        }
         agent.scrollback.invalidate_heights();
         for child in agent.subagent_views.values_mut() {
-            child.scrollback.clear_group_expansion();
+            if dense_fallback {
+                child.scrollback.clear_group_expansion();
+            }
             child.scrollback.invalidate_heights();
         }
     }
@@ -375,7 +377,7 @@ pub(super) fn set_group_tool_verbs_inner(app: &mut AppView, new: bool) {
     }
 }
 
-/// Set whether runs of consecutive non-destructive tool calls and subagent
+/// Set whether runs of consecutive tool calls, Thought and subagent
 /// rows are grouped into one transcript row.
 ///
 /// SHELL-OWNED: cache mirror + `[ui].group_tool_verbs` via `Effect::PersistSetting`.

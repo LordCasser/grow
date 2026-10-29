@@ -1,0 +1,4 @@
+- [x] 补充 promotion waiter drop 后重新提升及真正取消后再提升的回归，修复发现的缺陷。
+- [x] 注入 terminal/replacement ACK 丢失及 post-commit repair 故障，验证阻断与恢复。
+- [x] 覆盖异步完成待发布期间换路由、降窗和新 replacement。
+- [x] 对抗性复查、相关回归和生产构建；更新规范/开发说明、归档并清理构建残留。

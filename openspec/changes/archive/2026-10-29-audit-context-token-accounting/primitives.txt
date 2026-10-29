@@ -1,0 +1,23 @@
+   Compiling token-estimation v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/token-estimation)
+    Finished `test` profile [unoptimized] target(s) in 0.87s
+     Running unittests src/lib.rs (target/debug/deps/token_estimation-3fd33a59c9530be6)
+
+running 15 tests
+test tests::estimate_chars_is_inverse ... ok
+test tests::estimate_image_tokens_uses_constant ... ok
+test tests::estimate_tokens_is_bytes_over_four ... ok
+test tests::exceeds_threshold_matches_integer_pct ... ok
+test tests::exceeds_threshold_with_headroom_headroom_larger_than_threshold_saturates ... ok
+test tests::exceeds_threshold_fires_on_strict_boundary ... ok
+test tests::exceeds_threshold_with_headroom_subtracts_headroom ... ok
+test tests::exceeds_threshold_with_headroom_zero_headroom_matches_exceeds_threshold ... ok
+test tests::exceeds_threshold_with_headroom_zero_window ... ok
+test tests::free_tokens_saturates ... ok
+test tests::usage_percentage_clamps_and_handles_zero_total ... ok
+test tests::usage_percentage_truncated_u8_clamps_and_handles_zero_total ... ok
+test tests::usage_percentage_truncated_u8_truncates_does_not_round ... ok
+test tests::usage_percentage_u8_rounds ... ok
+test tests::usage_percentage_u8_rounds_half_up ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

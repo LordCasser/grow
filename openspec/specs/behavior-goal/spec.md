@@ -461,3 +461,28 @@ Goal complete SHALL 要求非空完成报告，说明原目标的达成结果、
 - **THEN** 当前 Goal 不再展示旧报告作为新定义的完成依据。
 
 实施入口：`shell/src/session/actor/goal.rs::handle_goal_command`、`shell/src/session/goal_tracker.rs`、`tools/src/implementations/grow_build/update_goal/mod.rs`。
+
+### Requirement: Plan handoff receipt versions identify the submitted plan
+
+Plan handoff notification source versions SHALL use the positive session-wide Plan submission identity independently of the artifact revision. Artifact hash, positive revision and handoff kind SHALL remain part of source identity and owner validation. Different submissions of the same body SHALL remain distinct receipts; receipt admission SHALL NOT reject a valid submission merely because its ID differs from the document revision. This SHALL preserve existing event shapes, immutable historical receipts and exact current-handoff matching before execution.
+
+#### Scenario: Another Plan cycle submits the same artifact body
+
+- **WHEN** Plan exits and is entered again, and the same body is submitted with a new submission ID while its current-cycle artifact revision is one
+- **THEN** the new handoff is admitted and consumed exactly once under the new submission identity without deduplicating against the previous cycle or reporting acknowledgement loss.
+
+#### Scenario: Revision and submission identity differ
+
+- **WHEN** a valid Plan handoff has positive artifact revision and submission ID with different values
+- **THEN** Timeline accepts and replays that exact receipt, while zero submission IDs, zero revisions and malformed artifact identities remain invalid.
+
+### Requirement: Live Plan handoff rechecks preserve exact consumption ownership
+Before the next live Plan Step the Session SHALL consume the exact approved handoff or prove that its immutable receipt was already consumed by the current Turn. Missing receipts, dismissed receipts, actor unavailability and consumption by another Turn SHALL NOT authorize resampling. Rechecking SHALL NOT append duplicate consumption or re-inject model input.
+
+#### Scenario: Active drain consumed the current handoff
+- **WHEN** the exact artifact hash, revision, kind and submission receipt was consumed by the current Turn before the next-Step check
+- **THEN** the check succeeds without a new Timeline fact or another model message.
+
+#### Scenario: Receipt belongs to another lifecycle
+- **WHEN** an exact receipt is dismissed, absent, consumed by another Turn, or its owner cannot answer
+- **THEN** the check fails and no successor provider request is admitted.

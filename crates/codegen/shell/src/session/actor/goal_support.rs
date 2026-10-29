@@ -1442,9 +1442,14 @@ impl SessionActor {
                 item,
             })
             .collect();
-        let kind = state.timeline_kind_with_model_context_items(contexts)?;
+        let scope = goal_directive_scope(state.behavior.behavior(), state.goal.as_ref());
+        let chat_state::TimelineEventKind::Control(control) =
+            state.timeline_kind_with_model_context_items(contexts)?
+        else {
+            unreachable!("control snapshot produces a Control event")
+        };
         self.chat_state_handle
-            .record_timeline_event_durably(kind)
+            .record_control_event_durably(control, scope)
             .await
             .map(|_| ())
             .map_err(std::io::Error::other)
@@ -1534,18 +1539,9 @@ impl SessionActor {
     }
 
     pub(super) fn active_goal_directive_tag(&self) -> Option<sampling_types::GoalDirectiveTag> {
-        if self.behavior.lock().behavior() != tool_types::BehaviorId::Goal {
-            return None;
-        }
+        let behavior = self.behavior.lock().behavior();
         let tracker = self.goal_tracker.lock();
-        let goal = tracker.snapshot()?;
-        if goal.status != crate::session::goal_tracker::GoalStatus::Active {
-            return None;
-        }
-        Some(sampling_types::GoalDirectiveTag {
-            goal_id: goal.goal_id.clone(),
-            definition_revision: goal.definition_revision,
-        })
+        goal_directive_scope(behavior, tracker.snapshot())
     }
 
     pub(super) fn goal_directive_item(
@@ -1676,6 +1672,21 @@ impl SessionActor {
             .goal_loop_active_gate
             .store(active, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Goal request scope comes from control authority, never from the last history tag.
+pub(super) fn goal_directive_scope(
+    behavior: tool_types::BehaviorId,
+    goal: Option<&crate::session::goal_tracker::GoalState>,
+) -> Option<sampling_types::GoalDirectiveTag> {
+    let goal = goal.filter(|goal| {
+        behavior == tool_types::BehaviorId::Goal
+            && goal.status == crate::session::goal_tracker::GoalStatus::Active
+    })?;
+    Some(sampling_types::GoalDirectiveTag {
+        goal_id: goal.goal_id.clone(),
+        definition_revision: goal.definition_revision,
+    })
 }
 
 #[cfg(test)]

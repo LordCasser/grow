@@ -1,0 +1,3 @@
+- [x] 1. Share the effective sticky-layout gate between header geometry and precise entry navigation.
+- [x] 2. Add regression coverage for top and center target placement with sticky display enabled, disabled, and compact prompts.
+- [x] 3. Run the focused Pager navigation tests and validate OpenSpec.

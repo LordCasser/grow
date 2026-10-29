@@ -242,9 +242,15 @@ impl CompactionSampler for ShellCompactionSampler {
 
         match sample {
             Ok(output) => {
-                let response = output.content.clone();
-                *self.last_success.lock().unwrap() = Some(output);
-                Ok(LlmCompactionOutput { response })
+                if let Some(failure) = summary_stop_failure(&output) {
+                    let error = compact_failure_to_sample_error(failure);
+                    *self.sideband_feedback.lock().unwrap() = Some(error.to_string());
+                    Err(error)
+                } else {
+                    let response = output.content.clone();
+                    *self.last_success.lock().unwrap() = Some(output);
+                    Ok(LlmCompactionOutput { response })
+                }
             }
             Err(failure) => {
                 if matches!(&failure, CompactFailure::ImageInputUnsupported(_)) {
@@ -257,6 +263,29 @@ impl CompactionSampler for ShellCompactionSampler {
             }
         }
     }
+}
+
+/// Only completed text responses can become replacement history. The three
+/// provider protocols normalize their successful terminal reasons to these
+/// values. Missing and unknown reasons follow the existing bounded transient
+/// retry path because they do not prove completion. Context window exhaustion
+/// keeps its established deterministic input-ladder path.
+fn summary_stop_failure(output: &CompactOutput) -> Option<CompactFailure> {
+    let reason = output.stop_reason.as_deref();
+    if !output.truncated && matches!(reason, Some("stop" | "end_turn" | "stop_sequence")) {
+        return None;
+    }
+
+    let reason = reason.unwrap_or("incomplete stream");
+    let message = format!("compact failed: summary did not complete ({reason})");
+    let error = if reason == "model_context_window_exceeded" {
+        CompactFailure::Deterministic(acp::Error::internal_error().data(format!(
+            "compact failed: context_length_exceeded during summary ({reason})"
+        )))
+    } else {
+        CompactFailure::Transient(acp::Error::internal_error().data(message))
+    };
+    Some(error)
 }
 
 /// Map grow-build's [`CompactFailure`] onto the shared engine's
@@ -307,6 +336,58 @@ fn sideband_error_to_sample_error(error: SidebandRunError) -> CompactionSampleEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compact_output(stop_reason: Option<&str>, truncated: bool) -> CompactOutput {
+        CompactOutput {
+            content: "partial summary text".into(),
+            usage: chat_state::SidebandUsage::default(),
+            stop_reason: stop_reason.map(str::to_owned),
+            truncated,
+            ttft_ms: None,
+            stream_ms: None,
+            delta_count: 1,
+            itl_max_ms: None,
+        }
+    }
+
+    #[test]
+    fn only_completed_summary_stops_are_accepted() {
+        for reason in ["stop", "end_turn", "stop_sequence"] {
+            assert!(summary_stop_failure(&compact_output(Some(reason), false)).is_none());
+        }
+        for reason in [
+            "max_tokens",
+            "model_context_window_exceeded",
+            "refusal",
+            "pause_turn",
+            "tool_calls",
+            "tool_use",
+            "function_call",
+            "content_filter",
+            "provider_extension",
+        ] {
+            assert!(
+                summary_stop_failure(&compact_output(Some(reason), false)).is_some(),
+                "accepted non-success stop {reason}"
+            );
+        }
+        assert!(summary_stop_failure(&compact_output(None, false)).is_some());
+        assert!(summary_stop_failure(&compact_output(Some("stop"), true)).is_some());
+    }
+
+    #[test]
+    fn context_window_summary_stop_uses_existing_overflow_classification() {
+        let failure = summary_stop_failure(&compact_output(
+            Some("model_context_window_exceeded"),
+            false,
+        ))
+        .unwrap();
+        let error = compact_failure_to_sample_error(failure);
+        let CompactionSampleError::Deterministic(message) = error else {
+            panic!("context exhaustion must enter the bounded input ladder")
+        };
+        assert!(compaction::is_context_length_error(&message));
+    }
 
     #[test]
     fn sideband_budget_rejection_drives_the_compaction_input_ladder() {

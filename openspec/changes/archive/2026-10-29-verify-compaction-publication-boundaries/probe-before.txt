@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized] target(s) in 3m 09s
+     Running unittests src/lib.rs (target/debug/deps/shell-361a98a001547f23)
+
+running 2 tests
+
+thread '<unnamed>' (3258312) panicked at crates/codegen/shell/src/session/actor/tests/compaction_repromotion_tests.rs:117:17:
+a new waiter must resume the existing promotion: Err(Error { code: -32603: Internal error, message: "Internal error", data: Some(Object {"message": String("turn compaction promotion was not durably recorded: timeline event violates the causal fold: compaction 01a1858e-afb4-7653-8bdc-6002d4f3a0c2 has no matching start event"), "error_kind": String("turn_boundary_persistence_failed"), "phase": String("compaction promotion")}) })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (3258313) panicked at crates/codegen/shell/src/session/actor/tests/compaction_repromotion_tests.rs:110:17:
+cancellation must not become an invalid duplicate promotion: Error { code: -32603: Internal error, message: "Internal error", data: Some(Object {"message": String("turn compaction promotion was not durably recorded: timeline event violates the causal fold: compaction 01a1858e-afb4-7653-8bdc-601a89069293 has no matching start event"), "error_kind": String("turn_boundary_persistence_failed"), "phase": String("compaction promotion")}) }
+test session::actor::tests::compaction_pre_prune_tests::compaction_repromotion_tests::cancelled_generation_cannot_publish_when_promoted_again ... FAILED
+test session::actor::tests::compaction_pre_prune_tests::compaction_repromotion_tests::dropped_promotion_waiter_can_await_the_same_generation_again ... FAILED
+
+failures:
+
+failures:
+    session::actor::tests::compaction_pre_prune_tests::compaction_repromotion_tests::cancelled_generation_cannot_publish_when_promoted_again
+    session::actor::tests::compaction_pre_prune_tests::compaction_repromotion_tests::dropped_promotion_waiter_can_await_the_same_generation_again
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 4387 filtered out; finished in 0.25s
+
+error: test failed, to rerun pass `-p shell --lib`

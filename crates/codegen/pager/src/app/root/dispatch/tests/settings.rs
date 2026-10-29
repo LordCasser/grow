@@ -2760,32 +2760,18 @@ fn set_show_thinking_blocks_off_preserves_tool_group_header() {
         .get_cached_entry_layouts()
         .expect("layout cache");
     assert_eq!(layouts_on[think_idx].height, 1);
-    assert_eq!(layouts_on[think_idx].group_header_count, 3);
+    assert_eq!(layouts_on[think_idx].group_header_count, 6);
     let _ = dispatch(Action::SetShowThinkingBlocks(false), &mut app);
-    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.scrollback.prepare_layout(80, 40);
-    let layouts = agent
-        .scrollback
-        .get_cached_entry_layouts()
-        .expect("layout cache after hide")
-        .to_vec();
-    assert_eq!(layouts[think_idx].height, 0);
-    assert_eq!(layouts[think_idx].group_header_count, 0);
-    assert!(!layouts[think_idx].group_collapse_header);
-    let header_idx = 1usize;
-    assert!(
-        agent
-            .scrollback
-            .entry(header_idx)
-            .is_some_and(|e| e.block.is_tool_call())
+    let layouts = agent.scrollback.get_cached_entry_layouts().unwrap();
+    assert_eq!(
+        layouts[0].height, 1,
+        "hidden Thought keeps the group summary"
     );
-    assert_eq!(layouts[header_idx].height, 1);
-    assert_eq!(layouts[header_idx].group_header_count, 2);
-    assert_eq!(layouts[2].height, 0);
-    assert_eq!(layouts[3].height, 0);
-    for (i, layout) in layouts.iter().enumerate().take(7).skip(4) {
-        assert!(layout.height > 0, "tail tool {i} visible");
-    }
+    assert_eq!(layouts[0].group_header_count, 6);
+    assert!(layouts[0].verb_group_header);
+    assert!(layouts[1..].iter().all(|layout| layout.height == 0));
     crate::appearance::cache::set_show_thinking_blocks(false);
 }
 /// Hidden thinking interspersed in a collapsed tool run stays transparent:
@@ -2838,11 +2824,11 @@ fn set_show_thinking_blocks_off_truncates_across_interspersed_thinking() {
     assert_eq!(layouts[think_idx].group_header_count, 0);
     assert!(!layouts[think_idx].group_collapse_header);
     assert_eq!(layouts[0].height, 1);
-    assert_eq!(layouts[0].group_header_count, 2);
+    assert_eq!(layouts[0].group_header_count, 6);
     assert_eq!(layouts[1].height, 0);
     assert_eq!(layouts[3].height, 0);
     for (i, layout) in layouts.iter().enumerate().take(7).skip(4) {
-        assert!(layout.height > 0, "tail tool {i} visible");
+        assert_eq!(layout.height, 0, "tool {i} belongs to the same activity");
     }
     crate::appearance::cache::set_show_thinking_blocks(false);
 }
@@ -2851,7 +2837,7 @@ fn set_show_thinking_blocks_off_truncates_across_interspersed_thinking() {
 /// drop manual group expansions like the `group_tool_verbs` flip does: a
 /// stale id must not reopen the reshaped run expanded.
 #[test]
-fn set_show_thinking_blocks_flip_reshapes_verb_runs_and_resets_expansion() {
+fn set_show_thinking_blocks_flip_preserves_activity_identity_and_expansion() {
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::types::DisplayMode;
     crate::appearance::cache::set_group_tool_verbs(true);
@@ -2880,10 +2866,16 @@ fn set_show_thinking_blocks_flip_reshapes_verb_runs_and_resets_expansion() {
         let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
         sb.prepare_layout(80, 40);
         let layouts = sb.get_cached_entry_layouts().unwrap();
-        assert_eq!(layouts[0].height, 0, "hidden thought takes no rows");
-        assert!(layouts[1].verb_group_header, "run re-anchors on the tool");
-        assert!(!layouts[1].group_collapse_header);
-        assert_eq!(layouts[2].height, 0);
+        assert_eq!(
+            layouts[0].height, 1,
+            "hidden Thought keeps only the group summary"
+        );
+        assert!(
+            layouts[0].verb_group_header,
+            "original activity anchor remains"
+        );
+        assert!(layouts[0].group_collapse_header);
+        assert!(layouts[2].height > 0);
     }
     let _ = dispatch(Action::SetShowThinkingBlocks(true), &mut app);
     {
@@ -2892,10 +2884,10 @@ fn set_show_thinking_blocks_flip_reshapes_verb_runs_and_resets_expansion() {
         let layouts = sb.get_cached_entry_layouts().unwrap();
         assert!(layouts[0].verb_group_header, "thought re-anchors the run");
         assert!(
-            !layouts[0].group_collapse_header,
-            "flip must reset the stale expansion"
+            layouts[0].group_collapse_header,
+            "visibility flip preserves user expansion"
         );
-        assert_eq!(layouts[1].height, 0);
+        assert!(layouts[1].height > 0);
     }
     crate::appearance::cache::set_group_tool_verbs(true);
     crate::appearance::cache::set_show_thinking_blocks(true);
