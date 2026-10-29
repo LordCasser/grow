@@ -12,11 +12,14 @@ session 的认证、native continuation 等修复与 sampler 共用一个 `Recov
 行为契约见 [model-sampling](../../openspec/specs/model-sampling/spec.md)。
 
 模型/backend 在 Step 边界切换时会撤下旧 route 的 native continuation，并以
-portable 历史重建请求。Responses 兼容端点若明确以 400 要求 thinking 工具往返
-回传 `reasoning_text`，sampler 将它投影为类型化失败事实；ChatState 只为当前
-Responses route 开启已有可见 reasoning 的窄化回放，确认后沿用同一
-`RecoveryBudget` 重提交。该状态在同 route 的 native reset 中保留，真正换 route
-时清除；签名、加密内容、provider item identity/status 不会跨 route 恢复。
+portable 历史重建请求。兼容端点明确以 400 要求回传或补齐 `reasoning_text`
+或 `reasoning_content` 时，HTTP/SSE 在用户文案截断前将结构化错误投影为 typed
+失败事实，DTO 往返保留该事实。ChatState 只为匹配的当前 route 确认一次回放，
+沿用同一 `RecoveryBudget` 重提交。Responses 保留普通非空回答和完整工具往返前的
+已有可见 reasoning，Chat 无文本时沿用空字段；不虚构 Responses 思考正文。
+该状态在同 route 的 native reset 中保留，真正换 route 时清除；签名、加密内容、
+provider item identity/status 不会跨 route 恢复。可见摘要不等于原生完整 reasoning。
+
 
 普通 Turn 尊重三 API 的原生终止，不要求额外的 `FinishTurn`，也不因正文以冒号结尾而自动续采样。
 原生终止只结束一次响应；完整业务调用仍进入工具循环，Goal 是否完成仍由 Goal 自身契约决定。

@@ -186,6 +186,9 @@ pub enum SamplingError {
         /// `Some(false)` = request-content error, don't retry.
         /// `None` = header absent (old server or non-proxy origin).
         should_retry: Option<bool>,
+        /// Structured evidence that the target backend requires portable
+        /// reasoning history. Parsed before the user-facing message is cut.
+        portable_reasoning_required: Option<ApiBackend>,
     },
     #[error("reqwest error stream: {0}")]
     EventStreamError(String),
@@ -217,16 +220,7 @@ impl SamplingError {
     pub fn from_stream_error(error_type: impl Into<String>, message: impl Into<String>) -> Self {
         let error_type = error_type.into();
         let message = message.into();
-        let normalized: String = error_type
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() {
-                    ch.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let normalized = normalize_error_code(&error_type);
         if normalized.contains("authentication")
             || normalized.contains("invalid_api_key")
             || normalized == "unauthorized"
@@ -270,6 +264,7 @@ impl SamplingError {
         } else if normalized.contains("invalid")
             || normalized.contains("unsupported")
             || normalized.contains("bad_request")
+            || normalized.contains("missing_required_parameter")
             || normalized.contains("data_inspection")
             || normalized.contains("datainspection")
             || normalized.contains("content_filter")
@@ -287,13 +282,46 @@ impl SamplingError {
         );
         let should_retry =
             (status == StatusCode::INTERNAL_SERVER_ERROR && !known_server_error).then_some(false);
+        let portable_reasoning_required =
+            portable_reasoning_requirement(status, None, Some(&error_type), None, &message);
         Self::Api {
             status,
             message: format!("{error_type}: {message}"),
             model_metadata: None,
             retry_after_secs: None,
             should_retry,
+            portable_reasoning_required,
         }
+    }
+
+    fn from_stream_error_with_param(
+        error_type: String,
+        code: Option<&str>,
+        kind: Option<&str>,
+        param: Option<&serde_json::Value>,
+        message: String,
+        request_id: Option<&str>,
+    ) -> Self {
+        let display_message = match request_id {
+            Some(id) => format!("{message} (request_id: {id})"),
+            None => message.clone(),
+        };
+        let mut error = Self::from_stream_error(error_type.clone(), display_message);
+        if let Self::Api {
+            status,
+            portable_reasoning_required,
+            ..
+        } = &mut error
+        {
+            *portable_reasoning_required = portable_reasoning_requirement(
+                *status,
+                code,
+                kind.or(Some(&error_type)),
+                param,
+                &message,
+            );
+        }
+        error
     }
 
     /// Auth error of unknown wire provenance — for paths that never sent a
@@ -367,26 +395,43 @@ impl SamplingError {
     /// omitted. Downstream recovery consumes this as a typed attempt fact.
     pub fn portable_reasoning_requirement(&self) -> Option<ApiBackend> {
         let SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message,
+            portable_reasoning_required,
             ..
         } = self
         else {
             return None;
         };
-        let message = message.to_ascii_lowercase();
-        if !message.contains("thinking mode")
-            || !(message.contains("passed back") || message.contains("pass back"))
-        {
-            return None;
-        }
-        match (
-            message.contains("reasoning_text"),
-            message.contains("reasoning_content"),
-        ) {
-            (true, false) => Some(ApiBackend::Responses),
-            (false, true) => Some(ApiBackend::ChatCompletions),
-            _ => None,
+        portable_reasoning_required.clone()
+    }
+
+    /// Build an API failure while retaining narrow structured compatibility
+    /// evidence separately from its bounded user-facing message.
+    pub fn from_api_response(
+        status: StatusCode,
+        bytes: &[u8],
+        model_metadata: Option<ResponseModelMetadata>,
+        retry_after_secs: Option<u64>,
+        should_retry: Option<bool>,
+    ) -> Self {
+        let portable_reasoning_required = parse_structured_error(
+            std::str::from_utf8(bytes).unwrap_or_default(),
+        )
+        .and_then(|parsed| {
+            portable_reasoning_requirement(
+                status,
+                parsed.code.as_deref(),
+                parsed.kind.as_deref().or(Some(parsed.error_type.as_str())),
+                parsed.param.as_ref(),
+                &parsed.message,
+            )
+        });
+        Self::Api {
+            status,
+            message: user_facing_api_error_message(status, bytes),
+            model_metadata,
+            retry_after_secs,
+            should_retry,
+            portable_reasoning_required,
         }
     }
 
@@ -505,6 +550,8 @@ struct ErrorBody {
     kind: Option<String>,
     #[serde(default)]
     code: Option<serde_json::Value>,
+    #[serde(default)]
+    param: Option<serde_json::Value>,
 }
 
 /// Flat error from the Grow proxy/gateway: `{"code": "...", "error": "..."}`.
@@ -520,13 +567,24 @@ struct FlatErrorResponse {
 struct NamedStreamErrorResponse {
     code: String,
     message: String,
+    #[serde(default)]
+    param: Option<serde_json::Value>,
     request_id: Option<String>,
 }
 
-/// Extract `(error_type, message)` from either error format.
-fn try_parse_error(data: &str) -> Option<(String, String)> {
+/// Parsed fields needed by both user-facing formatting and typed recovery.
+struct ParsedStructuredError {
+    error_type: String,
+    code: Option<String>,
+    kind: Option<String>,
+    param: Option<serde_json::Value>,
+    message: String,
+}
+
+/// Extract structured error evidence without truncating the provider message.
+fn parse_structured_error(data: &str) -> Option<ParsedStructuredError> {
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
-        let specific_code = resp.error.code.and_then(|code| match code {
+        let code = resp.error.code.and_then(|code| match code {
             serde_json::Value::String(value) if !value.trim().is_empty() => Some(value),
             // Some OpenAI-compatible gateways encode an HTTP status in
             // `error.code`. Only recognize the closed status taxonomy here;
@@ -546,22 +604,152 @@ fn try_parse_error(data: &str) -> Option<(String, String)> {
             },
             _ => None,
         });
-        return Some((
-            specific_code
-                .or(resp.error.kind)
-                .unwrap_or_else(|| "unknown".to_string()),
-            resp.error
+        let kind = resp.error.kind;
+        let error_type = code
+            .clone()
+            .or(kind.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Some(ParsedStructuredError {
+            error_type,
+            code,
+            kind,
+            param: resp.error.param,
+            message: resp
+                .error
                 .message
                 .unwrap_or_else(|| "unknown error".to_string()),
-        ));
+        });
     }
     if let Ok(flat) = serde_json::from_str::<FlatErrorResponse>(data) {
-        return Some((
-            flat.code.unwrap_or_else(|| "server_error".to_string()),
-            flat.error,
-        ));
+        let error_type = flat.code.unwrap_or_else(|| "server_error".to_string());
+        return Some(ParsedStructuredError {
+            code: Some(error_type.clone()),
+            error_type,
+            kind: None,
+            param: None,
+            message: flat.error,
+        });
     }
     None
+}
+
+/// Extract the historically supported explicit pass-back rejection, plus
+/// structured missing-parameter and exact-field-required forms.
+fn portable_reasoning_requirement(
+    status: StatusCode,
+    code: Option<&str>,
+    error_type: Option<&str>,
+    param: Option<&serde_json::Value>,
+    message: &str,
+) -> Option<ApiBackend> {
+    if status != StatusCode::BAD_REQUEST {
+        return None;
+    }
+    let words = message
+        .to_ascii_lowercase()
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let has = |phrase: &[&str]| {
+        words
+            .windows(phrase.len())
+            .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+    };
+    let mentions = |field: &str| words.iter().any(|word| word == field);
+    let code = code.map(normalize_error_code);
+    let (param_backend, param_field) = match param {
+        Some(serde_json::Value::String(param)) => {
+            let leaf = param.rsplit(['.', '[', ']']).next().unwrap_or(param).trim();
+            match leaf {
+                "reasoning_text" => (Some(ApiBackend::Responses), Some("reasoning_text")),
+                "reasoning_content" => {
+                    (Some(ApiBackend::ChatCompletions), Some("reasoning_content"))
+                }
+                _ => return None,
+            }
+        }
+        Some(_) => return None,
+        None => (None, None),
+    };
+    let message_field = match (mentions("reasoning_text"), mentions("reasoning_content")) {
+        (true, false) => (ApiBackend::Responses, "reasoning_text"),
+        (false, true) => (ApiBackend::ChatCompletions, "reasoning_content"),
+        (true, true) => return None,
+        (false, false) if code.as_deref() == Some("missing_required_parameter") => {
+            (param_backend?, param_field?)
+        }
+        (false, false) => return None,
+    };
+    let (backend, field) = message_field;
+
+    let error_type = error_type.map(normalize_error_code);
+    if [code.as_deref(), error_type.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|value| {
+            value.contains("unsupported")
+                || (value.starts_with("invalid_") && value != "invalid_request_error")
+        })
+        || has(&["unsupported"])
+        || has(&["not", "supported"])
+        || has(&["invalid", "value"])
+        || has(&[field, "is", "invalid"])
+    {
+        return None;
+    }
+
+    if param_field.is_some_and(|param_field| param_field != field) {
+        return None;
+    }
+
+    let pass_back = has(&["thinking", "mode"])
+        && (has(&["must", "be", "passed", "back"])
+            || has(&["must", "be", "pass", "back"])
+            || has(&["must", "pass", "back"]));
+    let required = has(&[field, "is", "required"]) || has(&[field, "field", "is", "required"]);
+    let field_missing = has(&[field, "is", "missing"])
+        || has(&[field, "field", "is", "missing"])
+        || has(&["missing", field]);
+    if has(&[field, "is", "not", "required"])
+        || has(&[field, "not", "required"])
+        || has(&[field, "is", "not", "missing"])
+        || has(&[field, "not", "missing"])
+    {
+        return None;
+    }
+    let generic_field_required =
+        words == ["field", "required"] || words == ["field", "is", "required"];
+    let missing_named_parameter = param
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|param| {
+            words
+                .iter()
+                .map(String::as_str)
+                .eq(["missing", "required", "parameter"].into_iter().chain(
+                    param
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                        .filter(|word| !word.is_empty()),
+                ))
+        });
+    let missing_parameter = code.as_deref() == Some("missing_required_parameter")
+        && param_field == Some(field)
+        && (required || field_missing || missing_named_parameter || generic_field_required);
+
+    (pass_back || required || missing_parameter).then_some(backend)
+}
+
+fn normalize_error_code(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Max chars of a structured (JSON) error message shown to users.
@@ -603,11 +791,11 @@ fn truncate_user_error(s: &str) -> String {
 
 /// Format a known JSON error envelope; `None` if the body is not structured.
 fn structured_error_message(bytes: &[u8]) -> Option<String> {
-    let (error_type, message) = std::str::from_utf8(bytes).ok().and_then(try_parse_error)?;
-    let msg = if error_type == "unknown" || error_type == "server_error" {
-        message
+    let parsed = parse_structured_error(std::str::from_utf8(bytes).ok()?)?;
+    let msg = if parsed.error_type == "unknown" || parsed.error_type == "server_error" {
+        parsed.message
     } else {
-        format!("{error_type}: {message}")
+        format!("{}: {}", parsed.error_type, parsed.message)
     };
     Some(truncate_user_error(&msg))
 }
@@ -632,7 +820,8 @@ pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String
 }
 
 pub fn try_parse_stream_error(event_name: &str, data: &str) -> Option<SamplingError> {
-    let parsed = try_parse_error(data).or_else(|| {
+    let mut request_id = None;
+    let parsed = parse_structured_error(data).or_else(|| {
         if event_name != "error" {
             return None;
         }
@@ -640,18 +829,32 @@ pub fn try_parse_stream_error(event_name: &str, data: &str) -> Option<SamplingEr
         if named.code.trim().is_empty() || named.message.trim().is_empty() {
             return None;
         }
-        let message = match named.request_id.filter(|id| !id.trim().is_empty()) {
-            Some(id) => format!("{} (request_id: {id})", named.message),
-            None => named.message,
-        };
-        Some((named.code, message))
+        request_id = named.request_id.filter(|id| !id.trim().is_empty());
+        Some(ParsedStructuredError {
+            error_type: named.code.clone(),
+            code: Some(named.code),
+            kind: None,
+            param: named.param,
+            message: named.message,
+        })
     });
-    let Some((error_type, message)) = parsed else {
+    let Some(parsed) = parsed else {
         return (event_name == "error")
             .then(|| SamplingError::serialization_message("malformed named SSE error event"));
     };
-    tracing::warn!(error_type, message, "Server-side stream error");
-    Some(SamplingError::from_stream_error(error_type, message))
+    tracing::warn!(
+        error_type = parsed.error_type,
+        message = parsed.message,
+        "Server-side stream error"
+    );
+    Some(SamplingError::from_stream_error_with_param(
+        parsed.error_type,
+        parsed.code.as_deref(),
+        parsed.kind.as_deref(),
+        parsed.param.as_ref(),
+        parsed.message,
+        request_id.as_deref(),
+    ))
 }
 
 /// True when an error message indicates a context-window overflow. Backends report
@@ -712,6 +915,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             }
             .is_overloaded()
         );
@@ -722,6 +926,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             }
             .is_overloaded()
         );
@@ -732,6 +937,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             }
             .is_retryable()
         );
@@ -743,6 +949,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             }
             .is_overloaded()
         );
@@ -755,6 +962,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             }
             .is_overloaded()
         );
@@ -789,6 +997,7 @@ mod tests {
                     model_metadata: None,
                     retry_after_secs: None,
                     should_retry: None,
+                    portable_reasoning_required: None,
                 }
                 .is_overloaded(),
                 "expected overloaded for message: {msg}"
@@ -803,6 +1012,7 @@ mod tests {
                     model_metadata: None,
                     retry_after_secs: None,
                     should_retry: None,
+                    portable_reasoning_required: None,
                 }
                 .is_overloaded(),
                 "expected not overloaded for message: {msg}"
@@ -818,6 +1028,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
+            portable_reasoning_required: None,
         };
         assert!(vetoed_by_header.is_retry_vetoed());
 
@@ -827,6 +1038,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(vetoed_by_context.is_retry_vetoed());
 
@@ -836,6 +1048,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(!not_vetoed.is_retry_vetoed());
     }
@@ -876,6 +1089,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(api.is_context_length_error());
         assert!(
@@ -1190,6 +1404,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(
             !err.is_auth_error(),
@@ -1205,6 +1420,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(
             err.is_auth_error(),
@@ -1247,6 +1463,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(err.is_rate_limited());
         assert!(err.is_retryable(), "429 should be retryable");
@@ -1262,6 +1479,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(!server_error.is_rate_limited());
 
@@ -1274,25 +1492,18 @@ mod tests {
 
     #[test]
     fn recognizes_only_explicit_backend_reasoning_replay_rejections() {
-        let exact = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "The `reasoning_text` in the thinking mode must be passed back to the API."
-                .into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: Some(false),
-        };
+        let exact = SamplingError::from_stream_error(
+            "invalid_request_error",
+            "The `reasoning_text` in the thinking mode must be passed back to the API.",
+        );
         assert_eq!(
             exact.portable_reasoning_requirement(),
             Some(ApiBackend::Responses)
         );
-        let chat = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "Error from provider (Console Go): Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API.".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: Some(false),
-        };
+        let chat = SamplingError::from_stream_error(
+            "invalid_request_error",
+            "Error from provider (Console Go): Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API.",
+        );
         assert_eq!(
             chat.portable_reasoning_requirement(),
             Some(ApiBackend::ChatCompletions)
@@ -1302,10 +1513,6 @@ mod tests {
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "The reasoning_text in the thinking mode must be passed back to the API.",
-            ),
-            (
-                StatusCode::BAD_REQUEST,
-                "reasoning_content is required for this tool call",
             ),
             (
                 StatusCode::BAD_REQUEST,
@@ -1320,15 +1527,275 @@ mod tests {
                 "reasoning_text or reasoning_content in thinking mode must be passed back",
             ),
         ] {
-            let other = SamplingError::Api {
+            let other = SamplingError::from_api_response(
                 status,
-                message: message.into(),
-                model_metadata: None,
-                retry_after_secs: None,
-                should_retry: Some(false),
-            };
+                serde_json::json!({
+                    "error": {"type": "invalid_request_error", "message": message}
+                })
+                .to_string()
+                .as_bytes(),
+                None,
+                None,
+                Some(false),
+            );
             assert_eq!(other.portable_reasoning_requirement(), None, "{message}");
         }
+    }
+
+    #[test]
+    fn structured_reasoning_evidence_survives_display_truncation_and_rejects_conflicts() {
+        let message = format!(
+            "{} The `reasoning_text` in the thinking mode must be passed back to the API.",
+            "proxy prefix".repeat(40)
+        );
+        let body = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "missing_required_parameter",
+                "param": "reasoning_text",
+                "message": message,
+            }
+        });
+        let error = SamplingError::from_api_response(
+            StatusCode::BAD_REQUEST,
+            body.to_string().as_bytes(),
+            None,
+            None,
+            Some(false),
+        );
+        assert_eq!(
+            error.portable_reasoning_requirement(),
+            Some(ApiBackend::Responses)
+        );
+        let SamplingError::Api { message, .. } = error else {
+            panic!("API error expected")
+        };
+        assert!(message.chars().count() <= MAX_USER_ERROR_BODY_CHARS + 1);
+        assert!(message.ends_with('…'));
+        assert!(!message.contains("reasoning_text"));
+
+        let conflict = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "param": "reasoning_content",
+                "message": "The reasoning_text in thinking mode must be passed back."
+            }
+        });
+        assert_eq!(
+            SamplingError::from_api_response(
+                StatusCode::BAD_REQUEST,
+                conflict.to_string().as_bytes(),
+                None,
+                None,
+                Some(false),
+            )
+            .portable_reasoning_requirement(),
+            None
+        );
+    }
+
+    #[test]
+    fn structured_reasoning_requirement_is_exact_and_not_a_generic_400_recovery() {
+        let structured = |code: &str, param: &str, message: &str| {
+            serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": code,
+                    "param": param,
+                    "message": message
+                }
+            })
+        };
+        let required = structured(
+            "missing_required_parameter",
+            "messages[2].reasoning_content",
+            "Field required",
+        );
+        assert_eq!(
+            SamplingError::from_api_response(
+                StatusCode::BAD_REQUEST,
+                required.to_string().as_bytes(),
+                None,
+                None,
+                Some(false),
+            )
+            .portable_reasoning_requirement(),
+            Some(ApiBackend::ChatCompletions)
+        );
+
+        let missing_named_parameter = structured(
+            "missing_required_parameter",
+            "messages[2].reasoning_content",
+            "Missing required parameter: 'messages[2].reasoning_content'",
+        );
+        assert_eq!(
+            SamplingError::from_api_response(
+                StatusCode::BAD_REQUEST,
+                missing_named_parameter.to_string().as_bytes(),
+                None,
+                None,
+                Some(false),
+            )
+            .portable_reasoning_requirement(),
+            Some(ApiBackend::ChatCompletions)
+        );
+
+        let field_required = structured(
+            "invalid_request_error",
+            "reasoning_content",
+            "reasoning_content is required for this tool call",
+        );
+        assert_eq!(
+            SamplingError::from_api_response(
+                StatusCode::BAD_REQUEST,
+                field_required.to_string().as_bytes(),
+                None,
+                None,
+                Some(false),
+            )
+            .portable_reasoning_requirement(),
+            Some(ApiBackend::ChatCompletions)
+        );
+
+        for body in [
+            structured(
+                "unsupported_parameter",
+                "reasoning_text",
+                "reasoning_text is required",
+            ),
+            structured(
+                "invalid_value",
+                "reasoning_text",
+                "reasoning_text is required",
+            ),
+            structured(
+                "missing_required_parameter",
+                "reasoning_text",
+                "reasoning_text or reasoning_content is required",
+            ),
+            structured(
+                "invalid_request_error",
+                "reasoning_content",
+                "reasoning_content is not required",
+            ),
+            structured(
+                "missing_required_parameter",
+                "reasoning_text",
+                "reason_text is required",
+            ),
+            structured(
+                "missing_required_parameter",
+                "reasoning_text",
+                "reasoning_text is not missing; the required parameter is prompt",
+            ),
+            structured(
+                "missing_required_parameter",
+                "reasoning_text",
+                "reasoning_text is required but not supported",
+            ),
+            structured(
+                "missing_required_parameter",
+                "reasoning_text",
+                "reasoning_text is present; password field required",
+            ),
+        ] {
+            assert_eq!(
+                SamplingError::from_api_response(
+                    StatusCode::BAD_REQUEST,
+                    body.to_string().as_bytes(),
+                    None,
+                    None,
+                    Some(false),
+                )
+                .portable_reasoning_requirement(),
+                None,
+                "unexpected reasoning recovery for {body}"
+            );
+        }
+
+        let pass_back = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "message": "The reasoning_text in thinking mode must be passed back."
+            }
+        });
+        assert_eq!(
+            SamplingError::from_api_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                pass_back.to_string().as_bytes(),
+                None,
+                None,
+                Some(false),
+            )
+            .portable_reasoning_requirement(),
+            None
+        );
+        assert_eq!(
+            SamplingError::from_api_response(
+                StatusCode::BAD_REQUEST,
+                b"<html>reasoning_text in thinking mode must be passed back</html>",
+                None,
+                None,
+                Some(false),
+            )
+            .portable_reasoning_requirement(),
+            None
+        );
+    }
+
+    #[test]
+    fn sse_reasoning_requirement_uses_full_message_and_structured_param() {
+        let message = format!(
+            "{} reasoning_content is required",
+            "gateway prefix".repeat(40)
+        );
+        let body = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "missing_required_parameter",
+                "param": "messages[2].reasoning_content",
+                "message": message,
+            }
+        });
+        let error = try_parse_stream_error("error", &body.to_string()).unwrap();
+        assert_eq!(
+            error.portable_reasoning_requirement(),
+            Some(ApiBackend::ChatCompletions)
+        );
+
+        let response_error = serde_json::json!({
+            "sequence_number": 1,
+            "code": "missing_required_parameter",
+            "param": "input[3].reasoning_text",
+            "message": "Field required",
+            "request_id": "request_reasoning_content_diagnostic_only",
+        });
+        let error = try_parse_stream_error("error", &response_error.to_string()).unwrap();
+        assert_eq!(
+            error.portable_reasoning_requirement(),
+            Some(ApiBackend::Responses)
+        );
+
+        assert!(
+            error
+                .to_string()
+                .contains("request_reasoning_content_diagnostic_only")
+        );
+        let invalid_param = serde_json::json!({
+            "code": "missing_required_parameter",
+            "param": ["reasoning_text"],
+            "message": "Field required",
+        });
+        let error = try_parse_stream_error("error", &invalid_param.to_string()).unwrap();
+        assert!(matches!(error, SamplingError::Api { .. }));
+        assert_eq!(error.portable_reasoning_requirement(), None);
+        assert!(error.to_string().contains("Field required"));
+
+        let unknown = SamplingError::from_stream_error(
+            "VendorUnmappedCode",
+            "reasoning_text in thinking mode must be passed back",
+        );
+        assert_eq!(unknown.portable_reasoning_requirement(), None);
     }
 
     #[test]
@@ -1339,6 +1806,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(42),
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert_eq!(err.retry_after(), Some(42));
     }
@@ -1351,6 +1819,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert_eq!(err.retry_after(), None);
     }

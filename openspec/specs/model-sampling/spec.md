@@ -383,7 +383,7 @@ Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹�
 - **THEN** 该 span 继续使用完整原生内容，portable 处理不删掉其 thinking 或重复生成工具调用。
 
 #### Scenario: Target route requires reasoning text replay
-- **WHEN** Responses 路由对含 portable 工具历史的请求返回明确 400，声明 thinking mode 必须回传 `reasoning_text`
+- **WHEN** Responses 路由对含 portable assistant 历史的请求返回明确 400，要求回传 `reasoning_text`
 - **THEN** 系统在当前路由内启用可见 reasoning 回放，确认投影状态后按同一 logical sampling 余额重建请求，reasoning、function call 与结果各保留一次。
 
 #### Scenario: Replayed portable reasoning remains narrow
@@ -397,6 +397,14 @@ Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹�
 #### Scenario: Chat reasoning stays within its assistant boundary
 - **WHEN** 历史含多段 reasoning、不同 assistant、User/System/ToolResult 边界或有效 native span
 - **THEN** 可见 reasoning 不跨越无关边界绑定，native 原文保持且不重复，缺 reasoning 字段时仅补空字符串；Timeline 不改写。
+
+#### Scenario: Responses reasoning accompanies an ordinary answer
+- **WHEN** 当前 Responses 路由已确认要求 reasoning 回放，历史中非空可见 reasoning 紧邻普通可输出 assistant 回答
+- **THEN** 请求按顺序各输出一次 reasoning 与回答，无 id/status/encrypted_content，不跨 User/System/ToolResult 或其他 assistant 边界绑定，工具配对和原始历史保持。
+
+#### Scenario: Responses reasoning has no assistant carrier
+- **WHEN** 历史只有空 reasoning、孤立 reasoning 或其后的 assistant 没有任何可输出正文和完整工具调用
+- **THEN** 不生成孤立或虚构的 reasoning item，该历史不能单独授予一次恢复。
 
 ### Requirement: Portable boundaries keep tool exchanges together
 
@@ -455,7 +463,7 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 - **THEN** ChatState 确认启用当前路由投影模式后静默重提交，不把失败候选加入 Surface。
 
 #### Scenario: Repeated rejection does not loop
-- **WHEN** 回放模式已经启用后端点仍返回相同拒绝，或不存在可改变的有效历史（Responses 仍要求完整工具往返前的非空 reasoning）
+- **WHEN** 回放模式已经启用后端点仍返回相同拒绝，或不存在可改变的有效历史（Responses 要求可输出 assistant 前的非空可见 reasoning）
 - **THEN** 系统不再次声明状态已改变，不重置 logical sampling 预算，并按既有其他恢复或终态路径处理。
 
 #### Scenario: Chat history has no visible reasoning
@@ -463,7 +471,7 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 - **THEN** 当前 Chat 路由可确认一次空字段编码恢复，不能为满足字段要求虚构 reasoning 正文。
 
 #### Scenario: Rejection identifies a different backend
-- **WHEN** 错误要求的 reasoning 字段属于另一 backend，或错误不同时满足 400、thinking mode 与明确回传要求
+- **WHEN** 错误要求的 reasoning 字段属于另一 backend，或错误不满足 400 与明确的对应字段缺失/回传要求，或字段证据冲突
 - **THEN** 不启用当前路由的 reasoning 兼容状态。
 
 验证入口：`sampling-types/src/conversation.rs` 的 wire 投影、`sampling-types/src/error.rs` 的分类、`chat-state/src/actor/tests.rs` 的路由状态测试与 `shell/src/session/actor/turn/sampling.rs` 的恢复测试。
@@ -471,6 +479,18 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 #### Scenario: Runtime-only Chat history requires reasoning replay
 - **WHEN** Chat 路由明确要求 reasoning_content，而当前历史只有会生成 assistant 的非空 AgentMessage 或用户 SkillLoad
 - **THEN** 可确认一次启用，portable 与新增 live Runtime assistant 均编码空 reasoning_content，不借用无关 reasoning，不改变既有恢复额度；空收件批次或 Model-only 技能元数据不构成启用依据。
+
+#### Scenario: Long structured HTTP error retains recovery evidence
+- **WHEN** 结构化 HTTP 400 错误的明确 reasoning 字段要求位于展示截断长度之外
+- **THEN** 在生成短展示文案之前提取 typed 要求，HTTP 与等价 SSE 判定一致；DTO 往返不依赖已截短字符串。
+
+#### Scenario: Structured missing parameter identifies the required field
+- **WHEN** HTTP 或 SSE 结构化错误明确声明缺失唯一 reasoning 字段，code/param/message 证据一致且状态为400
+- **THEN** 生成对应 backend 的 typed 要求，仍由当前 route、实际wire变化和原恢复预算决定是否重提交。
+
+#### Scenario: Unsupported or ambiguous fields are not missing history
+- **WHEN** 错误报告字段不支持、值非法、未知字段拼写、冲突字段、泛化缺失，或错误正文非结构化
+- **THEN** 不通过该 reasoning 恢复路径启用回放，也不猜造所需字段或思考文本。
 
 ### Requirement: Messages tool identity encoding preserves distinct exchanges
 Messages 请求 SHALL 将中性工具调用 ID 与结果关联 ID 一致转换为 ASCII 字母、数字、下划线或连字符组成的非空有界 ID。请求中不同原始身份 SHALL NOT 因编码而碰撞。有效 native continuation 的原生内容和 ID SHALL 保持不变，生成 ID SHALL 避免与其冲突。编码 SHALL NOT 改写原始 Timeline 或执行身份。

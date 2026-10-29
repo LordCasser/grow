@@ -1,0 +1,72 @@
+{
+  "date": "2026-10-29",
+  "git_base": "7459db916f72e402d2937fb916d92e21d7857faf",
+  "binary_sha256": "4678717479513499fd81995bcbc64d6b4c647d5872a2955824eb658c99a153ac",
+  "build": "cargo build --locked -p cli --bin grow --no-default-features --features sandbox-enforce",
+  "rust_version": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+  "production_source_sha256": {
+    "crates/codegen/chat-state/src/actor/tests.rs": "e50aed582eb1690bff96445602f5cddc35ec85b7723c4a72df355aa45c8b25da",
+    "crates/codegen/sampler/src/actor/request_task.rs": "1fb4d8945fc91efaac36bebdb329c817d5e5b907cb21f2bf545833f6601f0d4b",
+    "crates/codegen/sampler/src/client.rs": "5ead7ad2c2d5f04407f9fe99efe1dc5a5e2a09d8489b9d79950cfe2949181d05",
+    "crates/codegen/sampler/src/events.rs": "48374717f283608a021968570234c71ec39f71dcd6cadfb7d042a34a51ab046b",
+    "crates/codegen/sampler/src/retry.rs": "4fd336d3d5802980e3bb9ac5b575d33b978ed122a5b47a2ccc65a2c9b4dfc2cf",
+    "crates/codegen/sampling-types/src/conversation.rs": "98c8680f0d6c80a3a395dccbec77e249555252093309685700224d9551922824",
+    "crates/codegen/sampling-types/src/error.rs": "fe2fc4c7fe0fdb7679f7a80e6d968d25aa57701b6d1753c8754fe140a0f7ebd6",
+    "crates/codegen/shell/src/sampling/error.rs": "8506fb79dad3fb9eaae8bb239854c10dcbe9f43391c0377a6ce060a07941dfd3",
+    "crates/codegen/shell/src/session/actor/recap.rs": "0252860ed7885a23c0673e30b3dbb4b5141b48c34f390ca0a1deb1c6cc74d3f1",
+    "crates/codegen/shell/src/session/actor/turn/sampling.rs": "fa9c6964dcf3ca4fc344926ee35395168b176f62aa286b12a4b477d3b502a83b",
+    "crates/codegen/shell/src/session/helpers/session_compact.rs": "9aba840fd359b394857cd41be81fd38f9c070b2ce19e040baf128544f1000875"
+  },
+  "test_log_sha256": {
+    "core-final": "73f2717aab216a4599f6653fd1389cb471e5164a3da373d6dc049561b0ae7ced",
+    "core-serial": "e3ad9fe2d52bf2845822a2ee5fda24dd2154db7e8bc0e795e52ed08ad43c15c2",
+    "errors": "a4a5f2ec11c2b22cbd79d3acc6799f93fc5c077555fef81bb329944cddddb7fc",
+    "shell": "a50c4b835ef3b0207a0ebd514f4b2fb567306f63ee14f60b192feacdfe992aa9",
+    "switch-tests": "3940b43076f9d074cafd2c4d4baad5e0a9aea15ace947a6002e24891094ab08f",
+    "fmt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build": "58f779618dd830198eaeb9ec849804279f497b94185d4e53df068ccc8f2e1219",
+    "core-serial-final": "ef8282958065eddd25b013a27aabb3e1ec5bf89587488a658f2ebad7d2dafbc5",
+    "build-final": "705159f4d09b853a404104ac3437e3a7c9f3407bd82fbcb59b2014053d739024",
+    "fmt-final": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "openspec-prearchive": "e897bd401240b48f7d43fbf80853d745067214b4d7761c6367f510bd87093be1",
+    "openspec-final": "3ac073cde2df1302415fa4d421ce180a7a9ae88a8d02a37bb812159c5bb2e866",
+    "openspec-archived": "83a645a0cc19b4876232f5626fc32b889c7e0101fcc4290277078c40a7e683bf",
+    "openspec-archived-final": "8d8553204c48713b9e8f16688f21a7e3cfe6ae7ac68487432acf45fa28f0047d"
+  },
+  "validation_tools_sha256": {
+    "live_validation.py": "81dff300d96c5d031fb9f6dc95212990b59da84105fe3268c35a8f78d49a6045",
+    "extract_live_evidence.py": "2ca974df38789b65b95340c3efbed23fd1fe83b431a33d39cc5cc4dc186ff8e4"
+  },
+  "pre_final_sse_fix_build": {
+    "binary_sha256": "f4a2bda25997865398e497f7791d0050a3cad38ab32051bfaf5a7ee258c946a1",
+    "production_source_sha256": {
+      "crates/codegen/chat-state/src/actor/tests.rs": "e50aed582eb1690bff96445602f5cddc35ec85b7723c4a72df355aa45c8b25da",
+      "crates/codegen/sampler/src/actor/request_task.rs": "1fb4d8945fc91efaac36bebdb329c817d5e5b907cb21f2bf545833f6601f0d4b",
+      "crates/codegen/sampler/src/client.rs": "5ead7ad2c2d5f04407f9fe99efe1dc5a5e2a09d8489b9d79950cfe2949181d05",
+      "crates/codegen/sampler/src/events.rs": "48374717f283608a021968570234c71ec39f71dcd6cadfb7d042a34a51ab046b",
+      "crates/codegen/sampler/src/retry.rs": "4fd336d3d5802980e3bb9ac5b575d33b978ed122a5b47a2ccc65a2c9b4dfc2cf",
+      "crates/codegen/sampling-types/src/conversation.rs": "98c8680f0d6c80a3a395dccbec77e249555252093309685700224d9551922824",
+      "crates/codegen/sampling-types/src/error.rs": "3987b28deaf04022c4a6a028f6b127ecbb53b03d29c3d222600b1b6913ecbbc4",
+      "crates/codegen/shell/src/sampling/error.rs": "8506fb79dad3fb9eaae8bb239854c10dcbe9f43391c0377a6ce060a07941dfd3",
+      "crates/codegen/shell/src/session/actor/recap.rs": "0252860ed7885a23c0673e30b3dbb4b5141b48c34f390ca0a1deb1c6cc74d3f1",
+      "crates/codegen/shell/src/session/actor/turn/sampling.rs": "fa9c6964dcf3ca4fc344926ee35395168b176f62aa286b12a4b477d3b502a83b",
+      "crates/codegen/shell/src/session/helpers/session_compact.rs": "9aba840fd359b394857cd41be81fd38f9c070b2ce19e040baf128544f1000875"
+    },
+    "live_runs": [
+      "primary-live-evidence.json",
+      "direct-live-evidence.json"
+    ]
+  },
+  "final_live_run": "final-live-evidence.json",
+  "evidence_sha256": {
+    "direct-live-evidence.json": "111b1900793355b4187bccfdcbbec0ca87cbf2383e93caf1d5704beeb7f1d77e",
+    "final-live-evidence.json": "d04b9aec2888246e56664184eff68d5722333f6506135aea694b5410e6fe9cff",
+    "primary-live-evidence.json": "7427508369966a507beaf212992aeb11195a0db92f08532a9e5014ab7976f528"
+  },
+  "cleanup": {
+    "isolated_live_runs_removed": 3,
+    "cargo_files_removed": 81728,
+    "cargo_gib_removed": 10.5,
+    "raw_reasoning_archived": false
+  }
+}

@@ -897,6 +897,7 @@ mod classify_tests {
                     model_metadata: None,
                     retry_after_secs: None,
                     should_retry: None,
+                    portable_reasoning_required: None,
                 },
                 0,
             ))
@@ -1012,6 +1013,7 @@ mod classify_tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             },
             0
         )));
@@ -1047,6 +1049,7 @@ mod classify_tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             },
             0,
         ) else {
@@ -1062,6 +1065,7 @@ mod classify_tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                portable_reasoning_required: None,
             },
             0,
         ) else {
@@ -1080,6 +1084,7 @@ mod classify_tests {
                     model_metadata: None,
                     retry_after_secs: None,
                     should_retry: None,
+                    portable_reasoning_required: None,
                 },
                 image_count,
             )
@@ -1097,6 +1102,7 @@ mod classify_tests {
                     model_metadata: None,
                     retry_after_secs: None,
                     should_retry: None,
+                    portable_reasoning_required: None,
                 },
                 1,
             ),

@@ -2073,7 +2073,10 @@ pub fn project_portable_history_with_reasoning(
                     .trim_start()
                     .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
                 {
-                    if reasoning_backend == Some(ApiBackend::ChatCompletions) {
+                    if reasoning_backend == Some(ApiBackend::ChatCompletions)
+                        || (reasoning_backend == Some(ApiBackend::Responses)
+                            && !assistant.content.is_empty())
+                    {
                         projected.append(&mut pending_reasoning);
                     }
                     projected.push(ConversationItem::Assistant(AssistantItem {
@@ -2117,8 +2120,10 @@ pub fn project_portable_history_with_reasoning(
                     .collect();
                 let retained_ids: BTreeSet<_> = calls.iter().map(|call| call.id.clone()).collect();
                 if !calls.is_empty()
-                    || (reasoning_backend == Some(ApiBackend::ChatCompletions)
-                        && !assistant.content.is_empty()
+                    || (matches!(
+                        reasoning_backend,
+                        Some(ApiBackend::ChatCompletions | ApiBackend::Responses)
+                    ) && !assistant.content.is_empty()
                         && !assistant
                             .content
                             .trim_start()
@@ -4152,7 +4157,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// Portable surface facts are allowlisted into Responses input items. Spans
 /// admitted for the current route are replaced with their typed native
 /// fragments. Portable reasoning remains omitted unless the current route has
-/// learned that visible reasoning attached to a complete tool exchange is
+/// learned that visible reasoning attached to a retained assistant is
 /// required.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
     let items: Vec<rs::InputItem> = request_segments(req, ApiBackend::Responses)
@@ -8021,7 +8026,7 @@ mod tests {
         let mut request = ConversationRequest::from_items(vec![
             ConversationItem::user("earlier question"),
             ConversationItem::Reasoning(synthesized_reasoning_item(
-                "standalone reasoning must stay omitted",
+                "ordinary answer reasoning required by target",
             )),
             ConversationItem::assistant("earlier final answer"),
             ConversationItem::user("inspect"),
@@ -8042,26 +8047,29 @@ mod tests {
         });
 
         let responses = portable_wire(&request, ApiBackend::Responses);
-        let reasoning = responses["input"]
-            .as_array()
-            .unwrap()
+        let input = responses["input"].as_array().unwrap();
+        let reasoning: Vec<_> = input
             .iter()
-            .find(|item| item["type"] == "reasoning")
-            .expect("learned Responses route must replay visible reasoning");
-        assert_eq!(reasoning["id"], serde_json::Value::Null);
-        assert_eq!(reasoning["status"], serde_json::Value::Null);
-        assert_eq!(reasoning["encrypted_content"], serde_json::Value::Null);
-        assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
+            .filter(|item| item["type"] == "reasoning")
+            .collect();
+        assert_eq!(reasoning.len(), 2);
+        for item in &reasoning {
+            assert_eq!(item["id"], serde_json::Value::Null);
+            assert_eq!(item["status"], serde_json::Value::Null);
+            assert_eq!(item["encrypted_content"], serde_json::Value::Null);
+            assert_eq!(item["content"][0]["type"], "reasoning_text");
+        }
         assert_eq!(
-            reasoning["content"][0]["text"],
+            reasoning[0]["content"][0]["text"],
+            "ordinary answer reasoning required by target"
+        );
+        assert_eq!(
+            reasoning[1]["content"][0]["text"],
             "portable reasoning required by target"
         );
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["content"], "earlier final answer");
         assert_wire_tool_pairs(&responses, &["call_reasoning_replay"]);
-        assert!(
-            !responses
-                .to_string()
-                .contains("standalone reasoning must stay omitted")
-        );
 
         for backend in [ApiBackend::ChatCompletions, ApiBackend::Messages] {
             assert!(
@@ -8071,6 +8079,65 @@ mod tests {
                 "compatibility replay must remain Responses-only"
             );
         }
+    }
+
+    #[test]
+    fn learned_responses_reasoning_requires_its_own_visible_assistant() {
+        let reasoning = |text: &str| ConversationItem::Reasoning(synthesized_reasoning_item(text));
+        let items = vec![
+            reasoning("before user"),
+            ConversationItem::user("question"),
+            ConversationItem::assistant("no thought for this answer"),
+            reasoning("before system"),
+            ConversationItem::system("instruction"),
+            ConversationItem::assistant("another answer"),
+            reasoning("before orphan result"),
+            ConversationItem::tool_result("orphan", "unpaired"),
+            ConversationItem::assistant("answer after result"),
+            reasoning("before empty assistant"),
+            ConversationItem::assistant(""),
+            ConversationItem::assistant("empty assistant must break binding"),
+            reasoning(""),
+            ConversationItem::assistant("empty thought"),
+            reasoning("kept first"),
+            reasoning("kept second"),
+            ConversationItem::assistant("answer with two thoughts"),
+            ConversationItem::assistant("next answer without thought"),
+            reasoning("dangling thought"),
+        ];
+        let original = serde_json::to_value(&items).unwrap();
+        let mut request = ConversationRequest::from_items(items);
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: request.items.len(),
+            spans: vec![],
+            portable_reasoning_backend: Some(ApiBackend::Responses),
+        });
+        let wire = portable_wire(&request, ApiBackend::Responses);
+        let input = wire["input"].as_array().unwrap();
+        let thoughts: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .collect();
+        assert_eq!(thoughts.len(), 2);
+        assert_eq!(thoughts[0]["content"][0]["text"], "kept first");
+        assert_eq!(thoughts[1]["content"][0]["text"], "kept second");
+        let first = input
+            .iter()
+            .position(|item| item["type"] == "reasoning")
+            .unwrap();
+        assert_eq!(input[first + 2]["content"], "answer with two thoughts");
+        assert_eq!(input[first + 3]["content"], "next answer without thought");
+        assert_eq!(serde_json::to_value(&request.items).unwrap(), original);
+        request
+            .native_continuation
+            .as_mut()
+            .unwrap()
+            .portable_reasoning_backend = None;
+        assert!(
+            !portable_wire(&request, ApiBackend::Responses)
+                .to_string()
+                .contains("kept first")
+        );
     }
 
     #[test]

@@ -2440,20 +2440,29 @@ mod image_input_rejection_tests {
     async fn explicit_reasoning_replay_rejection_updates_once_then_stops() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                for (backend, field, has_reasoning) in [
+                for (backend, field, has_reasoning, has_tools) in [
                     (
                         sampling_types::ApiBackend::Responses,
                         "reasoning_text",
                         true,
-                    ),
-                    (
-                        sampling_types::ApiBackend::ChatCompletions,
-                        "reasoning_content",
                         true,
                     ),
                     (
                         sampling_types::ApiBackend::ChatCompletions,
                         "reasoning_content",
+                        true,
+                        true,
+                    ),
+                    (
+                        sampling_types::ApiBackend::ChatCompletions,
+                        "reasoning_content",
+                        false,
+                        true,
+                    ),
+                    (
+                        sampling_types::ApiBackend::Responses,
+                        "reasoning_text",
+                        true,
                         false,
                     ),
                 ] {
@@ -2481,35 +2490,50 @@ mod image_input_rejection_tests {
                             ),
                         );
                     }
-                    actor.chat_state_handle.push_assistant_response(
-                        sampling_types::ConversationItem::assistant_tool_calls(vec![
-                            sampling_types::ToolCall {
-                                id: "reasoning-replay-call".into(),
-                                name: "read_file".into(),
-                                arguments: r#"{"path":"a"}"#.into(),
-                            },
-                        ]),
-                    );
-                    actor.chat_state_handle.push_tool_result(
-                        sampling_types::ConversationItem::tool_result(
-                            "reasoning-replay-call",
-                            "done",
-                        ),
-                    );
+                    if has_tools {
+                        actor.chat_state_handle.push_assistant_response(
+                            sampling_types::ConversationItem::assistant_tool_calls(vec![
+                                sampling_types::ToolCall {
+                                    id: "reasoning-replay-call".into(),
+                                    name: "read_file".into(),
+                                    arguments: r#"{"path":"a"}"#.into(),
+                                },
+                            ]),
+                        );
+                        actor.chat_state_handle.push_tool_result(
+                            sampling_types::ConversationItem::tool_result(
+                                "reasoning-replay-call",
+                                "done",
+                            ),
+                        );
+                    } else {
+                        actor.chat_state_handle.push_assistant_response(
+                            sampling_types::ConversationItem::assistant("ordinary answer"),
+                        );
+                    }
                     actor
                         .chat_state_handle
                         .replace_sampling_route(responses_config);
                     let actor = std::sync::Arc::new(actor);
-                    let error =
-                        sampler::SamplingErrorInfo::from(&sampling_types::SamplingError::Api {
-                            status: reqwest::StatusCode::BAD_REQUEST,
-                            message: format!(
-                                "The `{field}` in the thinking mode must be passed back to the API."
-                            ),
-                            model_metadata: None,
-                            retry_after_secs: None,
-                            should_retry: Some(false),
-                        });
+                    let error_body = serde_json::to_vec(&serde_json::json!({
+                        "error": { "type": "invalid_request_error", "message": format!(
+                            "{}The `{field}` in the thinking mode must be passed back to the API.",
+                            "Proxy context. ".repeat(40),
+                        ) }
+                    }))
+                    .unwrap();
+                    let typed = sampler::SamplingErrorInfo::from(
+                        &sampling_types::SamplingError::from_api_response(
+                            reqwest::StatusCode::BAD_REQUEST,
+                            &error_body,
+                            None,
+                            None,
+                            Some(false),
+                        ),
+                    );
+                    assert!(!typed.message.contains(field));
+                    let error: sampler::SamplingErrorInfo =
+                        serde_json::from_value(serde_json::to_value(&typed).unwrap()).unwrap();
                     assert_eq!(error.portable_reasoning_required, Some(backend.clone()));
 
                     let first = actor
@@ -2582,6 +2606,7 @@ mod image_input_rejection_tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry,
+            portable_reasoning_required: None,
         }
     }
 

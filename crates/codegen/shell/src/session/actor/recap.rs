@@ -895,6 +895,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry,
+            portable_reasoning_required: None,
         }
     }
 

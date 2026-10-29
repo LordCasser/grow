@@ -8423,27 +8423,66 @@ async fn chat_reasoning_replay_requires_an_assistant_but_not_invented_reasoning(
 }
 
 #[tokio::test]
-async fn responses_reasoning_replay_requires_a_complete_portable_tool_exchange() {
-    let h = TestHarness::with_config(
-        vec![
-            ConversationItem::user("question"),
-            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
-                "standalone final-answer reasoning",
-            )),
-            ConversationItem::assistant("answer"),
-        ],
-        SamplingConfig {
-            api_backend: sampling_types::ApiBackend::Responses,
-            ..test_config()
-        },
-    );
-
-    assert_eq!(
-        h.handle
-            .enable_portable_reasoning(sampling_types::ApiBackend::Responses)
-            .await,
-        Some(false)
-    );
+async fn responses_reasoning_replay_acknowledges_ordinary_answers_without_inventing_text() {
+    use sampling_types::ApiBackend;
+    for (thought, answer, should_enable) in [
+        ("visible ordinary-answer reasoning", "answer", true),
+        ("", "answer", false),
+        ("orphan reasoning", "", false),
+    ] {
+        let h = TestHarness::with_config(
+            vec![
+                ConversationItem::user("question"),
+                ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(thought)),
+                ConversationItem::assistant(answer),
+            ],
+            SamplingConfig {
+                api_backend: ApiBackend::Responses,
+                ..test_config()
+            },
+        );
+        let before = h
+            .handle
+            .build_request("ordinary-answer", vec![], None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::Responses)
+                .await,
+            Some(should_enable)
+        );
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::Responses)
+                .await,
+            Some(false)
+        );
+        let after = h
+            .handle
+            .build_request("ordinary-answer", vec![], None, None, None)
+            .await
+            .unwrap();
+        let wire = wire_request_json(&after, &ApiBackend::Responses);
+        let reasoning: Vec<_> = wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .collect();
+        assert_eq!(reasoning.len(), usize::from(should_enable));
+        if should_enable {
+            assert_eq!(reasoning[0]["content"][0]["text"], thought);
+            assert!(
+                crate::estimate_request_input_tokens(&after)
+                    > crate::estimate_request_input_tokens(&before)
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&after.items).unwrap(),
+            serde_json::to_value(&before.items).unwrap()
+        );
+    }
 }
 
 #[tokio::test]

@@ -610,9 +610,17 @@ fn check_request_body_size(request: &reqwest::Request) -> Result<()> {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
+            portable_reasoning_required: None,
         });
     }
     Ok(())
+}
+
+fn api_error_message(error: &SamplingError) -> &str {
+    let SamplingError::Api { message, .. } = error else {
+        unreachable!("from_api_response always constructs an API error")
+    };
+    message
 }
 
 // =============================================================================
@@ -942,14 +950,13 @@ impl SamplingClient {
                     sent_bearer,
                 ));
             }
-            let message = user_facing_api_error_message(status, bytes.as_ref());
-            return Err(SamplingError::Api {
+            return Err(SamplingError::from_api_response(
                 status,
-                message,
+                bytes.as_ref(),
                 model_metadata,
                 retry_after_secs,
                 should_retry,
-            });
+            ));
         }
 
         let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).map_err(|e| {
@@ -1080,8 +1087,15 @@ impl SamplingClient {
             }
 
             let bytes = read_response_bytes(response).await?;
-            let message = user_facing_api_error_message(status, bytes.as_ref());
-            span.record("error", message.as_str());
+            let api_error = SamplingError::from_api_response(
+                status,
+                bytes.as_ref(),
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            );
+            let message = api_error_message(&api_error);
+            span.record("error", message);
             tracing::error!(
                 status = %status,
                 error_message = %message,
@@ -1089,13 +1103,7 @@ impl SamplingClient {
                 model_id = %model_id,
                 "chat/completions API error"
             );
-            return Err(SamplingError::Api {
-                status,
-                message,
-                model_metadata,
-                retry_after_secs,
-                should_retry,
-            });
+            return Err(api_error);
         }
 
         // Strip UTF-8 BOM if present: eventsource-stream 0.2.3 incorrectly slices BOM at byte 1 instead of 3.
@@ -1278,7 +1286,14 @@ impl SamplingClient {
                 ));
             }
 
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let api_error = SamplingError::from_api_response(
+                status,
+                bytes.as_ref(),
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            );
+            let message = api_error_message(&api_error);
             tracing::warn!(
                 status = %status,
                 error_message = %message,
@@ -1286,13 +1301,7 @@ impl SamplingClient {
                 model_id = %model_id,
                 "responses API error"
             );
-            return Err(SamplingError::Api {
-                status,
-                message,
-                model_metadata,
-                retry_after_secs,
-                should_retry,
-            });
+            return Err(api_error);
         }
 
         let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
@@ -1423,8 +1432,15 @@ impl SamplingClient {
             let retry_after_secs = extract_retry_after(response.headers());
             let should_retry = extract_should_retry(response.headers());
             let bytes = read_response_bytes(response).await?;
-            let message = user_facing_api_error_message(status, bytes.as_ref());
-            span.record("error", message.as_str());
+            let api_error = SamplingError::from_api_response(
+                status,
+                bytes.as_ref(),
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            );
+            let message = api_error_message(&api_error);
+            span.record("error", message);
             tracing::error!(
                 status = %status,
                 error_message = %message,
@@ -1432,13 +1448,7 @@ impl SamplingClient {
                 model_id = %model_id,
                 "responses API error"
             );
-            return Err(SamplingError::Api {
-                status,
-                message,
-                model_metadata,
-                retry_after_secs,
-                should_retry,
-            });
+            return Err(api_error);
         }
 
         let model_metadata = extract_model_metadata(response.headers());
@@ -1616,7 +1626,14 @@ impl SamplingClient {
                 ));
             }
 
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let api_error = SamplingError::from_api_response(
+                status,
+                bytes.as_ref(),
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            );
+            let message = api_error_message(&api_error);
             tracing::warn!(
                 status = %status,
                 error_message = %message,
@@ -1624,13 +1641,7 @@ impl SamplingClient {
                 model_id = %model_id,
                 "messages API error"
             );
-            return Err(SamplingError::Api {
-                status,
-                message,
-                model_metadata,
-                retry_after_secs,
-                should_retry,
-            });
+            return Err(api_error);
         }
 
         let response_obj =
@@ -1732,8 +1743,15 @@ impl SamplingClient {
             let retry_after_secs = extract_retry_after(response.headers());
             let should_retry = extract_should_retry(response.headers());
             let bytes = read_response_bytes(response).await?;
-            let message = user_facing_api_error_message(status, bytes.as_ref());
-            span.record("error", message.as_str());
+            let api_error = SamplingError::from_api_response(
+                status,
+                bytes.as_ref(),
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            );
+            let message = api_error_message(&api_error);
+            span.record("error", message);
             tracing::error!(
                 status = %status,
                 error_message = %message,
@@ -1741,13 +1759,7 @@ impl SamplingClient {
                 model_id = %model_id,
                 "messages API error"
             );
-            return Err(SamplingError::Api {
-                status,
-                message,
-                model_metadata,
-                retry_after_secs,
-                should_retry,
-            });
+            return Err(api_error);
         }
 
         let model_metadata = extract_model_metadata(response.headers());

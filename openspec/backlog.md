@@ -6,6 +6,8 @@
 
 ## 保留的暂缓项
 
+- **跨路由 reasoning 后续边界**：[第一阶段审查](changes/archive/2026-10-29-improve-cross-route-reasoning-compatibility/audit.md) 发现通用 native-bearing HTTP 400 仍会触发一次 reset，以及可见 reasoning 仅保存 text、未区分摘要和完整正文。本阶段修复错误事实保真和目标请求投影；若真实目标要求更强语义，应独立处理精确 continuation 拒绝分类或最小 provenance，不预建全局 capability registry。
+- **Sampler 日志捕获偶发失败（待定位）**：本次并行回归中既有 `sampling_auth_logs_omit_credentials` 的 `logs.contains("client_post")` 失败一次，日志调用和测试未修改，串行整包两次通过；未证实具体并行原因。复现与限制见[兼容性验证](changes/archive/2026-10-29-improve-cross-route-reasoning-compatibility/verification.md)，独立排查，不混入协议改动。
 - **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：保留方向，不实施、不设日期；未来启动时另建 change，明确身份、权限、执行 owner、断线和恢复边界。不得据此引入 Dock、Memory 或远端控制框架。决策见 [上游主题评审](changes/archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
 - **Provider 缓存策略与 native epoch（待真实路由证据）**：[理论 review](changes/archive/2026-09-28-evaluate-provider-cache-affinity/results.md) 仅证明本地 key/breakpoint/retention 机制。先取得具体 provider/model/deployment、字段透传和真实负载证据，再做该 route 的最小优化，不预建 registry。
 - **Recap 与主请求缓存（待真实共享前缀及收益证据）**：recap 保持独立 key、tool-free Sideband 契约；不为假设中的缓存复用添加主请求 tools。先测真实收益。

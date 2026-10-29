@@ -537,6 +537,7 @@ pub(crate) fn sampling_error_from_info(info: &SamplingErrorInfo) -> SamplingErro
             model_metadata: info.model_metadata.clone(),
             retry_after_secs: info.retry_after_secs,
             should_retry: Some(info.is_retryable),
+            portable_reasoning_required: info.portable_reasoning_required.clone(),
         },
         SamplingErrorKind::EmptyResponse => info.empty_response_context.clone().map_or_else(
             || SamplingError::EventStreamError(info.message.clone()),
@@ -619,6 +620,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);
@@ -634,6 +636,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(15),
             should_retry: None,
+            portable_reasoning_required: None,
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::RateLimited);
@@ -653,6 +656,7 @@ mod tests {
             }),
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);
@@ -668,20 +672,37 @@ mod tests {
             (ApiBackend::Responses, "reasoning_text"),
             (ApiBackend::ChatCompletions, "reasoning_content"),
         ] {
-            let original = SamplingError::Api {
-                status: StatusCode::BAD_REQUEST,
-                message: format!(
-                    "The `{field}` in the thinking mode must be passed back to the API."
-                ),
-                model_metadata: None,
-                retry_after_secs: None,
-                should_retry: Some(false),
+            let message = if field == "reasoning_text" {
+                format!("The `{field}` in the thinking mode must be passed back to the API.")
+            } else {
+                format!("The `{field}` is required in thinking mode.")
             };
+            let body = serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "missing_required_parameter",
+                    "param": field,
+                    "message": message,
+                }
+            });
+            let original = SamplingError::from_api_response(
+                StatusCode::BAD_REQUEST,
+                body.to_string().as_bytes(),
+                None,
+                None,
+                Some(false),
+            );
             let info: SamplingErrorInfo = serde_json::from_value(
                 serde_json::to_value(SamplingErrorInfo::from(&original)).unwrap(),
             )
             .unwrap();
-            assert_eq!(info.portable_reasoning_required, Some(backend));
+            assert_eq!(info.portable_reasoning_required, Some(backend.clone()));
+            let rebuilt = sampling_error_from_info(&info);
+            assert_eq!(
+                rebuilt.portable_reasoning_requirement(),
+                Some(backend),
+                "typed requirement must survive DTO reconstruction"
+            );
         }
 
         let legacy: SamplingErrorInfo = serde_json::from_value(serde_json::json!({

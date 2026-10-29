@@ -1,0 +1,1399 @@
+{
+  "raw_rpc_sha256": "86b2ca8defd4805b6b910c37f108ed536768326db398e02f415b6c0197dbdaa7",
+  "prompts": [
+    {
+      "stage": 1,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "opencode/glm-5.3-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 1"
+      ],
+      "assistant_text_sha256": "dda6f8ecf7c050debb47ed6f40aff7a78311e78afde02195c6c9486917e91f71",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 2,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 2"
+      ],
+      "assistant_text_sha256": "08d28721240444c9b2ebc5d09a1437b3468e3acd56b8b4395607e0eef3fc3557",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 3,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "neorouter/deepseek-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 3"
+      ],
+      "assistant_text_sha256": "35e0ad13abd863128f958858f6a734caaca5741137a9985253ce7754e57e8120",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 4,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "qwen2/qwen3.8-flash",
+      "status": "failed",
+      "checks": {
+        "rpc_success": false,
+        "single_expected_command": false,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": false,
+        "reported_current_token": false,
+        "reported_previous_token": false
+      },
+      "tool_commands": [],
+      "assistant_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rpc_error": {
+        "code": -32603,
+        "kind": "api",
+        "status": 403,
+        "portable_reasoning_required": null,
+        "sha256": "6ddc47b9e304164e6bd7cab7effa793189b22aebda99f04c6e9911116f8e1954"
+      },
+      "stop_reason": null
+    },
+    {
+      "stage": 5,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "failed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": false,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 4",
+        "python3 record_step.py 5"
+      ],
+      "assistant_text_sha256": "298186e63a77caf30902e8ed4dda50d6eb7e0ec9c913cdc6e39baa2e024e983a",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 6,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "qwen2/qwen3.8-flash",
+      "status": "failed",
+      "checks": {
+        "rpc_success": false,
+        "single_expected_command": false,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": false,
+        "reported_current_token": false,
+        "reported_previous_token": false
+      },
+      "tool_commands": [],
+      "assistant_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rpc_error": {
+        "code": -32603,
+        "kind": "api",
+        "status": 403,
+        "portable_reasoning_required": null,
+        "sha256": "6ddc47b9e304164e6bd7cab7effa793189b22aebda99f04c6e9911116f8e1954"
+      },
+      "stop_reason": null
+    },
+    {
+      "stage": 7,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "neorouter/deepseek-flash",
+      "status": "failed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": false,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 6",
+        "python3 record_step.py 7"
+      ],
+      "assistant_text_sha256": "10954a9f3a854ebd7692dae45316e95b3487f3ee60275ab93fd8a06f8939da1a",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 8,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 8"
+      ],
+      "assistant_text_sha256": "323128f5f0bd897a409dc304c7168d70fed09492eddb8272f5220194ebce0990",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 9,
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "route": "bigmodel/glm-5.3-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 9"
+      ],
+      "assistant_text_sha256": "b510b52aefd59392b72356378521fff9d920f770dc99a9c3155519a00f5ecaf8",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": "history_first",
+      "session_id": "01a187de-7da5-7eb0-bc71-53037f448738",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "no_tools": true,
+        "correct_answer": true
+      },
+      "tool_commands": [],
+      "assistant_text_sha256": "005fc4185b4f6096a1c6273010e11d67b436b338d6168bd54ccb9ecbaf2d7a27",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": "history_second",
+      "session_id": "01a187de-7da5-7eb0-bc71-53037f448738",
+      "route": "neorouter/deepseek-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "no_tools": true,
+        "correct_answer": true
+      },
+      "tool_commands": [],
+      "assistant_text_sha256": "0e2f9175685f76dffe3b6796a13c2ed1fd2f0cdd4fe9f35c446f2b551294b25c",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    }
+  ],
+  "sessions": [
+    {
+      "session_id": "01a187dd-9944-7aa1-ac8d-793a952d4158",
+      "timeline_sha256": "a40042eda7e69899af8ff7b0cd2a589c2b7ff5657280253d8399099fb38bd5d2",
+      "attempts": [
+        {
+          "timeline_seq": 20,
+          "kind": "request",
+          "request_id": "d886ecba-2b97-4198-9eee-ccdf48a81382",
+          "attempt_number": 1,
+          "body_sha256": "4411c56390e5c5b3f25da6882d1f31588ec32026b6c58e8f92e3c44f2e2a6d32",
+          "body_bytes": 48309,
+          "stage": 1,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "max",
+          "thinking": null,
+          "assistant_count": 0,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 0,
+          "tool_result_count": 0,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187dd-9a81-7f81-bfd7-20d16d2feba3",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 25,
+          "kind": "response",
+          "request_id": "d886ecba-2b97-4198-9eee-ccdf48a81382",
+          "attempt_number": 1,
+          "body_sha256": "5159f2b46e53a45b595af8f24e6f4054bff34485f9667c90fa471df8db02b4f7",
+          "body_bytes": 3677,
+          "stage": 1,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 51,
+          "kind": "request",
+          "request_id": "218434fe-24bd-4896-a5a2-6107cbb11dd0",
+          "attempt_number": 1,
+          "body_sha256": "fb0e8bdccb48c9f8306dfb81b7eb785f30e0f44f3b2ef4a84f00ac95e7872a89",
+          "body_bytes": 49240,
+          "stage": 1,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "max",
+          "thinking": null,
+          "assistant_count": 1,
+          "reasoning_text_count": 1,
+          "reasoning_nonempty_count": 1,
+          "reasoning_text_chars": 462,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 1,
+          "tool_result_count": 1,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4e5eb099e8ee4565c03fcde1192d9e3563094e1dd362373a71fa9f1b36172c94",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187dd-9a81-7f81-bfd7-20d16d2feba3",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 53,
+          "kind": "response",
+          "request_id": "218434fe-24bd-4896-a5a2-6107cbb11dd0",
+          "attempt_number": 1,
+          "body_sha256": "a73c3329f6fae37c869328bc964e2546264e082c5c3412450181942611ab6892",
+          "body_bytes": 2938,
+          "stage": 1,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 73,
+          "kind": "request",
+          "request_id": "c346776d-fd12-43a2-baaf-072273f76433",
+          "attempt_number": 1,
+          "body_sha256": "a990f67b14f1ad8cd24a345bf1bdccb738252d94b6bde911c1c1ed1e3766955f",
+          "body_bytes": 49469,
+          "stage": 2,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 2,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 1,
+          "tool_result_count": 1,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4e5eb099e8ee4565c03fcde1192d9e3563094e1dd362373a71fa9f1b36172c94",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187dd-bf5d-7800-8fc5-88fd7c155134",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 74,
+          "kind": "response",
+          "request_id": "c346776d-fd12-43a2-baaf-072273f76433",
+          "attempt_number": 1,
+          "body_sha256": "ed12da30fe6998017a6c79d1071b21f378158ff5b483580a7bce19d922ecdcb5",
+          "body_bytes": 12160,
+          "stage": 2,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 100,
+          "kind": "request",
+          "request_id": "f7d60c8d-55cc-4a5c-bc49-4cf6d0f500fe",
+          "attempt_number": 1,
+          "body_sha256": "fd5a60090600082bb7a440f15a9b61c359b32535f499419ea64872e24b540075",
+          "body_bytes": 49913,
+          "stage": 2,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 3,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 2,
+          "tool_result_count": 2,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "e3473bd534869d6185e7b6ebb106ec7d71fa96cca2d2acd7057e47dda18e22e1",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187dd-bf5d-7800-8fc5-88fd7c155134",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 102,
+          "kind": "response",
+          "request_id": "f7d60c8d-55cc-4a5c-bc49-4cf6d0f500fe",
+          "attempt_number": 1,
+          "body_sha256": "845129325eb3d57ce5d1c5a64f660be8b1ebdf6df9e31e41f8d45794f72234aa",
+          "body_bytes": 4378,
+          "stage": 2,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 122,
+          "kind": "request",
+          "request_id": "44fc1f3b-013e-4c14-9624-25cd7287c621",
+          "attempt_number": 1,
+          "body_sha256": "1392a42667045c5b6a617d9804d329d31feec288c4ef56bafff072789a9fb2a2",
+          "body_bytes": 50498,
+          "stage": 3,
+          "wire_model": "deepseek-flash",
+          "reasoning_effort": {
+            "effort": "max",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 2,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 2,
+          "tool_result_count": 2,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "e3473bd534869d6185e7b6ebb106ec7d71fa96cca2d2acd7057e47dda18e22e1",
+          "backend": "responses",
+          "endpoint_host": "api.neorouter.ai",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187dd-d499-71c3-a9d0-3b4002a5308c",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 123,
+          "kind": "response",
+          "request_id": "44fc1f3b-013e-4c14-9624-25cd7287c621",
+          "attempt_number": 1,
+          "body_sha256": "aefe9203f59df1832ed848eae2861042d41d8235689dfbd71d5ebee5546fe7c2",
+          "body_bytes": 118361,
+          "stage": 3,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 149,
+          "kind": "request",
+          "request_id": "12bdd696-20ca-483e-b9ea-b171897bbd3f",
+          "attempt_number": 1,
+          "body_sha256": "d1ece125e0f245575f25240e4f575a2b66ab2cf6a1c9aca488da00a8bc1ca752",
+          "body_bytes": 50950,
+          "stage": 3,
+          "wire_model": "deepseek-flash",
+          "reasoning_effort": {
+            "effort": "max",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 2,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 3,
+          "tool_result_count": 3,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "d848748e71020a09d0cc73f0f2597a886588fd504a3475f404469bc69c9230aa",
+          "backend": "responses",
+          "endpoint_host": "api.neorouter.ai",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187dd-d499-71c3-a9d0-3b4002a5308c",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 151,
+          "kind": "response",
+          "request_id": "12bdd696-20ca-483e-b9ea-b171897bbd3f",
+          "attempt_number": 1,
+          "body_sha256": "b57abf55f30bd6814d3a2b94b72861e55dcf05475f343aa4d035aa20ba4376ea",
+          "body_bytes": 125525,
+          "stage": 3,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 171,
+          "kind": "request",
+          "request_id": "a447fd0d-b779-45ae-8d13-fe468d6a2f98",
+          "attempt_number": 1,
+          "body_sha256": "90a1c9297d92bf6969be63473ec7e9f47ce1568a23f96dcadd77c01064ed4e59",
+          "body_bytes": 51428,
+          "stage": 4,
+          "wire_model": "qwen3.8-flash",
+          "reasoning_effort": null,
+          "thinking": {
+            "type": "adaptive",
+            "display": "summarized"
+          },
+          "assistant_count": 6,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 3,
+          "tool_result_count": 3,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "d848748e71020a09d0cc73f0f2597a886588fd504a3475f404469bc69c9230aa",
+          "backend": "messages",
+          "endpoint_host": "token-plan.cn-beijing.maas.aliyuncs.com",
+          "endpoint_path_sha256": "22165574ab5b20f7c756e90cd9964af83ab0d0989275f5ac0133d71b09bf01b9",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187dd-ec18-7f93-9de2-7476cedfe900",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 172,
+          "kind": "response",
+          "request_id": "a447fd0d-b779-45ae-8d13-fe468d6a2f98",
+          "attempt_number": 1,
+          "body_sha256": "10c7bbacb41c315750502827d9f85042d9a1a20140dc550c9255ba00c729e7d4",
+          "body_bytes": 178,
+          "stage": 4,
+          "status": 403,
+          "provider_terminal": null,
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": false,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [],
+            "remaining_attempts": 2,
+            "error": {
+              "code": null,
+              "kind": "Api",
+              "status": 403,
+              "portable_reasoning_required": null,
+              "sha256": "1e068384841754a94c8d5ec2652813b57f5ad0de18560d9fa0913346ca47fb92"
+            }
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 174,
+          "kind": "recovery_stop",
+          "request_id": "a447fd0d-b779-45ae-8d13-fe468d6a2f98",
+          "attempt_number": 1,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "body_bytes": 0,
+          "stage": 4,
+          "status": null,
+          "provider_terminal": null,
+          "error": {
+            "code": null,
+            "kind": "Api",
+            "status": 403,
+            "portable_reasoning_required": null,
+            "sha256": "1e068384841754a94c8d5ec2652813b57f5ad0de18560d9fa0913346ca47fb92"
+          },
+          "truncated": null
+        },
+        {
+          "timeline_seq": 194,
+          "kind": "request",
+          "request_id": "453674cb-b0e7-4ba3-9dfa-8cc46f34415e",
+          "attempt_number": 1,
+          "body_sha256": "5c73dd72577c4cb8cc465d2aad6743e84cc62db901fa2c28e40e511ad7366f93",
+          "body_bytes": 52280,
+          "stage": 5,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 6,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 3,
+          "tool_result_count": 3,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "d848748e71020a09d0cc73f0f2597a886588fd504a3475f404469bc69c9230aa",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187dd-ef43-7112-9f93-d72453e55b2b",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 196,
+          "kind": "response",
+          "request_id": "453674cb-b0e7-4ba3-9dfa-8cc46f34415e",
+          "attempt_number": 1,
+          "body_sha256": "7b54ff1c79101e62c90f2823d476abb93b9b65bc1938aa0145287028dcf7f7f6",
+          "body_bytes": 56267,
+          "stage": 5,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 222,
+          "kind": "request",
+          "request_id": "cf8830d4-f338-4452-ba4a-50d72b682b98",
+          "attempt_number": 1,
+          "body_sha256": "4dc6f6bbf6e31456dbf0cf875bd390b9001b19ae523cf39c45f6b950594455ff",
+          "body_bytes": 55114,
+          "stage": 5,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 7,
+          "reasoning_text_count": 1,
+          "reasoning_nonempty_count": 1,
+          "reasoning_text_chars": 2331,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 4,
+          "tool_result_count": 4,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "7a7643a9fbcbfcb7001b46efdaeae9bb25be9d31cc522ac597054253d396f149",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187dd-ef43-7112-9f93-d72453e55b2b",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 224,
+          "kind": "response",
+          "request_id": "cf8830d4-f338-4452-ba4a-50d72b682b98",
+          "attempt_number": 1,
+          "body_sha256": "9122b8f137f10c61ff07bd3b8ea0a40883c1d80da6940ec2fd3d384c4f54ce3d",
+          "body_bytes": 12949,
+          "stage": 5,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 250,
+          "kind": "request",
+          "request_id": "7bcb3091-a753-41ad-8b09-20f0d0258b9b",
+          "attempt_number": 1,
+          "body_sha256": "be8b65d508cceba1b55ac2f7e00f567a8c1665dfa44a3445c0031d1b480f6154",
+          "body_bytes": 55596,
+          "stage": 5,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 8,
+          "reasoning_text_count": 2,
+          "reasoning_nonempty_count": 2,
+          "reasoning_text_chars": 2346,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 5,
+          "tool_result_count": 5,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "0849979e6217d5d58c26a69c31ebdd6d13705e78e0a00e44ca4c4db9d5fd1e2c",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 2,
+          "continuation_epoch": "01a187dd-ef43-7112-9f93-d72453e55b2b",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 252,
+          "kind": "response",
+          "request_id": "7bcb3091-a753-41ad-8b09-20f0d0258b9b",
+          "attempt_number": 1,
+          "body_sha256": "b44310cadae4bd3e8493dc35cf8982dc079e89c100ce546953353b8a922be7b5",
+          "body_bytes": 14303,
+          "stage": 5,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 272,
+          "kind": "request",
+          "request_id": "2dd63bed-ff5d-4666-ac41-3c4dfb71176b",
+          "attempt_number": 1,
+          "body_sha256": "81c9d32da6057e29a3eeadfa1f342dba3d678b14586c4bee95d10a5c02b15a4d",
+          "body_bytes": 53904,
+          "stage": 6,
+          "wire_model": "qwen3.8-flash",
+          "reasoning_effort": null,
+          "thinking": {
+            "type": "adaptive",
+            "display": "summarized"
+          },
+          "assistant_count": 9,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 5,
+          "tool_result_count": 5,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "0849979e6217d5d58c26a69c31ebdd6d13705e78e0a00e44ca4c4db9d5fd1e2c",
+          "backend": "messages",
+          "endpoint_host": "token-plan.cn-beijing.maas.aliyuncs.com",
+          "endpoint_path_sha256": "22165574ab5b20f7c756e90cd9964af83ab0d0989275f5ac0133d71b09bf01b9",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187de-1c88-76d1-8b25-33f2618da92c",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 273,
+          "kind": "response",
+          "request_id": "2dd63bed-ff5d-4666-ac41-3c4dfb71176b",
+          "attempt_number": 1,
+          "body_sha256": "ce02440d955b759bfb460f9583d3e232a3a91a82c522ad2208b23230a061971c",
+          "body_bytes": 178,
+          "stage": 6,
+          "status": 403,
+          "provider_terminal": null,
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": false,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [],
+            "remaining_attempts": 2,
+            "error": {
+              "code": null,
+              "kind": "Api",
+              "status": 403,
+              "portable_reasoning_required": null,
+              "sha256": "1e068384841754a94c8d5ec2652813b57f5ad0de18560d9fa0913346ca47fb92"
+            }
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 275,
+          "kind": "recovery_stop",
+          "request_id": "2dd63bed-ff5d-4666-ac41-3c4dfb71176b",
+          "attempt_number": 1,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "body_bytes": 0,
+          "stage": 6,
+          "status": null,
+          "provider_terminal": null,
+          "error": {
+            "code": null,
+            "kind": "Api",
+            "status": 403,
+            "portable_reasoning_required": null,
+            "sha256": "1e068384841754a94c8d5ec2652813b57f5ad0de18560d9fa0913346ca47fb92"
+          },
+          "truncated": null
+        },
+        {
+          "timeline_seq": 295,
+          "kind": "request",
+          "request_id": "bde2d150-a358-48dc-9329-07ef16805652",
+          "attempt_number": 1,
+          "body_sha256": "9df62acd9a095b50a8d477f292cef550e872b1388ecaeb1ffaae26a8a99af5fd",
+          "body_bytes": 54591,
+          "stage": 7,
+          "wire_model": "deepseek-flash",
+          "reasoning_effort": {
+            "effort": "max",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 4,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 5,
+          "tool_result_count": 5,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "0849979e6217d5d58c26a69c31ebdd6d13705e78e0a00e44ca4c4db9d5fd1e2c",
+          "backend": "responses",
+          "endpoint_host": "api.neorouter.ai",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187de-1ed5-7180-8203-c2393436adce",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 296,
+          "kind": "response",
+          "request_id": "bde2d150-a358-48dc-9329-07ef16805652",
+          "attempt_number": 1,
+          "body_sha256": "9f2f1bb19c47eab79127cbe95a08fbc9d81825b1de5b7285bef50ba2fb98b348",
+          "body_bytes": 118363,
+          "stage": 7,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 322,
+          "kind": "request",
+          "request_id": "5e297cdc-d8fd-4e94-afd6-2e514dd000ac",
+          "attempt_number": 1,
+          "body_sha256": "fba7a00f56d2065d323345b62657255c41bacd5cb6164205c24fffa99d7b18ff",
+          "body_bytes": 55043,
+          "stage": 7,
+          "wire_model": "deepseek-flash",
+          "reasoning_effort": {
+            "effort": "max",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 4,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 6,
+          "tool_result_count": 6,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "f293b0df75f728250e3ac7b47c9f48df7765a53704c3b598333ea8c40cc92708",
+          "backend": "responses",
+          "endpoint_host": "api.neorouter.ai",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187de-1ed5-7180-8203-c2393436adce",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 324,
+          "kind": "response",
+          "request_id": "5e297cdc-d8fd-4e94-afd6-2e514dd000ac",
+          "attempt_number": 1,
+          "body_sha256": "34ca72204df22df64f04523408db03a281ed43af1a7fa6d7585cff71e2d4fdcc",
+          "body_bytes": 159544,
+          "stage": 7,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 350,
+          "kind": "request",
+          "request_id": "8d1632b1-068b-419e-adbf-f100c988299a",
+          "attempt_number": 1,
+          "body_sha256": "5517e8b51f83cb0acccc4e2d217749a8ca394d042824e2d636c207263feb733a",
+          "body_bytes": 56475,
+          "stage": 7,
+          "wire_model": "deepseek-flash",
+          "reasoning_effort": {
+            "effort": "max",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 4,
+          "reasoning_text_count": 1,
+          "reasoning_nonempty_count": 1,
+          "reasoning_text_chars": 787,
+          "reasoning_opaque_field_count": 2,
+          "tool_call_count": 7,
+          "tool_result_count": 7,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "7dab424769684ba639235b006f8b38a8db3c5e68f71f4faab33654f060064c34",
+          "backend": "responses",
+          "endpoint_host": "api.neorouter.ai",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 2,
+          "continuation_epoch": "01a187de-1ed5-7180-8203-c2393436adce",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 352,
+          "kind": "response",
+          "request_id": "8d1632b1-068b-419e-adbf-f100c988299a",
+          "attempt_number": 1,
+          "body_sha256": "ccdd2655d63407e4d00c3be80c9cf007b7aefbdf27d28474f7aefe5bccb4396e",
+          "body_bytes": 150830,
+          "stage": 7,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 372,
+          "kind": "request",
+          "request_id": "b82b0e38-614e-4653-bcef-647a4cc9c581",
+          "attempt_number": 1,
+          "body_sha256": "026c2bec81dcaae26718dff26f7cf5b9268b4a6b272cb824bc9913666e6c1b95",
+          "body_bytes": 56617,
+          "stage": 8,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 12,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 7,
+          "tool_result_count": 7,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "7dab424769684ba639235b006f8b38a8db3c5e68f71f4faab33654f060064c34",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187de-3c14-7783-8159-2897345531f8",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 373,
+          "kind": "response",
+          "request_id": "b82b0e38-614e-4653-bcef-647a4cc9c581",
+          "attempt_number": 1,
+          "body_sha256": "7ca316f13791b70f6211ec78b15ba8040301bf649a5b839c9e75638417ddcca1",
+          "body_bytes": 12167,
+          "stage": 8,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 399,
+          "kind": "request",
+          "request_id": "b9d9c892-c808-4123-80ce-77b24dc67b21",
+          "attempt_number": 1,
+          "body_sha256": "2e54f405257c661d155904cd981f8b1ba2ec680650d9a2e8dbf235a752861c2c",
+          "body_bytes": 57061,
+          "stage": 8,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 13,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 8,
+          "tool_result_count": 8,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "6cdb9eb416804e4cf99e41c8da6aee51e0eccf0ac090492eb884209372de6ade",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187de-3c14-7783-8159-2897345531f8",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 401,
+          "kind": "response",
+          "request_id": "b9d9c892-c808-4123-80ce-77b24dc67b21",
+          "attempt_number": 1,
+          "body_sha256": "c5d041c09a086ab034f9d24a73de176ecf040fead4cf3d02a70fd781a358894b",
+          "body_bytes": 4378,
+          "stage": 8,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 421,
+          "kind": "request",
+          "request_id": "3d7b6605-f98f-42c0-ac7b-af0b8fb51c14",
+          "attempt_number": 1,
+          "body_sha256": "3210e9ed16ae67b2781b454b5ace086f08f1652150ae32179b5822efad694387",
+          "body_bytes": 57778,
+          "stage": 9,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "max",
+          "thinking": null,
+          "assistant_count": 14,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 8,
+          "tool_result_count": 8,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "6cdb9eb416804e4cf99e41c8da6aee51e0eccf0ac090492eb884209372de6ade",
+          "backend": "chat_completions",
+          "endpoint_host": "open.bigmodel.cn",
+          "endpoint_path_sha256": "d32ee5a5570e3fa075d2083a07fb8c3156cbe6a9536223e0fc80063b04593e97",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187de-4fcc-7930-b88d-0d1bc10a0430",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 422,
+          "kind": "response",
+          "request_id": "3d7b6605-f98f-42c0-ac7b-af0b8fb51c14",
+          "attempt_number": 1,
+          "body_sha256": "ee0836e3c6a098d0d4f0bacde9ae54dddd5f064c1b3afa96ac396c9a763bfc82",
+          "body_bytes": 856,
+          "stage": 9,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 448,
+          "kind": "request",
+          "request_id": "7c5c16b7-f3e6-4cba-a937-200e2e40e347",
+          "attempt_number": 1,
+          "body_sha256": "4a8a92c4900fcc7fd99a14aba39c61036c4ec7d60e9ef97c6d93f29f9c283206",
+          "body_bytes": 58213,
+          "stage": 9,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "max",
+          "thinking": null,
+          "assistant_count": 15,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 9,
+          "tool_result_count": 9,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "0a1df7f26da9a587e8dc585bfaf115b8a9851239ac701aa10e200e06acccfc98",
+          "backend": "chat_completions",
+          "endpoint_host": "open.bigmodel.cn",
+          "endpoint_path_sha256": "d32ee5a5570e3fa075d2083a07fb8c3156cbe6a9536223e0fc80063b04593e97",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187de-4fcc-7930-b88d-0d1bc10a0430",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 450,
+          "kind": "response",
+          "request_id": "7c5c16b7-f3e6-4cba-a937-200e2e40e347",
+          "attempt_number": 1,
+          "body_sha256": "3bd90b33f78510bc43f84174039c4f165e5eeaeb32822659ee51ee19a77d583e",
+          "body_bytes": 13343,
+          "stage": 9,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        }
+      ]
+    },
+    {
+      "session_id": "01a187de-7da5-7eb0-bc71-53037f448738",
+      "timeline_sha256": "ac59a0bc374650d29b3246f460d355199560670f8152d90bb18b0740195be1c7",
+      "attempts": [
+        {
+          "timeline_seq": 20,
+          "kind": "request",
+          "request_id": "27db67b1-3a33-48c9-84ab-ea0a6edb8ce4",
+          "attempt_number": 1,
+          "body_sha256": "bc921ffd9fe62bee6a46d6713e28a259f982e6445122e2204e2e0594af7b0cc3",
+          "body_bytes": 47910,
+          "stage": "history_first",
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 0,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 0,
+          "tool_result_count": 0,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187de-7eae-7b72-a5f7-63303bafdf1b",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 22,
+          "kind": "response",
+          "request_id": "27db67b1-3a33-48c9-84ab-ea0a6edb8ce4",
+          "attempt_number": 1,
+          "body_sha256": "c8ae3b936a98dcfd69ecddbdca1f0f8539a5f7c7747cbbf10c740580f891e2b1",
+          "body_bytes": 3524,
+          "stage": "history_first",
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 42,
+          "kind": "request",
+          "request_id": "b653ba64-2ccf-49ba-8e9a-6c1127c29ffb",
+          "attempt_number": 1,
+          "body_sha256": "3d8119151387e0bd78572a3c550853aa251fc3e25c5b7f1d23f19bb9990fbfb7",
+          "body_bytes": 48077,
+          "stage": "history_second",
+          "wire_model": "deepseek-flash",
+          "reasoning_effort": {
+            "effort": "max",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 1,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 0,
+          "tool_result_count": 0,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "backend": "responses",
+          "endpoint_host": "api.neorouter.ai",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187de-89a7-7a72-83de-d5a37d460615",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 47,
+          "kind": "response",
+          "request_id": "b653ba64-2ccf-49ba-8e9a-6c1127c29ffb",
+          "attempt_number": 1,
+          "body_sha256": "aac4cd14a4ff6cf2fa3372e69a395f89bd597fa7013e2caeaa2741cddcb94f37",
+          "body_bytes": 116719,
+          "stage": "history_second",
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        }
+      ]
+    }
+  ],
+  "fixture_execution_counts": {
+    "1": 1,
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1,
+    "6": 1,
+    "7": 1,
+    "8": 1,
+    "9": 1
+  },
+  "all_fixture_stages_executed_once": true,
+  "limitations": [
+    "Reasoning text and raw provider responses are omitted; hashes identify private evidence.",
+    "A failed stage may be executed by a later model from retained user history; per-prompt commands remain authoritative."
+  ],
+  "run_label": "primary",
+  "reasoning_policy": "configured_defaults",
+  "matrix_counts": {
+    "passed": 5,
+    "failed": 4,
+    "total": 9
+  },
+  "driver_result_recovered_from_raw_rpc": true
+}

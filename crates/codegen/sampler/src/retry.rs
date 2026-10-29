@@ -395,6 +395,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         }
     }
 
@@ -405,6 +406,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(retry_after),
             should_retry: None,
+            portable_reasoning_required: None,
         }
     }
 
@@ -729,6 +731,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
+            portable_reasoning_required: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -746,6 +749,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -761,6 +765,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(true),
+            portable_reasoning_required: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -776,6 +781,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -832,6 +838,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(10),
             should_retry: Some(false),
+            portable_reasoning_required: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),

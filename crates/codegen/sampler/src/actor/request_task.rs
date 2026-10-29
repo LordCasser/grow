@@ -2316,6 +2316,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         let info = SamplingErrorInfo::from(&original);
         let err = synthesize_from_info(&info);
@@ -2338,6 +2339,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(7),
             should_retry: None,
+            portable_reasoning_required: None,
         };
         let info = SamplingErrorInfo::from(&original);
         let err = synthesize_from_info(&info);
@@ -2362,6 +2364,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            portable_reasoning_required: None,
         };
         let mut info = SamplingErrorInfo::from(&original);
         info.source = None;

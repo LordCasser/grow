@@ -1,0 +1,1354 @@
+{
+  "raw_rpc_sha256": "5f1ea82fa670745edbc0403d87ad16927875714868945461dadcd073ba3ac77d",
+  "prompts": [
+    {
+      "stage": 1,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "opencode/glm-5.3-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 1"
+      ],
+      "assistant_text_sha256": "5f9da6ef031f1989b52e1dc72f550b79a08a1b48e09c9511a2bf70891c3613a5",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 2,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 2"
+      ],
+      "assistant_text_sha256": "729709fa51e6ced7e4c5e427e332d9b6c9d45add0b5a033fd13823ec8d56b605",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 3,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "deepseek/deepseek-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 3"
+      ],
+      "assistant_text_sha256": "f8cceef25abdb6932ec2e3c29f48fd140dbcb66ccd842d76a8d2a2fca72acd0e",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 4,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "opencode/qwen3.8-max",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 4"
+      ],
+      "assistant_text_sha256": "0016a1a1ddc10dd8353fc4f0d3b0550302c0fc4a21dc6b5d3e2253dd6d2b1e2b",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 5,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 5"
+      ],
+      "assistant_text_sha256": "e932381e6c8a42d5874e74946d6bae51678e1e2f2561d1483e55e1170ed00203",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 6,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "opencode/qwen3.8-max",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 6"
+      ],
+      "assistant_text_sha256": "2996f173831a89fe0de596fc2fa056996a6174f245bf0d6a8f716c54ec79476c",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 7,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "deepseek/deepseek-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 7"
+      ],
+      "assistant_text_sha256": "b271712add40363af1b69099b94c38bee579195bb4b7fd75d2c3fa8e44d5d899",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 8,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 8"
+      ],
+      "assistant_text_sha256": "20b5e9a5acfca62c8253caedb35127e32b4026690ce7966a111f1de160cf48ef",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": 9,
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "route": "bigmodel/glm-5.3-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "single_expected_command": true,
+        "all_tool_calls_completed": true,
+        "current_token_in_completed_tool_result": true,
+        "reported_current_token": true,
+        "reported_previous_token": true
+      },
+      "tool_commands": [
+        "python3 record_step.py 9"
+      ],
+      "assistant_text_sha256": "902ef271915d33b049557591315abf93fd32422214e662911fd8510db90b7844",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": "history_first",
+      "session_id": "01a187f4-5775-7f72-ac7c-a51bc130d420",
+      "route": "opencode/deepseek-v4.1-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "no_tools": true,
+        "correct_answer": true
+      },
+      "tool_commands": [],
+      "assistant_text_sha256": "005fc4185b4f6096a1c6273010e11d67b436b338d6168bd54ccb9ecbaf2d7a27",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    },
+    {
+      "stage": "history_second",
+      "session_id": "01a187f4-5775-7f72-ac7c-a51bc130d420",
+      "route": "deepseek/deepseek-flash",
+      "status": "passed",
+      "checks": {
+        "rpc_success": true,
+        "no_tools": true,
+        "correct_answer": true
+      },
+      "tool_commands": [],
+      "assistant_text_sha256": "0e2f9175685f76dffe3b6796a13c2ed1fd2f0cdd4fe9f35c446f2b551294b25c",
+      "rpc_error": null,
+      "stop_reason": "end_turn"
+    }
+  ],
+  "sessions": [
+    {
+      "session_id": "01a187f3-6aca-7200-af31-10e9b88d4324",
+      "timeline_sha256": "47e1541040fdbd5747aeb8a8d53a8a57421766d03226433f65f2ee53ca033c83",
+      "attempts": [
+        {
+          "timeline_seq": 20,
+          "kind": "request",
+          "request_id": "2c82c3a8-068d-4b65-8ac6-025c3abaf485",
+          "attempt_number": 1,
+          "body_sha256": "2119c93567c6c601f145ac8eba3ae8b6d6838f2c928767c516aebbad5cd67fa4",
+          "body_bytes": 48310,
+          "stage": 1,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 0,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 0,
+          "tool_result_count": 0,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-6bee-7bd2-9ab0-0595270f62f0",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 25,
+          "kind": "response",
+          "request_id": "2c82c3a8-068d-4b65-8ac6-025c3abaf485",
+          "attempt_number": 1,
+          "body_sha256": "dd51559c5d67306f0577fb3ba2d4eff70e88b24a0edae228d73da5bb00825a03",
+          "body_bytes": 2642,
+          "stage": 1,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 51,
+          "kind": "request",
+          "request_id": "efe1b627-e521-4997-9663-8c830d5a420b",
+          "attempt_number": 1,
+          "body_sha256": "f1dc54753c53eac61e24532d25a5536e2d9d2d774c10e0debb643d2329bd2a4a",
+          "body_bytes": 48923,
+          "stage": 1,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 1,
+          "reasoning_text_count": 1,
+          "reasoning_nonempty_count": 1,
+          "reasoning_text_chars": 152,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 1,
+          "tool_result_count": 1,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "fa697039e9829c536d163fc0e0dc91d24045ae3ceb75eac2c36f5a4a0a465b49",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187f3-6bee-7bd2-9ab0-0595270f62f0",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 53,
+          "kind": "response",
+          "request_id": "efe1b627-e521-4997-9663-8c830d5a420b",
+          "attempt_number": 1,
+          "body_sha256": "b879d52954e3c83c61918c9b8070f350db309f9ae06467cba384413587c89124",
+          "body_bytes": 1870,
+          "stage": 1,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 73,
+          "kind": "request",
+          "request_id": "94db08ff-be24-4672-94a0-e4046b8a8d6c",
+          "attempt_number": 1,
+          "body_sha256": "1d02de43f759fa6b30c786819d5806f2d87a09bc9ed778664a71ebeabdf1f8aa",
+          "body_bytes": 49521,
+          "stage": 2,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 2,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 1,
+          "tool_result_count": 1,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "fa697039e9829c536d163fc0e0dc91d24045ae3ceb75eac2c36f5a4a0a465b49",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-8a7b-73d1-bf4d-32b4d45954e9",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 75,
+          "kind": "response",
+          "request_id": "94db08ff-be24-4672-94a0-e4046b8a8d6c",
+          "attempt_number": 1,
+          "body_sha256": "6305cb5967e9f35c2629463c096ba75c99691cc116381a049604974deab284b7",
+          "body_bytes": 14575,
+          "stage": 2,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 101,
+          "kind": "request",
+          "request_id": "cd919116-77f5-4447-a5ab-94b823035ad3",
+          "attempt_number": 1,
+          "body_sha256": "7195ac396b35680f208ba0bc63c4dfbff7205d7bca0320ccd984ead527102741",
+          "body_bytes": 50101,
+          "stage": 2,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 3,
+          "reasoning_text_count": 1,
+          "reasoning_nonempty_count": 1,
+          "reasoning_text_chars": 119,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 2,
+          "tool_result_count": 2,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "2675e12a85d3c4bb4cc1acbb6e818d7467fec5f91c4606c6199cb7a5e420ddfb",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187f3-8a7b-73d1-bf4d-32b4d45954e9",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 103,
+          "kind": "response",
+          "request_id": "cd919116-77f5-4447-a5ab-94b823035ad3",
+          "attempt_number": 1,
+          "body_sha256": "8b3fd91e21480ed2d7acf6af4fae6200f2a80d1e0ecd7225b7f060a4b8315e6c",
+          "body_bytes": 4084,
+          "stage": 2,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 123,
+          "kind": "request",
+          "request_id": "ef2d2aa8-6d4d-4a14-b749-d024334b66ae",
+          "attempt_number": 1,
+          "body_sha256": "d9e49879e3b06aee31bfdaebf91ea085ec934eb4aff76efa898f9fa19d4761d5",
+          "body_bytes": 50457,
+          "stage": 3,
+          "wire_model": "deepseek-v4-flash",
+          "reasoning_effort": {
+            "effort": "high",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 2,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 2,
+          "tool_result_count": 2,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "2675e12a85d3c4bb4cc1acbb6e818d7467fec5f91c4606c6199cb7a5e420ddfb",
+          "backend": "responses",
+          "endpoint_host": "api.deepseek.com",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-9e23-7292-a1c8-c337fc724579",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 124,
+          "kind": "response",
+          "request_id": "ef2d2aa8-6d4d-4a14-b749-d024334b66ae",
+          "attempt_number": 1,
+          "body_sha256": "3ea780a03ff17e19f9e1da447383a90deace4e8c7bd9ae2aa6cbf1e4aa1c403c",
+          "body_bytes": 118060,
+          "stage": 3,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 150,
+          "kind": "request",
+          "request_id": "c3c6d273-9a39-4827-b785-7b838f88b080",
+          "attempt_number": 1,
+          "body_sha256": "81cfed82905db8f4710a39a3ad3e80a3d984ee0d8671912ca0980b681a1a9dd4",
+          "body_bytes": 50903,
+          "stage": 3,
+          "wire_model": "deepseek-v4-flash",
+          "reasoning_effort": {
+            "effort": "high",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 2,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 3,
+          "tool_result_count": 3,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "46d049a714c79e2603097d50fa530fc634ca0e3f17dfc3422fb9d37bbc73fadd",
+          "backend": "responses",
+          "endpoint_host": "api.deepseek.com",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187f3-9e23-7292-a1c8-c337fc724579",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 152,
+          "kind": "response",
+          "request_id": "c3c6d273-9a39-4827-b785-7b838f88b080",
+          "attempt_number": 1,
+          "body_sha256": "f7ce129c27966bea0bfca4c4634eeee32afc4086369f80f001d53a642a7ec0f4",
+          "body_bytes": 123376,
+          "stage": 3,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 172,
+          "kind": "request",
+          "request_id": "dc472f4c-a209-4dde-8f9e-6a47f4fe03e9",
+          "attempt_number": 1,
+          "body_sha256": "a24028b60ae366df82b1c3e22ed330361766751b74c32332c34f83c5752ae3d0",
+          "body_bytes": 51275,
+          "stage": 4,
+          "wire_model": "qwen3.8-max",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 6,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 3,
+          "tool_result_count": 3,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "46d049a714c79e2603097d50fa530fc634ca0e3f17dfc3422fb9d37bbc73fadd",
+          "backend": "messages",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "42ce00ebbc1e16bdff31de739f49efbc6dcb372cef312f03f886aa0819c74a85",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-a9e2-76d3-a8c9-1f4947bd812f",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 174,
+          "kind": "response",
+          "request_id": "dc472f4c-a209-4dde-8f9e-6a47f4fe03e9",
+          "attempt_number": 1,
+          "body_sha256": "b61bf8332bf4e4590d89ff6f96f410df46499dae43b1dbc80a50657b7e1e5b98",
+          "body_bytes": 3574,
+          "stage": 4,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "messages",
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 200,
+          "kind": "request",
+          "request_id": "06814e50-8e11-4142-ae31-a28e2e764c3b",
+          "attempt_number": 1,
+          "body_sha256": "d05785243e117c81916c12b56bc063d29eac438d6689e62ba3dde4c95586141a",
+          "body_bytes": 51697,
+          "stage": 4,
+          "wire_model": "qwen3.8-max",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 7,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 4,
+          "tool_result_count": 4,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "93751191a671a6afd4551d221afe232ff2007c060eaf1ad0a67b17224d566517",
+          "backend": "messages",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "42ce00ebbc1e16bdff31de739f49efbc6dcb372cef312f03f886aa0819c74a85",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-bad6-70e0-b2aa-667e1ee17a65",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 202,
+          "kind": "response",
+          "request_id": "06814e50-8e11-4142-ae31-a28e2e764c3b",
+          "attempt_number": 1,
+          "body_sha256": "e7123c6b1eb40c13e187bb840dc611b41efc0c9af00ea23a8ef0cf41f3d9f6c3",
+          "body_bytes": 4049,
+          "stage": 4,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "messages",
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 222,
+          "kind": "request",
+          "request_id": "eae695d5-a590-4eeb-b2d1-3e547e0f7e0e",
+          "attempt_number": 1,
+          "body_sha256": "105b606b40a61ebdec88a04f47915afa10383a0b81aaacfa37f100d1ea8b39da",
+          "body_bytes": 52817,
+          "stage": 5,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 8,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 4,
+          "tool_result_count": 4,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "93751191a671a6afd4551d221afe232ff2007c060eaf1ad0a67b17224d566517",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-cb67-7eb0-88f2-1eee8bf470e0",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 223,
+          "kind": "response",
+          "request_id": "eae695d5-a590-4eeb-b2d1-3e547e0f7e0e",
+          "attempt_number": 1,
+          "body_sha256": "c648489e66f2918f6e6de527634cef904f7bd357ebcfb569c0f5da08f0ddd064",
+          "body_bytes": 11891,
+          "stage": 5,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 249,
+          "kind": "request",
+          "request_id": "8369f9e9-d3d4-43be-8f2c-59ba1580d931",
+          "attempt_number": 1,
+          "body_sha256": "c3c53ddd7dbf398bc8aed744cc9387bea2f1f2f9c9089b53f12711944551ac52",
+          "body_bytes": 53255,
+          "stage": 5,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 9,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 5,
+          "tool_result_count": 5,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "e19e27f63a60482f62e50dbbd73bd39970d5fd0f6fd3d1cd012471add59789b3",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187f3-cb67-7eb0-88f2-1eee8bf470e0",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 251,
+          "kind": "response",
+          "request_id": "8369f9e9-d3d4-43be-8f2c-59ba1580d931",
+          "attempt_number": 1,
+          "body_sha256": "60995e907129a62d8c48175173302d2e596eeba1b3f68ff0df222cb19ca4e851",
+          "body_bytes": 3572,
+          "stage": 5,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 271,
+          "kind": "request",
+          "request_id": "f94c9904-7d6c-4c83-84af-8447451dda2b",
+          "attempt_number": 1,
+          "body_sha256": "222e348c0f68c4d25c753c6b701426cbaedc5c274c97c935492496e176323ded",
+          "body_bytes": 53543,
+          "stage": 6,
+          "wire_model": "qwen3.8-max",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 10,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 5,
+          "tool_result_count": 5,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "e19e27f63a60482f62e50dbbd73bd39970d5fd0f6fd3d1cd012471add59789b3",
+          "backend": "messages",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "42ce00ebbc1e16bdff31de739f49efbc6dcb372cef312f03f886aa0819c74a85",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-deab-72f0-9eda-1529cb9376a6",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 273,
+          "kind": "response",
+          "request_id": "f94c9904-7d6c-4c83-84af-8447451dda2b",
+          "attempt_number": 1,
+          "body_sha256": "d5b27f6ec65ef45bdf2e226bf70919bc147e87cc4a89ef251fe5518ba11f9571",
+          "body_bytes": 3868,
+          "stage": 6,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "messages",
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 299,
+          "kind": "request",
+          "request_id": "8b1c3a0d-fbdd-44f1-877e-1074c78429dd",
+          "attempt_number": 1,
+          "body_sha256": "966ba240edd7eeb3f459b9f7c5524be3486bd242ee48f3557e24bf16d74c1754",
+          "body_bytes": 53965,
+          "stage": 6,
+          "wire_model": "qwen3.8-max",
+          "reasoning_effort": null,
+          "thinking": null,
+          "assistant_count": 11,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 6,
+          "tool_result_count": 6,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "9b10bb0a042ff017cc9019981416789b0160c2a262ee756b417eee7a77f7e7a1",
+          "backend": "messages",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "42ce00ebbc1e16bdff31de739f49efbc6dcb372cef312f03f886aa0819c74a85",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f3-f057-7610-b5be-e8aaffbf584b",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 301,
+          "kind": "response",
+          "request_id": "8b1c3a0d-fbdd-44f1-877e-1074c78429dd",
+          "attempt_number": 1,
+          "body_sha256": "a7b8bce4e176397bf5dd11b85e6fd373e1a2cc3a68125852eabb8a4a3c5ffc01",
+          "body_bytes": 4423,
+          "stage": 6,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "messages",
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 321,
+          "kind": "request",
+          "request_id": "ee250387-7132-4ed3-bf54-5b1503c0ec59",
+          "attempt_number": 1,
+          "body_sha256": "8f0efbdc90e139c533b44e8c466a821c946b52b51856f9900bda19e208268e29",
+          "body_bytes": 54838,
+          "stage": 7,
+          "wire_model": "deepseek-v4-flash",
+          "reasoning_effort": {
+            "effort": "high",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 6,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 6,
+          "tool_result_count": 6,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "9b10bb0a042ff017cc9019981416789b0160c2a262ee756b417eee7a77f7e7a1",
+          "backend": "responses",
+          "endpoint_host": "api.deepseek.com",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f4-0815-7533-9d76-f358f36b88b1",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 322,
+          "kind": "response",
+          "request_id": "ee250387-7132-4ed3-bf54-5b1503c0ec59",
+          "attempt_number": 1,
+          "body_sha256": "3b97c63c6529d7bb3a88b5eca70449bea19eef5f2ed109224bddd591e3c6c119",
+          "body_bytes": 118060,
+          "stage": 7,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 348,
+          "kind": "request",
+          "request_id": "0420e8c8-2147-4b35-8101-6b96a281b51b",
+          "attempt_number": 1,
+          "body_sha256": "ad3a0582c9b25d39c9f3a81ec09bdc24b69b2c72e74b79d52ace3bccf197b212",
+          "body_bytes": 55284,
+          "stage": 7,
+          "wire_model": "deepseek-v4-flash",
+          "reasoning_effort": {
+            "effort": "high",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 6,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 7,
+          "tool_result_count": 7,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "a6ebbdda7a1889a288a4f745da2d3143f010530e9c76931d22a7a1507955309b",
+          "backend": "responses",
+          "endpoint_host": "api.deepseek.com",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187f4-0815-7533-9d76-f358f36b88b1",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 350,
+          "kind": "response",
+          "request_id": "0420e8c8-2147-4b35-8101-6b96a281b51b",
+          "attempt_number": 1,
+          "body_sha256": "84d3d027b126a1ccecc91452a7805a6ac7312ed1ecb31520ca344ef3da224c59",
+          "body_bytes": 124003,
+          "stage": 7,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 370,
+          "kind": "request",
+          "request_id": "36015661-cc6d-41ee-b6fc-e5553f4bc005",
+          "attempt_number": 1,
+          "body_sha256": "133f4138ed0ef6f296a68c42d2ffb9b4754a4ea236e70086b35bdf475875966c",
+          "body_bytes": 56113,
+          "stage": 8,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 14,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 7,
+          "tool_result_count": 7,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "a6ebbdda7a1889a288a4f745da2d3143f010530e9c76931d22a7a1507955309b",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f4-1474-7253-9f2e-b1dbb4c3525b",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 371,
+          "kind": "response",
+          "request_id": "36015661-cc6d-41ee-b6fc-e5553f4bc005",
+          "attempt_number": 1,
+          "body_sha256": "3adcc0c5581f761d2c36323681219e815b99eff27fded2492646d3f16f141656",
+          "body_bytes": 11890,
+          "stage": 8,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 397,
+          "kind": "request",
+          "request_id": "4e233c65-60dd-4448-bd19-c9487ff66fe6",
+          "attempt_number": 1,
+          "body_sha256": "04557c485ae83f7c610e991c9a9d8b0439dcd5c192d03e9f8cbbbbd083060123",
+          "body_bytes": 56551,
+          "stage": 8,
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 15,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 8,
+          "tool_result_count": 8,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "b0c95d6c92f3828da0c1124e442089c70081842ea2c999fc60d452a3ea5899b1",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187f4-1474-7253-9f2e-b1dbb4c3525b",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 399,
+          "kind": "response",
+          "request_id": "4e233c65-60dd-4448-bd19-c9487ff66fe6",
+          "attempt_number": 1,
+          "body_sha256": "afa65941b7e4851fd3c5050e78fdf7603e2c6b9ded8235f74fcf64709110927a",
+          "body_bytes": 3572,
+          "stage": 8,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 419,
+          "kind": "request",
+          "request_id": "163a0605-6e4d-4cd9-a618-3a36c9e0db7b",
+          "attempt_number": 1,
+          "body_sha256": "ad08971a4d4daadb6597f229471154f1d421966149ad2cb79f6bcf494fc23cca",
+          "body_bytes": 57205,
+          "stage": 9,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 16,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 8,
+          "tool_result_count": 8,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "b0c95d6c92f3828da0c1124e442089c70081842ea2c999fc60d452a3ea5899b1",
+          "backend": "chat_completions",
+          "endpoint_host": "open.bigmodel.cn",
+          "endpoint_path_sha256": "d32ee5a5570e3fa075d2083a07fb8c3156cbe6a9536223e0fc80063b04593e97",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f4-2a85-7c33-bc0b-886f911a7054",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 420,
+          "kind": "response",
+          "request_id": "163a0605-6e4d-4cd9-a618-3a36c9e0db7b",
+          "attempt_number": 1,
+          "body_sha256": "3b60a69ddbda56a10bc10cfbf5e7a4679b83f6b5f422617c65acdd52b0052e61",
+          "body_bytes": 850,
+          "stage": 9,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "tool_calls"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 446,
+          "kind": "request",
+          "request_id": "ac05cbf6-ac17-4f2e-bd78-aee12d122e70",
+          "attempt_number": 1,
+          "body_sha256": "d4607459f4b953e4a27ebc567ec517db7d07d56fe4e2e29a379f14e15d801f86",
+          "body_bytes": 57634,
+          "stage": 9,
+          "wire_model": "glm-5.3-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 17,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 9,
+          "tool_result_count": 9,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "a71435e467202452456185c434ba3fd4074be4c28d8f8c9a294c9ea4525cd79b",
+          "backend": "chat_completions",
+          "endpoint_host": "open.bigmodel.cn",
+          "endpoint_path_sha256": "d32ee5a5570e3fa075d2083a07fb8c3156cbe6a9536223e0fc80063b04593e97",
+          "native_span_count": 1,
+          "continuation_epoch": "01a187f4-2a85-7c33-bc0b-886f911a7054",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 448,
+          "kind": "response",
+          "request_id": "ac05cbf6-ac17-4f2e-bd78-aee12d122e70",
+          "attempt_number": 1,
+          "body_sha256": "0b3e1c5a9c10b5420723f03b982657440cd947eb1602f168352895cfecd32a88",
+          "body_bytes": 11777,
+          "stage": 9,
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        }
+      ]
+    },
+    {
+      "session_id": "01a187f4-5775-7f72-ac7c-a51bc130d420",
+      "timeline_sha256": "0a6bae7f2f8df20c8503bac84fa5118312a9837b8ab5b21d4d33ebdb38e2865f",
+      "attempts": [
+        {
+          "timeline_seq": 20,
+          "kind": "request",
+          "request_id": "c2052de0-123c-47a5-b202-22e531490f89",
+          "attempt_number": 1,
+          "body_sha256": "36dc86d85c0b9f676ae038e1c487a141fcadf2f65f2cdcadd5f23c98c3f52462",
+          "body_bytes": 47936,
+          "stage": "history_first",
+          "wire_model": "deepseek-v4.1-flash",
+          "reasoning_effort": "high",
+          "thinking": null,
+          "assistant_count": 0,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 0,
+          "tool_result_count": 0,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "backend": "chat_completions",
+          "endpoint_host": "opencode.ai",
+          "endpoint_path_sha256": "37d2b465bbb0449c8a3f3d089f62586e0a9fdb66e618ea4419dfd5be445206da",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f4-5880-75b3-9ce6-975cbb223696",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 25,
+          "kind": "response",
+          "request_id": "c2052de0-123c-47a5-b202-22e531490f89",
+          "attempt_number": 1,
+          "body_sha256": "2509dc69587090a7528047c56219c97559d14b5533739c4ad0efe94fbc122c1c",
+          "body_bytes": 4592,
+          "stage": "history_first",
+          "status": 200,
+          "provider_terminal": {
+            "backend": "chat_completions",
+            "finish_reason": "stop"
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        },
+        {
+          "timeline_seq": 45,
+          "kind": "request",
+          "request_id": "484e9482-cb65-441c-8b77-2bd042f4defa",
+          "attempt_number": 1,
+          "body_sha256": "59a3c1a345b59c3f65df2a56ef141773c1c376fed15968a0041eecc44a3f6f7c",
+          "body_bytes": 48054,
+          "stage": "history_second",
+          "wire_model": "deepseek-v4-flash",
+          "reasoning_effort": {
+            "effort": "high",
+            "summary": "concise"
+          },
+          "thinking": null,
+          "assistant_count": 1,
+          "reasoning_text_count": 0,
+          "reasoning_nonempty_count": 0,
+          "reasoning_text_chars": 0,
+          "reasoning_opaque_field_count": 0,
+          "tool_call_count": 0,
+          "tool_result_count": 0,
+          "tool_ids_paired_once": true,
+          "tool_ids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "backend": "responses",
+          "endpoint_host": "api.deepseek.com",
+          "endpoint_path_sha256": "c307a0672f4b5363839dc99ee72adb58c60daea3a812cd16134680195763e254",
+          "native_span_count": 0,
+          "continuation_epoch": "01a187f4-649c-73f2-9edd-0d38cc83bcc3",
+          "portable_reasoning_backend": null
+        },
+        {
+          "timeline_seq": 47,
+          "kind": "response",
+          "request_id": "484e9482-cb65-441c-8b77-2bd042f4defa",
+          "attempt_number": 1,
+          "body_sha256": "6980567d99582024af7d055e4ec599bfd9ba3acabcc322b250fde760105e8f0e",
+          "body_bytes": 116641,
+          "stage": "history_second",
+          "status": 200,
+          "provider_terminal": {
+            "backend": "responses",
+            "event": "response.completed",
+            "status": "completed",
+            "incomplete_reason": null
+          },
+          "outcome": {
+            "attempt": 1,
+            "output_delivery": "irreversible",
+            "output_observed": true,
+            "recovery_can_recover": true,
+            "recovery_stop_reasons": [
+              "irreversible_output"
+            ],
+            "remaining_attempts": 2,
+            "error": null
+          },
+          "truncated": false
+        }
+      ]
+    }
+  ],
+  "fixture_execution_counts": {
+    "1": 1,
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1,
+    "6": 1,
+    "7": 1,
+    "8": 1,
+    "9": 1
+  },
+  "all_fixture_stages_executed_once": true,
+  "limitations": [
+    "Reasoning text and raw provider responses are omitted; hashes identify private evidence.",
+    "A failed stage may be executed by a later model from retained user history; per-prompt commands remain authoritative."
+  ],
+  "run_label": "final_direct",
+  "reasoning_policy": "high_where_configured",
+  "resident_process_pid": 38357,
+  "matrix_counts": {
+    "passed": 9,
+    "failed": 0,
+    "not_run": 0,
+    "total": 9
+  },
+  "stage_durations_ms": {
+    "1": 7812,
+    "2": 5032,
+    "3": 3006,
+    "4": 8584,
+    "5": 4930,
+    "6": 10604,
+    "7": 3163,
+    "8": 5654,
+    "9": 11590
+  }
+}
