@@ -1,0 +1,147 @@
+{
+  "url": "https://github.com/LordCasser/grow/actions/runs/40841704026",
+  "source": "069f712894caf83352ace5b0e71276f07f01f9e1",
+  "conclusion": "success",
+  "jobs": [
+    {
+      "id": 123339385471,
+      "name": "Select platform matrix",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:22:52Z",
+      "completed_at": "2026-10-29T08:22:55Z"
+    },
+    {
+      "id": 123339385617,
+      "name": "Validate dispatch inputs",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:22:53Z",
+      "completed_at": "2026-10-29T08:22:56Z"
+    },
+    {
+      "id": 123339385682,
+      "name": "Validate release tag",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:22:53Z",
+      "completed_at": "2026-10-29T08:23:15Z"
+    },
+    {
+      "id": 123339549463,
+      "name": "Build ohos-aarch64 / Build ohos-aarch64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:20Z",
+      "completed_at": "2026-10-29T09:28:15Z"
+    },
+    {
+      "id": 123339549468,
+      "name": "Build linux-x86_64 / Build linux-x86_64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:48:03Z"
+    },
+    {
+      "id": 123339549489,
+      "name": "Build windows-x86_64 / Build windows-x86_64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:19Z",
+      "completed_at": "2026-10-29T09:06:46Z"
+    },
+    {
+      "id": 123339549515,
+      "name": "Build linux-aarch64 / Build linux-aarch64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:20Z",
+      "completed_at": "2026-10-29T08:44:23Z"
+    },
+    {
+      "id": 123339549528,
+      "name": "Build macos-x86_64 / Build macos-x86_64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:20Z",
+      "completed_at": "2026-10-29T09:13:07Z"
+    },
+    {
+      "id": 123339549573,
+      "name": "Build macos-aarch64 / Build macos-aarch64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:20Z",
+      "completed_at": "2026-10-29T09:15:03Z"
+    },
+    {
+      "id": 123339549678,
+      "name": "Build windows-aarch64 / Build windows-aarch64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:55:19Z"
+    },
+    {
+      "id": 123339549714,
+      "name": "Build linux-aarch64-musl / Build linux-aarch64-musl",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:42:13Z"
+    },
+    {
+      "id": 123339549729,
+      "name": "Build linux-riscv64 / Build linux-riscv64",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:40:29Z"
+    },
+    {
+      "id": 123339549841,
+      "name": "Windows storage regressions on release commit / Create and reopen a session",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:29:19Z"
+    },
+    {
+      "id": 123339549900,
+      "name": "OpenSpec validation on release commit / validate",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:23:31Z"
+    },
+    {
+      "id": 123339549940,
+      "name": "Native coordination and export regressions on release commit / native (ubuntu-24.04)",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:36:41Z"
+    },
+    {
+      "id": 123339549952,
+      "name": "Native coordination and export regressions on release commit / native (windows-2025)",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:51:08Z"
+    },
+    {
+      "id": 123339549965,
+      "name": "Build linux-x86_64-musl / Build linux-x86_64-musl",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:47:28Z"
+    },
+    {
+      "id": 123339550000,
+      "name": "Core regressions on release commit / Core tests and CLI build",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:18Z",
+      "completed_at": "2026-10-29T08:57:56Z"
+    },
+    {
+      "id": 123339550074,
+      "name": "Native coordination and export regressions on release commit / native (macos-15)",
+      "conclusion": "success",
+      "started_at": "2026-10-29T08:23:19Z",
+      "completed_at": "2026-10-29T08:51:03Z"
+    },
+    {
+      "id": 123366387768,
+      "name": "Publish release assets",
+      "conclusion": "success",
+      "started_at": "2026-10-29T09:28:18Z",
+      "completed_at": "2026-10-29T09:30:04Z"
+    }
+  ]
+}

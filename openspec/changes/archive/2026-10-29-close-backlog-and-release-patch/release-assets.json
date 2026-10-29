@@ -1,0 +1,79 @@
+{
+  "tag": "v2.5.4",
+  "url": "https://github.com/LordCasser/grow/releases/tag/v2.5.4",
+  "published_at": "2026-10-29T09:30:02Z",
+  "draft": false,
+  "prerelease": false,
+  "latest": "v2.5.4",
+  "source": "069f712894caf83352ace5b0e71276f07f01f9e1",
+  "native_version": "grow 2.5.4 (069f712)",
+  "native_attestation_verified": true,
+  "assets": [
+    {
+      "name": "grow-2.5.4-linux-aarch64-musl.tar.gz",
+      "size": 45732206,
+      "digest": "sha256:8a54ce93ef639e96d9ca537245ffc8a8b385b77088fd48a9abab0ced415841ca",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-linux-aarch64-musl.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-linux-aarch64.tar.gz",
+      "size": 46222662,
+      "digest": "sha256:32b35c462df14417d1ed337f20b451e69d031e349df287d20780a507b7de0a26",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-linux-aarch64.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-linux-riscv64.tar.gz",
+      "size": 49014554,
+      "digest": "sha256:36eb123af93486bd652f7e2348dcee02632d3d015487e9af5c8fd4c8fa21f365",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-linux-riscv64.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-linux-x86_64-musl.tar.gz",
+      "size": 49799815,
+      "digest": "sha256:284ee954e8160f68ea031da65f97369afee947a0ad46e4c1e16d8120be801bc1",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-linux-x86_64-musl.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-linux-x86_64.tar.gz",
+      "size": 49248233,
+      "digest": "sha256:76f73ec2221036ca1ab22a96b7710f70360c1382e14c1d12b8d9f26dae4d21f9",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-linux-x86_64.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-macos-aarch64.tar.gz",
+      "size": 43132104,
+      "digest": "sha256:2fd20b17a8d29214731b92e82640c6cef3df37eb3482a80592e90ed9c7256ea7",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-macos-aarch64.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-macos-x86_64.tar.gz",
+      "size": 46778639,
+      "digest": "sha256:5853ade3d2d303d6c1759fd06a2880ee7f86be21b82855b8682072ad00ac3307",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-macos-x86_64.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-ohos-aarch64.tar.gz",
+      "size": 42671948,
+      "digest": "sha256:3a774005789ebaae23556ebdcc31548c8517cb83621a78378b545b8f17a7f22a",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-ohos-aarch64.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-windows-aarch64.tar.gz",
+      "size": 41351781,
+      "digest": "sha256:2c8673aea1ff5d25bf9bc1ee58d46cd727ac95638d25d5d27ed11a44881eb582",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-windows-aarch64.tar.gz"
+    },
+    {
+      "name": "grow-2.5.4-windows-x86_64.tar.gz",
+      "size": 44560343,
+      "digest": "sha256:bfb2ed03d15b31458d1d1f7bdd9503e708220083bd1e8ad336730d8b179bbfaf",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/grow-2.5.4-windows-x86_64.tar.gz"
+    },
+    {
+      "name": "SHA256SUMS",
+      "size": 989,
+      "digest": "sha256:aea33f0a4cb8cabe06bb5a9b7142d9a569b42ffb7efb79bb05af08e46a635065",
+      "url": "https://github.com/LordCasser/grow/releases/download/v2.5.4/SHA256SUMS"
+    }
+  ]
+}

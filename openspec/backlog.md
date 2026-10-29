@@ -1,6 +1,8 @@
 # Backlog
 
-截至 2026-10-29，本轮已清完登记的缺陷与测试债务。用户确认“清完缺陷与测试债务，暂缓项保留说明”。已解决项保留逐项证据；原始清单见 [清理前快照](changes/close-backlog-and-release-patch/backlog-before.md)。新的问题仍须独立建立 change，不以本次审计结论推断未来改动无风险。
+截至 2026-10-29，本轮已清完登记的缺陷与测试债务。用户确认“清完缺陷与测试债务，暂缓项保留说明”。已解决项保留逐项证据；原始清单见 [清理前快照](changes/archive/2026-10-29-close-backlog-and-release-patch/backlog-before.md)。新的问题仍须独立建立 change，不以本次审计结论推断未来改动无风险。
+
+本轮修复已随 [v2.5.4](https://github.com/LordCasser/grow/releases/tag/v2.5.4) 发布，正式同SHA流水线20个作业全部成功。
 
 ## 保留的暂缓项
 
@@ -12,7 +14,7 @@
 
 ## 本轮闭合的缺陷与测试债务
 
-以下路径将随对应变更归档固定；正式发布和完整验证汇总见 [发布记录](changes/close-backlog-and-release-patch/verification.md)。
+以下路径将随对应变更归档固定；正式发布和完整验证汇总见 [发布记录](changes/archive/2026-10-29-close-backlog-and-release-patch/verification.md)。
 
 | 问题 | 修复与验证 |
 | --- | --- |
@@ -32,7 +34,7 @@
 | Goal Control 后首请求前 scope 未同步 | [fix-goal-control-context-scope](changes/archive/2026-10-29-fix-goal-control-context-scope/verification.md) |
 | CI 发现日志溢出测试的诊断位置/中间计数时序假设 | [同步测试](changes/archive/2026-10-29-synchronize-unified-log-overflow-test/verification.md)，55项全量及200次精确执行通过 |
 | 活动组真实PTY仍沿用旧分组边界与过早等待 | [契约与同步修复](changes/archive/2026-10-29-align-activity-group-pty-contract/verification.md)，完整活动组交互与剩余16项发布PTY通过 |
-| Runtime 回归未进入正式 Core 门禁 | [gate-backlog-runtime-regressions](changes/gate-backlog-runtime-regressions/verification.md) |
+| Runtime 回归未进入正式 Core 门禁 | [gate-backlog-runtime-regressions](changes/archive/2026-10-29-gate-backlog-runtime-regressions/verification.md) |
 
 - **Native 分段与 AgentMessage 交错候选**：真实生产 drain 位于整批工具边界，未发现反例生产可达性；关闭待证实项，保留直接构造 adapter 历史/未来新调用方的限制。见 [通路审计](changes/archive/2026-10-29-audit-runtime-native-message-tool-batch-boundary/audit.md)。
 - **Markdown clone 候选**：普通 resume 移交 entries，搜索 clone 为 Arc；重建 Markdown view 的调用未进入该生产热点。不引入缓存框架，见 [调用归因](changes/archive/2026-10-29-fix-pager-sticky-navigation-geometry/audit.md)。

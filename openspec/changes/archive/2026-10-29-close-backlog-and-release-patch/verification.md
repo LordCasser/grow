@@ -1,5 +1,21 @@
 # 2.5.4 修复与发布验证
 
+[Grow v2.5.4](https://github.com/LordCasser/grow/releases/tag/v2.5.4) 已于 2026-10-29 09:30:02 UTC 正式发布，并已成为 latest；非 draft、非 prerelease。缺陷与测试债务逐项闭合，用户明确暂缓的功能和证据依赖优化保留说明。
+
+## 最终结果
+
+- 发布源/tag：`069f712894caf83352ace5b0e71276f07f01f9e1` / `v2.5.4`。两个被门禁拦截的候选tag v2.5.2、v2.5.3保持原指向且未发布；没有移动tag或绕过门禁。
+- [正式run40841704026](https://github.com/LordCasser/grow/actions/runs/40841704026) **20/20 jobs success**，包含Core、三平台协调/导出、Windows存储、OpenSpec、10个平台构建和最终publisher。完整清单：[release-gates.json](release-gates.json)。
+- **10个平台归档 + SHA256SUMS**，资产清单与大小/digest：[release-assets.json](release-assets.json)，[原始校验和](SHA256SUMS)。所有10个manifest摘要与GitHub API digest相符，manifest自身digest亦相符。
+- 独立下载本机macOS arm64归档后SHA256通过，解包仅含一个grow可执行文件，实际输出 **`grow 2.5.4 (069f712)`**；`gh attestation verify --repo LordCasser/grow --signer-workflow LordCasser/grow/.github/workflows/build-one.yml`成功。其他归档的完整下载与attestation由官方publisher成功执行；独立本机核对没有伪称运行其他平台二进制。
+- [backlog-before](backlog-before.md)保留清理前原文（其中相对链接沿原openspec/backlog.md的位置解释）；[inventory](inventory.md)映射逐项修复。以下阶段记录保留失败和过程，不替代这里的最终结果。
+
+清理本仓库Cargo编译产物完成：49,486 files / 24.9 GiB（cargo clean报告），仅清理本仓库target；真实daemon/子进程fixture按owner回收，未终止其他项目进程。独立下载的发布验证目录已由TemporaryDirectory回收。
+
+最终归档完成：当前规范/活动提案严格校验16/16，全部archive742/742通过。唯一保留的活动提案是用户暂缓范围内的MCP多轮elicitation；本轮缺陷与测试债务无未完成任务。源码未在发布后修改，后续提交仅归档规范与验证证据。
+
+## 验证过程与候选记录
+
 ## 范围与版本
 
 用户确认仅清理缺陷和测试债务，Remote Control、真实 provider/负载依赖优化及独立 MCP 新功能保留说明。清理前完整清单见 backlog-before.md；逐项闭合见 inventory.md 与各独立 change。原有工作区内的上下文/压缩/恢复修复及工具/Thought 聚合一并核对和回归，未重置。
@@ -71,3 +87,11 @@ OS watcher注册无法取消；LocalSet可先结束等待，runtime仍持有阻�
 活动组PTY已按真实idle/正文消失边界完成，DONE与idle共用90s绝对期限。一次最终精确通过后又连续3次通过。余下16项发布PTY全通过，详见align-activity-group-pty-contract验证记录。2.5.4仅递增patch身份并修正此测试；生产逻辑与2.5.3相同。先等待push Core全部成功，再创建tag并dispatch全平台release。
 
 2.5.4默认CLI构建成功（1m10s，`/tmp/grow-2.5.4-cli.log`），最终格式与diff检查通过；严格规范18/18、archive740/740通过。活动组3次重复与余下16项发布PTY全部成功后才提交候选；创建tag前等待同SHA push Core全部成功。
+
+## 最终2.5.4同SHA门禁与tag
+
+最终源为 `069f712894caf83352ace5b0e71276f07f01f9e1`。同SHA push [Core40836525699](https://github.com/LordCasser/grow/actions/runs/40836525699)、[三平台协调40836525910](https://github.com/LordCasser/grow/actions/runs/40836525910)、[Windows存储40836525679](https://github.com/LordCasser/grow/actions/runs/40836525679)、[OpenSpec40836525717](https://github.com/LordCasser/grow/actions/runs/40836525717)全部success。Core的库/Settings/CLI/真实恢复/全部28项选定PTY步骤均成功后才创建注解tag `v2.5.4`。
+
+Clean committed tree执行 `bash scripts/validate-release.sh v2.5.4`通过，tag精确指向上述SHA；官方origin tag推送成功，main dispatch官方release，所有平台与publish开启。正式发布run及产物结果待下方补齐。
+
+最终官方release：[40841704026](https://github.com/LordCasser/grow/actions/runs/40841704026)，从main派发、源/tag均069f7128；build_linux/build_macos/build_windows/build_ohos/publish全true。
