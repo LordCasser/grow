@@ -2869,3 +2869,6 @@ mod compaction_repromotion_tests;
 
 #[path = "compaction_route_notice_tests.rs"]
 mod compaction_route_notice_tests;
+
+#[path = "route_handoff_tests.rs"]
+mod route_handoff_tests;

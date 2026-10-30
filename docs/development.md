@@ -507,6 +507,8 @@ Resume 的首历史归因沿用 opt-in instrumentation：`session.replay.first_s
 
 完整可信的 provider context 回执即使低于本地 heuristic 也成为计数锚点。校准只保留一份随当前投影推进的参考：追加按本地增量计入；低值 footprint 缩小时按当前比例向上取整；再次增长不能继续套用压缩前比例。route/rewind 清校准，累计账本不变。冷恢复从持久化 Behavior/Goal 授权初始化请求作用域，并在运行时协调后同步最终 scope，随后才公布会话。普通和技能请求统一以已校准输入加 task clamp 后的显式输出上限检查总窗口；None 不虚构后端默认预留。见 [有效计数](../openspec/specs/model-sampling/spec.md#requirement-context-mutations-use-effective-request-estimates)、[冷恢复](../openspec/specs/model-sampling/spec.md#requirement-cold-context-pressure-follows-portable-replay) 和 [窗口准入](../openspec/specs/model-sampling/spec.md#requirement-known-input-overflow-cannot-bypass-provider-admission)。
 
+同一 turn 在 Step 边界实际换路由后，已获准的下一 Step 通过持久化 AutoContinue 接手保留历史。该内部 user 边界不增加用户授权或重新执行工具；同路由 effort 变化不追加，已有异步压缩续接则复用，写入失败不派发下一请求。跨 provider 的“缺少 reasoning”拒绝可能来自不兼容的旧工具调用 ID，不能据此认定全部历史 reasoning 都会占用新模型窗口。仍保留独立的显式输出预留检查。见 [跨路由续接](../openspec/specs/model-sampling/spec.md#requirement-cross-route-continuation-hands-off-completed-history-at-an-admitted-step)。
+
 显式输出预留造成总窗口超限时，普通前台请求沿同一自动压缩入口先跨 Step 结算边界恢复；trigger 保留实际输出上限，图片重投影和 prune 复核也按总需求判断。prune 目标同时受输入阈值和 `context_window - max_output_tokens` 约束；一次摘要或后台提升提交后仍放不下时，保留 Completed 并终止本轮，不重复发摘要。未设置输出上限时不猜默认值，输出预留自身已占满窗口时不为该预留启动无效恢复。抑制与子任务准入规则不变。见 [总窗口准入契约](../openspec/specs/model-sampling/spec.md#requirement-known-input-overflow-cannot-bypass-provider-admission)。
 
 恢复后的 `/goal clear` 与其他 Goal 控制共用同一 Control 提交入口；事实和请求 scope 在一个 durable ACK 边界发布，不再用后续独立 setter 清除。持久化失败保留原 scope。用户 rewind 在 Goal 状态存在时仍要求先 clear，内部 ChatState 历史重放不替代这一入口约束。见 [Goal 与上下文组合契约](../openspec/specs/model-sampling/spec.md#requirement-context-mutations-use-effective-request-estimates)。

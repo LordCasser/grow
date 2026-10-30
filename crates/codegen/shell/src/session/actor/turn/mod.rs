@@ -1414,9 +1414,20 @@ impl SessionActor {
                             })),
                         });
                     };
+                    let previous_route = self.model_route.snapshot();
                     let (model_changed, agent_changed, behavior_changed) = self
                         .apply_pending_controls_at_step_boundary(control_boundary)
                         .await;
+                    let current_route = self.model_route.snapshot();
+                    let route_changed = previous_route.model_id != current_route.model_id
+                        || previous_route.sampling_config.model
+                            != current_route.sampling_config.model
+                        || previous_route.sampling_config.api_backend
+                            != current_route.sampling_config.api_backend
+                        || previous_route.sampling_config.base_url
+                            != current_route.sampling_config.base_url
+                        || previous_route.sampling_config.query_params
+                            != current_route.sampling_config.query_params;
                     // Every accepted definition/route control is now durable
                     // and live. Fence the new Goal budget before any
                     // model-switch compaction, forced compaction, recovery, or
@@ -1590,15 +1601,26 @@ impl SessionActor {
                             // The owner has admitted another Step. Keep the handoff
                             // after the retained tail, without reopening a completed
                             // turn or turning a summary into a new user instruction.
-                            if async_compaction_applied && self.events.next_step_index() > 0 {
+                            let continuation = if async_compaction_applied {
+                                Some(compaction::ASYNC_COMPACTION_CONTINUE_PROMPT)
+                            } else if route_changed {
+                                Some(
+                                    "The model route has changed. Continue only the latest authorized unfinished task from the retained conversation and completed tool results. This handoff is not a new user request or permission; do not repeat completed tools merely because the route changed.",
+                                )
+                            } else {
+                                None
+                            };
+                            if let Some(continuation) = continuation
+                                && self.events.next_step_index() > 0
+                            {
                                 self.chat_state_handle
                                     .push_user_message_durably(ConversationItem::auto_continue(
-                                        compaction::ASYNC_COMPACTION_CONTINUE_PROMPT,
+                                        continuation,
                                     ))
                                     .await
                                     .map_err(|error| {
                                         crate::session::commands::fatal_turn_boundary_error(
-                                            "async compaction continuation",
+                                            "step continuation",
                                             error.to_string(),
                                         )
                                     })?;

@@ -1,0 +1,500 @@
+{
+  "purpose": "Sanitized evidence for reasoning replay and context compaction audit. No prompt, reasoning text, tool arguments, raw response, credentials, or request IDs are included.",
+  "original_requests": [
+    {
+      "name": "prior Chat Completions request",
+      "http_status": 200,
+      "usage": {
+        "input_tokens": 692516,
+        "output_tokens": 10188,
+        "cache_read_tokens": 633600
+      },
+      "request_bytes": 2170847,
+      "request_sha256": "42b051bd1e5625ae4f06a78fd422fac44cc77edbdc0ba005e022b73d12ca5b19"
+    },
+    {
+      "name": "Responses request rejected for missing reasoning_text",
+      "http_status": 400,
+      "usage": null,
+      "request_bytes": 2170356,
+      "request_sha256": "63d8c5292d7f36f575524480db8155194dd4909f65f9fec7d54660177dfb3837",
+      "max_output_tokens": 393216,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    }
+  ],
+  "reconstructed_wire": {
+    "private_file": "/private/tmp/grow-reasoning-audit-b1Sqq5/rebuilt-request.json",
+    "sha256": "08a778ff299f9225e8c2688809a800352f9eaf7a4dade0f23592fb40d6b59ebd",
+    "bytes": 5772756,
+    "mode": "0600",
+    "input_items": 2179,
+    "reasoning_items": 442,
+    "reasoning_chars": 3542788,
+    "reasoning_utf8_bytes": 3549097,
+    "reasoning_schema": "type=reasoning,id=null,summary=[],content=[type=reasoning_text,text]",
+    "max_output_tokens": 393216,
+    "semantic_assertions": [
+      "all 1,795 source surface IDs resolved",
+      "all 442 nonempty source reasoning items associated with an assistant target",
+      "inserting reasoning preserves every original input item and every other top-level field/value"
+    ]
+  },
+  "count_estimates": {
+    "reasoning_utf8_bytes_divided_by_4_per_item_then_floored_sum": 887104,
+    "local_compaction_estimate": 1370640,
+    "context_window": 1048576,
+    "estimate_minus_floor_sum": 483536,
+    "method_note": "887104 is the sum of floor(UTF-8 bytes / 4) for each reasoning item, not floor of aggregate bytes / 4."
+  },
+  "controlled_variants": [
+    {
+      "source_result_file": "probe-result.json",
+      "variant_name": "probe",
+      "change": "Set stream=false and max_output_tokens=1 on the full reconstructed history.",
+      "http_status": 400,
+      "status": null,
+      "request_sha256": "cf10b472bce0d127e7b8a44d04448c258491ff43b443742c95066f0d07b512b4",
+      "request_bytes": 5772751,
+      "response_sha256": "c55df742b70ea5daacc71c0a9c52537faac15e8692efb223f79ba9187136e200",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "empty-probe-result.json",
+      "variant_name": "empty-probe",
+      "change": "Set stream=false and max_output_tokens=1; add 192 empty reasoning items.",
+      "http_status": 400,
+      "status": null,
+      "request_sha256": "045aba03fd42ceaf8ad3bf967b6595d0f70489fd051daf71bc3c1c6c81710c8e",
+      "request_bytes": 5790415,
+      "response_sha256": "42a1f157e0ac4768c88516533d432226f97f2b2590f624b876d44a8124c53ec6",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "id-results.json",
+      "variant_name": "short_id_native_reasoning",
+      "change": "Replace a native tool-call ID with a benign short ID.",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "id-control-result.json",
+      "variant_name": "id-control",
+      "change": "Set stream=false and max_output_tokens=1; replace only the final function-call/result ID pair with the endpoint-generated ID.",
+      "http_status": 200,
+      "status": "incomplete",
+      "request_sha256": "3cc66e41be56783ebfef11827c1c48c8161fc063128470af2d5635022d154e63",
+      "request_bytes": 5772751,
+      "response_sha256": "2db9a91aa11cec2c3f93e94c862323f9aed3e72b71228cce63c1a5ac867061bb",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": {
+        "input_tokens": 693053,
+        "output_tokens": 1,
+        "total_tokens": 693054
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "boundary-probe-result.json",
+      "variant_name": "boundary-probe",
+      "change": "Set stream=false and max_output_tokens=1; append a new user boundary.",
+      "http_status": 200,
+      "status": "incomplete",
+      "request_sha256": "0b18d170eb4b234f8d0c749fecd6cd6e65dfa8a4963eca3c9c10544c51a1a405",
+      "request_bytes": 5772921,
+      "response_sha256": "a7e300ece8ff684edbacc8d10075184ed1891c9f12ec0d8d8439f4fbfde01789",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": {
+        "input_tokens": 693060,
+        "output_tokens": 1,
+        "total_tokens": 693061
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "fixed-probe-result.json",
+      "variant_name": "fixed-probe",
+      "change": "Set stream=false and max_output_tokens=1; remove historical reasoning and retain the production user handoff.",
+      "http_status": 200,
+      "status": "incomplete",
+      "request_sha256": "76c77a2f76ba9e3bd1357a136088220d964f7be1b29ddf3483aae77b904a1e4f",
+      "request_bytes": 2170655,
+      "response_sha256": "211dd575e979e707ea41776357081bc04754fd539edc5a6796b385059f58c2b1",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": {
+        "input_tokens": 693085,
+        "output_tokens": 1,
+        "total_tokens": 693086
+      },
+      "error_kind": null
+    },
+    {
+      "variant_name": "native_force_tool_choice_initial_probe",
+      "source_result_file": null,
+      "change": "Initial native continuation probe forced tool_choice on the thinking route.",
+      "http_status": 400,
+      "usage": null,
+      "request_sha256": null,
+      "request_bytes": null,
+      "error_kind": null,
+      "provenance": "Parent-reported; result was later overwritten, so hash, bytes, and structured error kind were not retained."
+    }
+  ],
+  "usage_scope_note": "All non-null usage values below belong to the named controlled variants. The original missing-reasoning 400 request has no usage; controlled variant counts must not be attributed to that failed request.",
+  "additional_sanitized_results": [
+    {
+      "source_result_file": "attachment-results.json",
+      "variant_name": "same_turn_content_and_call",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "attachment-results.json",
+      "variant_name": "same_turn_empty_assistant",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "attachment-results.json",
+      "variant_name": "same_turn_no_id",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "attachment-results.json",
+      "variant_name": "same_turn_with_id",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "attachment-results.json",
+      "variant_name": "reasoning_after_call",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "boundary-probe-result.json",
+      "variant_name": "boundary-probe",
+      "http_status": 200,
+      "status": "incomplete",
+      "request_sha256": "0b18d170eb4b234f8d0c749fecd6cd6e65dfa8a4963eca3c9c10544c51a1a405",
+      "request_bytes": 5772921,
+      "response_sha256": "a7e300ece8ff684edbacc8d10075184ed1891c9f12ec0d8d8439f4fbfde01789",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": {
+        "input_tokens": 693060,
+        "output_tokens": 1,
+        "total_tokens": 693061
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "counting-results.json",
+      "variant_name": "old_turn_long_reasoning",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 347,
+        "output_tokens": 1,
+        "total_tokens": 348
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "counting-results.json",
+      "variant_name": "old_turn_empty_reasoning",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 347,
+        "output_tokens": 1,
+        "total_tokens": 348
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "counting-results.json",
+      "variant_name": "same_turn_long_reasoning",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "counting-results.json",
+      "variant_name": "same_turn_empty_reasoning",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "empty-probe-result.json",
+      "variant_name": "empty-probe",
+      "http_status": 400,
+      "status": null,
+      "request_sha256": "045aba03fd42ceaf8ad3bf967b6595d0f70489fd051daf71bc3c1c6c81710c8e",
+      "request_bytes": 5790415,
+      "response_sha256": "42a1f157e0ac4768c88516533d432226f97f2b2590f624b876d44a8124c53ec6",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "fixed-probe-result.json",
+      "variant_name": "fixed-probe",
+      "http_status": 200,
+      "status": "incomplete",
+      "request_sha256": "76c77a2f76ba9e3bd1357a136088220d964f7be1b29ddf3483aae77b904a1e4f",
+      "request_bytes": 2170655,
+      "response_sha256": "211dd575e979e707ea41776357081bc04754fd539edc5a6796b385059f58c2b1",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": {
+        "input_tokens": 693085,
+        "output_tokens": 1,
+        "total_tokens": 693086
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "id-control-result.json",
+      "variant_name": "id-control",
+      "http_status": 200,
+      "status": "incomplete",
+      "request_sha256": "3cc66e41be56783ebfef11827c1c48c8161fc063128470af2d5635022d154e63",
+      "request_bytes": 5772751,
+      "response_sha256": "2db9a91aa11cec2c3f93e94c862323f9aed3e72b71228cce63c1a5ac867061bb",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": {
+        "input_tokens": 693053,
+        "output_tokens": 1,
+        "total_tokens": 693054
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "id-results.json",
+      "variant_name": "native_id_synthetic_reasoning",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 357,
+        "output_tokens": 1,
+        "total_tokens": 358
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "id-results.json",
+      "variant_name": "short_id_native_reasoning",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "id-results.json",
+      "variant_name": "prefixed_short_id",
+      "http_status": 400,
+      "status": null,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "id-results.json",
+      "variant_name": "native_with_typed_user",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 357,
+        "output_tokens": 1,
+        "total_tokens": 358
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "native-results.json",
+      "variant_name": "seed",
+      "http_status": 200,
+      "status": "completed",
+      "usage": {
+        "input_tokens": 294,
+        "output_tokens": 52,
+        "total_tokens": 346
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "native-results.json",
+      "variant_name": "native",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 359,
+        "output_tokens": 1,
+        "total_tokens": 360
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "native-results.json",
+      "variant_name": "visible_only",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 359,
+        "output_tokens": 1,
+        "total_tokens": 360
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "probe-result.json",
+      "variant_name": "probe",
+      "http_status": 400,
+      "status": null,
+      "request_sha256": "cf10b472bce0d127e7b8a44d04448c258491ff43b443742c95066f0d07b512b4",
+      "request_bytes": 5772751,
+      "response_sha256": "c55df742b70ea5daacc71c0a9c52537faac15e8692efb223f79ba9187136e200",
+      "max_output_tokens": 1,
+      "stream": false,
+      "usage": null,
+      "error_kind": {
+        "type": "invalid_request_error",
+        "code": "invalid_request"
+      }
+    },
+    {
+      "source_result_file": "shape-results.json",
+      "variant_name": "empty_text_answer",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 305,
+        "output_tokens": 1,
+        "total_tokens": 306
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "shape-results.json",
+      "variant_name": "nonempty_text_answer",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 305,
+        "output_tokens": 1,
+        "total_tokens": 306
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "shape-results.json",
+      "variant_name": "content_plus_call",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 351,
+        "output_tokens": 1,
+        "total_tokens": 352
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "shape-results.json",
+      "variant_name": "call_only",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 347,
+        "output_tokens": 1,
+        "total_tokens": 348
+      },
+      "error_kind": null
+    },
+    {
+      "source_result_file": "shape-results.json",
+      "variant_name": "empty_call_only",
+      "http_status": 200,
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 347,
+        "output_tokens": 1,
+        "total_tokens": 348
+      },
+      "error_kind": null
+    }
+  ],
+  "evidence_sources": {
+    "rebuild_script": "rebuild_evidence.py (relative to this evidence.json)",
+    "private_result_directory": "/private/tmp/grow-reasoning-audit-b1Sqq5",
+    "timeline_sha256": "33edc78efd7736ef26f1a6ef3ec5ec8e54b27ed710a31947a8d7a62897a1956a",
+    "private_artifacts_status": "Deleted after checking 32 sanitized result rows against private sources and verifying reconstructed payload SHA-256/length; original session untouched."
+  }
+}
