@@ -495,7 +495,7 @@ pub(crate) struct WorkflowAgentCatalogSource {
     plugins: SharedWorkflowPluginRegistry,
     cli_agents: Vec<agent::config::AgentDefinition>,
     cli_overrides: crate::agent::config::CliAgentOverrides,
-    toggles: std::collections::HashMap<String, bool>,
+    toggles: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, bool>>>,
     file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
     parent_agent_name: String,
     skills_config: agent::prompt::skills::SkillsConfig,
@@ -507,7 +507,7 @@ impl WorkflowAgentCatalogSource {
         plugins: SharedWorkflowPluginRegistry,
         cli_agents: Vec<agent::config::AgentDefinition>,
         cli_overrides: crate::agent::config::CliAgentOverrides,
-        toggles: std::collections::HashMap<String, bool>,
+        toggles: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, bool>>>,
         file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
         parent_agent_name: String,
         skills_config: agent::prompt::skills::SkillsConfig,
@@ -543,11 +543,12 @@ impl WorkflowAgentCatalogSource {
         String,
     > {
         let plugins = self.plugins.read().clone();
+        let toggles = self.toggles.read().clone();
         let context = crate::agent::subagent::resolution::DefinitionResolutionContext {
             cwd: &self.cwd,
             plugins: plugins.as_deref(),
             cli_agents: &self.cli_agents,
-            toggles: &self.toggles,
+            toggles: &toggles,
         };
         let definitions = crate::agent::subagent::resolution::capture_agent_definitions(
             &context,
@@ -606,7 +607,7 @@ impl WorkflowAgentCatalogSource {
             std::sync::Arc::new(parking_lot::RwLock::new(None)),
             Vec::new(),
             crate::agent::config::CliAgentOverrides::default(),
-            std::collections::HashMap::new(),
+            Default::default(),
             None,
             "grow".to_owned(),
             Default::default(),
@@ -2004,7 +2005,7 @@ mod tests {
                 disallowed_tools: Some(vec!["bash".to_owned()]),
                 ..Default::default()
             },
-            std::collections::HashMap::new(),
+            Default::default(),
             Some(frozen_file_tools),
             "grow".to_owned(),
             Default::default(),

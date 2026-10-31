@@ -652,6 +652,10 @@ impl MvpAgent {
                 .iter()
                 .find(|node| node.session_id == spawn.child_session_id)
                 .ok_or("suspended child is missing from root barrier")?;
+            crate::agent::subagent::resolution::restored_birth_capability(
+                spawn.capability_mode.as_deref(),
+            )
+            .map_err(|error| format!("original child {}: {error}", spawn.subagent_id))?;
             let recipe = SubagentExecutionRecipe::from_value(&spawn.execution_recipe)
                 .map_err(|error| error.to_string())?;
             if recipe.owner.workflow_run_id() != spawn.workflow_run_id.as_deref()

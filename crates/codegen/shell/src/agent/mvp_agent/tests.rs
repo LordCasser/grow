@@ -1,6 +1,8 @@
 use super::*;
 
 mod mcp_child_policy_reload_tests;
+mod subagent_toggle_reload_tests;
+mod subagent_restore_authority_tests;
 mod plan_decision_status_tests;
 
 #[test]

@@ -851,6 +851,17 @@ pub async fn run_leader(
                                 warn!(error = %e, "failed to inject MCP reload into ACP stream");
                             }
                         }
+                        ConfigUpdate::SubagentToggleChanged => {
+                            let line = internal_reload_request_line(
+                                "config-reload-subagent-toggle",
+                                "grow/internal/reload_subagent_toggle",
+                                serde_json::json!({}),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(e) = tx.write_all(line.as_bytes()).await {
+                                warn!(error = %e, "failed to inject subagent toggle reload into ACP stream");
+                            }
+                        }
                         ConfigUpdate::ModelsChanged => {
                             info!("Model config change detected — reloading agent model list");
                             let line = internal_reload_request_line(
@@ -911,6 +922,9 @@ pub async fn run_leader(
                 }
             });
 
+            let _ = startup_config_update_tx.send(
+                crate::config::reloader::ConfigUpdate::SubagentToggleChanged,
+            );
             let _ = startup_config_update_tx.send(
                 crate::config::reloader::ConfigUpdate::McpCatalogChanged { project_root: None },
             );

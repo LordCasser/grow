@@ -2106,7 +2106,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             | "grow/session/update_mcp_servers" | "grow/session/fork"
             | "grow/internal/reload_mcp_catalog" | "grow/internal/reload_skills"
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
-            | "grow/internal/reload_announcements"
+            | "grow/internal/reload_announcements" | "grow/internal/reload_subagent_toggle"
             | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute"
             | "grow/queue/prompt_status" | "grow/queue/control" | "grow/plan/artifact" | "grow/plan/review" | "grow/plan/decision_status" => {
                 crate::extensions::session_admin::handle(self, &args).await

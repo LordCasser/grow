@@ -23,6 +23,9 @@ pub struct Agent {
     /// The definition this agent was built from.
     definition: AgentDefinition,
 
+    /// Toggle snapshot used to project this Agent's tool catalog.
+    subagent_toggle: std::collections::HashMap<String, bool>,
+
     /// The context that produced the current system prompt.
     /// Stored for inspection, re-rendering, and serialization.
     prompt_context: PromptContext,
@@ -52,11 +55,24 @@ impl Agent {
     ) -> Self {
         Self {
             definition,
+            subagent_toggle: Default::default(),
             prompt_context,
             system_prompt,
             role_prompt,
             tool_bridge,
         }
+    }
+
+    pub(crate) fn with_subagent_toggle(
+        mut self,
+        toggle: std::collections::HashMap<String, bool>,
+    ) -> Self {
+        self.subagent_toggle = toggle;
+        self
+    }
+
+    pub fn subagent_toggle(&self) -> &std::collections::HashMap<String, bool> {
+        &self.subagent_toggle
     }
 
     // ── From definition ──────────────────────────────────────────────

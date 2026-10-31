@@ -241,6 +241,24 @@ pub struct SubagentsConfig {
     pub toggle: std::collections::HashMap<String, bool>,
 }
 impl SubagentsConfig {
+    /// Parse only the live toggle policy; unrelated startup-only settings are
+    /// not re-resolved by a toggle update. Invalid values never become defaults.
+    pub fn parse_toggle(
+        config: &toml::Value,
+    ) -> Result<std::collections::HashMap<String, bool>, toml::de::Error> {
+        #[derive(Default, Deserialize)]
+        struct TogglePolicy {
+            #[serde(default)]
+            toggle: std::collections::HashMap<String, bool>,
+        }
+        config
+            .get("subagents")
+            .cloned()
+            .map(toml::Value::try_into::<TogglePolicy>)
+            .transpose()
+            .map(|policy| policy.unwrap_or_default().toggle)
+    }
+
     /// Check if a subagent is enabled.
     /// Returns `true` if the agent is not in the toggle map (default enabled).
     pub fn is_subagent_enabled(&self, name: &str) -> bool {

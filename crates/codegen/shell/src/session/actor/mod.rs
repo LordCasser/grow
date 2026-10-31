@@ -558,7 +558,18 @@ impl AgentPreparation {
             abort: std::cell::RefCell::new(None),
             ready: tokio::sync::Notify::new(),
         });
-        let output = std::rc::Rc::clone(&preparation);
+        preparation.start_build(rebuild_spec, definition, session_id);
+        preparation
+    }
+
+    fn start_build(
+        self: &std::rc::Rc<Self>,
+        rebuild_spec: std::sync::Arc<crate::session::agent_rebuild::AgentRebuildSpec>,
+        definition: agent::AgentDefinition,
+        session_id: String,
+    ) {
+        let new_agent_name = definition.selector_identity();
+        let output = std::rc::Rc::clone(self);
         let task = tokio::task::spawn_local(async move {
             let result = std::panic::AssertUnwindSafe(rebuild_spec.build_agent(definition))
                 .catch_unwind()
@@ -589,8 +600,28 @@ impl AgentPreparation {
             *output.result.borrow_mut() = Some(result);
             output.ready.notify_waiters();
         });
-        *preparation.abort.borrow_mut() = Some(task.abort_handle());
-        preparation
+        *self.abort.borrow_mut() = Some(task.abort_handle());
+    }
+
+    /// Restart a stale candidate before claiming its control. Discovery stays
+    /// outside the cancellation gate and retains the same desired revision.
+    fn refresh_stale_catalog(
+        self: &std::rc::Rc<Self>,
+        rebuild_spec: &std::sync::Arc<crate::session::agent_rebuild::AgentRebuildSpec>,
+        session_id: String,
+    ) -> bool {
+        if rebuild_spec.workflow_owned || self.superseded.get() {
+            return false;
+        }
+        let definition = match self.result.borrow().as_ref() {
+            Some(Ok(agent)) if agent.subagent_toggle() != &*rebuild_spec.subagent_toggle.read() => {
+                agent.definition().clone()
+            }
+            _ => return false,
+        };
+        self.result.borrow_mut().take();
+        self.start_build(rebuild_spec.clone(), definition, session_id);
+        true
     }
 
     /// `false` means a newer desired Agent revision replaced this candidate.
@@ -651,6 +682,7 @@ impl Drop for AgentPreparation {
 
 /// A concrete control claimed for application at a causal boundary.
 enum PendingStepControl {
+    SubagentCatalogReload(Option<std::rc::Rc<AgentPreparation>>),
     ModelReload(PendingModelReload),
     ModelSelection(Box<PendingModelSelection>),
     AgentSelection(PendingAgentSelection),
@@ -863,6 +895,15 @@ impl PendingStepControls {
         });
     }
 
+    fn admit_subagent_catalog_reload(&mut self) {
+        let sequence = self.next_sequence();
+        self.ordered.push_back(SequencedStepControl {
+            sequence,
+            revision: 0,
+            value: PendingStepControl::SubagentCatalogReload(None),
+        });
+    }
+
     fn admit_goal_definition(&mut self, pending: PendingGoalDefinitionControl) {
         let sequence = self.next_sequence();
         self.ordered.push_back(SequencedStepControl {
@@ -947,9 +988,19 @@ impl PendingStepControls {
     }
 
     fn agent_preparation(
-        &self,
+        &mut self,
         key: PendingStepControlKey,
+        prepare_reload: impl FnOnce() -> std::rc::Rc<AgentPreparation>,
     ) -> Option<std::rc::Rc<AgentPreparation>> {
+        if let PendingStepControlKey::Ordered { sequence } = key
+            && let Some(pending) = self
+                .ordered
+                .front_mut()
+                .filter(|pending| pending.sequence == sequence)
+            && let PendingStepControl::SubagentCatalogReload(preparation) = &mut pending.value
+        {
+            return Some(preparation.get_or_insert_with(prepare_reload).clone());
+        }
         let PendingStepControlKey::Agent { sequence, revision } = key else {
             return None;
         };
@@ -1081,6 +1132,11 @@ impl PendingStepControls {
         }
         for pending in self.ordered.drain(..) {
             match pending.value {
+                PendingStepControl::SubagentCatalogReload(preparation) => {
+                    if let Some(preparation) = preparation {
+                        preparation.mark_superseded();
+                    }
+                }
                 PendingStepControl::ModelReload(pending) => {
                     for respond_to in pending.responders {
                         let _ = respond_to.send(Err(error()));

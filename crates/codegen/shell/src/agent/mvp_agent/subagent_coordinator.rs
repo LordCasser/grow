@@ -130,7 +130,11 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
         deadline: tokio::time::Instant,
     ) -> Result<
         Self::RunFuture,
-        Box<tools::implementations::grow_build::task::coordinator::ChildRunOutput<Self::CompletionData>>,
+        Box<
+            tools::implementations::grow_build::task::coordinator::ChildRunOutput<
+                Self::CompletionData,
+            >,
+        >,
     > {
         let agent_ref = self.agent_ref.clone();
         Ok(Box::pin(async move {
@@ -372,22 +376,22 @@ impl MvpAgent {
         parent_session_id: &str,
     ) -> crate::agent::subagent::SubagentValidationContext {
         let parent_sid = acp::SessionId::new(parent_session_id);
-        let (parent_cwd, subagent_filter) = {
-            let sessions = self.sessions.borrow();
-            let ps = sessions.get(&parent_sid);
-            warn_on_missing_parent_session_for_validate_type(parent_session_id, ps.is_some());
-            (
-                ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
-                    .unwrap_or_default(),
-                ps.map(|h| h.agent_profile.subagent_filter())
-                    .unwrap_or_default(),
-            )
-        };
+        let parent = self.control_session_handle(&parent_sid);
+        warn_on_missing_parent_session_for_validate_type(parent_session_id, parent.is_some());
+        let (parent_cwd, subagent_filter, parent_agent_name) = parent
+            .map(|handle| {
+                (
+                    std::path::PathBuf::from(&handle.info.cwd),
+                    handle.agent_profile.subagent_filter(),
+                    Some(handle.agent_profile.name()),
+                )
+            })
+            .unwrap_or_default();
         let (cli_agent_names, subagent_toggle) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.cli_agents.iter().map(|d| d.name.clone()).collect(),
-                cfg.subagent_toggle.clone(),
+                cfg.subagent_toggle.read().clone(),
             )
         };
         crate::agent::subagent::SubagentValidationContext {
@@ -395,6 +399,7 @@ impl MvpAgent {
             plugin_registry: self.plugin_registry_handle.snapshot(),
             subagent_toggle,
             subagent_filter,
+            parent_agent_name,
             cli_agent_names,
         }
     }

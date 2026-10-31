@@ -832,6 +832,8 @@ pub enum SessionCommand {
     /// Re-discover skills from disk, update the SkillManager baseline,
     /// and re-advertise slash commands to the client.
     ReloadSkills,
+    /// Refresh the ordinary Agent tool catalog at a safe Step boundary.
+    ReloadSubagentCatalog,
     /// Dispatch session_start hook using the actor's loaded HookRegistry.
     DispatchSessionStartHook {
         /// "new" for brand new sessions, "load" for sessions loaded from disk.

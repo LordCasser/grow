@@ -1,4 +1,5 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
+mod delegation_identity_tests;
 use super::*;
 use super::handle_request::{
     canonical_total_tokens, child_task_prompt_identity, record_subagent_usage,
@@ -3101,7 +3102,7 @@ fn validate_subagent_type_returns_disabled_when_toggled_off() {
 fn validate_subagent_type_honors_parent_agent_filter() {
     let mut definition = agent::AgentDefinition::default_grow_build();
     definition.subagents.allow = vec!["explore".to_string()];
-    let mut ctx = make_validation_ctx(HashMap::new());
+    let mut ctx = make_validation_ctx(HashMap::from([("general-purpose".into(), true)]));
     ctx.subagent_filter = definition.subagent_filter();
 
     assert!(matches!(
@@ -3110,8 +3111,51 @@ fn validate_subagent_type_honors_parent_agent_filter() {
     ));
     assert!(matches!(
         validate_subagent_type("general-purpose", &ctx),
-        SubagentValidateTypeOutcome::Disabled,
+        SubagentValidateTypeOutcome::ParentRestricted { .. },
     ));
+}
+#[test]
+fn validation_resolves_unknown_short_name_before_parent_filter() {
+    let mut definition = agent::AgentDefinition::default_grow_build();
+    definition.subagents.allow = vec!["explore".to_string()];
+    let mut ctx = make_validation_ctx(HashMap::new());
+    ctx.subagent_filter = definition.subagent_filter();
+
+    assert!(matches!(
+        validate_subagent_type("general", &ctx),
+        SubagentValidateTypeOutcome::Unknown { .. },
+    ));
+}
+#[test]
+fn spawn_gate_preserves_unknown_short_name_before_parent_filter() {
+    let mut definition = agent::AgentDefinition::default_grow_build();
+    definition.subagents.allow = vec!["explore".to_string()];
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.subagent_filter = definition.subagent_filter();
+
+    assert!(matches!(
+        gate_subagent_type("general", &ctx),
+        SubagentValidateTypeOutcome::Unknown { .. },
+    ));
+}
+#[test]
+fn parent_restricted_outcome_lists_only_allowed_full_ids() {
+    let mut definition = agent::AgentDefinition::default_grow_build();
+    definition.subagents.allow = vec!["explore".to_string()];
+    let mut ctx = make_validation_ctx(HashMap::new());
+    ctx.subagent_filter = definition.subagent_filter();
+    ctx.parent_agent_name = Some("researcher".into());
+
+    match validate_subagent_type("general-purpose", &ctx) {
+        SubagentValidateTypeOutcome::ParentRestricted {
+            parent_agent,
+            available,
+        } => {
+            assert_eq!(parent_agent, "researcher");
+            assert_eq!(available, vec!["explore"]);
+        }
+        other => panic!("expected ParentRestricted, got {other:?}"),
+    }
 }
 #[test]
 fn validate_subagent_type_unknown_includes_cli_agents_in_available() {
@@ -4027,4 +4071,37 @@ async fn unavailable_inspection_cannot_publish_a_result_into_existing_child_stor
     let result = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback, &dir).await;
     assert!(matches!(result, Err(ChildResultRecoveryError::Unpublished(_))), "unverifiable completion cannot manufacture a successful result: {result:?}");
     assert_eq!(std::fs::read(dir.join("timeline.jsonl")).unwrap(), before);
+}
+
+#[test]
+fn subagent_toggle_reload_rechecks_an_existing_spawn_context() {
+    let ctx = crate::test_support::lsp_runtime::ctx_with_toggle(HashMap::new());
+    let live_toggle = ctx.subagent_toggle.clone();
+    assert!(matches!(gate_subagent_type("general-purpose", &ctx), SubagentValidateTypeOutcome::Ok));
+    live_toggle.write().insert("general-purpose".into(), false);
+    assert!(matches!(gate_subagent_type("general-purpose", &ctx), SubagentValidateTypeOutcome::Disabled));
+    live_toggle.write().clear();
+    assert!(matches!(gate_subagent_type("general-purpose", &ctx), SubagentValidateTypeOutcome::Ok));
+}
+
+#[test]
+fn subagent_validation_uses_full_nested_path_ids_before_policy() {
+    let project = tempfile::tempdir().unwrap();
+    git2::Repository::init(project.path()).unwrap();
+    let definitions = project.path().join(".grow/agents/team");
+    std::fs::create_dir_all(&definitions).unwrap();
+    std::fs::write(definitions.join("worker.md"), "---\nname: worker\ndescription: nested worker\n---\n").unwrap();
+    let mut parent = agent::AgentDefinition::default_grow_build();
+    parent.subagents.allow = vec!["team/worker".into()];
+    let mut ctx = make_validation_ctx(HashMap::from([("team/worker".into(), true)]));
+    ctx.parent_cwd = project.path().to_path_buf();
+    ctx.parent_agent_name = Some("researcher".into());
+    ctx.subagent_filter = parent.subagent_filter();
+    assert!(matches!(validate_subagent_type("team/worker", &ctx), SubagentValidateTypeOutcome::Ok));
+    match validate_subagent_type("worker", &ctx) {
+        SubagentValidateTypeOutcome::Unknown { available } => assert_eq!(available, vec!["team/worker"]),
+        other => panic!("short name is not an alias: {other:?}"),
+    }
+    ctx.subagent_toggle.insert("team/worker".into(), false);
+    assert!(matches!(validate_subagent_type("team/worker", &ctx), SubagentValidateTypeOutcome::Disabled));
 }

@@ -56,6 +56,9 @@ pub fn discover_agent_definition(
     subagent_type: &str,
     context: &DefinitionResolutionContext<'_>,
 ) -> Option<AgentDefinition> {
+    if !agent::discovery::is_canonical_agent_selector(subagent_type) {
+        return None;
+    }
     agent::discovery::by_name_in_cwd_with_plugins(subagent_type, context.cwd, context.plugins)
         .or_else(|| {
             context
@@ -67,22 +70,15 @@ pub fn discover_agent_definition(
 }
 /// Sorted model-facing names available under the current discovery context.
 pub fn available_agent_names(context: &DefinitionResolutionContext<'_>) -> Vec<String> {
-    let mut available: Vec<String> =
-        agent::discovery::all_subagents_with_plugins(context.cwd, context.toggles, context.plugins)
-            .into_iter()
-            .map(|entry| entry.name)
-            .collect();
-    for definition in context.cli_agents {
-        if context
-            .toggles
-            .get(&definition.name)
-            .copied()
-            .unwrap_or(true)
-            && !available.contains(&definition.name)
-        {
-            available.push(definition.name.clone());
-        }
-    }
+    let mut available: Vec<String> = agent::discovery::all_subagents_with_plugins_and_cli(
+        context.cwd,
+        context.toggles,
+        context.plugins,
+        context.cli_agents,
+    )
+    .into_iter()
+    .map(|entry| entry.name)
+    .collect();
     available.sort();
     available
 }
@@ -117,9 +113,11 @@ pub fn capture_agent_definitions(
 
     names
         .into_iter()
-        .filter(|name| filter.allows(name) && context.toggles.get(name).copied().unwrap_or(true))
         .filter_map(|name| {
-            let mut definition = discover_agent_definition(&name, context)?;
+            let mut definition = resolve_agent_definition(&name, context).ok()?;
+            if !filter.allows(&definition.selector_identity()) {
+                return None;
+            }
             cli_overrides.apply_to_subagent_definition(&mut definition);
             Some((name, definition))
         })
@@ -137,48 +135,63 @@ pub fn gate_agent_definition(
     }
     Ok(())
 }
-/// Validate discovery and the global toggle without cloning definitions.
+/// Candidate IDs follow the same source priority as definition resolution.
+pub fn available_validation_agent_names(context: &DefinitionValidationContext<'_>) -> Vec<String> {
+    let mut available: Vec<_> =
+        agent::discovery::all_subagents_with_plugins(context.cwd, context.toggles, context.plugins)
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+    for name in context.cli_agent_names {
+        if agent::discovery::is_canonical_agent_selector(name)
+            && context.toggles.get(name).copied().unwrap_or(true)
+            && !available.contains(name)
+            && agent::discovery::by_name_in_cwd_with_plugins(name, context.cwd, context.plugins)
+                .is_none()
+        {
+            available.push(name.clone());
+        }
+    }
+    available.sort();
+    available
+}
+/// Resolve and authorize the canonical selector, preserving source priority.
+
 pub fn validate_agent_name(
     subagent_type: &str,
     context: &DefinitionValidationContext<'_>,
-) -> Result<(), ResolutionError> {
-    let resolves = context
-        .cli_agent_names
-        .iter()
-        .any(|name| name == subagent_type)
-        || agent::discovery::by_name_in_cwd_with_plugins(
-            subagent_type,
-            context.cwd,
-            context.plugins,
-        )
-        .is_some();
-    if !resolves {
-        let mut available: Vec<String> = agent::discovery::all_subagents_with_plugins(
-            context.cwd,
-            context.toggles,
-            context.plugins,
-        )
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect();
-        for name in context.cli_agent_names {
-            if context.toggles.get(name).copied().unwrap_or(true) && !available.contains(name) {
-                available.push(name.clone());
-            }
-        }
-        available.sort();
+) -> Result<String, ResolutionError> {
+    let identity = agent::discovery::is_canonical_agent_selector(subagent_type)
+        .then(|| {
+            agent::discovery::by_name_in_cwd_with_plugins(
+                subagent_type,
+                context.cwd,
+                context.plugins,
+            )
+            .map(|definition| definition.selector_identity())
+            .or_else(|| {
+                context
+                    .cli_agent_names
+                    .iter()
+                    .find(|name| name.as_str() == subagent_type)
+                    .cloned()
+            })
+        })
+        .flatten();
+    let Some(identity) = identity else {
         return Err(ResolutionError::Unknown {
             subagent_type: subagent_type.to_owned(),
-            available,
+            available: available_validation_agent_names(context),
         });
-    }
+    };
     let gate_context = DefinitionResolutionContext {
         cwd: context.cwd,
         plugins: context.plugins,
         cli_agents: &[],
         toggles: context.toggles,
     };
-    gate_agent_definition(subagent_type, &gate_context)
+    gate_agent_definition(&identity, &gate_context)?;
+    Ok(identity)
 }
 /// Discover and gate one production agent definition.
 pub fn resolve_agent_definition(
@@ -191,7 +204,7 @@ pub fn resolve_agent_definition(
             available: available_agent_names(context),
         }
     })?;
-    gate_agent_definition(subagent_type, context)?;
+    gate_agent_definition(&definition.selector_identity(), context)?;
     Ok(definition)
 }
 
@@ -257,6 +270,16 @@ pub fn apply_child_profile_policy(
         .retain(|tool| !forbidden(tool));
     definition.tool_config.tools.retain(|tool| !forbidden(tool));
 }
+/// Same-lifecycle restoration must use the original effective birth fact,
+/// never a mutable profile default or the original optional request override.
+pub fn restored_birth_capability(
+    capability_mode: Option<&str>,
+) -> Result<tool_types::SubagentCapabilityMode, String> {
+    let mode = capability_mode.ok_or("original child birth capability_mode is missing")?;
+    serde_json::from_value(serde_json::Value::String(mode.to_owned()))
+        .map_err(|_| format!("original child birth capability_mode is invalid: {mode}"))
+}
+
 /// Resolve runtime overrides and definition defaults in the production order.
 pub fn resolve_runtime_config(
     overrides: &SubagentRuntimeOverrides,

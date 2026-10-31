@@ -211,6 +211,10 @@ pub async fn spawn_shell(
 fn config_reload_request(update: shell::config::reloader::ConfigUpdate) -> Option<acp::ExtRequest> {
     use shell::config::reloader::ConfigUpdate;
     let (method, params) = match update {
+        ConfigUpdate::SubagentToggleChanged => (
+            "grow/internal/reload_subagent_toggle",
+            serde_json::json!({}),
+        ),
         ConfigUpdate::ModelsChanged => ("grow/internal/reload_models", serde_json::json!({})),
         ConfigUpdate::McpCatalogChanged { project_root } => (
             "grow/internal/reload_mcp_catalog",
@@ -508,6 +512,9 @@ fn spawn_agent_thread_direct(
                     }
                 }));
                 let _ = startup_config_update_tx.send(
+                    shell::config::reloader::ConfigUpdate::SubagentToggleChanged,
+                );
+                let _ = startup_config_update_tx.send(
                     shell::config::reloader::ConfigUpdate::McpCatalogChanged {
                         project_root: None,
                     },
@@ -623,6 +630,19 @@ fn spawn_agent_thread_direct(
 #[cfg(test)]
 mod tests {
     mod mcp_hot_reload;
+
+    #[test]
+    fn subagent_toggle_reload_uses_shared_internal_route() {
+        let request = super::config_reload_request(
+            shell::config::reloader::ConfigUpdate::SubagentToggleChanged,
+        )
+        .unwrap();
+        assert_eq!(
+            request.method.as_ref(),
+            "grow/internal/reload_subagent_toggle"
+        );
+        assert_eq!(request.params.get(), "{}");
+    }
     use super::*;
 
     #[test]

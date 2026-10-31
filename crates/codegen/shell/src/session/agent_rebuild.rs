@@ -91,7 +91,8 @@ pub(crate) struct AgentRebuildSpec {
     pub app_builder_deployer_config: AppBuilderDeployerConfig,
     pub write_file_enabled: bool,
     pub subagents_enabled: bool,
-    pub subagent_toggle: HashMap<String, bool>,
+    pub subagent_toggle:
+        std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, bool>>>,
     pub background_workflows_enabled: bool,
     pub ask_user_question_enabled: bool,
     pub prompt_audience: PromptAudience,
@@ -103,6 +104,9 @@ pub(crate) struct AgentRebuildSpec {
     /// every later Agent rebuild snapshots it at the build boundary instead
     /// of retaining the session's spawn-time registry.
     pub plugin_registry: crate::session::workflow::tracker::SharedWorkflowPluginRegistry,
+    /// CLI definitions are a live-session catalog fallback for ordinary
+    /// Agent rebuilds. Workflow names remain frozen in their preloaded list.
+    pub cli_subagents: Vec<agent::config::AgentDefinition>,
     pub preloaded_subagent_names: Option<Vec<String>>,
     /// Workflow Run-owned skill catalog. Ordinary sessions rediscover skills
     /// on Agent rebuild; Workflow children must keep consuming the Run
@@ -207,6 +211,7 @@ impl AgentRebuildSpec {
             prompt_working_directory,
             lsp,
             plugin_registry,
+            cli_subagents,
             preloaded_subagent_names,
             frozen_skills,
             file_tool_overrides,
@@ -263,7 +268,8 @@ impl AgentRebuildSpec {
         .with_write_file_enabled(*write_file_enabled)
         .with_fs(fs_backend.clone())
         .with_subagents_enabled(*subagents_enabled)
-        .with_subagent_toggle(subagent_toggle.clone())
+        .with_subagent_toggle(subagent_toggle.read().clone())
+        .with_cli_subagents(cli_subagents.clone())
         .with_background_workflows_enabled(*background_workflows_enabled)
         .with_task_model_slugs(
             models_manager
@@ -413,7 +419,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         write_file_enabled: true,
         subagents_enabled: false,
-        subagent_toggle: HashMap::new(),
+        subagent_toggle: Default::default(),
         background_workflows_enabled: false,
         ask_user_question_enabled: true,
         prompt_audience: PromptAudience::Primary,
@@ -422,6 +428,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         prompt_working_directory: None,
         lsp: None,
         plugin_registry: Arc::new(parking_lot::RwLock::new(None)),
+        cli_subagents: Vec::new(),
         preloaded_subagent_names: None,
         frozen_skills: None,
         file_tool_overrides: None,

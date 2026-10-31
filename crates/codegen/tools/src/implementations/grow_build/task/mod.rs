@@ -361,39 +361,27 @@ impl tool_runtime::Tool for TaskTool {
 
         // 2. Eager validation — catch unknown / disabled
         //    types before the fire-and-forget background spawn.
-        match backend
+        let validation = backend
             .backend()
             .validate_type(&input.subagent_type, &parent_session_id)
-            .await
-        {
+            .await;
+        match validation {
             SubagentValidateTypeOutcome::Ok => {}
-            SubagentValidateTypeOutcome::Unknown { available } => {
-                let suffix = if available.is_empty() {
-                    String::new()
-                } else {
-                    format!(". Available types: {}", available.join(", "))
-                };
-                return Err(tool_runtime::ToolError::invalid_arguments(format!(
-                    "Unknown subagent type: {}{suffix}",
-                    input.subagent_type
-                )));
-            }
-            SubagentValidateTypeOutcome::Disabled => {
-                return Err(tool_runtime::ToolError::invalid_arguments(format!(
-                    "Subagent '{}' is disabled via [subagents.toggle] in config.toml",
-                    input.subagent_type
-                )));
-            }
             SubagentValidateTypeOutcome::ValidationUnavailable => {
                 // `custom` (not `invalid_arguments`) so the model doesn't
                 // retry with a different name on transport faults.
                 return Err(tool_runtime::ToolError::custom(
                     "validation_unavailable",
-                    format!(
-                        "Cannot validate subagent type '{}': the subagent coordinator is \
-                         unreachable. Retry shortly or notify ops.",
-                        input.subagent_type
-                    ),
+                    validation
+                        .rejection_message(&input.subagent_type)
+                        .expect("rejected validation has a message"),
+                ));
+            }
+            rejected => {
+                return Err(tool_runtime::ToolError::invalid_arguments(
+                    rejected
+                        .rejection_message(&input.subagent_type)
+                        .expect("rejected validation has a message"),
                 ));
             }
         }
@@ -1352,6 +1340,30 @@ mod tests {
         let msg = result.expect_err("must reject").to_string();
         assert!(msg.contains("disabled via [subagents.toggle]"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn parent_restricted_type_returns_parent_error_before_spawn_in_both_modes() {
+        for run_in_background in [true, false] {
+            let (backend, mut rx) =
+                make_backend_with_validation(SubagentValidateTypeOutcome::ParentRestricted {
+                    parent_agent: "researcher".into(),
+                    available: vec!["explore".into()],
+                });
+            let resources = resources_for_task(backend);
+            let result = tool_runtime::Tool::run(
+                &TaskTool,
+                test_ctx(resources.into_shared()),
+                task_input("general-purpose", run_in_background),
+            )
+            .await;
+
+            let msg = result.expect_err("parent policy must reject").to_string();
+            assert!(msg.contains("not allowed for parent Agent 'researcher'"));
+            assert!(msg.contains("Available types: explore"));
+            assert!(!msg.contains("disabled via [subagents.toggle]"));
+            assert!(rx.try_recv().is_err(), "rejected Task must not spawn");
+        }
     }
 
     #[tokio::test]

@@ -12,6 +12,8 @@ use super::watcher::ConfigChangeEvent;
 /// Typed, `Send`-safe messages for the agent to apply inside its `LocalSet`.
 #[derive(Debug)]
 pub enum ConfigUpdate {
+    /// Global per-type subagent policy changed; other settings remain startup-only.
+    SubagentToggleChanged,
     /// The canonical MCP catalog changed. `project_root = None` reloads every
     /// active session (global config or home-level imports); `Some(root)`
     /// reloads only sessions rooted at or beneath that project.
@@ -169,6 +171,24 @@ impl ConfigReloader {
                 return Ok(());
             }
         };
+
+        self.apply_global_config(new_global)
+    }
+
+    fn apply_global_config(&mut self, new_global: toml::Value) -> anyhow::Result<()> {
+        if self
+            .last_global_config
+            .get("subagents")
+            .and_then(|value| value.get("toggle"))
+            != new_global
+                .get("subagents")
+                .and_then(|value| value.get("toggle"))
+        {
+            crate::config::SubagentsConfig::parse_toggle(&new_global)?;
+            let _ = self
+                .config_update_tx
+                .send(ConfigUpdate::SubagentToggleChanged);
+        }
 
         // MCP catalog and auxiliary policy — compare their tables in global
         // config (`~/.grow/config.toml`) via toml::Value. Project-
@@ -367,6 +387,57 @@ fn extract_ui_fields(config: &toml::Value) -> (Option<String>, Option<String>, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_toggle_reload_tracks_changes_deletion_and_invalid_values() {
+        let initial: toml::Value = toml::from_str("[subagents.toggle]\nexplore = true\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reloader = ConfigReloader::new(initial.clone(), None, tx, false, false);
+        reloader.apply_global_config(initial.clone()).unwrap();
+        assert!(rx.try_recv().is_err());
+
+        let disabled: toml::Value =
+            toml::from_str("[subagents.toggle]\nexplore = false\n").unwrap();
+        reloader.apply_global_config(disabled.clone()).unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ConfigUpdate::SubagentToggleChanged
+        ));
+        assert!(rx.try_recv().is_err());
+        for invalid in [
+            "[subagents.toggle]\nexplore = 'true'",
+            "[subagents]\ntoggle = false",
+            "subagents = 'invalid'",
+        ] {
+            let invalid = toml::from_str(invalid).unwrap();
+            assert!(reloader.apply_global_config(invalid).is_err());
+            assert_eq!(reloader.last_global_config, disabled);
+            assert!(rx.try_recv().is_err());
+        }
+        let deleted: toml::Value = toml::from_str("[subagents]\npermission_mode = 'ask'").unwrap();
+        reloader.apply_global_config(deleted.clone()).unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ConfigUpdate::SubagentToggleChanged
+        ));
+        assert!(
+            crate::config::SubagentsConfig::parse_toggle(&deleted)
+                .unwrap()
+                .is_empty()
+        );
+        reloader
+            .apply_global_config(toml::from_str("[subagents]\npermission_mode = 'auto'").unwrap())
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "startup-only permission mode must not reload toggles"
+        );
+        reloader.apply_global_config(initial).unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ConfigUpdate::SubagentToggleChanged
+        ));
+    }
 
     #[test]
     fn hash_project_mcp_config_tracks_canonical_ancestor_config() {

@@ -346,6 +346,7 @@ async fn run_shell_child_inner(
     }
     let mut restored_persistence = None;
     let mut restored_spawn = None;
+    let mut restored_capability_mode = None;
     if let Some(checkpoint) = &restore {
         let source = match ctx.parent_chat_state.as_ref() {
             Some(parent) => parent.timeline_events().await.and_then(|events| events.into_iter().find(|event| {
@@ -364,6 +365,16 @@ async fn run_shell_child_inner(
         else {
             unreachable!()
         };
+        restored_capability_mode = Some(
+            match crate::agent::subagent::resolution::restored_birth_capability(
+                spawn.capability_mode.as_deref(),
+            ) {
+                Ok(mode) => mode,
+                Err(message) => {
+                    return child_run_output(failure_result(&request, &message), completion_data);
+                }
+            },
+        );
         let info = SessionInfo {
             id: acp::SessionId::new(spawn.child_session_id.clone()),
             cwd: spawn.child_cwd.clone(),
@@ -437,6 +448,17 @@ async fn run_shell_child_inner(
         })
         .unwrap_or(&request.subagent_type)
         .to_owned();
+    let type_validation = if request.owner.is_workflow() {
+        SubagentValidateTypeOutcome::Ok
+    } else {
+        gate_subagent_type(&request.subagent_type, &ctx)
+    };
+    if !matches!(type_validation, SubagentValidateTypeOutcome::Ok) {
+        let msg = type_validation
+            .rejection_message(&request.subagent_type)
+            .expect("rejected type validation has a message");
+        return child_run_output(failure_result(&request, &msg), completion_data);
+    }
     let (definition, frozen_workflow_skills, frozen_subagent_names) =
         match frozen_workflow_agent_definition(&request, &ctx) {
             Ok(Some((definition, skills, names))) => (Some(definition), Some(skills), Some(names)),
@@ -447,32 +469,9 @@ async fn run_shell_child_inner(
         };
     let workflow_agent_names = frozen_subagent_names.clone();
     let Some(mut definition) = definition else {
-        let msg = format!("Unknown subagent type: {}", request.subagent_type);
+        let msg = format!("Unknown subagent type: {selected_agent}");
         return child_run_output(failure_result(&request, &msg), completion_data);
     };
-    match if request.owner.is_workflow() {
-        SubagentValidateTypeOutcome::Ok
-    } else {
-        gate_subagent_type(&request.subagent_type, &ctx)
-    } {
-        SubagentValidateTypeOutcome::Disabled => {
-            let msg = format!(
-                "Subagent '{}' is not available to the current Agent or is disabled via [subagents.toggle]",
-                request.subagent_type
-            );
-            return child_run_output(failure_result(&request, &msg), completion_data);
-        }
-        SubagentValidateTypeOutcome::Unknown { .. }
-        | SubagentValidateTypeOutcome::ValidationUnavailable => {
-            let msg = format!("Cannot validate subagent '{}'", request.subagent_type);
-            return child_run_output(failure_result(&request, &msg), completion_data);
-        }
-        SubagentValidateTypeOutcome::Ok => {}
-        _ => {
-            let msg = format!("Cannot validate subagent '{}'", request.subagent_type);
-            return child_run_output(failure_result(&request, &msg), completion_data);
-        }
-    }
     if !request.owner.is_workflow() {
         resolve_subagent_toolset(&selected_agent, &ctx, &mut definition);
     }
@@ -486,7 +485,8 @@ async fn run_shell_child_inner(
     // narrow or widen that request, and the immediate security parent's
     // immutable ceiling is the final upper bound. Incomparable read/write and
     // execute branches meet at read-only.
-    let requested_capability_mode = effective_runtime.capability_mode;
+    let requested_capability_mode =
+        restored_capability_mode.unwrap_or(effective_runtime.capability_mode);
     let initial_capability_mode = ctx
         .parent_capability_ceiling
         .as_ref()

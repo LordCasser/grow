@@ -50,6 +50,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/internal/reload_mcp_catalog" => handle_reload_mcp_catalog(agent, args).await,
         "grow/internal/reload_skills" => handle_reload_skills(agent),
         "grow/internal/reload_workflows" => handle_reload_workflows(agent),
+        "grow/internal/reload_subagent_toggle" => handle_reload_subagent_toggle(agent),
         "grow/internal/reload_models" => handle_reload_models(agent).await,
         "grow/internal/reload_announcements" => handle_reload_announcements(agent, args),
         "grow/plugins/reload" => handle_plugins_reload(agent).await,
@@ -2073,6 +2074,34 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
         dunce::canonicalize(session_cwd).unwrap_or_else(|_| session_cwd.to_path_buf());
     let target_cwd = dunce::canonicalize(target_cwd).unwrap_or_else(|_| target_cwd.to_path_buf());
     session_cwd.starts_with(target_cwd)
+}
+
+/// Publish the policy before refreshing catalogs. Existing spawn contexts
+/// share this cell, so a stale preflight cannot authorize a later admission.
+pub(crate) fn handle_reload_subagent_toggle(agent: &MvpAgent) -> ExtResult {
+    let disk = crate::config::load_from_disk()
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    apply_subagent_toggle_config(agent, &disk)
+}
+
+pub(crate) fn apply_subagent_toggle_config(agent: &MvpAgent, disk: &toml::Value) -> ExtResult {
+    let toggles = crate::config::SubagentsConfig::parse_toggle(disk)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    let live_toggle = agent.cfg.borrow().subagent_toggle.clone();
+    *live_toggle.write() = toggles;
+    let mut queued = 0;
+    for (_, handle) in agent.live_control_session_handles() {
+        if handle
+            .cmd_tx
+            .send(SessionCommand::ReloadSubagentCatalog)
+            .is_ok()
+        {
+            queued += 1;
+        }
+    }
+    ExtMethodResult::success(serde_json::json!({ "queued": queued }))
+        .to_ext_response()
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))
 }
 
 // internal/reload_models

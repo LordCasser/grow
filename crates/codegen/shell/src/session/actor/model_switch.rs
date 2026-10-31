@@ -639,6 +639,29 @@ impl SessionActor {
         .await
     }
 
+    pub(super) async fn admit_subagent_catalog_reload(self: &std::sync::Arc<Self>) {
+        if self.rebuild_spec.workflow_owned {
+            return;
+        }
+        let gate = self.step_control_gate.lock().await;
+        let mut admission = self.state.lock().await;
+        if !admission.execution_open() {
+            return;
+        }
+        admission
+            .pending_step_controls
+            .admit_subagent_catalog_reload();
+        let should_drain = admission.foreground.is_idle();
+        if should_drain {
+            admission.foreground = ForegroundState::ApplyingControl;
+        }
+        drop(admission);
+        drop(gate);
+        if should_drain {
+            self.spawn_claimed_pending_step_control_drain();
+        }
+    }
+
     /// Mailbox admission for catalog hot reload. The current step retains its
     /// exact provider route; adjacent busy reloads coalesce, but every user
     /// model, Agent or Goal selection is an ordering barrier in the unified
@@ -1430,7 +1453,13 @@ impl SessionActor {
                     }
                     return (model_changed, agent_changed, behavior_changed);
                 };
-                let preparation = admission.pending_step_controls.agent_preparation(key);
+                let preparation = admission.pending_step_controls.agent_preparation(key, || {
+                    AgentPreparation::start(
+                        self.rebuild_spec.clone(),
+                        self.agent.borrow().definition().clone(),
+                        self.session_id_string(),
+                    )
+                });
                 let projection = admission.pending_step_controls.projection(key);
                 admission.applying_step_control = projection.clone();
                 (key, preparation, projection)
@@ -1445,7 +1474,7 @@ impl SessionActor {
                     )
                     .await;
             }
-            let workspace_binding = if let Some(preparation) = preparation {
+            let workspace_binding = if let Some(preparation) = &preparation {
                 // Filesystem/plugin/skill discovery is deliberately outside
                 // the cancellation-critical step gate. If Stop aborts this
                 // turn while preparation is pending, the queue retains the
@@ -1471,6 +1500,11 @@ impl SessionActor {
                         admission.applying_step_control = None;
                     }
                     return (model_changed, agent_changed, behavior_changed);
+                }
+                if preparation.as_ref().is_some_and(|preparation| {
+                    preparation.refresh_stale_catalog(&self.rebuild_spec, self.session_id_string())
+                }) {
+                    continue;
                 }
                 let control = admission.pending_step_controls.take(key);
                 if control.is_none()
@@ -1651,6 +1685,29 @@ impl SessionActor {
             return (false, false, false, None, None, None, Some(error));
         }
         match control {
+            PendingStepControl::SubagentCatalogReload(preparation) => {
+                let result = match (
+                    preparation
+                        .expect("reload preparation initialized before claim")
+                        .take(),
+                    workspace_binding,
+                ) {
+                    (Ok(agent), Ok(Some(binding))) => {
+                        self.apply_prepared_agent(agent, binding, None).await
+                    }
+                    (Ok(_), Ok(None)) => Err(acp::Error::internal_error()
+                        .data("Subagent catalog activation has no workspace binding")),
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                };
+                let applied = result.as_ref().is_ok_and(|changed| *changed);
+                if let Err(error) = &result {
+                    tracing::error!(%error, "failed to refresh subagent catalog");
+                }
+                let fatal = result
+                    .err()
+                    .filter(crate::session::commands::is_fatal_turn_boundary_error);
+                (false, applied, false, None, None, None, fatal)
+            }
             PendingStepControl::ModelReload(pending) => {
                 let mut workflow_admission = self.workflow_manager.lock().await;
                 let result = self
@@ -1867,7 +1924,13 @@ impl SessionActor {
                     self.send_available_commands_update().await;
                     return;
                 };
-                let preparation = admission.pending_step_controls.agent_preparation(key);
+                let preparation = admission.pending_step_controls.agent_preparation(key, || {
+                    AgentPreparation::start(
+                        self.rebuild_spec.clone(),
+                        self.agent.borrow().definition().clone(),
+                        self.session_id_string(),
+                    )
+                });
                 let projection = admission.pending_step_controls.projection(key);
                 admission.applying_step_control = projection.clone();
                 (key, preparation, projection)
@@ -1882,7 +1945,7 @@ impl SessionActor {
                     )
                     .await;
             }
-            let workspace_binding = if let Some(preparation) = preparation {
+            let workspace_binding = if let Some(preparation) = &preparation {
                 if !preparation.wait_ready().await {
                     Ok(None)
                 } else if preparation.has_agent() {
@@ -1912,6 +1975,11 @@ impl SessionActor {
                 admission.foreground,
                 ForegroundState::ApplyingControl
             ));
+            if preparation.as_ref().is_some_and(|preparation| {
+                preparation.refresh_stale_catalog(&self.rebuild_spec, self.session_id_string())
+            }) {
+                continue;
+            }
             let Some(control) = admission.pending_step_controls.take(key) else {
                 // A newer desired revision replaced the prepared target.
                 if admission.applying_step_control.as_ref() == projection.as_ref() {
@@ -2159,6 +2227,8 @@ impl SessionActor {
                 .definition()
                 .runtime_equivalent(new_agent.definition())
                 && current.role_prompt() == new_agent.role_prompt()
+                && (self.rebuild_spec.workflow_owned
+                    || current.subagent_toggle() == new_agent.subagent_toggle())
         };
         if already_applied {
             // Reconnect is at-least-once: a rearmed Agent control may be
@@ -4865,3 +4935,7 @@ mod tests {
             .await;
     }
 }
+
+#[cfg(test)]
+#[path = "tests/subagent_toggle_reload_tests.rs"]
+mod subagent_toggle_reload_tests;

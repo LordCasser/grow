@@ -808,7 +808,8 @@ pub struct Config {
     /// Per-subagent enable/disable toggles from `[subagents.toggle]` in config.toml.
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
-    pub subagent_toggle: std::collections::HashMap<String, bool>,
+    pub subagent_toggle:
+        std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, bool>>>,
     /// Path for the Layer-3 LazinessDetector debug log
     /// (`--laziness-debug-log`). When `Some`, the classifier fires
     /// after every turn (bypassing the idle wait, the per-model
@@ -1083,7 +1084,7 @@ impl Default for Config {
             subagent_permission_mode: Default::default(),
             subagent_classifier_input: Default::default(),
             subagent_model_overrides: std::collections::HashMap::new(),
-            subagent_toggle: std::collections::HashMap::new(),
+            subagent_toggle: Default::default(),
             laziness_debug_log: None,
             respect_gitignore: false,
             path_not_found_hints: false,
@@ -1358,7 +1359,7 @@ impl Config {
         self.subagent_permission_mode = sa.permission_mode;
         self.subagent_classifier_input = sa.classifier_input;
         self.subagent_model_overrides = sa.models;
-        self.subagent_toggle = sa.toggle;
+        self.subagent_toggle = std::sync::Arc::new(parking_lot::RwLock::new(sa.toggle));
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();
         let remote = self
             .remote_settings

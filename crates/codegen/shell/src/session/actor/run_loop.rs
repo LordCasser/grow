@@ -1802,6 +1802,9 @@ pub(super) async fn run_session(
                             )
                             .await;
                     }
+                    SessionCommand::ReloadSubagentCatalog => {
+                        session.admit_subagent_catalog_reload().await;
+                    }
                     SessionCommand::ReloadModelConfig {
                         catalog,
                         responds_to,

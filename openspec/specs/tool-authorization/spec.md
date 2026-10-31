@@ -499,3 +499,34 @@ Persistent shell dump readers SHALL wait for a complete terminal marker line, in
 #### Scenario: Large function state travels through the pipe
 - **WHEN** a large function snapshot is dumped and replayed through the production state descriptors
 - **THEN** marker detection checks only a fixed suffix per chunk, and complete dumps retain function state under the existing read deadline.
+
+### Requirement: Subagent rejection preserves its actual policy cause
+Subagent validation and dispatch SHALL distinguish unknown definition IDs, explicit global toggle disablement, parent Agent delegation restrictions and unavailable validation. Only an explicit false toggle SHALL be described as disabled by `[subagents.toggle]`. Parent restriction diagnostics SHALL identify the parent Agent and current allowed full IDs. Definition existence SHALL be checked before parent filtering; path-derived IDs SHALL NOT gain implicit basename aliases.
+
+#### Scenario: Enabled type excluded by the parent
+- **WHEN** an existing type has toggle true but the parent allow/deny policy forbids it
+- **THEN** preflight and dispatch reject it as a parent policy restriction without claiming global disablement, and no child is spawned.
+
+#### Scenario: Short name does not identify the nested definition
+- **WHEN** only a nested path ID exists and the request uses its bare frontmatter name
+- **THEN** validation reports an unknown ID even under a restricted parent and provides only allowed available full IDs.
+
+#### Scenario: Explicit global disablement
+- **WHEN** an existing type has toggle false
+- **THEN** validation rejects it with the global toggle cause; automatic permission approval does not override it.
+
+### Requirement: Delegation authorizes canonical definition identities
+
+普通 subagent 委派 SHALL 先解析正式 definition selector，再对正式身份应用全局 toggle 与父 allow/deny。目录 SHALL 包含 native、plugin、CLI 最终 fallback 的可委派定义，按照相同优先级合并并统一过滤；普通会话重建 SHALL 保留 CLI 来源。非规范路径 selector SHALL 被拒绝，不得通过路径拼写绕过限制。
+
+#### Scenario: An alternate selector resolves to a disabled or denied plugin
+- **WHEN** bare selector 解析到限定 plugin selector，且正式 selector 被 toggle 禁用或父 deny 拒绝
+- **THEN** 预检与派发均拒绝，并保留实际拒绝原因；正式 allow 列表同样对 bare 请求生效。
+
+#### Scenario: A native selector contains path aliases
+- **WHEN** selector 包含空段、`.`、`..`、绝对路径，或请求与注册路径 ID 不同的大小写拼写
+- **THEN** 不解析成另一个可委派身份，不绕过正式名称上的限制。
+
+#### Scenario: Plugin and CLI catalogs change enablement
+- **WHEN** 唯一允许的 plugin 或 CLI Agent 被关闭后重新开启
+- **THEN** 普通会话与子会话的 Task 目录移除后恢复该正式 ID，空目录撤下 Task；重建保留 CLI 来源，重复名称继续使用执行解析选中的定义。

@@ -80,6 +80,7 @@ pub struct AgentBuilder {
     bash_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     ask_user_question_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
+    cli_subagents: Vec<AgentDefinition>,
     context_window_tokens: Option<u64>,
     /// Session-scoped MCP tool-result inline cap (bytes). When `Some`, seeded
     /// into the toolset's `TruncationCfg` resource after finalize, where the
@@ -247,6 +248,7 @@ impl AgentBuilder {
             bash_params_json: None,
             ask_user_question_params_json: None,
             plugin_registry: None,
+            cli_subagents: Vec::new(),
             context_window_tokens: None,
             mcp_max_output_bytes: None,
             persisted_announced_skill_names: None,
@@ -500,6 +502,11 @@ impl AgentBuilder {
         self.plugin_registry = Some(registry);
         self
     }
+    /// Supply CLI-defined subagents as the final discovery fallback.
+    pub fn with_cli_subagents(mut self, definitions: Vec<AgentDefinition>) -> Self {
+        self.cli_subagents = definitions;
+        self
+    }
     /// Set the model context window size in tokens.
     pub fn with_context_window(mut self, tokens: u64) -> Self {
         self.context_window_tokens = Some(tokens);
@@ -648,10 +655,11 @@ impl AgentBuilder {
             let has_subagents = if let Some(names) = &self.preloaded_subagent_names {
                 names.iter().any(|name| filter.allows(name))
             } else {
-                let mut discovered = crate::discovery::all_subagents_with_plugins(
+                let mut discovered = crate::discovery::all_subagents_with_plugins_and_cli(
                     &self.working_directory,
                     &self.subagent_toggle,
                     self.plugin_registry.as_deref(),
+                    &self.cli_subagents,
                 );
                 discovered.retain(|entry| filter.allows(&entry.name));
                 let present = !discovered.is_empty();
@@ -667,7 +675,23 @@ impl AgentBuilder {
                     .iter_mut()
                     .find(|tc| tc.id == task_tool_id)
                 {
-                    task_tc.description_override = Some(CHILD_TASK_DESCRIPTION.to_string());
+                    let names: Vec<&str> = if let Some(names) = &self.preloaded_subagent_names {
+                        names
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|name| filter.allows(name))
+                            .collect()
+                    } else {
+                        live_subagents
+                            .as_deref()
+                            .expect("live child catalog discovered")
+                            .iter()
+                            .map(|entry| entry.name.as_str())
+                            .collect()
+                    };
+                    task_tc.description_override = Some(
+                        CHILD_TASK_DESCRIPTION.replace("{available_types}", &names.join(", ")),
+                    );
                 }
             } else if let Some(task_tc) = tool_config
                 .tools
@@ -907,7 +931,8 @@ impl AgentBuilder {
             system_prompt,
             role_prompt,
             tool_bridge,
-        ))
+        )
+        .with_subagent_toggle(self.subagent_toggle))
     }
 }
 /// CLI naming for the shared [`tool_types::build_task_description`] builder.
@@ -922,9 +947,7 @@ const TASK_TOOL_NAMING: tool_types::TaskToolNaming<'static> = tool_types::TaskTo
 /// Concise task-tool description for child sessions. Delegation from a child
 /// is possible but discouraged — prefer doing the work directly.
 ///
-/// NOTE: This hardcodes the built-in agent type names ("general-purpose",
-/// "explore", "plan"). If custom child-visible subagent types become common,
-/// consider generating this list dynamically like the parent description does.
+/// Full IDs are supplied from the same filtered catalog used for availability.
 const CHILD_TASK_DESCRIPTION: &str = "\
 Launch a sub-agent to handle a specific sub-task. Use this only when \n\
 the sub-task is clearly independent and would benefit from a separate \n\
@@ -932,7 +955,7 @@ context (e.g., a parallel search while you continue working).\n\
 \n\
 Prefer doing the work yourself unless delegation is clearly necessary.\n\
 \n\
-Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\" or \"explore\"), \n\
+Usage: specify ${{ params.task.subagent_type }} from [{available_types}], \n\
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
 ${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
 /// CLI [`tool_types::SubagentToolNaming`]: each kind maps to its
@@ -999,7 +1022,7 @@ pub(crate) fn build_task_description(
         .map(|entry| {
             let tools = match &entry.source {
                 SubagentSource::Builtin(b) => Some(builtin_tools_fragment(*b)),
-                SubagentSource::UserDefined { .. } => None,
+                SubagentSource::UserDefined { .. } | SubagentSource::Cli => None,
             };
             tool_types::SubagentDescriptor {
                 name: entry.name.clone(),

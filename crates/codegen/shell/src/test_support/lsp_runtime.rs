@@ -89,7 +89,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         available_models: indexmap::IndexMap::new(),
         catalog_revision: 0,
         subagent_model_overrides: HashMap::new(),
-        subagent_toggle: toggle,
+        subagent_toggle: std::sync::Arc::new(parking_lot::RwLock::new(toggle)),
         subagent_filter: Default::default(),
         remote_settings: None,
         laziness_debug_log: None,

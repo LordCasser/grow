@@ -822,7 +822,7 @@ pub(crate) async fn spawn_session_actor(
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
-    subagent_toggle: std::collections::HashMap<String, bool>,
+    subagent_toggle: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, bool>>>,
     workflow_cli_agents: Vec<agent::config::AgentDefinition>,
     workflow_cli_overrides: crate::agent::config::CliAgentOverrides,
     workflow_file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
@@ -1595,6 +1595,7 @@ pub(crate) async fn spawn_session_actor(
         prompt_working_directory: prompt_display_cwd.clone(),
         lsp: tool_context.lsp.clone(),
         plugin_registry: shared_plugin_registry.clone(),
+        cli_subagents: workflow_cli_agents.clone(),
         preloaded_subagent_names: frozen_subagent_names,
         frozen_skills: frozen_workflow_skills,
         file_tool_overrides: workflow_file_tool_overrides.clone(),
@@ -3313,6 +3314,13 @@ pub(crate) async fn spawn_session_actor(
         session.notification_reconciliation_worker.arm(worker);
     }
     let observation_owner = RuntimeObservationOwnerGuard::new(runtime_observation.clone());
+    // Config may have changed while this not-yet-registered session was
+    // building. Reconcile through the same idle boundary as resident sessions.
+    if !session.rebuild_spec.workflow_owned
+        && session.agent.borrow().subagent_toggle() != &*subagent_toggle.read()
+    {
+        let _ = cmd_tx.send(SessionCommand::ReloadSubagentCatalog);
+    }
     tokio::task::spawn_local(async move {
         let _observation_owner = observation_owner;
         ::diagnostics::session_ctx::with_session_ctx(
@@ -3683,7 +3691,7 @@ pub(crate) async fn spawn_session_on_thread(
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
-    subagent_toggle: std::collections::HashMap<String, bool>,
+    subagent_toggle: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, bool>>>,
     workflow_cli_agents: Vec<agent::config::AgentDefinition>,
     workflow_cli_overrides: crate::agent::config::CliAgentOverrides,
     workflow_file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,

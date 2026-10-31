@@ -697,9 +697,51 @@ pub enum SubagentValidateTypeOutcome {
     Unknown {
         available: Vec<String>,
     },
+    ParentRestricted {
+        parent_agent: String,
+        available: Vec<String>,
+    },
     Disabled,
     /// Coordinator unreachable; distinct from `Unknown` (the type may be valid).
     ValidationUnavailable,
+}
+
+impl SubagentValidateTypeOutcome {
+    /// Explain why a requested type cannot be admitted. Shared by Task
+    /// preflight and the child runner so both surfaces report the same cause.
+    pub fn rejection_message(&self, subagent_type: &str) -> Option<String> {
+        match self {
+            Self::Ok => None,
+            Self::Unknown { available } => {
+                let suffix = if available.is_empty() {
+                    String::new()
+                } else {
+                    format!(". Available types: {}", available.join(", "))
+                };
+                Some(format!("Unknown subagent type: {subagent_type}{suffix}"))
+            }
+            Self::ParentRestricted {
+                parent_agent,
+                available,
+            } => {
+                let suffix = if available.is_empty() {
+                    " No subagent types are available to this parent.".to_owned()
+                } else {
+                    format!(" Available types: {}.", available.join(", "))
+                };
+                Some(format!(
+                    "Subagent '{subagent_type}' is not allowed for parent Agent '{parent_agent}'.{suffix}"
+                ))
+            }
+            Self::Disabled => Some(format!(
+                "Subagent '{subagent_type}' is disabled via [subagents.toggle] in config.toml"
+            )),
+            Self::ValidationUnavailable => Some(format!(
+                "Cannot validate subagent type '{subagent_type}': the subagent coordinator is \
+                 unreachable. Retry shortly or notify ops."
+            )),
+        }
+    }
 }
 
 #[derive(Educe)]

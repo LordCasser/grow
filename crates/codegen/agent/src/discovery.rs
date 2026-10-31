@@ -57,6 +57,8 @@ pub enum SubagentSource {
     Builtin(BuiltinAgentName),
     /// User-defined agent from project, user, or bundled discovery.
     UserDefined { scope: AgentScope },
+    /// Agent definition supplied by the CLI for this session.
+    Cli,
 }
 
 // ── all_subagents ────────────────────────────────────────────────────
@@ -143,7 +145,7 @@ fn merge_subagents(
         // Check if this name already exists in entries
         if let Some(pos) = entries.iter().position(|e| e.name == def.name) {
             let should_replace = match &entries[pos].source {
-                SubagentSource::Builtin(_) => true,
+                SubagentSource::Builtin(_) | SubagentSource::Cli => true,
                 SubagentSource::UserDefined { scope } => {
                     discovered_scope_priority(def.scope) > discovered_scope_priority(*scope)
                 }
@@ -233,6 +235,17 @@ fn discover_with_home(
     definitions
 }
 
+/// Selectors are registry IDs, not filesystem paths to normalize.
+/// Native nested IDs and qualified plugin IDs may contain ordinary segments.
+pub fn is_canonical_agent_selector(name: &str) -> bool {
+    !name.contains('\\')
+        && name.split(['/', ':']).all(|part| !matches!(part, "" | "." | ".."))
+        && name.matches(':').count() <= 1
+        // Plugin discovery registers flat filenames. Accepting paths here
+        // would assign two different files the same plugin:stem identity.
+        && !(name.contains(':') && name.contains('/'))
+}
+
 /// Find an agent definition by name.
 ///
 /// Checks built-ins first, then the ordered user roots.
@@ -246,6 +259,10 @@ fn by_name_with_home(
     home: Option<&Path>,
     grow_home: Option<&Path>,
 ) -> Option<AgentDefinition> {
+    if !is_canonical_agent_selector(name) {
+        return None;
+    }
+
     // Check built-ins first — type-safe via BuiltinAgentName strum enum
     if let Ok(builtin) = BuiltinAgentName::from_str(name) {
         return Some(builtin.definition());
@@ -283,6 +300,10 @@ fn by_name_in_cwd_with_home(
     home: Option<&Path>,
     grow_home: Option<&Path>,
 ) -> Option<AgentDefinition> {
+    if !is_canonical_agent_selector(name) {
+        return None;
+    }
+
     if let Some(def) = load_project_definition_by_name(name, cwd) {
         return Some(def);
     }
@@ -418,6 +439,44 @@ fn all_subagents_with_plugins_and_home(
         }
     }
 
+    // Plugin entries are appended after native entries so a colliding native
+    // selector retains precedence. Toggles apply to every source uniformly.
+    entries
+        .into_iter()
+        .filter(|entry| toggle.get(&entry.name).copied().unwrap_or(true))
+        .collect()
+}
+
+/// Build the enabled subagent catalog from native, plugin, and CLI sources.
+/// Native and plugin entries take precedence; CLI definitions fill only names
+/// absent from that catalog.
+pub fn all_subagents_with_plugins_and_cli(
+    cwd: &Path,
+    toggle: &HashMap<String, bool>,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+    cli_agents: &[AgentDefinition],
+) -> Vec<SubagentEntry> {
+    let mut entries = all_subagents_with_plugins(cwd, toggle, plugins);
+    for definition in cli_agents {
+        // Resolve before enablement: a disabled higher-priority source must
+        // not reveal a CLI fallback that execution would never select.
+        if !is_canonical_agent_selector(&definition.name)
+            || !toggle.get(&definition.name).copied().unwrap_or(true)
+            || entries.iter().any(|entry| entry.name == definition.name)
+            || by_name_in_cwd_with_plugins(&definition.name, cwd, plugins).is_some()
+        {
+            continue;
+        }
+        entries.push(SubagentEntry {
+            name: definition.name.clone(),
+            description: definition.description.clone(),
+            source: SubagentSource::Cli,
+            shadows_builtin: None,
+            config_source: ConfigSource::Cli {
+                path: PathBuf::new(),
+            },
+        });
+    }
     entries
 }
 
@@ -447,6 +506,10 @@ fn by_name_in_cwd_with_plugins_and_home(
     home: Option<&Path>,
     grow_home: Option<&Path>,
 ) -> Option<AgentDefinition> {
+    if !is_canonical_agent_selector(name) {
+        return None;
+    }
+
     let qualified_plugin_name = name.split_once(':');
 
     // `plugin:agent` is a reserved, reconstructable namespace. A native file
@@ -467,7 +530,9 @@ fn by_name_in_cwd_with_plugins_and_home(
             && plugin.enabled
         {
             for agent_dir in &plugin.agent_dirs {
-                let agent_file = agent_dir.join(format!("{agent_name}.md"));
+                let Some(agent_file) = registered_agent_path(agent_dir, agent_name) else {
+                    continue;
+                };
                 if agent_file.is_file()
                     && let Some(mut def) = load_plugin_agent_definition(plugin, &agent_file)
                 {
@@ -488,7 +553,9 @@ fn by_name_in_cwd_with_plugins_and_home(
             Vec::new();
         for plugin in registry.enabled_plugins() {
             for agent_dir in &plugin.agent_dirs {
-                let agent_file = agent_dir.join(format!("{name}.md"));
+                let Some(agent_file) = registered_agent_path(agent_dir, name) else {
+                    continue;
+                };
                 if agent_file.is_file() {
                     matches.push((plugin, agent_file));
                 }
@@ -577,9 +644,8 @@ fn load_project_definitions(
 /// [`project_agent_dirs`] SSOT), highest-priority dir first.
 fn load_project_definition_by_name(name: &str, cwd: &Path) -> Option<AgentDefinition> {
     for agents_dir in project_agent_dirs(Some(cwd)).0 {
-        let agent_file = agents_dir.join(format!("{name}.md"));
-        if let Some(def) = load_definition_from_path(
-            &agent_file,
+        if let Some(def) = load_definition_by_name(
+            &agents_dir,
             name,
             "Failed to parse project agent definition",
             Some(AgentScope::Project),
@@ -590,13 +656,27 @@ fn load_project_definition_by_name(name: &str, cwd: &Path) -> Option<AgentDefini
     None
 }
 
+/// Use the same registered path IDs as discovery. Joining a caller string
+/// would also accept case/Unicode aliases on case-insensitive filesystems.
+fn registered_agent_path(dir: &Path, name: &str) -> Option<PathBuf> {
+    let mut path = dir.to_path_buf();
+    for component in format!("{name}.md").split('/') {
+        path = std::fs::read_dir(&path)
+            .ok()?
+            .flatten()
+            .find(|entry| entry.file_name() == component)?
+            .path();
+    }
+    Some(path)
+}
+
 fn load_definition_by_name(
     dir: &Path,
     name: &str,
     error_message: &str,
     scope_override: Option<AgentScope>,
 ) -> Option<AgentDefinition> {
-    let agent_file = dir.join(format!("{}.md", name));
+    let agent_file = registered_agent_path(dir, name)?;
     load_definition_from_path(&agent_file, name, error_message, scope_override)
 }
 
@@ -1283,6 +1363,87 @@ mod tests {
             }
         );
         assert!(entries.iter().any(|e| e.name == "plugin-one:reviewer"));
+    }
+
+    #[test]
+    fn plugin_subagent_toggle_filters_catalog_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let plugin_root = tempfile::tempdir().unwrap();
+        let plugin_agents = plugin_root.path().join("agents");
+        fs::create_dir_all(&plugin_agents).unwrap();
+        write_agent_file(&plugin_agents, "reviewer.md", "reviewer", "Plugin reviewer");
+        let registry = make_plugin_registry("plugin-one", PluginScope::User, vec![plugin_agents]);
+
+        let entries = all_subagents_with_plugins_and_home(
+            &cwd,
+            &HashMap::from([("plugin-one:reviewer".to_string(), false)]),
+            Some(&registry),
+            Some(&home),
+            None,
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.name == "plugin-one:reviewer")
+        );
+    }
+
+    #[test]
+    fn cli_catalog_fallback_obeys_toggles_and_native_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let agents_dir = cwd.join(".grow/agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        write_agent_file(
+            &agents_dir,
+            "collision.md",
+            "collision",
+            "Native definition",
+        );
+        let cli_agents = vec![
+            synthetic_agent("cli-only", "CLI definition", AgentScope::BuiltIn),
+            synthetic_agent("collision", "CLI collision", AgentScope::BuiltIn),
+        ];
+        let disabled = all_subagents_with_plugins_and_cli(
+            &cwd,
+            &HashMap::from([("cli-only".to_string(), false)]),
+            None,
+            &cli_agents,
+        );
+        assert!(!disabled.iter().any(|entry| entry.name == "cli-only"));
+
+        let enabled = all_subagents_with_plugins_and_cli(&cwd, &HashMap::new(), None, &cli_agents);
+        let cli = enabled
+            .iter()
+            .find(|entry| entry.name == "cli-only")
+            .unwrap();
+        assert_eq!(cli.description, "CLI definition");
+        assert_eq!(cli.source, SubagentSource::Cli);
+        assert!(matches!(&cli.config_source, ConfigSource::Cli { .. }));
+        let collision = enabled
+            .iter()
+            .find(|entry| entry.name == "collision")
+            .unwrap();
+        assert_eq!(collision.description, "Native definition");
+        assert!(matches!(
+            &collision.source,
+            SubagentSource::UserDefined { .. }
+        ));
+
+        let reenabled = all_subagents_with_plugins_and_cli(
+            &cwd,
+            &HashMap::from([("cli-only".to_string(), true)]),
+            None,
+            &cli_agents,
+        );
+        assert!(reenabled.iter().any(|entry| entry.name == "cli-only"));
     }
 
     #[test]

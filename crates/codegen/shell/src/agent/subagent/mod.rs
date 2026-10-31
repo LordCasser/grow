@@ -244,7 +244,8 @@ pub(crate) struct SubagentSpawnContext {
     pub subagent_model_overrides: std::collections::HashMap<String, String>,
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
     /// Omitted agents default to enabled (`true`).
-    pub subagent_toggle: std::collections::HashMap<String, bool>,
+    pub subagent_toggle:
+        std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, bool>>>,
     /// Active parent Agent's task-tool restriction, composed with the global
     /// toggle at validation and spawn time.
     pub subagent_filter: agent::config::SubagentFilter,
@@ -1810,11 +1811,12 @@ fn resolve_agent_definition(
         .as_ref()
         .map(|config| config.cli_agents.as_slice())
         .unwrap_or_default();
+    let subagent_toggle = ctx.subagent_toggle.read().clone();
     let resolution_context = crate::agent::subagent::resolution::DefinitionResolutionContext {
         cwd: &ctx.parent_cwd,
         plugins: ctx.plugin_registry.as_deref(),
         cli_agents,
-        toggles: &ctx.subagent_toggle,
+        toggles: &subagent_toggle,
     };
     let mut def = crate::agent::subagent::resolution::discover_agent_definition(
         subagent_type,
@@ -1829,12 +1831,13 @@ fn available_agent_names(ctx: &SubagentSpawnContext) -> Vec<String> {
         .as_ref()
         .map(|config| config.cli_agents.as_slice())
         .unwrap_or_default();
+    let subagent_toggle = ctx.subagent_toggle.read().clone();
     crate::agent::subagent::resolution::available_agent_names(
         &crate::agent::subagent::resolution::DefinitionResolutionContext {
             cwd: &ctx.parent_cwd,
             plugins: ctx.plugin_registry.as_deref(),
             cli_agents,
-            toggles: &ctx.subagent_toggle,
+            toggles: &subagent_toggle,
         },
     )
     .into_iter()
@@ -1849,6 +1852,7 @@ pub(crate) struct SubagentValidationContext {
     pub plugin_registry: Option<Arc<agent::plugins::PluginRegistry>>,
     pub subagent_toggle: HashMap<String, bool>,
     pub subagent_filter: agent::config::SubagentFilter,
+    pub parent_agent_name: Option<String>,
     pub cli_agent_names: Vec<String>,
 }
 /// Synchronously validate a subagent type against discovery and the global toggle.
@@ -1857,9 +1861,6 @@ pub(crate) fn validate_subagent_type(
     subagent_type: &str,
     ctx: &SubagentValidationContext,
 ) -> SubagentValidateTypeOutcome {
-    if !ctx.subagent_filter.allows(subagent_type) {
-        return SubagentValidateTypeOutcome::Disabled;
-    }
     let context = crate::agent::subagent::resolution::DefinitionValidationContext {
         cwd: &ctx.parent_cwd,
         plugins: ctx.plugin_registry.as_deref(),
@@ -1867,7 +1868,8 @@ pub(crate) fn validate_subagent_type(
         toggles: &ctx.subagent_toggle,
     };
     match crate::agent::subagent::resolution::validate_agent_name(subagent_type, &context) {
-        Ok(()) => SubagentValidateTypeOutcome::Ok,
+        Ok(identity) if ctx.subagent_filter.allows(&identity) => SubagentValidateTypeOutcome::Ok,
+        Ok(_) => parent_restricted_outcome(ctx),
         Err(crate::agent::subagent::resolution::ResolutionError::Unknown { available, .. }) => {
             SubagentValidateTypeOutcome::Unknown {
                 available: available
@@ -1881,44 +1883,49 @@ pub(crate) fn validate_subagent_type(
         }
     }
 }
-/// Gate an already-resolved subagent type against the `[subagents.toggle]`
-/// disable map.
-///
-/// The caller must have already confirmed the type resolves to an
-/// `AgentDefinition`; this checks only the global toggle, returning `Ok` when
-/// the type may run and `Disabled` otherwise. Shared by
-/// [`run_shell_child`] and [`describe_subagent_type`] so both apply
-/// identical gates.
+fn parent_restricted_outcome(ctx: &SubagentValidationContext) -> SubagentValidateTypeOutcome {
+    let available = crate::agent::subagent::resolution::available_validation_agent_names(
+        &crate::agent::subagent::resolution::DefinitionValidationContext {
+            cwd: &ctx.parent_cwd,
+            plugins: ctx.plugin_registry.as_deref(),
+            cli_agent_names: &ctx.cli_agent_names,
+            toggles: &ctx.subagent_toggle,
+        },
+    )
+    .into_iter()
+    .filter(|name| ctx.subagent_filter.allows(name))
+    .collect();
+    SubagentValidateTypeOutcome::ParentRestricted {
+        parent_agent: ctx
+            .parent_agent_name
+            .clone()
+            .unwrap_or_else(|| "current Agent".to_owned()),
+        available,
+    }
+}
+/// Apply the same discovery, global-toggle, and parent-filter validation used
+/// during Task preflight to the actual spawn path.
 fn gate_subagent_type(
     subagent_type: &str,
     ctx: &SubagentSpawnContext,
 ) -> SubagentValidateTypeOutcome {
-    if !ctx.subagent_filter.allows(subagent_type) {
-        return SubagentValidateTypeOutcome::Disabled;
-    }
     let cli_agents = ctx
         .agent_config
         .as_ref()
         .map(|config| config.cli_agents.as_slice())
         .unwrap_or_default();
-    let resolution_context = crate::agent::subagent::resolution::DefinitionResolutionContext {
-        cwd: &ctx.parent_cwd,
-        plugins: ctx.plugin_registry.as_deref(),
-        cli_agents,
-        toggles: &ctx.subagent_toggle,
+    let validation_context = SubagentValidationContext {
+        parent_cwd: ctx.parent_cwd.clone(),
+        plugin_registry: ctx.plugin_registry.clone(),
+        subagent_toggle: ctx.subagent_toggle.read().clone(),
+        subagent_filter: ctx.subagent_filter.clone(),
+        parent_agent_name: ctx.parent_agent_name.clone(),
+        cli_agent_names: cli_agents
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect(),
     };
-    match crate::agent::subagent::resolution::gate_agent_definition(
-        subagent_type,
-        &resolution_context,
-    ) {
-        Ok(()) => SubagentValidateTypeOutcome::Ok,
-        Err(crate::agent::subagent::resolution::ResolutionError::Disabled { .. }) => {
-            SubagentValidateTypeOutcome::Disabled
-        }
-        Err(crate::agent::subagent::resolution::ResolutionError::Unknown { .. }) => {
-            SubagentValidateTypeOutcome::ValidationUnavailable
-        }
-    }
+    validate_subagent_type(subagent_type, &validation_context)
 }
 pub(crate) fn subagent_harness_flavor_is_representable(agent_type: &str) -> bool {
     crate::agent::subagent::resolution::subagent_harness_flavor_is_representable(agent_type)
