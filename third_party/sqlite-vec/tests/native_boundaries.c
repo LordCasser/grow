@@ -1,8 +1,16 @@
 // Compile this harness with SQLITE_CORE and link libsqlite3 + libm.
+#include "../sqlite3.h"
+#include <stddef.h>
+static int fail_vector_allocation;
+static void *vector_malloc(int size) {
+  return fail_vector_allocation ? NULL : sqlite3_malloc(size);
+}
+#define sqlite3_malloc vector_malloc
 #ifndef GROW_SQLITE_VEC_SOURCE_PATH
 #define GROW_SQLITE_VEC_SOURCE_PATH "../sqlite-vec.c"
 #endif
 #include GROW_SQLITE_VEC_SOURCE_PATH
+#undef sqlite3_malloc
 #include <stdio.h>
 
 static vec0_vtab *captured;
@@ -28,6 +36,49 @@ static void nearest(sqlite3 *db, const char *sql, int expected) {
   assert(sqlite3_column_int(stmt, 0) == expected);
   assert(sqlite3_step(stmt) == SQLITE_DONE);
   assert(sqlite3_finalize(stmt) == SQLITE_OK);
+}
+
+static void failed_vector_scalar(sqlite3_context *context, int argc,
+                                 sqlite3_value **argv) {
+  fail_vector_allocation = 1;
+  if (argc == 1) vec_f32(context, argc, argv);
+  else vec_quantize_int8(context, argc, argv);
+  fail_vector_allocation = 0;
+}
+
+static void float_vector_errors(sqlite3 *db) {
+  sqlite3_stmt *stmt = NULL;
+  assert(sqlite3_prepare_v2(db, "SELECT '[1,2]'", -1, &stmt, NULL) == SQLITE_OK);
+  assert(sqlite3_step(stmt) == SQLITE_ROW);
+  f32 *vector = NULL;
+  size_t dimensions = 0;
+  fvec_cleanup cleanup = NULL;
+  char sentinel = 0;
+  char *error = &sentinel;
+  fail_vector_allocation = 1;
+  int rc = fvec_from_value(sqlite3_column_value(stmt, 0), &vector,
+                           &dimensions, &cleanup, &error);
+  fail_vector_allocation = 0;
+  assert(rc == SQLITE_NOMEM && error == NULL);
+  assert(vector == NULL && cleanup == NULL);
+  assert(sqlite3_finalize(stmt) == SQLITE_OK);
+
+  assert(sqlite3_create_function(db, "failed_f32", 1, SQLITE_UTF8, NULL,
+                                 failed_vector_scalar, NULL, NULL) == SQLITE_OK);
+  assert(sqlite3_create_function(db, "failed_int8", 2, SQLITE_UTF8, NULL,
+                                 failed_vector_scalar, NULL, NULL) == SQLITE_OK);
+  const char *failures[] = {"SELECT failed_f32('[1,2]')",
+                            "SELECT failed_int8('[1,2]', 'unit')",
+                            "SELECT vec_f32('bad')",
+                            "SELECT vec_quantize_int8('bad', 'unit')"};
+  for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
+    assert(sqlite3_prepare_v2(db, failures[i], -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ERROR);
+    if (i >= 2) assert(strstr(sqlite3_errmsg(db), "Input does not start with '['"));
+    assert(sqlite3_finalize(stmt) == SQLITE_ERROR);
+  }
+  nearest(db, "SELECT length(vec_f32('[1,2]'))", 8);
+  nearest(db, "SELECT length(vec_quantize_int8('[0,1]', 'unit'))", 2);
 }
 
 static void metadata_lifecycle(sqlite3 *db) {
@@ -113,6 +164,7 @@ int main(void) {
   assert(memcmp(before, after, 8) == 0);
   assert(sqlite3_blob_close(blob) == SQLITE_OK);
   metadata_lifecycle(db);
+  float_vector_errors(db);
 
   sqlite3_module module = vec0Module;
   module.xCreate = capture_create;

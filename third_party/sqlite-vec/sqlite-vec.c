@@ -963,6 +963,7 @@ void fvec_cleanup_noop(void *_) { UNUSED_PARAMETER(_); }
 static int fvec_from_value(sqlite3_value *value, f32 **vector,
                            size_t *dimensions, fvec_cleanup *cleanup,
                            char **pzErr) {
+  *pzErr = NULL;
   int value_type = sqlite3_value_type(value);
 
   if (value_type == SQLITE_BLOB) {
