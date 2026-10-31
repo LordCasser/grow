@@ -2400,6 +2400,111 @@ async fn release_undispatched_link(actor: &std::sync::Arc<SessionActor>, prompt_
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn hydration_closes_legacy_replans_after_startup_failure_once() {
+    use crate::session::actor::tests::support::install_test_foreground;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut actor = linked_actor().await;
+            let snapshot = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            let mut legacy = snapshot.plan;
+            legacy
+                .update_steps(
+                    tool_types::PlanUpdateMode::Merge,
+                    vec![PlanStep {
+                        content: "changed after startup failure".into(),
+                        ..legacy.steps[0].clone()
+                    }],
+                )
+                .unwrap();
+            // Older code generated this state after recording the failure.
+            legacy.links[0].dispatch_failure = Some("cwd outside parent workspace".into());
+            legacy.replans[0].progress = tool_types::ReplanProgress::Dispatching;
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: Some(snapshot.seq),
+                        plan: Box::new(legacy.clone()),
+                    },
+                ))
+                .await
+                .unwrap();
+            let history = actor.chat_state_handle.timeline_events().await.unwrap();
+            let sampling = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+            std::sync::Arc::get_mut(&mut actor)
+                .unwrap()
+                .chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                history,
+                sampling,
+                Box::new(chat_state::NullTimelinePersistence),
+                events,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let restored = std::sync::Arc::get_mut(&mut actor).unwrap();
+            restored.events =
+                crate::session::events::EventTracker::new(restored.chat_state_handle.clone());
+
+            actor.hydrate_local_plan().await.unwrap();
+            let repaired = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(repaired.plan.links[0].pending_source_revision.is_none());
+            assert!(!repaired.plan.links[0].terminal);
+            assert!(repaired.plan.links[0].result_id.is_none());
+            assert_eq!(
+                repaired.plan.links[0].dispatch_failure,
+                legacy.links[0].dispatch_failure
+            );
+            assert_eq!(repaired.plan.replans[0].id, legacy.replans[0].id);
+            assert!(matches!(&repaired.plan.replans[0].progress,
+                tool_types::ReplanProgress::Unapplied { reason }
+                    if reason == "cwd outside parent workspace"));
+            assert_eq!(
+                actor.planning_completion_blockers().await.unwrap().len(),
+                1,
+                "the required delivery still needs explicit release"
+            );
+            actor.hydrate_local_plan().await.unwrap();
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .planning_state()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .seq,
+                repaired.seq
+            );
+
+            install_test_foreground(&actor, "release-recovered-failure").await;
+            release_undispatched_link(&actor, "release-recovered-failure").await;
+            assert!(
+                actor
+                    .planning_completion_blockers()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            select_planning_scope(&actor, "release-recovered-failure")
+                .await
+                .unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn required_undispatched_scope_switch_needs_released_review() {
     use crate::session::actor::tests::support::install_test_foreground;
 

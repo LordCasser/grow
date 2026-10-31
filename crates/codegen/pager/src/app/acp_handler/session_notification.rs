@@ -2524,6 +2524,13 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             "Behavior state updated (from CurrentModeUpdate)"
         );
     }
+    if let Some(receipt) = cmu
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/planDecisionReceipt"))
+    {
+        agent.confirm_plan_decision_receipt(receipt);
+    }
     true
 }
 

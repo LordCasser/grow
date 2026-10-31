@@ -23,3 +23,10 @@ async fn deferred_plan_reviewed_after_resume() {
     .await
     .expect("deferred Plan must remain reviewable after resume");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_two_revisions_complete() {
+    pager_pty_harness::scenarios::plan_approval_resume::assert_plan_two_revisions_complete()
+        .await
+        .expect("two Plan revisions must be approved and completed");
+}

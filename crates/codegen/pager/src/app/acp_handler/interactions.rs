@@ -205,6 +205,17 @@ pub(super) fn handle_plan_approval(
 
     // A new authoritative approval retires every older preview request.
     agent.plan_preview_request_id = agent.plan_preview_request_id.wrapping_add(1);
+    if agent
+        .pending_plan_approval_decision
+        .as_ref()
+        .is_some_and(|pending| {
+            pending.response.submission_id != params.submission_id
+                || pending.session_id != params.session_id
+                || pending.binding_epoch != agent.session_binding_epoch
+        })
+    {
+        agent.pending_plan_approval_decision = None;
+    }
     if let Some(mut old) = agent.plan_approval_view.take() {
         tracing::warn!(
             old_tool_call_id = %old.tool_call_id,

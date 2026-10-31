@@ -44,6 +44,7 @@ use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
 use crate::theme::Theme;
 use crate::views::extensions_modal::{ExtensionsModalState, StatusFilter};
+use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
 use crate::views::modal::ActiveModal;
 use crate::views::modal::CancelTurnViewState;
@@ -958,6 +959,92 @@ pub fn mcp_init_progress(v: &AgentView) -> Option<&McpInitProgress> {
 /// `AgentView::plan_approval_view`.
 pub fn plan_approval_view(v: &AgentView) -> Option<&PlanApprovalViewState> {
     v.plan_approval_view.as_ref()
+}
+
+/// The currently open line viewer, including ordinary and retained Plan previews.
+pub fn agent_line_viewer(v: &AgentView) -> Option<&LineViewerState> {
+    v.line_viewer.as_ref()
+}
+
+/// Mutable line viewer access for Minimal's embedded preview renderer.
+pub fn agent_line_viewer_mut(v: &mut AgentView) -> Option<&mut LineViewerState> {
+    v.line_viewer.as_mut()
+}
+
+/// Number of comments attached to the currently open Plan preview.
+pub fn agent_plan_comment_count(v: &AgentView) -> usize {
+    v.plan_comments.len()
+}
+
+/// Whether an approval response still awaits authoritative confirmation.
+pub fn agent_plan_decision_pending(v: &AgentView) -> bool {
+    v.pending_plan_approval_decision.is_some()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_plan_approval_for_test(v: &mut AgentView, approval: PlanApprovalViewState) {
+    v.plan_approval_view = Some(approval);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_plan_approval(
+    focus: crate::views::plan_approval_view::PlanApprovalFocus,
+) -> PlanApprovalViewState {
+    use crate::views::plan_approval_view::PlanApprovalExtRequest;
+    use crate::views::prompt_widget::StashedPrompt;
+
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let mut approval = PlanApprovalViewState::new(
+        PlanApprovalExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "plan-call".into(),
+            plan_content: "# Plan\n\n- Keep this visible".into(),
+            submission_id: 1,
+            artifact_revision: 1,
+            artifact_hash: "a".repeat(64),
+        },
+        StashedPrompt {
+            text: String::new(),
+            cursor: 0,
+            images: Vec::new(),
+            chip_elements: Vec::new(),
+            image_counter: 0,
+            image_undo_stash: Vec::new(),
+        },
+        tx,
+    );
+    approval.focus = focus;
+    approval
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_plan_viewer_for_test(
+    v: &mut AgentView,
+    viewer: crate::views::file_search::line_viewer::LineViewerState,
+) {
+    v.line_viewer = Some(viewer);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn approve_then_rebuild_plan_approval_for_test(v: &mut AgentView) {
+    use crate::views::plan_approval_view::PlanApprovalExtRequest;
+
+    let _ = v.approve_plan();
+    let old = v.plan_approval_view.take().expect("approval fixture");
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let request = PlanApprovalExtRequest {
+        session_id: old.source_session_id.clone(),
+        tool_call_id: old.tool_call_id.clone(),
+        plan_content: old.plan_content.clone(),
+        submission_id: old.submission_id,
+        artifact_revision: old.artifact_revision,
+        artifact_hash: old.artifact_hash.clone(),
+    };
+    let mut rebuilt = PlanApprovalViewState::new(request, old.stashed_prompt, tx);
+    rebuilt.focus = old.focus;
+    rebuilt.comments = old.comments;
+    rebuilt.next_comment_id = old.next_comment_id;
+    v.plan_approval_view = Some(rebuilt);
 }
 
 /// Whether the minimal `/btw` panel is the painted input owner.

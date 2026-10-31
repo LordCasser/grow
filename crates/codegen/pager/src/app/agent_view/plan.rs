@@ -65,6 +65,30 @@ fn append_draft_text(text: &mut String, cursor: &mut usize, addition: &str) {
 }
 
 impl AgentView {
+    /// Confirm a pending Plan decision from its durable accepted receipt.
+    /// Ordinary mode updates are deliberately insufficient; callers must
+    /// provide the receipt emitted after the Shell's durable ACK.
+    pub(crate) fn confirm_plan_decision_receipt(&mut self, receipt: &serde_json::Value) -> bool {
+        let Some(pending) = self.pending_plan_approval_decision.as_ref() else {
+            return false;
+        };
+        if !self
+            .session
+            .session_id
+            .as_ref()
+            .is_some_and(|session_id| session_id.0.as_ref() == pending.session_id)
+            || pending.binding_epoch != self.session_binding_epoch
+            || !plan_decision_receipt_matches(pending, receipt)
+        {
+            return false;
+        }
+        let pending = pending.clone();
+        close_confirmed_plan_decision(self, &pending);
+        self.pending_plan_approval_decision = None;
+        self.show_toast("Plan decision confirmed.");
+        true
+    }
+
     /// Whether the current line viewer is showing a plan preview.
     pub(crate) fn is_plan_viewer(&self) -> bool {
         self.line_viewer.as_ref().is_some_and(|v| {
@@ -652,7 +676,9 @@ impl AgentView {
                 pav.focus = PlanApprovalFocus::Prompt;
             }
         } else if let Some(ref mut viewer) = self.line_viewer {
-            viewer.plan_mut().feedback_active = true;
+            let plan = viewer.plan_mut();
+            plan.feedback_active = true;
+            plan.decision_pending = self.pending_plan_approval_decision.is_some();
         }
     }
     /// Discard an in-progress comment draft: clear the prompt text and
@@ -1130,10 +1156,208 @@ impl AgentView {
         self.plan_comments_artifact = None;
         self.plan_next_comment_id = 0;
         self.cancel_line_viewer();
-        self.show_toast("Plan feedback sent.");
+        self.show_toast("Plan feedback sent to chat or queued.");
         InputOutcome::Action(Action::SendPrompt(text))
     }
 }
+
+fn plan_decision_receipt_matches(
+    pending: &PendingPlanApprovalDecision,
+    receipt: &serde_json::Value,
+) -> bool {
+    let expected = &pending.response;
+    let expected_action = match expected.outcome {
+        crate::views::plan_approval_view::PlanApprovalOutcome::Approved => "approve",
+        crate::views::plan_approval_view::PlanApprovalOutcome::Cancelled => "revise",
+        crate::views::plan_approval_view::PlanApprovalOutcome::Abandoned => "abandon",
+        crate::views::plan_approval_view::PlanApprovalOutcome::Deferred => "defer",
+    };
+    receipt
+        .get("decision_id")
+        .and_then(serde_json::Value::as_str)
+        == Some(expected.decision_id.as_str())
+        && receipt
+            .get("submission_id")
+            .and_then(serde_json::Value::as_u64)
+            == Some(expected.submission_id)
+        && receipt.get("action").and_then(serde_json::Value::as_str) == Some(expected_action)
+        && receipt
+            .get("feedback")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            == expected
+                .feedback
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+}
+
+fn close_confirmed_plan_decision(agent: &mut AgentView, pending: &PendingPlanApprovalDecision) {
+    let closes_live_view = agent.plan_approval_view.as_ref().is_some_and(|pav| {
+        pav.source_session_id == pending.session_id
+            && pav.submission_id == pending.response.submission_id
+            && pav.artifact_revision == pending.artifact_revision
+            && pav.artifact_hash == pending.artifact_hash
+            && pav
+                .decision_response
+                .as_ref()
+                .is_none_or(|response| response.decision_id == pending.response.decision_id)
+    });
+    if closes_live_view && let Some(pav) = agent.plan_approval_view.take() {
+        agent.plan_next_comment_id = pav.next_comment_id;
+        agent.prompt.restore(pav.stashed_prompt);
+        agent.line_viewer = None;
+        agent.prompt.textarea.cancel_undo_group();
+        agent.casual_commenting_range = None;
+        agent.casual_editing_comment_id = None;
+    }
+    if agent
+        .plan_comments_artifact
+        .as_ref()
+        .is_some_and(|artifact| {
+            artifact.session_id == pending.session_id
+                && artifact.binding_epoch == pending.binding_epoch
+                && artifact.submission_id == pending.response.submission_id
+                && artifact.artifact_hash == pending.artifact_hash
+                && artifact.artifact_revision == pending.artifact_revision
+        })
+    {
+        agent.plan_comments.clear();
+        agent.plan_comments_artifact = None;
+    }
+}
+
+#[cfg(test)]
+mod casual_send_route_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+
+    #[test]
+    fn casual_plan_feedback_uses_chat_prompt_route_and_discloses_queueing() {
+        let mut agent = make_agent();
+        agent.enter_casual_commenting_for_test();
+        agent.plan_comments.push(PlanComment {
+            id: 0,
+            line_range: 0..1,
+            text: "clarify this step".into(),
+        });
+
+        let outcome = agent.send_casual_plan_comments();
+        let InputOutcome::Action(Action::SendPrompt(message)) = outcome else {
+            panic!("casual comments must go through the ordinary prompt route");
+        };
+        assert!(message.starts_with("Plan feedback:"));
+        assert!(message.contains("clarify this step"));
+        assert_eq!(
+            agent.toast.as_ref().map(|(message, _)| message.as_str()),
+            Some("Plan feedback sent to chat or queued.")
+        );
+    }
+}
+
+#[cfg(test)]
+mod plan_footer_mouse_route_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use crate::views::file_search::line_viewer::render_line_viewer;
+    use crate::views::plan_approval_view::{
+        PlanApprovalExtRequest, PlanApprovalOutcome, PlanApprovalViewState,
+    };
+    use crate::views::prompt_widget::StashedPrompt;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn approval_agent() -> AgentView {
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            PlanApprovalExtRequest {
+                session_id: "test-session".into(),
+                tool_call_id: "plan-call".into(),
+                plan_content: "# Plan\n\n- Verify the approval path".into(),
+                submission_id: 1,
+                artifact_revision: 1,
+                artifact_hash: "a".repeat(64),
+            },
+            StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        ));
+        agent.show_plan_preview();
+        agent
+    }
+
+    fn render_narrow(agent: &mut AgentView) {
+        let area = Rect::new(0, 0, 32, 24);
+        let mut buffer = Buffer::empty(area);
+        render_line_viewer(
+            &mut buffer,
+            area,
+            agent.line_viewer.as_mut().unwrap(),
+            std::path::Path::new("/tmp"),
+            &crate::theme::Theme::current(),
+            0,
+        );
+    }
+
+    fn click(agent: &mut AgentView, rect: Rect) -> InputOutcome {
+        agent.handle_line_viewer_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + rect.width / 2,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn narrow_footer_mouse_actions_follow_their_decision_routes() {
+        let mut agent = approval_agent();
+        render_narrow(&mut agent);
+        let revise = agent
+            .line_viewer
+            .as_ref()
+            .unwrap()
+            .plan_ref()
+            .unwrap()
+            .send_button_area
+            .unwrap();
+        assert!(matches!(click(&mut agent, revise), InputOutcome::Changed));
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().focus,
+            PlanApprovalFocus::Prompt
+        );
+        assert!(agent.pending_plan_approval_decision.is_none());
+
+        assert!(matches!(
+            agent.approve_plan(),
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        render_narrow(&mut agent);
+        let plan = agent.line_viewer.as_ref().unwrap().plan_ref().unwrap();
+        let check = plan.check_button_area.unwrap();
+        let collapse = plan.collapse_button_area.unwrap();
+        assert!(matches!(
+            click(&mut agent, check),
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        assert!(matches!(click(&mut agent, collapse), InputOutcome::Changed));
+        assert!(agent.line_viewer.is_none());
+        assert!(agent.plan_approval_view.is_some());
+        let pending = agent.pending_plan_approval_decision.as_ref().unwrap();
+        assert_eq!(pending.response.outcome, PlanApprovalOutcome::Approved);
+        assert_eq!(pending.response.submission_id, 1);
+        assert!(!pending.response.decision_id.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod prompt_flag_tests {
     use super::test_fixtures::make_agent;

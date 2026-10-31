@@ -307,19 +307,27 @@ impl SessionActor {
     /// silent text loss when a mode update follows queued output. Persist + broadcast
     /// happen when the actor loop drains the event through `emit_buffered`.
     pub(super) fn enqueue_current_mode_update(&self, current_mode_id: acp::SessionModeId) {
-        self.enqueue_current_mode_update_inner(current_mode_id, None);
+        self.enqueue_current_mode_update_inner(current_mode_id, None, None);
+    }
+    pub(super) fn enqueue_current_mode_update_with_plan_decision(
+        &self,
+        current_mode_id: acp::SessionModeId,
+        receipt: &crate::session::behavior::RetainedPlanDecision,
+    ) {
+        self.enqueue_current_mode_update_inner(current_mode_id, None, Some(receipt));
     }
     pub(super) fn enqueue_current_mode_update_with_behavior_change(
         &self,
         current_mode_id: acp::SessionModeId,
         behavior_change: serde_json::Value,
     ) {
-        self.enqueue_current_mode_update_inner(current_mode_id, Some(behavior_change));
+        self.enqueue_current_mode_update_inner(current_mode_id, Some(behavior_change), None);
     }
     fn enqueue_current_mode_update_inner(
         &self,
         current_mode_id: acp::SessionModeId,
         behavior_change: Option<serde_json::Value>,
+        plan_decision: Option<&crate::session::behavior::RetainedPlanDecision>,
     ) {
         let behavior = self.behavior.lock();
         let plan_phase = behavior.plan_phase_label();
@@ -343,6 +351,9 @@ impl SessionActor {
             "grow/displayProjectionSource": format!("behavior:{behavior_name}"),
             "grow/displayProjectionRevision": control_revision,
         });
+        if let Some(receipt) = plan_decision {
+            behavior_meta["grow/planDecisionReceipt"] = serde_json::json!(receipt);
+        }
         let notification = acp::SessionNotification::new(
             self.session_info.id.clone(),
             acp::SessionUpdate::CurrentModeUpdate(

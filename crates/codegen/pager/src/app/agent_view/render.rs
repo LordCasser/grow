@@ -101,10 +101,9 @@ impl AgentView {
     ) -> Vec<HintItem> {
         if self.pending_plan_approval_decision.is_some() || pav.decision_pending() {
             let mut hints = vec![HintItem::new(key!('r'), "check confirmation")];
-            if self.line_viewer.is_some() && pav.focus == PlanApprovalFocus::Preview {
-                hints.push(HintItem::new(key!('y'), "copy plan"));
+            if self.line_viewer.is_some() {
+                hints.push(HintItem::new(key!(Esc), "collapse"));
             }
-            hints.push(HintItem::new(key!(Esc), "close"));
             return hints;
         }
         match pav.focus {
@@ -112,28 +111,43 @@ impl AgentView {
                 vec![
                     HintItem::new(key!(Enter), "save comment"),
                     HintItem::new(key!(Esc), "cancel"),
+                    HintItem::new(key!(Tab), "discard comment"),
                 ]
             }
             PlanApprovalFocus::Prompt => {
                 let has_content = !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
                 if has_content {
-                    vec![
+                    let mut hints = vec![
                         HintItem::new(key!(Enter), "request changes"),
                         HintItem::new(key!(Tab), "plan"),
-                        HintItem::new(key!(Esc), "close"),
-                    ]
+                    ];
+                    if self.line_viewer.is_some() {
+                        hints.push(HintItem::new(key!(Esc), "collapse"));
+                    }
+                    hints
                 } else {
-                    vec![
+                    let mut hints = vec![
                         HintItem::new(key!('a'), "approve"),
                         HintItem::new(key!(Tab), "plan"),
-                        HintItem::new(key!(Esc), "close"),
-                    ]
+                    ];
+                    if self.line_viewer.is_some() {
+                        hints.push(HintItem::new(key!(Esc), "collapse"));
+                    }
+                    hints
                 }
             }
-            PlanApprovalFocus::Preview => vec![
+            PlanApprovalFocus::Preview if self.line_viewer.is_some() => vec![
+                HintItem::new(key!('a'), "approve"),
+                HintItem::new(key!('s'), "revise"),
+                HintItem::new(key!('c'), "comment"),
                 HintItem::new(key!('l'), "later"),
+                HintItem::new(key!('q'), "abandon"),
                 HintItem::new(key!('y'), "copy plan"),
-                HintItem::new(key!(Esc), "close"),
+                HintItem::new(key!(Esc), "collapse"),
+            ],
+            PlanApprovalFocus::Preview => vec![
+                HintItem::new(key!('a'), "approve"),
+                HintItem::new(key!(Tab), "feedback"),
             ],
         }
     }
@@ -228,7 +242,7 @@ impl AgentView {
                     h.push(HintItem::new(key!('r'), "review"));
                 }
                 if !self.plan_comments.is_empty() {
-                    h.push(HintItem::new(key!('s'), "send"));
+                    h.push(HintItem::new(key!('s'), "send to chat/queue"));
                 }
                 h.push(HintItem::new(key!(Esc), "close"));
                 h

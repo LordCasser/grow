@@ -480,6 +480,8 @@ pub enum Modal {
     /// Plan approval (`AgentView::plan_approval_view`) — rendered compactly by
     /// [`super::plan`] in place of the full TUI's fullscreen line viewer.
     Plan,
+    /// Ordinary or retained Plan preview opened without a live approval.
+    PlanPreview,
 }
 
 /// The active prompt-replacing modal, in the full-TUI render precedence
@@ -495,6 +497,11 @@ pub fn active_modal(agent: &AgentView) -> Option<Modal> {
     // mutually exclusive with permission/question in practice; check it next.
     if minimal_api::plan_approval_view(agent).is_some() {
         return Some(Modal::Plan);
+    }
+    if minimal_api::agent_line_viewer(agent).is_some_and(|viewer| {
+        viewer.kind == pager::views::file_search::line_viewer::LineViewerKind::PlanPreview
+    }) {
+        return Some(Modal::PlanPreview);
     }
     if !minimal_api::agent_permission_queue(agent).is_empty() {
         return Some(Modal::Permission);
@@ -550,7 +557,8 @@ pub fn modal_height(modal: Modal, agent: &mut AgentView, screen_h: u16, content_
                 0
             }
         }
-        Modal::Plan => super::plan::height(agent),
+        Modal::Plan => super::plan::height(agent, content_w as u16),
+        Modal::PlanPreview => screen_h.saturating_sub(1),
     }
 }
 
@@ -594,6 +602,7 @@ pub fn render_modal(
             None
         }
         Modal::Plan => super::plan::render(buf, area, agent, theme),
+        Modal::PlanPreview => super::plan::render_preview(buf, area, agent, theme),
     }
 }
 

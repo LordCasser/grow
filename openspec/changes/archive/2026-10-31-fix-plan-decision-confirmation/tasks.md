@@ -1,0 +1,3 @@
+- [x] 构造 early status query 与新审批被旧 pending 阻塞的回归。
+- [x] 接入 durable receipt 的既有通知路径，统一精确确认。
+- [x] 验证失败和迟到路径，更新文档并严格校验归档。

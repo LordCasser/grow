@@ -39,7 +39,7 @@ the approval lifecycle inside that Behavior.
 
 You can enter plan mode yourself in two ways:
 
-- **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
+- **`/plan`** -- Select Plan for the current session. On the dashboard, this stages Plan for the next session you start. Run `/plan <description>` to enter plan mode and start a turn with that description after the mode switch succeeds.
 - **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Workflow, and Goal when those Behaviors are available.
 
 Permission is selected independently through `Ctrl+X P` or `/permission`;
@@ -117,13 +117,24 @@ The approval view has three focus states:
 
 Press `Tab` to switch between the preview and the prompt. When you send feedback -- inline comments, freeform notes, or both -- the agent receives it and revises the plan. Plan mode stays active so you can iterate.
 
+An empty `Enter` in the revision prompt does not approve or submit anything.
+Use `a` on an empty prompt without pending comments to approve, or return to
+Preview with `Tab` to approve with comments and see all review actions. Minimal also displays the editor while you write a line
+comment. In a narrow preview, the action bar wraps onto multiple rows.
+
 ### Leaving the Approval View
 
-Press `Esc` to return focus from the prompt to the plan preview. In the preview, `Esc` first clears transient search or selection, then collapses the page; the close button also only collapses it. Neither action approves, abandons, or defers the plan, and the approval remains pending.
+In the preview, `Esc` first clears transient search or selection, then collapses the page; the close button also only collapses it. From the revision prompt, `Esc` collapses any open preview. Use `Tab` to reopen it. Neither action approves, abandons, or defers the plan, and the approval remains pending. While editing a line comment, `Esc` cancels that edit and restores your previous revision draft.
 
 Press `l` in the approval preview to keep the candidate for later. Once that decision is durably confirmed, Grow releases the approval wait without starting implementation. Run `/view-plan` to read it again, then press `r` in the retained preview to request a new review. Viewing alone never approves it. If another Behavior owns the session, its admission rules still apply; the saved plan does not take over automatically. Press `q` in the approval preview only when you intend to abandon it.
 
-If a decision is shown as unconfirmed, use `r` to check its status rather than submitting another decision. Approval and comments remain bound to the reviewed session and submission. If the candidate changes, review the new one; old comments remain unsent drafts rather than being applied to a different plan.
+Accepted decisions close the confirmation view automatically when the server acknowledges that exact decision. If a decision remains unconfirmed, use `r` to check its status rather than submitting another decision. Approval and comments remain bound to the reviewed session and submission. If the candidate changes, review the new one; old comments remain unsent drafts rather than being applied to a different plan.
+
+Outside a live approval, comments sent from an ordinary Plan preview are
+ordinary chat messages. If the agent is busy, they enter the normal message
+queue; sending them does not itself return the Plan to revision or approve it.
+For a retained candidate, use `r` to open a formal review first. Completed
+Plan and Result report tabs remain read-only.
 
 See the [retained-plan contract](../../../../../openspec/specs/behavior-goal/spec.md#requirement-retained-plans-remain-under-the-existing-session-owner).
 

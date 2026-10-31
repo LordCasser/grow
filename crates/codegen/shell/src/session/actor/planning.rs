@@ -415,6 +415,36 @@ impl SessionActor {
         Ok(receipt)
     }
     pub(crate) async fn hydrate_local_plan(&self) -> Result<(), String> {
+        if let Some(snapshot) = self.chat_state_handle.planning_state().await? {
+            let mut plan = snapshot.plan;
+            let failures: Vec<_> = plan
+                .links
+                .iter()
+                .filter(|link| link.pending_source_revision.is_some())
+                .filter_map(|link| {
+                    link.dispatch_failure
+                        .as_ref()
+                        .map(|reason| (link.id.clone(), reason.clone()))
+                })
+                .collect();
+            let mut changed = false;
+            for (task_id, reason) in failures {
+                changed |= plan
+                    .mark_link_undispatched(&task_id, reason)
+                    .map_err(|error| format!("cannot close undispatched replans: {error:?}"))?;
+            }
+            if changed {
+                self.chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                        chat_state::timeline::PlanningEvent {
+                            previous: Some(snapshot.seq),
+                            plan: Box::new(plan),
+                        },
+                    ))
+                    .await
+                    .map_err(|error| format!("planning recovery unconfirmed: {error}"))?;
+            }
+        }
         let bridge = self.agent.borrow().tool_bridge().clone();
         let plan = self.bind_local_planning_runtime(&bridge).await?;
         self.send_update(

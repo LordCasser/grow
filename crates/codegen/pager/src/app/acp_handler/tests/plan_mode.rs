@@ -46,6 +46,287 @@
         }
     }
 
+    fn approval_ext(
+        body: &str,
+        submission_id: u64,
+    ) -> (
+        acp_transport::AcpArgs<acp::ExtRequest>,
+        tokio::sync::oneshot::Receiver<acp_transport::AcpResult<acp::ExtResponse>>,
+    ) {
+        let (mut ext, rx) = make_exit_plan_ext(Some(body));
+        let mut params: serde_json::Value = serde_json::from_str(ext.request.params.get()).unwrap();
+        params["submissionId"] = submission_id.into();
+        params["artifactHash"] = blake3::hash(body.as_bytes()).to_hex().to_string().into();
+        ext.request.params = serde_json::value::to_raw_value(&params).unwrap().into();
+        (ext, rx)
+    }
+
+    fn open_approval(app: &mut AppView, body: &str, submission_id: u64) {
+        let (ext, _rx) = approval_ext(body, submission_id);
+        assert!(handle_plan_approval(ext, app));
+    }
+
+    fn install_pending_decision(
+        agent: &mut AgentView,
+        decision_id: &str,
+        outcome: crate::views::plan_approval_view::PlanApprovalOutcome,
+        feedback: Option<&str>,
+    ) -> serde_json::Value {
+        use crate::views::plan_approval_view::{PendingPlanApprovalDecision, PlanApprovalExtResponse};
+
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        let response = PlanApprovalExtResponse {
+            outcome,
+            feedback: feedback.map(str::to_owned),
+            submission_id: pav.submission_id,
+            decision_id: decision_id.into(),
+        };
+        let pending = PendingPlanApprovalDecision {
+            session_id: pav.source_session_id.clone(),
+            binding_epoch: agent.session_binding_epoch,
+            response: response.clone(),
+            artifact_revision: pav.artifact_revision,
+            artifact_hash: pav.artifact_hash.clone(),
+            comments: pav.comments.clone(),
+        };
+        agent.plan_approval_view.as_mut().unwrap().decision_response = Some(response.clone());
+        agent.pending_plan_approval_decision = Some(pending);
+        let action = match response.outcome {
+            crate::views::plan_approval_view::PlanApprovalOutcome::Approved => "approve",
+            crate::views::plan_approval_view::PlanApprovalOutcome::Cancelled => "revise",
+            crate::views::plan_approval_view::PlanApprovalOutcome::Abandoned => "abandon",
+            crate::views::plan_approval_view::PlanApprovalOutcome::Deferred => "defer",
+        };
+        serde_json::json!({
+            "decision_id": response.decision_id,
+            "submission_id": response.submission_id,
+            "action": action,
+            "feedback": response.feedback,
+            "resulting_status": "revision_requested"
+        })
+    }
+
+    #[test]
+    fn early_unconfirmed_status_then_exact_mode_receipt_closes_plan() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::views::plan_approval_view::PlanApprovalOutcome;
+        use acp_transport::protocol as acp;
+
+        let mut app = make_app_with_agent("sess-1");
+        open_approval(&mut app, "# First Plan", 1);
+        let receipt = install_pending_decision(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "decision-1",
+            PlanApprovalOutcome::Cancelled,
+            Some("please revise"),
+        );
+        crate::app::root::dispatch::dispatch(
+            Action::TaskComplete(TaskResult::PlanApprovalDecisionStatusResolved {
+                agent_id: AgentId(0),
+                session_id: acp::SessionId::new("sess-1"),
+                binding_epoch: app.agents[&AgentId(0)].session_binding_epoch,
+                submission_id: 1,
+                decision_id: "decision-1".into(),
+                result: Ok(serde_json::json!({"status": "unconfirmed"})),
+            }),
+            &mut app,
+        );
+        assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_some());
+        assert!(app.agents[&AgentId(0)].plan_approval_view.is_some());
+
+        let update = acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")).meta(
+                serde_json::json!({"grow/planDecisionReceipt": receipt})
+                    .as_object().cloned().unwrap(),
+            ),
+        );
+        assert!(detect_plan_mode_change(&update, app.agents.get_mut(&AgentId(0)).unwrap()));
+        assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_none());
+        assert!(app.agents[&AgentId(0)].plan_approval_view.is_none());
+
+        // A later round has a distinct authoritative submission and artifact.
+        open_approval(&mut app, "# Revised Plan", 2);
+        install_pending_decision(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "decision-2",
+            PlanApprovalOutcome::Approved,
+            None,
+        );
+        let old_receipt = serde_json::json!({
+            "decision_id": "decision-1", "submission_id": 1,
+            "action": "revise", "feedback": "please revise",
+            "resulting_status": "revision_requested"
+        });
+        assert!(!app.agents.get_mut(&AgentId(0)).unwrap().confirm_plan_decision_receipt(&old_receipt));
+        assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_some());
+        assert!(app.agents[&AgentId(0)].plan_approval_view.is_some());
+    }
+
+    #[test]
+    fn mode_update_receipt_is_required_and_checked_against_current_identity() {
+        use acp_transport::protocol as acp;
+
+        let mut app = make_app_with_agent("sess-1");
+        open_approval(&mut app, "# Plan", 1);
+        let mut agent = app.agents.swap_remove(&AgentId(0)).unwrap();
+        let receipt = install_pending_decision(
+            &mut agent,
+            "decision-1",
+            crate::views::plan_approval_view::PlanApprovalOutcome::Cancelled,
+            Some("please revise"),
+        );
+        let plain_update = acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")),
+        );
+        assert!(detect_plan_mode_change(&plain_update, &mut agent));
+        assert!(agent.pending_plan_approval_decision.is_some());
+
+        let wrong_receipt = serde_json::json!({
+            "decision_id": "decision-other", "submission_id": 1,
+            "action": "revise", "feedback": "please revise"
+        });
+        let bad = acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")).meta(serde_json::json!({
+                "grow/planDecisionReceipt": wrong_receipt
+            }).as_object().cloned().unwrap()),
+        );
+        assert!(detect_plan_mode_change(&bad, &mut agent));
+        assert!(agent.pending_plan_approval_decision.is_some());
+
+        for (action, feedback) in [("approve", "please revise"), ("revise", "different feedback")] {
+            let wrong_payload = serde_json::json!({
+                "decision_id": "decision-1", "submission_id": 1,
+                "action": action, "feedback": feedback
+            });
+            let bad = acp::SessionUpdate::CurrentModeUpdate(
+                acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")).meta(
+                    serde_json::json!({
+                        "grow/planDecisionReceipt": wrong_payload
+                    }).as_object().cloned().unwrap(),
+                ),
+            );
+            assert!(detect_plan_mode_change(&bad, &mut agent));
+            assert!(agent.pending_plan_approval_decision.is_some());
+        }
+
+        agent.pending_plan_approval_decision.as_mut().unwrap().session_id = "other-session".into();
+        let bad = acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")).meta(serde_json::json!({
+                "grow/planDecisionReceipt": receipt
+            }).as_object().cloned().unwrap()),
+        );
+        assert!(detect_plan_mode_change(&bad, &mut agent));
+        assert!(agent.pending_plan_approval_decision.is_some());
+
+        agent.pending_plan_approval_decision.as_mut().unwrap().session_id = "sess-1".into();
+        agent.pending_plan_approval_decision.as_mut().unwrap().binding_epoch += 1;
+        assert!(detect_plan_mode_change(&bad, &mut agent));
+        assert!(agent.pending_plan_approval_decision.is_some());
+
+        let binding_epoch = agent.session_binding_epoch;
+        agent.pending_plan_approval_decision.as_mut().unwrap().binding_epoch = binding_epoch;
+        let exact = acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")).meta(serde_json::json!({
+                "grow/planDecisionReceipt": receipt
+            }).as_object().cloned().unwrap()),
+        );
+        assert!(detect_plan_mode_change(&exact, &mut agent));
+        assert!(agent.pending_plan_approval_decision.is_none());
+        assert!(agent.plan_approval_view.is_none());
+    }
+
+    #[test]
+    fn new_submission_retires_pending_decision_but_duplicate_keeps_it_and_comments() {
+        use crate::views::plan_approval_view::{PlanComment, PlanApprovalOutcome};
+        use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+        let mut app = make_app_with_agent("sess-1");
+        open_approval(&mut app, "# Plan", 1);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.resolve_plan_preview(PlanArtifactQueryResponse {
+                session_id: "sess-1".into(),
+                submission_id: 1,
+                retained: true,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(b"# Plan").to_hex().to_string(),
+                plan_content: "# Plan".into(),
+                completion_report: None,
+            }).unwrap();
+            install_pending_decision(
+                agent,
+                "decision-1",
+                PlanApprovalOutcome::Cancelled,
+                Some("please revise"),
+            );
+            agent.plan_comments.push(PlanComment {
+                id: 1,
+                line_range: 1..2,
+                text: "preserve me".into(),
+            });
+            agent.plan_comments_artifact = agent.plan_artifact_preview.clone();
+        }
+
+        open_approval(&mut app, "# Plan", 1);
+        assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_some());
+        assert_eq!(app.agents[&AgentId(0)].plan_comments[0].text, "preserve me");
+        assert_eq!(app.agents[&AgentId(0)].plan_comments_artifact.as_ref().unwrap().submission_id, 1);
+
+        open_approval(&mut app, "# Next Plan", 2);
+        assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_none());
+        assert_eq!(app.agents[&AgentId(0)].plan_comments[0].text, "preserve me");
+        assert_eq!(app.agents[&AgentId(0)].plan_comments_artifact.as_ref().unwrap().submission_id, 1);
+
+        let registry = crate::actions::ActionRegistry::defaults();
+        let mut effects = Vec::new();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.handle_input(
+            &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &registry,
+            &mut effects,
+        );
+        agent.prompt.set_text("change the next step");
+        let outcome = agent.handle_input(
+            &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &registry,
+            &mut effects,
+        );
+        assert!(matches!(outcome, crate::app::root::InputOutcome::Action(crate::app::actions::Action::CheckPlanApprovalDecision)));
+        assert!(agent.plan_approval_view.as_ref().unwrap().decision_pending());
+        let pending = agent.pending_plan_approval_decision.as_ref().unwrap();
+        assert_eq!(pending.response.outcome, PlanApprovalOutcome::Cancelled);
+        assert_eq!(pending.response.feedback.as_deref(), Some("change the next step"));
+    }
+
+    #[test]
+    fn duplicate_same_submission_keeps_pending_until_its_receipt_closes_replacement_view() {
+        use crate::views::plan_approval_view::PlanApprovalOutcome;
+
+        let mut app = make_app_with_agent("sess-1");
+        open_approval(&mut app, "# Plan", 1);
+        install_pending_decision(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "decision-1",
+            PlanApprovalOutcome::Cancelled,
+            Some("please revise"),
+        );
+        open_approval(&mut app, "# Plan", 1);
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.pending_plan_approval_decision.is_some());
+        assert!(agent.confirm_plan_decision_receipt(&serde_json::json!({
+            "decision_id": "decision-1", "submission_id": 1,
+            "action": "revise", "feedback": "please revise"
+        })));
+        assert!(agent.pending_plan_approval_decision.is_none());
+        assert!(agent.plan_approval_view.is_none());
+    }
+
     #[test]
     fn plan_approval_opens_submitted_plan_preview() {
         let mut app = make_app_with_agent("sess-1");

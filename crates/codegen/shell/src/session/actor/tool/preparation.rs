@@ -1582,9 +1582,6 @@ impl SessionActor {
                         match parsed.outcome {
                             PlanApprovalOutcome::Abandoned => {
                                 tracing::info!("plan_control: user abandoned Plan");
-                                self.enqueue_current_mode_update(acp::SessionModeId::new(
-                                    tool_types::BehaviorId::Normal.as_id(),
-                                ));
                                 self.send_available_commands_update().await;
                                 let message = format!(
                                     "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
@@ -1649,9 +1646,6 @@ impl SessionActor {
                                 {
                                     tracing::warn!(%error, "Plan execution handoff receipt will be reconciled after restore");
                                 }
-                                self.enqueue_current_mode_update(acp::SessionModeId::new(
-                                    tools::types::BehaviorId::Plan.as_id(),
-                                ));
                                 tracing::info!("plan_control: user approved frozen Plan contract");
                             }
                             PlanApprovalOutcome::Deferred => {

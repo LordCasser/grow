@@ -93,73 +93,6 @@ fn is_runtime_suspended_prompt_response(result: &Result<acp::PromptResponse, Str
         })
 }
 
-fn plan_decision_receipt_matches(
-    pending: &crate::views::plan_approval_view::PendingPlanApprovalDecision,
-    value: &serde_json::Value,
-) -> bool {
-    let expected = &pending.response;
-    let Some(receipt) = value.get("receipt") else {
-        return false;
-    };
-    let expected_action = match expected.outcome {
-        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Approved => {
-            "approve"
-        }
-        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Cancelled => {
-            "revise"
-        }
-        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Abandoned => {
-            "abandon"
-        }
-        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Deferred => "defer",
-    };
-    let receipt_feedback = receipt.get("feedback").and_then(serde_json::Value::as_str);
-    receipt
-        .get("decision_id")
-        .and_then(serde_json::Value::as_str)
-        == Some(expected.decision_id.as_str())
-        && receipt
-            .get("submission_id")
-            .and_then(serde_json::Value::as_u64)
-            == Some(expected.submission_id)
-        && receipt.get("action").and_then(serde_json::Value::as_str) == Some(expected_action)
-        && receipt_feedback.map(str::trim) == expected.feedback.as_deref().map(str::trim)
-}
-
-fn close_confirmed_plan_decision(
-    agent: &mut crate::app::agent_view::AgentView,
-    pending: &crate::views::plan_approval_view::PendingPlanApprovalDecision,
-) {
-    let closes_live_view = agent.plan_approval_view.as_ref().is_some_and(|pav| {
-        pav.submission_id == pending.response.submission_id
-            && pav
-                .decision_response
-                .as_ref()
-                .is_some_and(|response| response.decision_id == pending.response.decision_id)
-    });
-    if closes_live_view && let Some(pav) = agent.plan_approval_view.take() {
-        agent.plan_next_comment_id = pav.next_comment_id;
-        agent.prompt.restore(pav.stashed_prompt);
-        agent.line_viewer = None;
-        agent.prompt.textarea.cancel_undo_group();
-        agent.casual_commenting_range = None;
-        agent.casual_editing_comment_id = None;
-    }
-    if agent
-        .plan_comments_artifact
-        .as_ref()
-        .is_some_and(|artifact| {
-            artifact.session_id == pending.session_id
-                && artifact.binding_epoch == pending.binding_epoch
-                && artifact.submission_id == pending.response.submission_id
-                && artifact.artifact_hash == pending.artifact_hash
-                && artifact.artifact_revision == pending.artifact_revision
-        })
-    {
-        agent.plan_comments.clear();
-        agent.plan_comments_artifact = None;
-    }
-}
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
     session_id
         .map(|sid| Effect::UnregisterActiveSession { session_id: sid })
@@ -445,16 +378,19 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             {
                 return vec![];
             }
-            let pending = pending.clone();
             match result {
                 Ok(value)
                     if value.get("status").and_then(serde_json::Value::as_str)
-                        == Some("accepted")
-                        && plan_decision_receipt_matches(&pending, &value) =>
+                        == Some("accepted") =>
                 {
-                    close_confirmed_plan_decision(agent, &pending);
-                    agent.pending_plan_approval_decision = None;
-                    agent.show_toast("Plan decision confirmed.");
+                    if !value
+                        .get("receipt")
+                        .is_some_and(|receipt| agent.confirm_plan_decision_receipt(receipt))
+                    {
+                        agent.show_toast(
+                            "Plan decision receipt did not match; confirmation is pending.",
+                        );
+                    }
                 }
                 Ok(value)
                     if value.get("status").and_then(serde_json::Value::as_str)
@@ -2445,64 +2381,5 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             rollback_effects
         }
-    }
-}
-
-#[cfg(test)]
-mod plan_decision_receipt_tests {
-    use super::plan_decision_receipt_matches;
-    use crate::views::plan_approval_view::{
-        PendingPlanApprovalDecision, PlanApprovalExtResponse, PlanApprovalOutcome,
-    };
-
-    fn pending() -> PendingPlanApprovalDecision {
-        PendingPlanApprovalDecision {
-            session_id: "session-1".into(),
-            binding_epoch: 3,
-            response: PlanApprovalExtResponse {
-                outcome: PlanApprovalOutcome::Cancelled,
-                feedback: Some("please revise".into()),
-                submission_id: 8,
-                decision_id: "decision-8".into(),
-            },
-            artifact_revision: 4,
-            artifact_hash: "a".repeat(64),
-            comments: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn only_exact_receipt_confirms_plan_decision() {
-        let pending = pending();
-        let receipt = serde_json::json!({
-            "status": "accepted",
-            "receipt": {
-                "decision_id": "decision-8",
-                "submission_id": 8,
-                "action": "revise",
-                "feedback": "please revise"
-            }
-        });
-        assert!(plan_decision_receipt_matches(&pending, &receipt));
-
-        let wrong_id = serde_json::json!({
-            "receipt": {
-                "decision_id": "decision-other",
-                "submission_id": 8,
-                "action": "revise",
-                "feedback": "please revise"
-            }
-        });
-        assert!(!plan_decision_receipt_matches(&pending, &wrong_id));
-
-        let wrong_payload = serde_json::json!({
-            "receipt": {
-                "decision_id": "decision-8",
-                "submission_id": 8,
-                "action": "approve",
-                "feedback": "please revise"
-            }
-        });
-        assert!(!plan_decision_receipt_matches(&pending, &wrong_payload));
     }
 }

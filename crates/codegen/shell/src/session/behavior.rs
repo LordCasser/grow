@@ -1384,7 +1384,7 @@ pub fn plan_phase_model_context(snapshot: &BehaviorSnapshot, plan_content: &str)
         .filter(|feedback| !feedback.is_empty());
     let context = match phase {
         PlanPhase::Drafting => format!(
-            "{}\n\nPlan phase: Drafting. Workspace mutation and execution are forbidden. Investigate, resolve material uncertainties, and submit one complete plan for approval with `plan_control` action `submit`.{}{}",
+            "{}\n\nPlan phase: Drafting. Workspace mutation and execution are forbidden. Investigate, resolve material uncertainties, and submit one complete plan for approval with `plan_control` action `submit`.{}{}{}",
             plan_behavior_template().trim(),
             if plan.is_empty() {
                 ""
@@ -1392,6 +1392,9 @@ pub fn plan_phase_model_context(snapshot: &BehaviorSnapshot, plan_content: &str)
                 "\n\nPlan requiring revision:\n\n"
             },
             if plan.is_empty() { "" } else { plan },
+            feedback.map_or_else(String::new, |feedback| format!(
+                "\n\nApproval feedback:\n\n{feedback}"
+            )),
         ),
         PlanPhase::AwaitingApproval => format!(
             "{}\n\nPlan phase: AwaitingApproval. The plan below is frozen and awaiting a human decision. Do not execute it, modify the workspace, or replace it unless the approval result moves the phase.\n\nFrozen plan:\n\n{}",
@@ -1645,6 +1648,62 @@ mod tests {
 
         controller.record_plan_artifact("# replacement");
         assert!(controller.snapshot().last_plan_handoff.is_none());
+    }
+
+    #[test]
+    fn revision_context_preserves_current_feedback_across_restore_and_resubmission() {
+        for amendment in [false, true] {
+            let mut controller = controller();
+            controller.select_behavior(BehaviorId::Plan);
+            if amendment {
+                controller.record_plan_artifact("# approved");
+                assert!(controller.submit_initial_plan());
+                assert!(controller.approve_submitted_plan());
+            }
+            let action = if amendment { "amend" } else { "submit" };
+            let phase = if amendment {
+                PlanPhase::Amending
+            } else {
+                PlanPhase::Drafting
+            };
+            for (plan, feedback) in [
+                ("# candidate", Some("补充恢复流程\n保留原有接口")),
+                ("# replacement", Some("覆盖失败路径，不增加重试")),
+                ("# final candidate", Some("   ")),
+                ("# no notes", None),
+            ] {
+                controller.record_plan_artifact(plan);
+                assert!(if amendment {
+                    controller.submit_plan_amendment()
+                } else {
+                    controller.submit_initial_plan()
+                });
+                let submitted = controller.snapshot();
+                let pending_context = plan_phase_model_context(&submitted, plan).unwrap();
+                assert!(!pending_context.contains("Approval feedback:"));
+                assert!(!pending_context.contains("补充恢复流程"));
+                assert!(!pending_context.contains("覆盖失败路径"));
+                assert!(controller.reject_submitted_plan_if_with_feedback(
+                    &submitted,
+                    feedback.map(str::to_owned),
+                ));
+                controller = BehaviorCoordinator::from_snapshot(controller.snapshot());
+                assert_eq!(controller.state(), BehaviorState::Plan(phase));
+                assert!(!controller.plan_allows_edits());
+                let context = plan_phase_model_context(&controller.snapshot(), plan).unwrap();
+                assert!(context.contains(plan));
+                assert!(context.contains(&format!("action `{action}`")));
+                assert!(context.contains("Workspace mutation and execution are forbidden"));
+                if let Some(feedback) = feedback.filter(|text| !text.trim().is_empty()) {
+                    assert_eq!(context.matches(feedback).count(), 1, "{phase:?}: {context}");
+                } else {
+                    assert!(!context.contains("Approval feedback:"));
+                }
+                if plan != "# candidate" {
+                    assert!(!context.contains("补充恢复流程"));
+                }
+            }
+        }
     }
 
     #[test]

@@ -5,13 +5,13 @@
 //! into native scrollback** as a normal conversation block (see
 //! [`maybe_commit_plan`]), so it reads and scrolls exactly like the rest of the
 //! transcript. The prompt-anchored live region then holds only the decision
-//! controls — approve / revise / keep planning — plus the feedback input when
+//! controls — approve / revise / defer / abandon — plus the feedback input when
 //! revising. Nothing of the plan body is drawn under the prompt.
 //!
 //! Input routing is unchanged: while `line_viewer.is_some()` the agent's input
 //! handler already routes keys to `handle_line_viewer_key` (Preview focus:
-//! `a` approve / `s`/`Tab` revise / `q` keep planning) and `handle_plan_feedback_key`
-//! (Prompt focus: type feedback, `Enter` send, `Esc` back). Minimal keeps the
+//! `a` approve / `s`/`Tab` revise / `l` defer / `q` abandon) and `handle_plan_feedback_key`
+//! (Prompt focus: type feedback, `Enter` send, `Esc` collapse). Minimal keeps the
 //! line viewer open (so those keys fire) but renders this compact controls strip
 //! in place of the never-drawn fullscreen viewer.
 
@@ -37,6 +37,63 @@ fn focus(agent: &AgentView) -> PlanApprovalFocus {
 
 /// Controls-strip header for the parked plan-approval surface.
 const PLAN_HEADER: &str = "Plan ready for review";
+
+fn control_shortcuts(agent: &AgentView) -> Vec<pager::views::modal_window::Shortcut<'static>> {
+    use pager::views::modal_window::Shortcut;
+
+    let pending = minimal_api::agent_plan_decision_pending(agent)
+        || minimal_api::plan_approval_view(agent).is_some_and(|pav| pav.decision_pending());
+    let has_viewer = minimal_api::agent_line_viewer(agent).is_some();
+    let labels: Vec<&'static str> = if pending {
+        if has_viewer {
+            vec!["r check confirmation", "Esc collapse"]
+        } else {
+            vec!["r check confirmation"]
+        }
+    } else {
+        match focus(agent) {
+            PlanApprovalFocus::Prompt => {
+                let mut labels = vec![
+                    if !minimal_api::agent_prompt(agent).text().trim().is_empty()
+                        || minimal_api::plan_approval_view(agent)
+                            .is_some_and(|pav| !pav.comments.is_empty())
+                    {
+                        "Enter request changes"
+                    } else {
+                        "a approve"
+                    },
+                    "Tab plan",
+                ];
+                if has_viewer {
+                    labels.push("Esc collapse");
+                }
+                labels
+            }
+            PlanApprovalFocus::Commenting => {
+                vec!["Enter save comment", "Esc cancel", "Tab discard comment"]
+            }
+            PlanApprovalFocus::Preview if has_viewer => vec![
+                "a approve",
+                "s revise",
+                "l later",
+                "q abandon",
+                "c comment",
+                "y copy plan",
+                "Esc collapse",
+            ],
+            PlanApprovalFocus::Preview => vec!["a approve", "Tab feedback"],
+        }
+    };
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| Shortcut {
+            label,
+            clickable: false,
+            id,
+        })
+        .collect()
+}
 
 /// Commit the active plan into native scrollback, once per plan (and once per
 /// revision).
@@ -107,14 +164,17 @@ pub fn maybe_commit_plan(app: &mut AppView) {
 }
 
 /// Desired controls-strip height: header + controls + optional feedback input.
-pub fn height(agent: &AgentView) -> u16 {
-    let input = if focus(agent) == PlanApprovalFocus::Prompt {
+pub fn height(agent: &AgentView, width: u16) -> u16 {
+    let input = if matches!(
+        focus(agent),
+        PlanApprovalFocus::Prompt | PlanApprovalFocus::Commenting
+    ) {
         1
     } else {
         0
     };
-    // header (1) + controls (1) + input (0/1)
-    2u16.saturating_add(input)
+    let shortcuts = control_shortcuts(agent);
+    1u16 + pager::views::modal_window::shortcuts_rows_needed(&shortcuts, width) + input
 }
 
 /// Render the compact plan-approval controls strip into `area`. The plan itself
@@ -131,14 +191,18 @@ pub fn render(
         return None;
     }
     let foc = focus(agent);
-    let input_h: u16 = if foc == PlanApprovalFocus::Prompt {
+    let input_h: u16 = if matches!(
+        foc,
+        PlanApprovalFocus::Prompt | PlanApprovalFocus::Commenting
+    ) {
         1
     } else {
         0
     };
 
-    // header (1) · controls (1) · input (0/1)
-    let controls_y = (area.y + area.height).saturating_sub(1 + input_h);
+    let shortcuts = control_shortcuts(agent);
+    let hint_rows = pager::views::modal_window::shortcuts_rows_needed(&shortcuts, area.width);
+    let controls_y = (area.y + area.height).saturating_sub(hint_rows + input_h);
 
     // ── header ──
     let header_style = Style::default()
@@ -156,34 +220,15 @@ pub fn render(
         area.width,
     );
 
-    // ── controls hint ──
-    let has_content = minimal_api::plan_approval_view(agent)
-        .map(|p| !p.comments.is_empty())
-        .unwrap_or(false)
-        || !minimal_api::agent_prompt(agent).text().trim().is_empty();
-    // Tab reopens the submitted plan preview.
-    let hint = match foc {
-        PlanApprovalFocus::Prompt if has_content => {
-            "enter request changes \u{00b7} tab plan \u{00b7} esc back"
-        }
-        PlanApprovalFocus::Prompt => "enter approve \u{00b7} tab plan \u{00b7} esc back",
-        PlanApprovalFocus::Commenting => "enter save comment \u{00b7} esc cancel",
-        PlanApprovalFocus::Preview => "a approve \u{00b7} s revise \u{00b7} q keep planning",
-    };
-    let hint_style = theme.dim().bg(Color::Reset);
+    // ── controls hints ──
     let controls_rect = Rect {
         x: area.x,
         y: controls_y,
         width: area.width,
-        height: 1,
+        height: hint_rows,
     };
-    buf.set_style(controls_rect, hint_style);
-    buf.set_span(
-        area.x,
-        controls_y,
-        &Span::styled(hint, hint_style),
-        area.width,
-    );
+    buf.set_style(controls_rect, theme.dim().bg(Color::Reset));
+    pager::views::modal_window::render_modal_shortcuts(buf, controls_rect, &shortcuts, None, theme);
 
     // ── feedback input (revise mode) ──
     if input_h > 0 {
@@ -200,6 +245,197 @@ pub fn render(
             .cursor_pos;
     }
     None
+}
+
+/// Render an ordinary or retained Plan preview in Minimal's live region.
+pub fn render_preview(
+    buf: &mut Buffer,
+    area: Rect,
+    agent: &mut AgentView,
+    theme: &Theme,
+) -> Option<(u16, u16)> {
+    let cwd = minimal_api::agent_cwd(agent).to_path_buf();
+    let comment_count = minimal_api::agent_plan_comment_count(agent);
+    let viewer = minimal_api::agent_line_viewer_mut(agent)?;
+    pager::views::file_search::line_viewer::render_line_viewer(
+        buf,
+        area,
+        viewer,
+        &cwd,
+        theme,
+        comment_count,
+    );
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pager::views::file_search::line_viewer::{LineViewerKind, LineViewerState};
+    use ratatui::layout::Rect;
+
+    fn agent() -> AgentView {
+        let mut agent = minimal_api::test_agent_view(Some("test-session"), "/tmp".into());
+        minimal_api::set_agent_minimal_mode_for_test(&mut agent);
+        agent
+    }
+
+    fn approval(
+        focus: PlanApprovalFocus,
+    ) -> pager::views::plan_approval_view::PlanApprovalViewState {
+        minimal_api::test_plan_approval(focus)
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let area = *buf.area();
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn rebuilt_approval_uses_global_pending_decision_hint() {
+        let mut agent = agent();
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\n- Keep this visible".into(),
+            None,
+        )
+        .unwrap();
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.plan_mut().feedback_active = true;
+        minimal_api::set_plan_viewer_for_test(&mut agent, viewer);
+        minimal_api::set_plan_approval_for_test(&mut agent, approval(PlanApprovalFocus::Preview));
+        minimal_api::approve_then_rebuild_plan_approval_for_test(&mut agent);
+        let pav = minimal_api::plan_approval_view(&agent).unwrap();
+        assert!(!pav.decision_pending());
+        assert!(minimal_api::agent_plan_decision_pending(&agent));
+
+        let area = Rect::new(0, 0, 80, 3);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut agent, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("r check confirmation"), "{text}");
+        assert!(text.contains("Esc collapse"), "{text}");
+        assert!(!text.contains("a approve"), "{text}");
+        assert!(!text.contains("s revise"), "{text}");
+        assert!(!text.contains("l later"), "{text}");
+        assert!(!text.contains("q abandon"), "{text}");
+        assert!(!text.contains("y copy"), "{text}");
+    }
+
+    #[test]
+    fn collapsed_revision_prompt_omits_unavailable_preview_keys() {
+        let mut agent = agent();
+        minimal_api::set_plan_approval_for_test(&mut agent, approval(PlanApprovalFocus::Prompt));
+        minimal_api::agent_prompt_mut(&mut agent).set_text("revise this step");
+
+        let area = Rect::new(0, 0, 80, 3);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut agent, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("Enter request changes"), "{text}");
+        assert!(text.contains("Tab plan"), "{text}");
+        assert!(!text.contains("Esc collapse"), "{text}");
+        assert!(!text.contains("l later"), "{text}");
+        assert!(!text.contains("q abandon"), "{text}");
+        assert!(!text.contains("y copy"), "{text}");
+    }
+
+    #[test]
+    fn empty_revision_prompt_does_not_hint_enter_to_approve() {
+        let mut agent = agent();
+        minimal_api::set_plan_approval_for_test(&mut agent, approval(PlanApprovalFocus::Prompt));
+        let area = Rect::new(0, 0, 60, 3);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut agent, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("a approve"), "{text}");
+        assert!(!text.contains("Enter approve"), "{text}");
+    }
+
+    #[test]
+    fn minimal_preview_hints_wrap_at_narrow_width() {
+        let mut agent = agent();
+        minimal_api::set_plan_approval_for_test(&mut agent, approval(PlanApprovalFocus::Preview));
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", "# Plan".into(), None).unwrap();
+        viewer.kind = LineViewerKind::PlanPreview;
+        minimal_api::set_plan_viewer_for_test(&mut agent, viewer);
+        let area = Rect::new(0, 0, 24, height(&agent, 24));
+        assert!(area.height > 2);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut agent, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("q abandon"), "{text}");
+        assert!(text.contains("Esc collapse"), "{text}");
+    }
+
+    #[test]
+    fn minimal_plan_commenting_shows_the_live_editor() {
+        let mut agent = agent();
+        minimal_api::set_plan_approval_for_test(
+            &mut agent,
+            approval(PlanApprovalFocus::Commenting),
+        );
+        minimal_api::agent_prompt_mut(&mut agent).set_text("comment draft");
+
+        let area = Rect::new(0, 0, 60, 3);
+        let mut buf = Buffer::empty(area);
+        let cursor = render(&mut buf, area, &mut agent, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("comment draft"), "{text}");
+        assert!(cursor.is_some());
+    }
+
+    #[test]
+    fn ordinary_minimal_plan_preview_and_comment_editor_are_visible() {
+        let mut agent = agent();
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Ordinary preview body\n\n- Visible in Minimal".into(),
+            None,
+        )
+        .unwrap();
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.list_state.open_comment_input("casual comment draft");
+        minimal_api::set_plan_viewer_for_test(&mut agent, viewer);
+        assert_eq!(
+            crate::overlay::active_modal(&agent),
+            Some(crate::overlay::Modal::PlanPreview)
+        );
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render_preview(&mut buf, area, &mut agent, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("Ordinary preview body"), "{text}");
+        assert!(text.contains("casual comment draft"), "{text}");
+    }
+
+    #[test]
+    fn retained_minimal_plan_preview_shows_its_review_action() {
+        let mut agent = agent();
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", "# Retained plan".into(), None)
+                .unwrap();
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.plan_mut().show_review_button = true;
+        minimal_api::set_plan_viewer_for_test(&mut agent, viewer);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render_preview(&mut buf, area, &mut agent, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("r review"), "{text}");
+    }
 }
 
 /// Chromeless prompt style for the feedback editor (the modal supplies framing).

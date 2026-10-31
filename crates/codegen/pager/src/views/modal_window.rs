@@ -644,7 +644,7 @@ fn compute_modal_dims(area: Rect, sizing: &ModalSizing) -> (u16, u16) {
 ///
 /// Uses the same greedy line-breaking logic as [`render_modal_shortcuts`]
 /// so the layout prediction matches the actual render.
-pub(crate) fn shortcuts_rows_needed(shortcuts: &[Shortcut<'_>], width: u16) -> u16 {
+pub fn shortcuts_rows_needed(shortcuts: &[Shortcut<'_>], width: u16) -> u16 {
     if width == 0 || shortcuts.is_empty() {
         return 0;
     }

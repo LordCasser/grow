@@ -152,5 +152,6 @@ jobs:
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::minimal_cold_resume_keeps_the_original_explicit_skill_snapshot
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume plan_approval_restored_after_resume
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume deferred_plan_reviewed_after_resume
+          python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume plan_two_revisions_complete
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::cold_resume_after_partial_leaf_release_does_not_replay_checkpoint
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::concurrent_cold_resume_claims_one_root_without_replaying_tree_work

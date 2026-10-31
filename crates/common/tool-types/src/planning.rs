@@ -446,7 +446,12 @@ impl LocalPlan {
                     .iter_mut()
                     .filter(|link| link.parent_step_id == change.step_id)
                     .map(|link| {
-                        if !link.terminal {
+                        let unapplied_reason = if link.terminal {
+                            Some("child is already terminal".to_owned())
+                        } else {
+                            link.dispatch_failure.clone()
+                        };
+                        if unapplied_reason.is_none() {
                             link.pending_source_revision = Some(source_revision);
                         }
                         if change.fields.iter().any(|field| {
@@ -457,11 +462,11 @@ impl LocalPlan {
                         (
                             link.id.clone(),
                             link.child_session_id.clone(),
-                            link.terminal,
+                            unapplied_reason,
                         )
                     })
                     .collect();
-            for (link_id, child_session_id, terminal) in links {
+            for (link_id, child_session_id, unapplied_reason) in links {
                 let id = format!("{link_id}:{}:{source_revision}", change.step_id);
                 let record = ReplanChange {
                     id,
@@ -474,15 +479,11 @@ impl LocalPlan {
                     priority,
                     status,
                     removed,
-                    progress: if terminal {
-                        ReplanProgress::Unapplied {
-                            reason: "child is already terminal".into(),
-                        }
-                    } else {
-                        ReplanProgress::Pending
-                    },
+                    progress: unapplied_reason.map_or(ReplanProgress::Pending, |reason| {
+                        ReplanProgress::Unapplied { reason }
+                    }),
                 };
-                if terminal {
+                if record.progress.is_settled() {
                     self.replans.push(record);
                 } else if let Some(index) = self.replans.iter().position(|existing| {
                     existing.link_id == record.link_id
@@ -616,15 +617,15 @@ impl LocalPlan {
         if link.terminal || link.result_id.is_some() {
             return Err(ReplanError::InvalidProgress);
         }
-        if let Some(existing) = &link.dispatch_failure {
-            return if existing == &reason {
-                Ok(false)
-            } else {
-                Err(ReplanError::DispatchFailureConflict)
-            };
+        if let Some(existing) = &link.dispatch_failure
+            && existing != &reason
+        {
+            return Err(ReplanError::DispatchFailureConflict);
         }
 
+        let mut changed = link.dispatch_failure.is_none();
         link.dispatch_failure = Some(reason.clone());
+        changed |= link.pending_source_revision.take().is_some();
         for record in self
             .replans
             .iter_mut()
@@ -633,17 +634,9 @@ impl LocalPlan {
             record.progress = ReplanProgress::Unapplied {
                 reason: reason.clone(),
             };
+            changed = true;
         }
-        let pending = self
-            .replans
-            .iter()
-            .filter(|record| record.link_id == link_id && !record.progress.is_settled())
-            .map(|record| record.source_revision)
-            .max();
-        if let Some(link) = self.links.iter_mut().find(|link| link.id == link_id) {
-            link.pending_source_revision = pending;
-        }
-        Ok(true)
+        Ok(changed)
     }
 
     /// Required links alone participate in this explicit delivery gate.
@@ -1855,6 +1848,125 @@ mod tests {
             plan.mark_link_terminal("l1", "there was no child execution")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn edits_after_undispatched_link_do_not_reopen_child_replanning() {
+        for required in [false, true] {
+            for released in [false, true] {
+                let mut plan = linked_plan();
+                plan.links[0].required = required;
+                plan.mark_link_undispatched("l1", "startup failed").unwrap();
+                if released {
+                    plan.reviews.push(DeliveryReview {
+                        link_id: "l1".into(),
+                        result_id: None,
+                        reviewed_source_revision: plan.revision,
+                        decision: ReviewDecision::Released,
+                        reason: Some("release the required delivery".into()),
+                        verification_refs: Vec::new(),
+                    });
+                }
+
+                plan.update_steps(
+                    PlanUpdateMode::Merge,
+                    vec![step("s1", "changed after failure", PlanStepStatus::Pending)],
+                )
+                .unwrap();
+
+                let link = &plan.links[0];
+                assert_eq!(link.pending_source_revision, None);
+                assert!(!link.terminal);
+                assert_eq!(link.result_id, None);
+                assert_eq!(link.dispatch_failure.as_deref(), Some("startup failed"));
+                assert_eq!(plan.replans.len(), 1);
+                assert!(plan.replans.iter().all(|replan| matches!(
+                    &replan.progress,
+                    ReplanProgress::Unapplied { reason } if reason == "startup failed"
+                )));
+                assert_eq!(
+                    !plan.unresolved_required_deliveries().is_empty(),
+                    required && !released
+                );
+                plan.validate().unwrap();
+            }
+        }
+
+        let mut active = linked_plan();
+        active
+            .update_steps(
+                PlanUpdateMode::Merge,
+                vec![step("s1", "changed while active", PlanStepStatus::Pending)],
+            )
+            .unwrap();
+        assert_eq!(
+            active.links[0].pending_source_revision,
+            Some(active.revision)
+        );
+        assert_eq!(active.replans[0].progress, ReplanProgress::Pending);
+    }
+
+    #[test]
+    fn repeated_undispatched_ack_closes_legacy_unsettled_replans() {
+        for progress in [
+            ReplanProgress::Pending,
+            ReplanProgress::Dispatching,
+            ReplanProgress::Received,
+            ReplanProgress::Consumed,
+        ] {
+            let mut plan = linked_plan();
+            plan.update_steps(
+                PlanUpdateMode::Merge,
+                vec![step(
+                    "s1",
+                    "changed before failure",
+                    PlanStepStatus::Pending,
+                )],
+            )
+            .unwrap();
+            plan.replans[0].progress = progress;
+            plan.links[0].dispatch_failure = Some("startup failed".into());
+            plan.reviews.push(DeliveryReview {
+                link_id: "l1".into(),
+                result_id: None,
+                reviewed_source_revision: plan.revision,
+                decision: ReviewDecision::Released,
+                reason: Some("release the required delivery".into()),
+                verification_refs: Vec::new(),
+            });
+            let before = plan.clone();
+            before.validate().unwrap();
+            let identity = plan.replans[0].clone();
+
+            assert!(plan.mark_link_undispatched("l1", "startup failed").unwrap());
+            assert!(matches!(
+                &plan.replans[0].progress,
+                ReplanProgress::Unapplied { reason } if reason == "startup failed"
+            ));
+            assert!(identity.same_identity_payload(&plan.replans[0]));
+            assert_eq!(
+                plan.links[0].dispatch_failure.as_deref(),
+                Some("startup failed")
+            );
+            assert!(!plan.links[0].terminal);
+            assert_eq!(plan.links[0].result_id, None);
+            assert_eq!(plan.links[0].pending_source_revision, None);
+            plan.validate_transition_from(&before).unwrap();
+            plan.validate().unwrap();
+
+            let closed = plan.clone();
+            assert!(!plan.mark_link_undispatched("l1", "startup failed").unwrap());
+            assert_eq!(plan, closed);
+            assert!(
+                plan.mark_link_undispatched("l1", "different failure")
+                    .is_err()
+            );
+            assert_eq!(plan, closed);
+
+            let mut next_scope = plan.clone();
+            next_scope.scope_id = "next-work".into();
+            next_scope.validate_transition_from(&plan).unwrap();
+        }
     }
 
     #[test]

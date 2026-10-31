@@ -19,6 +19,7 @@ const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// before the turn ends with the last validation error.
 const STRUCTURED_OUTPUT_MAX_RETRIES: u32 =
     chat_state::session_runtime::MAX_STRUCTURED_OUTPUT_RETRIES;
+const PLANNING_COMPLETION_BLOCKED: &str = "planning_completion_blocked";
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
@@ -705,6 +706,18 @@ impl SessionActor {
                 // Goal during settlement).
                 return Ok(TurnOutcome::ControlEnded { snapshot });
             }
+            // Planning stops are ordinary turn errors: close the Step and
+            // apply admitted controls above, but never restart completion recovery.
+            if result.as_ref().err().is_some_and(|error| {
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("error_kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(PLANNING_COMPLETION_BLOCKED)
+            }) {
+                return result;
+            }
             if !self.events.has_active_step()
                 && matches!(&result, Ok(TurnOutcome::Completed { .. }))
             {
@@ -973,6 +986,7 @@ impl SessionActor {
     async fn check_planning_completion_gate(
         &self,
         completed_turns: usize,
+        previous_blockers: &mut Option<Vec<String>>,
     ) -> Result<PlanningCompletionGate, acp::Error> {
         let blockers = self
             .planning_completion_blockers()
@@ -981,6 +995,16 @@ impl SessionActor {
         let next_turn = completed_turns.saturating_add(1);
         let gate = planning_completion_gate(!blockers.is_empty(), next_turn, self.max_turns);
         if gate == PlanningCompletionGate::Retry {
+            if previous_blockers.as_ref() == Some(&blockers) {
+                return Err(acp::Error::invalid_request().data(json!({
+                    "error_kind": PLANNING_COMPLETION_BLOCKED,
+                    "message": format!(
+                        "Automatic continuation stopped because the same planning obligations remain unresolved: {}",
+                        blockers.iter().take(16).cloned().collect::<Vec<_>>().join("; ")
+                    ),
+                })));
+            }
+            *previous_blockers = Some(blockers.clone());
             self.chat_state_handle
                 .push_user_message_durably(ConversationItem::system_reminder(format!(
                     "This work cannot be declared complete yet: {}. Inspect the exact result and resolve the obligation with todo_write; unfinished optional TODOs alone do not block completion.",
@@ -988,6 +1012,8 @@ impl SessionActor {
                 )))
                 .await
                 .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+        } else if gate == PlanningCompletionGate::Clear {
+            *previous_blockers = None;
         }
         Ok(gate)
     }
@@ -1321,6 +1347,7 @@ impl SessionActor {
             self.events.next_step_index()
         };
         let mut identical_tool_calls = IdenticalToolCallRun::default();
+        let mut previous_planning_blockers = None;
         let mut auth_retry_schedule = AuthRetrySchedule::new();
         let mut sampling_recovery = self
             .sampling_continuation
@@ -2580,7 +2607,13 @@ impl SessionActor {
                     }
                 }
                 if !turn_refused {
-                    match self.check_planning_completion_gate(tool_turn_count).await? {
+                    match self
+                        .check_planning_completion_gate(
+                            tool_turn_count,
+                            &mut previous_planning_blockers,
+                        )
+                        .await?
+                    {
                         PlanningCompletionGate::Clear => {}
                         PlanningCompletionGate::Retry => {
                             tool_turn_count = tool_turn_count.saturating_add(1);
@@ -2672,7 +2705,13 @@ impl SessionActor {
                             }
                             PlannedCompletionPreflight::ContinueTurn => continue,
                         }
-                        match self.check_planning_completion_gate(tool_turn_count).await? {
+                        match self
+                            .check_planning_completion_gate(
+                                tool_turn_count,
+                                &mut previous_planning_blockers,
+                            )
+                            .await?
+                        {
                             PlanningCompletionGate::Clear => {}
                             PlanningCompletionGate::Retry => {
                                 tool_turn_count = tool_turn_count.saturating_add(1);

@@ -553,6 +553,8 @@ impl AgentView {
         let review_area = viewer.plan_ref().and_then(|p| p.review_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
+        let check_btn_area = viewer.plan_ref().and_then(|p| p.check_button_area);
+        let collapse_btn_area = viewer.plan_ref().and_then(|p| p.collapse_button_area);
         // Cached `is_plan_viewer()` so we don't need to call self while
         // the line_viewer is mutably borrowed below.
         let is_plan_preview =
@@ -603,6 +605,13 @@ impl AgentView {
                 }
                 if review_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     return InputOutcome::Action(Action::ReviewRetainedPlan);
+                }
+                if check_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    return InputOutcome::Action(Action::CheckPlanApprovalDecision);
+                }
+                if collapse_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    self.cancel_line_viewer();
+                    return InputOutcome::Changed;
                 }
                 if approve_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
@@ -738,6 +747,20 @@ impl AgentView {
                 let prev_copy_btn = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
                 if copy_btn_hover != prev_copy_btn {
                     viewer.plan_mut().copy_hovered = copy_btn_hover;
+                    changed = true;
+                }
+                let check_hover =
+                    check_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_check = viewer.plan_ref().is_some_and(|p| p.check_hovered);
+                if check_hover != prev_check {
+                    viewer.plan_mut().check_hovered = check_hover;
+                    changed = true;
+                }
+                let collapse_hover =
+                    collapse_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_collapse = viewer.plan_ref().is_some_and(|p| p.collapse_hovered);
+                if collapse_hover != prev_collapse {
+                    viewer.plan_mut().collapse_hovered = collapse_hover;
                     changed = true;
                 }
                 if self.plan_approval_view.is_some()
