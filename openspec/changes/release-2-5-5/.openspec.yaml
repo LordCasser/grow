@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-31
+skip_specs: true
+# Version, warning cleanup and publication coordination; existing changes own behavior contracts.

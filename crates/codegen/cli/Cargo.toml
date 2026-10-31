@@ -66,6 +66,11 @@ tikv-jemalloc-sys = { workspace = true, optional = true }
 # Heap-profile / stats mallctl helpers (prof.active, prof.dump, epoch, stats.*).
 tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats", "use_std"] }
 
+# jemalloc uses prefixed symbols on these platforms. Requesting unprefixed
+# allocation there only emits a build warning before the same fallback.
+[target.'cfg(not(any(target_vendor = "apple", target_os = "android", target_os = "dragonfly")))'.dependencies]
+tikv-jemallocator = { workspace = true, optional = true, features = ["unprefixed_malloc_on_supported_platforms"] }
+
 [dev-dependencies]
 pager-pty-harness = { path = "../pager-pty-harness" }
 tempfile = { workspace = true }

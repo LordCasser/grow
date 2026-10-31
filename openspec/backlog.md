@@ -4,6 +4,16 @@
 
 本轮修复已随 [v2.5.4](https://github.com/LordCasser/grow/releases/tag/v2.5.4) 发布，正式同SHA流水线20个作业全部成功。
 
+## 新发现待独立处理
+
+- **挂起恢复 workspace 路径别名漂移（2026-10-31，已复现）**：首次会话使用 macOS `/tmp`（同样涉及 `/var`）别名时，child 恢复的 cwd 成为 `/private/tmp`；实际工作区未变但 `runtime_source_hash.workspace` 不同，整树 fail closed。本轮权限 E2E 已以逐字段来源对比确认仅 workspace 字段不同，使用初始即 canonical 的 fixture 验证 RWX 主任务；路径身份入口统一须独立处理，不能通过移除 source hash 绕过。见 [恢复验证](changes/archive/2026-10-31-fix-subagent-delegation-authority/verification.md)。
+- **挂起 child 的出生 MCP 成员集合持久化（2026-10-31，待专项验证）**：live ceiling 保留 server/client identity，但 Spawn 当前仅保存有效 RWX，cold restore 从当前 profile 与父 pool 重建 MCP。需要针对先窄继承再切换宽 profile 的冷恢复核对出生服务集合及新 incarnation 的绑定语义；本轮仅证实 live MCP/permit 回归通过，不声称已复现跨进程 MCP 扩权。与本轮四项 RWX/目录修复分开设计。见 [恢复验证边界](changes/archive/2026-10-31-fix-subagent-delegation-authority/verification.md)。
+
+
+- **外部 ACP client 的 Plan 坏响应恢复（2026-10-31）**：malformed approval response 会结束当前 interaction，但保留待审批 Control；再次 `session/load`/重连可重新挂起，同连接没有自动重试。Bundled Pager 使用 typed response，未找到正常 UI 可复现入口。若要求外部 client 无需重连恢复，需独立定义重试入口及失败语义，不能加无界重试。见 [Plan 旅程审计](changes/archive/2026-10-31-audit-plan-user-journey/audit.md)。
+- **Plan 恢复 artifact 二次读取的竞态（2026-10-31，待故障注入）**：`resume_plan_approval` 在 reconciliation 后再次读取不可变 artifact，失败 fallback 使用无条件 `finish_plan_to_default`；若外部移除 artifact 与替换当前 Plan 同时发生，旧恢复任务可能影响新状态。正常生命周期没有删除入口，本轮未复现，不混入 UI 修复；后续独立验证 exact snapshot 收敛。见 [Plan 旅程审计](changes/archive/2026-10-31-audit-plan-user-journey/audit.md)。
+
+
 ## 保留的暂缓项
 
 - **跨路由 reasoning 后续边界**：[第一阶段审查](changes/archive/2026-10-29-improve-cross-route-reasoning-compatibility/audit.md) 发现通用 native-bearing HTTP 400 仍会触发一次 reset，以及可见 reasoning 仅保存 text、未区分摘要和完整正文。本阶段修复错误事实保真和目标请求投影；若真实目标要求更强语义，应独立处理精确 continuation 拒绝分类或最小 provenance，不预建全局 capability registry。
@@ -16,10 +26,15 @@
 
 ## 本轮闭合的缺陷与测试债务
 
+- **Subagent 委派复审四项（2026-10-31）**：正式 selector 授权/路径别名拒绝、原 child 出生 RWX 恢复、插件 toggle 目录过滤、CLI 目录与重建来源已修复。159 项定向回归通过；恢复覆盖四个独立进程、出生事实缺失/损坏失败、原 call 再授权与实际后代上限。原 R2 resolver 推断与 source hash fail-closed 边界已补充说明。见 [修复验证](changes/archive/2026-10-31-fix-subagent-delegation-authority/verification.md)。
+
 以下路径将随对应变更归档固定；正式发布和完整验证汇总见 [发布记录](changes/archive/2026-10-29-close-backlog-and-release-patch/verification.md)。
 
 | 问题 | 修复与验证 |
 | --- | --- |
+| Plan 窄屏操作消失、Minimal 预览/批注与提示错配、普通批注去向不明 | [完整旅程修复与回归](changes/archive/2026-10-31-audit-plan-user-journey/verification.md) |
+| Runtime suspend 等待已 park 的 foreground，导致活动压缩排空后仍超时 | [压缩排空与前台收回](changes/archive/2026-10-31-fix-suspension-compaction-drain/verification.md) |
+| Agent 禁用错误归因、完整 ID 诊断及 toggle 运行时同步（审计 A1/A2/A3） | [fix-agent-authorization-and-toggle-reload](changes/archive/2026-10-31-fix-agent-authorization-and-toggle-reload/verification.md)：typed 拒绝、主/子会话目录安全边界刷新、已有 spawn context 当前 gate 和切换候选失效回归；个人委派名单按用户明确要求更新 |
 | ACP 初始化被同步 watcher 注册阻塞；注册间隙 config/policy 漏同步 | [unblock-acp-during-watcher-registration](changes/archive/2026-10-29-unblock-acp-during-watcher-registration/verification.md) |
 | LSP refresh mock 使用固定 sleep | [synchronize-lsp-refresh-test](changes/archive/2026-10-29-synchronize-lsp-refresh-test/verification.md) |
 | SideQuestion 接收者关闭后仍运行 | [cancel-abandoned-side-questions](changes/archive/2026-10-29-cancel-abandoned-side-questions/verification.md) |
