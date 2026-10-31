@@ -4519,6 +4519,40 @@ After a leader publishes readiness, ACP initialization SHALL be able to progress
 - **WHEN** cancellation, a watcher registration error, or gateway completion ends the in-process worker after gateway polling starts
 - **THEN** the worker flushes live session actors before returning, and any still-running blocking registration task retains and drops its eventual watcher result when the OS call returns
 
+### Requirement: Cancellation markers do not infer the actor
+Pager 的共用取消标记 SHALL 显示中性的 `Turn cancelled` 及耗时，不根据 `cancelled` stop reason 或本地 cancelling 状态声称用户发起了取消。
+
+#### Scenario: Host cancellation is presented
+- **WHEN** RPC 或 durable terminal 带来 cancelled 终态，而展示事件没有操作者来源
+- **THEN** 取消标记不含 `by user`，两路先后到达仍只显示一次终态。
+
+#### Scenario: Explicit user cancellation is presented
+- **WHEN** 用户取消的回合完成正常终态结算
+- **THEN** 继续显示同一中性取消标记，输入恢复、队列处理和终态去重保持原规则。
+
+### Requirement: Automatic updates default to enabled and announce availability
+在既有自动更新准入条件满足且版本缓存需要刷新时，自动更新入口 SHALL 将未配置的 `[cli].auto_update` 视为 true，检查并按现有版本策略执行更新。显式 false SHALL 关闭这些入口的检查与下载。TUI 检测到可更新目标后 SHALL 提示目标版本与重启操作；完整模式使用即时 toast 并保留欢迎页提示，minimal 使用既有 scrollback notice。
+
+#### Scenario: No preference configured
+- **WHEN** auto_update 未配置且通过既有准入条件，缓存需要刷新
+- **THEN** 自动更新入口继续检查；发现需更新目标时按现有路径自动下载并交付更新结果。
+
+#### Scenario: Explicit opt out
+- **WHEN** auto_update 显式配置为 false
+- **THEN** 自动更新入口不检查版本、不启动下载，也不生成更新可用提示。
+
+#### Scenario: Update detected after entering a full TUI session
+- **WHEN** 完整 TUI 的后台检查交付更新可用结果
+- **THEN** 显示包含目标版本及重启提示的即时 toast，并保留 pending update 供欢迎页使用。
+
+#### Scenario: Minimal update notice
+- **WHEN** minimal TUI 的后台检查交付更新可用结果
+- **THEN** 在当前会话 scrollback 显示目标版本及重启提示。
+
+#### Scenario: No actionable update
+- **WHEN** 缓存仍新鲜、没有可更新目标、检查失败或版本策略不允许更新
+- **THEN** 不生成更新可用提示，沿用既有缓存和失败处理。
+
 ### Requirement: Accepted Plan decisions release confirmation UI without polling
 Plan 决定的 Control durable ACK 成功后，Shell SHALL 通过既有模式更新交付本次决定回执。Pager SHALL 按 session/binding、submission、decision identity、action 和 feedback 精确核对后释放对应确认界面。早到状态查询的 unconfirmed SHALL NOT 使后续已接纳决定永久停留在 check confirmation；普通 phase 更新或写入失败 SHALL NOT 被当作确认。
 
@@ -4571,14 +4605,3 @@ Plan 审批与预览 SHALL 根据实际可用宽度排列操作提示与点击�
 #### Scenario: Send comments from an ordinary preview
 - **WHEN** 用户从普通计划预览发送批注
 - **THEN** 提示说明普通消息发送或排队，不宣称计划已进入修订或决定已接纳。
-
-### Requirement: Cancellation markers do not infer the actor
-Pager 的共用取消标记 SHALL 显示中性的 `Turn cancelled` 及耗时，不根据 `cancelled` stop reason 或本地 cancelling 状态声称用户发起了取消。
-
-#### Scenario: Host cancellation is presented
-- **WHEN** RPC 或 durable terminal 带来 cancelled 终态，而展示事件没有操作者来源
-- **THEN** 取消标记不含 `by user`，两路先后到达仍只显示一次终态。
-
-#### Scenario: Explicit user cancellation is presented
-- **WHEN** 用户取消的回合完成正常终态结算
-- **THEN** 继续显示同一中性取消标记，输入恢复、队列处理和终态去重保持原规则。

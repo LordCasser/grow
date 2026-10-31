@@ -1448,6 +1448,7 @@ dependencies = [
  "libc",
  "pager",
  "pager-minimal",
+ "pager-pty-harness",
  "sandbox",
  "semver",
  "serde_json",

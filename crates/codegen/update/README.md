@@ -4,6 +4,8 @@
 
 版本范围和路径由 `config` 提供；CLI 组合层负责解析 `auto_update`、持久化 channel，并传入 pinned 安装成功后才执行的设置更新 future。配置读写继续使用原 shell 实现的校验、共享锁和原子替换，更新器本身不依赖 shell。显式 channel 切换意图另行传入安装决策，以保留从较新 alpha 回到 stable 的行为。
 
+`[cli].auto_update` 未配置时默认开启，显式 false 关闭自动检查与下载。后台检查仍遵守现有版本缓存和版本策略；发现可更新目标后，完整 TUI 显示目标版本及重启提示的 toast，并保留欢迎页提示，minimal 将重启提示写入 scrollback。见 [默认更新与提示契约](../../../openspec/specs/client-surfaces/spec.md#requirement-automatic-updates-default-to-enabled-and-announce-availability)。
+
 `auto_update.rs` 在替换前探测目标版本，并在发布候选二进制后执行冒烟检查。这两类 `--version` 进程是短期校验：等待受超时限制，直接子进程随等待取消或超时终止。终端隔离由 `tty_utils::detach_command` 处理，生命周期由 Command 的 `kill_on_drop` 处理，两者职责不同。
 
 后台 `run_update_subcommand` 刻意独立于调用方运行，不使用短期校验进程的终止策略。下载、替换和补全生成由各自路径负责。
@@ -13,3 +15,5 @@
 下载目录回收只有在明确读取到文件年龄且超过清理时限后才删除旧版本候选。未来时间戳（例如系统时钟回拨）和年龄读取失败均保留文件，与临时下载文件的保守判定一致。当前及上一版本的保留规则仍先于年龄判断。
 
 版本保留按完整版本分组：当前版本与当前之外最高版本的所有已识别平台产物一起保留。回退安装时，最高其他版本可能高于当前版本；不按文件枚举顺序选择单个产物，也不按每个平台分别选择不同版本。
+
+提示显示回归使用 `cargo test --locked --no-default-features -p cli --test update_notice_pty -- --ignored --exact update_notices_render_in_real_terminal --test-threads=1`。测试在隔离 PTY 中运行 Pager 与 CLI 注册的 minimal 渲染器，从既有更新结果通道交付测试版本，覆盖欢迎页、会话内 toast、minimal notice 及无更新不误报；不访问线上发布或执行安装。`UPDATE_NOTICE_ARTIFACT_DIR` 可指定终端 HTML/文本快照目录。

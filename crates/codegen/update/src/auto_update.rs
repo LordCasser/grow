@@ -712,7 +712,7 @@ pub async fn check_update_background(
         return BackgroundUpdateCheck::none();
     }
 
-    if auto_update != Some(true) {
+    if auto_update == Some(false) {
         return BackgroundUpdateCheck::none();
     }
 
@@ -800,8 +800,8 @@ pub async fn run_update_if_available(
         return Ok(false);
     }
 
-    // Background networking is opt-in.
-    if auto_update != Some(true) {
+    // Automatic updates are enabled unless explicitly disabled.
+    if auto_update == Some(false) {
         return Ok(false);
     }
 

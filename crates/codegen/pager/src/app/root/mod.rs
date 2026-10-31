@@ -774,7 +774,7 @@ pub struct AppView {
     pub deferred_startup: crate::app::session_startup::DeferredStartupActions,
     /// Persisted `[cli].show_tips` mirror. `None` = no override (default `true`).
     pub show_tips: Option<bool>,
-    /// Persisted `[cli].auto_update` mirror. `None` = no override (default `false`).
+    /// Persisted `[cli].auto_update` mirror. `None` = no override (default `true`).
     pub auto_update: Option<bool>,
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded
     /// from the effective TOML merge like `show_tips`. `None` = unset in TOML

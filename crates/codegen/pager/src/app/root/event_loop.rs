@@ -1806,11 +1806,14 @@ pub(crate) async fn run(
                     );
                     let latest = update.latest_version;
                     app.pending_update_version = Some(latest.clone());
-                    // The full TUI surfaces this on the welcome screen, which
-                    // minimal has none of — commit a one-line notice into
-                    // native scrollback instead (update notice).
+                    // Minimal mode uses native scrollback for notices;
+                    // full mode also retains the welcome-screen restart hint.
                     if term_state.screen_mode.is_minimal() {
                         dispatch::commit_minimal_update_notice(&mut app, &latest);
+                    } else {
+                        app.show_toast(&format!(
+                            "Update available: v{latest} — restart to apply."
+                        ));
                     }
                     presenter.request(false);
                 }
