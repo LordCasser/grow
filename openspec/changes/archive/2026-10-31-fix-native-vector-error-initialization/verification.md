@@ -23,3 +23,5 @@ fvec_from_value 的 JSON 路径在 array_init 失败后直接返回 SQLITE_NOMEM
 首轮 run 已确认 completed/cancelled，`gh release view v2.5.5` 返回 release not found。旧资产不作为新源的发布资产；release-2-5-5 负责重建未发布 tag 和全部门禁。
 
 归档前全量 strict 18/18、归档后全量 strict 17/17、归档 strict 761/761 通过。主规范已按新场景归档。
+
+第二轮正式 RISC-V job 124439925060（run 41168064853，源 599873595c943bcce2ec5bcc5fef891820e372c9）完整日志核对：原两条 -Wmaybe-uninitialized 已消失，无其他 Rust/C/linker 编译 warning/error；attestation 与 artifact 上传通过。Core 的 Linux 严格 C + ASan/UBSan/LeakSanitizer 也通过。日志为 /tmp/grow-release2-linux-riscv64.log 与 /tmp/grow-release2-core.log。

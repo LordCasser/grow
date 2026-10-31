@@ -2,7 +2,7 @@
 
 截至 2026-10-29，本轮已清完登记的缺陷与测试债务。用户确认“清完缺陷与测试债务，暂缓项保留说明”。已解决项保留逐项证据；原始清单见 [清理前快照](changes/archive/2026-10-29-close-backlog-and-release-patch/backlog-before.md)。新的问题仍须独立建立 change，不以本次审计结论推断未来改动无风险。
 
-本轮修复已随 [v2.5.4](https://github.com/LordCasser/grow/releases/tag/v2.5.4) 发布，正式同SHA流水线20个作业全部成功。
+本轮新增修复已随 [v2.5.5](https://github.com/LordCasser/grow/releases/tag/v2.5.5) 发布，正式同 SHA 流水线 20 个作业全部成功；[发布验证](changes/archive/2026-10-31-release-2-5-5/verification.md)。此前 v2.5.4 记录保留供追溯。
 
 ## 新发现待独立处理
 
@@ -32,6 +32,7 @@
 
 | 问题 | 修复与验证 |
 | --- | --- |
+| 原生 float 向量分配失败后错误指针未初始化；RISC-V C 编译 warning | [共享错误输出初始化与故障注入回归](changes/archive/2026-10-31-fix-native-vector-error-initialization/verification.md) |
 | Plan 窄屏操作消失、Minimal 预览/批注与提示错配、普通批注去向不明 | [完整旅程修复与回归](changes/archive/2026-10-31-audit-plan-user-journey/verification.md) |
 | Runtime suspend 等待已 park 的 foreground，导致活动压缩排空后仍超时 | [压缩排空与前台收回](changes/archive/2026-10-31-fix-suspension-compaction-drain/verification.md) |
 | Agent 禁用错误归因、完整 ID 诊断及 toggle 运行时同步（审计 A1/A2/A3） | [fix-agent-authorization-and-toggle-reload](changes/archive/2026-10-31-fix-agent-authorization-and-toggle-reload/verification.md)：typed 拒绝、主/子会话目录安全边界刷新、已有 spawn context 当前 gate 和切换候选失效回归；个人委派名单按用户明确要求更新 |
