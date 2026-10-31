@@ -25,3 +25,5 @@
 macOS 实际诊断确认 jemalloc 无条件请求不支持的 unprefixed 模式。已将该 feature 限定到 Apple/Android/DragonFly 以外目标，沿用依赖原有目标分类，Apple 仍为 prefixed，未开启 zone override。Cargo feature tree 核对 macOS 不含 unprefixed、Linux 含 unprefixed，两者仍启用 profiling/stats。Linux tree 首次 offline 缺 ashpd 缓存，改为正常拉取后通过，不修改锁定依赖。
 
 使用 `PATH=/Users/lordcasser/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin CARGO_BUILD_JOBS=2 cargo check --locked -p cli --bin grow`，2.5.5 默认 CLI 通过，编译与 build-script stderr 没有 warning。原 jemalloc 缺头文件失败已定位为 DevEco SDK diff 对不存在输入返回 0，系统 diff 及固定工具链下重新配置后成功。
+
+对抗性复核发现初始目标条件缺少 Unix 限制，可能令 Windows 新增 allocator 依赖；打标签前修正为 all(unix, not(...))，保持既有 Windows 依赖边界。

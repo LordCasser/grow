@@ -6,6 +6,6 @@
 
 ## 实际诊断与修复
 
-jemalloc-sys 的 NO_UNPREFIXED_MALLOC_TARGETS 明确列出 apple/android/dragonfly；当前 workspace 无条件请求 unprefixed_malloc_on_supported_platforms，使 macOS 每次输出 build-script warning 后回退 prefixed。将该 feature 移至 CLI 的对应目标依赖，profiling/stats 和全局 allocator 入口不变；不通过 override_allocator 改变 Apple 的 malloc zone 行为。受支持平台仍启用无前缀模式。
+jemalloc-sys 的 NO_UNPREFIXED_MALLOC_TARGETS 明确列出 apple/android/dragonfly；当前 workspace 无条件请求 unprefixed_malloc_on_supported_platforms，使 macOS 每次输出 build-script warning 后回退 prefixed。将该 feature 移至 CLI 的对应 Unix 目标依赖，profiling/stats 和全局 allocator 入口不变；不通过 override_allocator 改变 Apple 的 malloc zone 行为。受支持平台仍启用无前缀模式。
 
 本机 OpenHarmony SDK 的 diff 位于 /usr/bin 之前，读取不存在文件仍返回 0，导致 Autoconf 将尚未生成的头文件判断为 unchanged。只在本次 Cargo 命令调整 PATH 使用系统基础工具，不修改用户配置或第三方源码。

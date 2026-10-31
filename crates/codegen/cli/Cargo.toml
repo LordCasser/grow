@@ -68,7 +68,7 @@ tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats", "u
 
 # jemalloc uses prefixed symbols on these platforms. Requesting unprefixed
 # allocation there only emits a build warning before the same fallback.
-[target.'cfg(not(any(target_vendor = "apple", target_os = "android", target_os = "dragonfly")))'.dependencies]
+[target.'cfg(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "dragonfly"))))'.dependencies]
 tikv-jemallocator = { workspace = true, optional = true, features = ["unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
