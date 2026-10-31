@@ -66,7 +66,7 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
     // Generous budget: the heavy multi-client leader cluster drains the paced
     // cancel slower than the single-client path, so match the test's other
     // waits (LEADER/STREAM_TIMEOUT) rather than the single-client 15s.
-    a.wait_for_text("Turn cancelled by user", STREAM_TIMEOUT)
+    a.wait_for_text("Turn cancelled", STREAM_TIMEOUT)
         .expect("A turn cancelled marker");
 
     // Producer fail-before: the cancel must have persisted a durable terminal

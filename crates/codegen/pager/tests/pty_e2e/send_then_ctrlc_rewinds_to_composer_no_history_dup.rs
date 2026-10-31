@@ -5,7 +5,7 @@ use super::common::*;
 /// Ctrl+C BEFORE any server activity rewinds the send: the prompt text
 /// returns to the composer AND its scrollback "❯ " block is removed — the UI
 /// reads as if the user never hit Send (no stale copy in history, no
-/// "Turn cancelled by user" marker). (`do_cancel_turn` rewind path:
+/// "Turn cancelled" marker). (`do_cancel_turn` rewind path:
 /// `set_text` + `remove_entry`; requires `cancel_rewind_enabled`, on by
 /// default via the initialize `cancelRewind` meta.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -58,7 +58,7 @@ async fn send_then_ctrlc_rewinds_to_composer_no_history_dup() {
         .expect("rewound prompt restored");
     // The rewind is silent — it looks like the prompt was never sent.
     assert!(
-        !harness.contains_text("Turn cancelled by user"),
+        !harness.contains_text("Turn cancelled"),
         "rewind must not render a cancelled marker\nscreen:\n{}",
         harness.screen_contents()
     );

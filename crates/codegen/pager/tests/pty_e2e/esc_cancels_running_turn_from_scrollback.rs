@@ -51,13 +51,13 @@ async fn esc_cancels_running_turn_from_scrollback() {
     harness.update(Duration::from_millis(200));
 
     harness
-        .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
+        .wait_for_text("Turn cancelled", Duration::from_secs(15))
         .expect("turn cancelled marker (from scrollback)");
 
     harness.update(Duration::from_millis(600));
     let screen = harness.screen_contents();
     assert_eq!(
-        screen.matches("Turn cancelled by user").count(),
+        screen.matches("Turn cancelled").count(),
         1,
         "'Turn cancelled' must appear exactly once\nscreen:\n{screen}"
     );

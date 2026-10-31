@@ -1302,7 +1302,7 @@ pub(super) fn handle_prompt_response(
             &result,
             Ok(pr) if pr.stop_reason == acp::StopReason::Cancelled
         );
-    // Send-now cancel: suppress the "Turn cancelled by user" marker (the new
+    // Send-now cancel: suppress the "Turn cancelled" marker (the new
     // prompt follows right under the partial). Wire `cancelTrigger` wins, else
     // The RetryState handler already pushed the actionable context-overflow
     // block, so the generic TurnFailed + error toast are redundant.

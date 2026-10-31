@@ -723,6 +723,7 @@ impl SessionActor {
         manager.reopen_after_runtime_restore();
         manager.restore_suspended_executions().await?;
         drop(manager);
+        self.compaction.lease.reopen_admission();
         self.state
             .lock()
             .await
@@ -792,6 +793,7 @@ impl SessionActor {
             .await
             .runtime_suspend
             .store(true, std::sync::atomic::Ordering::Release);
+        self.compaction.lease.close_admission();
         let runtime = match self.chat_state_handle.runtime_state().await {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -881,19 +883,18 @@ impl SessionActor {
             .map(|task| (task.handle.clone(), task.stopped.clone()));
         if let Some((handle, stopped)) = task {
             if self.compaction.lease.is_in_flight() {
-                tokio::time::timeout_at(deadline, stopped)
+                tokio::time::timeout_at(deadline, self.compaction.lease.wait_idle())
                     .await
                     .map_err(|_| {
                         "active compaction owner did not settle before the suspension deadline"
                             .to_string()
-                    })?
-                    .map_err(|_| {
-                        "active compaction owner stopped without acknowledgement".to_string()
                     })?;
-            } else {
-                handle.abort();
-                let _ = stopped.await;
             }
+            // handle_prompt parks at runtime handoff after compaction exits.
+            // Retire it only after the lease's settlement boundary, rather
+            // than waiting for that parked task to stop itself.
+            handle.abort();
+            let _ = stopped.await;
         }
         self.workflow_manager
             .lock()

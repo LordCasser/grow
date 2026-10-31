@@ -75,7 +75,7 @@ async fn interjection_reaches_model_in_same_turn() {
 
     // Steering never cancels the foreground turn.
     assert!(
-        !harness.contains_text("Turn cancelled by user"),
+        !harness.contains_text("Turn cancelled"),
         "steering must not render a cancelled marker\nscreen:\n{}",
         harness.screen_contents()
     );

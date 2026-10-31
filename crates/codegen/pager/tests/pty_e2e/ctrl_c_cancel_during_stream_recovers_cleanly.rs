@@ -49,7 +49,7 @@ async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
     harness.update(Duration::from_millis(200));
 
     harness
-        .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
+        .wait_for_text("Turn cancelled", Duration::from_secs(15))
         .expect("turn cancelled marker");
 
     // Settle, then assert the marker rendered exactly once — a double marker
@@ -58,7 +58,7 @@ async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
     harness.update(Duration::from_millis(1000));
     let screen = harness.screen_contents();
     assert_eq!(
-        screen.matches("Turn cancelled by user").count(),
+        screen.matches("Turn cancelled").count(),
         1,
         "'Turn cancelled' must appear exactly once\nscreen:\n{screen}"
     );

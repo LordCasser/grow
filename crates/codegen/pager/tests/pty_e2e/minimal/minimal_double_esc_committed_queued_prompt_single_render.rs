@@ -71,7 +71,7 @@ async fn minimal_double_esc_committed_queued_prompt_single_render() {
     // stays empty, and the prompt count does NOT grow.
     harness.inject_keys(keys::CTRL_C).expect("Ctrl+C cancel");
     harness
-        .wait_for_full_text("Turn cancelled by user", Duration::from_secs(15))
+        .wait_for_full_text("Turn cancelled", Duration::from_secs(15))
         .expect("standard cancel marker (not a silent rewind)");
 
     harness.update(Duration::from_millis(500));

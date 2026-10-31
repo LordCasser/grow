@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 const COMPACTION_IDLE: u8 = 0;
 const COMPACTION_MANUAL: u8 = 1;
 const COMPACTION_AUTO: u8 = 2;
+const COMPACTION_CLOSED: u8 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionOwner {
@@ -24,13 +25,15 @@ pub enum CompactionOwner {
 #[derive(Default)]
 pub struct CompactionLease {
     owner: AtomicU8,
+    idle: tokio::sync::Notify,
 }
 
 pub struct CompactionLeaseGuard<'a>(&'a CompactionLease);
 
 impl Drop for CompactionLeaseGuard<'_> {
     fn drop(&mut self) {
-        self.0.owner.store(COMPACTION_IDLE, Ordering::Release);
+        self.0.owner.fetch_and(COMPACTION_CLOSED, Ordering::AcqRel);
+        self.0.idle.notify_waiters();
     }
 }
 
@@ -47,7 +50,27 @@ impl CompactionLease {
     }
 
     pub fn is_in_flight(&self) -> bool {
-        self.owner.load(Ordering::Acquire) != COMPACTION_IDLE
+        self.owner.load(Ordering::Acquire) & !COMPACTION_CLOSED != COMPACTION_IDLE
+    }
+
+    pub(crate) fn close_admission(&self) {
+        self.owner.fetch_or(COMPACTION_CLOSED, Ordering::AcqRel);
+    }
+
+    pub(crate) fn reopen_admission(&self) {
+        self.owner.fetch_and(!COMPACTION_CLOSED, Ordering::AcqRel);
+    }
+
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_in_flight() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -202,6 +225,28 @@ pub struct CompactionConfig {
 #[cfg(test)]
 mod compaction_lease_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn suspension_closes_acquisition_through_drain_until_restore() {
+        let lease = CompactionLease::default();
+        let owner = lease.try_enter(CompactionOwner::Auto).unwrap();
+        lease.close_admission();
+        assert!(lease.is_in_flight());
+        assert!(lease.try_enter(CompactionOwner::Manual).is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(lease.wait_idle(), lease.wait_idle(), async {
+                tokio::task::yield_now().await;
+                drop(owner);
+            });
+        })
+        .await
+        .unwrap();
+        assert!(!lease.is_in_flight());
+        assert!(lease.try_enter(CompactionOwner::Manual).is_none());
+        lease.wait_idle().await;
+        lease.reopen_admission();
+        assert!(lease.try_enter(CompactionOwner::Manual).is_some());
+    }
 
     #[test]
     fn manual_and_auto_compaction_are_mutually_exclusive() {

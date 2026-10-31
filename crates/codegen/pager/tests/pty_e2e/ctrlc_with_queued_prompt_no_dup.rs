@@ -51,7 +51,7 @@ async fn ctrlc_with_queued_prompt_no_dup() {
     turn_a.release();
 
     // Standard cancel (queued prompts skip the rewind): A is cancelled and B
-    // promotes as the next turn. The "Turn cancelled by user" marker and the
+    // promotes as the next turn. The "Turn cancelled" marker and the
     // "❯ B" promotion scroll above the viewport once B's start-adoption pins
     // its block to the head, so gate on B's reply (stable at the head) and
     // prove correctness via the composer state + the recorded wire below.

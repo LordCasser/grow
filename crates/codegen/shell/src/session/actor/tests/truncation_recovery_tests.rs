@@ -16,6 +16,12 @@ use serde_json::json;
 use test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
 use tokio::sync::mpsc;
 
+#[path = "compaction_admission_tests.rs"]
+mod compaction_admission_tests;
+
+#[path = "planning_completion_tests.rs"]
+mod planning_completion_tests;
+
 fn prompt(text: impl Into<String>, index: usize) -> ConversationItem {
     let mut item = ConversationItem::user(text);
     item.set_prompt_index(index);
@@ -3308,7 +3314,16 @@ fn truncation_tool_use_complete_wins_over_length() {
 /// rebuilds from the compacted conversation.
 #[test]
 fn context_window_exceeded_triggers_compaction() {
-    run_with_session_stack(|| {
+    context_window_exceeded_compaction_scenario(tool_types::BehaviorId::Normal);
+}
+
+#[test]
+fn executing_plan_continues_after_context_compaction() {
+    context_window_exceeded_compaction_scenario(tool_types::BehaviorId::Plan);
+}
+
+fn context_window_exceeded_compaction_scenario(behavior: tool_types::BehaviorId) {
+    run_with_session_stack(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3342,8 +3357,49 @@ fn context_window_exceeded_triggers_compaction() {
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
             seed_closed_compaction_range(&actor).await;
 
-            let result = run_user_turn(&actor, "ctx-exceeded").await;
-            result.expect("turn must complete successfully");
+            if behavior == tool_types::BehaviorId::Plan {
+                let plan =
+                    "# Build and verify\nContinue the approved implementation and validation.";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, plan)
+                    .unwrap();
+                let snapshot = {
+                    let mut state = actor.behavior.lock();
+                    assert!(state.select_behavior(behavior));
+                    state.record_plan_artifact(plan);
+                    assert!(state.submit_initial_plan());
+                    assert!(state.approve_submitted_plan());
+                    state.snapshot()
+                };
+                actor
+                    .persist_behavior_transition_durably(snapshot, None)
+                    .await
+                    .unwrap();
+            }
+            let prompt_id = "ctx-exceeded";
+            install_test_foreground(&actor, prompt_id).await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                actor.handle_prompt(
+                    prompt_id,
+                    admit_test_human_input(&actor, prompt_id).await,
+                    crate::session::PromptOrigin::User,
+                    Vec::new(),
+                    crate::session::TurnKind::User,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "continue the work",
+                    ))],
+                    behavior,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("compaction must not spin the turn")
+            .expect("turn must complete successfully");
+            assert_eq!(result.stop_reason, acp::StopReason::EndTurn);
 
             let conversation = actor.chat_state_handle.get_conversation().await;
             // Compaction must have been triggered: no continue prompt, and
@@ -3371,6 +3427,31 @@ fn context_window_exceeded_triggers_compaction() {
                 "the rebuilt turn must run against the compacted conversation, got {texts:?}"
             );
             assert_eq!(server.messages_request_count(), 3);
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. })
+                    ))
+                    .count(),
+                1,
+                "compaction continues the originally admitted Turn"
+            );
+            assert!(events.iter().any(|event| matches!(
+                event.kind,
+                chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Completed { .. }
+                )
+            )));
+            assert!(!events.iter().any(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { outcome, .. })
+                if outcome == "cancelled"
+            )));
+            if behavior == tool_types::BehaviorId::Plan {
+                assert_eq!(actor.behavior.lock().plan_phase_label(), Some("executing"));
+            }
         }));
     });
 }

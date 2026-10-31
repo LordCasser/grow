@@ -327,7 +327,7 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
     harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
     ordinary_turn.release();
     harness
-        .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
+        .wait_for_text("Turn cancelled", Duration::from_secs(15))
         .unwrap_or_else(|error| {
             panic!(
                 "ordinary turn cancelled: {error}\n--- unified diagnostics ---\n{}",

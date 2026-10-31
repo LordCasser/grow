@@ -69,7 +69,7 @@ async fn bash_queued_mid_turn_drains_as_bash() {
         harness.screen_contents()
     );
     assert!(
-        !harness.contains_text("Turn cancelled by user"),
+        !harness.contains_text("Turn cancelled"),
         "attempting to steer a bash row must not cancel the turn\nscreen:\n{}",
         harness.screen_contents()
     );

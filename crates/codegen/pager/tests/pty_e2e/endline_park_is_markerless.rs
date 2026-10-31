@@ -166,7 +166,7 @@ async fn parked_enter_queues_until_wait_finishes() {
         harness.update(Duration::from_millis(100));
         let screen = harness.screen_contents();
         screen.contains("Worked for")
-            && !screen.contains("Turn cancelled by user")
+            && !screen.contains("Turn cancelled")
             && screen.contains("hurry up please")
     });
     assert!(

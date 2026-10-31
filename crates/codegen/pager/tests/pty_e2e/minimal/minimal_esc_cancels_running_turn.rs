@@ -35,7 +35,7 @@ async fn minimal_esc_cancels_running_turn() {
     // Full-text: minimal commits the cancel marker to native scrollback, so it
     // may sit above the pinned viewport — check scrollback + screen.
     harness
-        .wait_for_full_text("Turn cancelled by user", Duration::from_secs(15))
+        .wait_for_full_text("Turn cancelled", Duration::from_secs(15))
         .expect("cancellation marker committed to scrollback");
     assert!(
         !harness.contains_text("panicked"),

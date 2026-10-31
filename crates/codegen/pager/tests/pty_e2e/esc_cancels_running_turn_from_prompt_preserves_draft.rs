@@ -51,7 +51,7 @@ async fn esc_cancels_running_turn_from_prompt_preserves_draft() {
     harness.update(Duration::from_millis(200));
 
     harness
-        .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
+        .wait_for_text("Turn cancelled", Duration::from_secs(15))
         .expect("turn cancelled marker");
 
     harness.update(Duration::from_millis(600));

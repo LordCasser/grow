@@ -37,7 +37,7 @@ pub enum SessionEvent {
         /// renders without a duration rather than lying with "0.0s".
         elapsed: Option<Duration>,
     },
-    /// Agent turn was cancelled by the user.
+    /// Agent turn was cancelled.
     TurnCancelled {
         /// Wall-clock elapsed time before cancellation.
         elapsed: Duration,
@@ -130,7 +130,7 @@ impl SessionEvent {
             }
             SessionEvent::TurnCompleted { elapsed: None } => "Turn completed.".to_string(),
             SessionEvent::TurnCancelled { elapsed } => {
-                format!("Turn cancelled by user in {}.", format_duration(*elapsed))
+                format!("Turn cancelled in {}.", format_duration(*elapsed))
             }
             SessionEvent::TurnHalted { elapsed } => {
                 format!(
@@ -612,7 +612,7 @@ mod tests {
         let event = SessionEvent::TurnCancelled {
             elapsed: Duration::from_secs(10),
         };
-        assert_eq!(event.message(), "Turn cancelled by user in 10s.");
+        assert_eq!(event.message(), "Turn cancelled in 10s.");
     }
 
     #[test]

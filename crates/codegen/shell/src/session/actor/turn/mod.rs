@@ -1916,21 +1916,19 @@ impl SessionActor {
                     .map_err(|message| acp::Error::internal_error().data(message))?;
                 self.ensure_model_context_fits(request.max_output_tokens)
                     .await?;
-                let (provider_admitted, manual_compaction_pending) =
-                    {
-                        let _boundary = self.step_control_gate.lock().await;
-                        let admission = self.state.lock().await;
-                        let manual_compaction_pending = admission.pending_manual_compact.is_some();
-                        (
-                            !manual_compaction_pending
-                                && admission.can_continue_regular_turn(req_id)
-                                && self.events.has_active_step()
-                                && self.tool_context.storage_admission.as_ref().is_none_or(
-                                    |gate| gate.check(self.session_info.id.0.as_ref()).is_ok(),
-                                ),
-                            manual_compaction_pending,
-                        )
-                    };
+                let (provider_admitted, manual_compaction_pending) = {
+                    let _boundary = self.step_control_gate.lock().await;
+                    let admission = self.state.lock().await;
+                    let manual_compaction_pending = admission.pending_manual_compact.is_some();
+                    let provider_admitted = !manual_compaction_pending
+                        && admission.can_continue_regular_turn(req_id)
+                        && self.events.has_active_step();
+                    if provider_admitted && let Some(gate) = &self.tool_context.storage_admission {
+                        gate.check(self.session_info.id.0.as_ref())
+                            .map_err(|reason| acp::Error::internal_error().data(reason))?;
+                    }
+                    (provider_admitted, manual_compaction_pending)
+                };
                 if !provider_admitted {
                     if manual_compaction_pending {
                         let snapshot = self

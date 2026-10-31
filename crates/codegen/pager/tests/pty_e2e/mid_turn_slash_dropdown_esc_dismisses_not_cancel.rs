@@ -50,7 +50,7 @@ async fn mid_turn_slash_dropdown_esc_dismisses_not_cancel() {
         "Esc must dismiss the slash dropdown\nscreen:\n{screen}"
     );
     assert!(
-        !screen.contains("Turn cancelled by user"),
+        !screen.contains("Turn cancelled"),
         "slash-dropdown Esc must NOT cancel the turn\nscreen:\n{screen}"
     );
     assert!(
@@ -62,7 +62,7 @@ async fn mid_turn_slash_dropdown_esc_dismisses_not_cancel() {
     // dropdown-dismiss Esc.
     harness.update(Duration::from_millis(600));
     assert!(
-        !harness.contains_text("Turn cancelled by user"),
+        !harness.contains_text("Turn cancelled"),
         "turn must still be running after the dropdown-dismiss Esc\nscreen:\n{}",
         harness.screen_contents()
     );

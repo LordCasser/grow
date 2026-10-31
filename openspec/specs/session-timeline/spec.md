@@ -1546,6 +1546,21 @@ Recovery SHALL NOT synthesize a successful canonical child result from Completed
 - **WHEN** a valid canonical Completed result exists but its referenced output is missing or corrupt
 - **THEN** recovery reuses the exact result reference and outcome without rewriting history or guessing output.
 
+### Requirement: Suspension drains compaction before retiring the foreground
+挂起 SHALL 在活动压缩的持久化与结算 owner 退出后收回并 join foreground，不等待已经为 runtime handoff 停驻的 foreground 自行退出。挂起 SHALL 沿用同一 deadline 和 operation 身份；压缩尚未排空时不得提前 abort 或确认 Suspended。
+
+#### Scenario: Active compaction settles into a parked foreground
+- **WHEN** 挂起关闭准入并取消活动压缩，压缩完成结算并释放 lease，foreground 随后停驻等待 handoff
+- **THEN** 挂起 owner 收回并 join foreground，在原 deadline 内完成 checkpoint，不生成 Turn cancelled/error/completed。
+
+#### Scenario: Compaction acknowledgement exceeds the suspension deadline
+- **WHEN** 压缩持久确认仍在途且共享 deadline 已到
+- **THEN** 返回未确认并保留压缩任务，不提交 Suspended；ACK 结算后同 operation 重试可以收回 foreground 并完成挂起。
+
+#### Scenario: An admitted manual worker reaches lease acquisition after suspension
+- **WHEN** 手动压缩已获得会话活动许可但尚未取得 publication lease，挂起先关闭执行准入
+- **THEN** 该 worker 不能取得新压缩 lease；原活动 lease 释放后仍保持关闭，只有恢复执行才重新开放。
+
 ### Requirement: Restored children retain their original birth authority
 
 原 suspended child 重建 SHALL 从原 Spawn 的已持久化有效 capability_mode 恢复出生 RWX，并与当前直接父权限上限相交；当前定义默认或已选 profile 不得扩大原生命周期的出生权限及后代 ceiling。恢复事实缺失或无效 SHALL 阻止整树执行准入。逐调用授权仍须按当前策略重新检查，不复用旧 permit。

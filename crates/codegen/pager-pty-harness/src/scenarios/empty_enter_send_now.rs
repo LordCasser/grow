@@ -2,7 +2,7 @@
 //!
 //! Regression for send-now discoverability: plain Enter with text still
 //! *queues*; a second bare Enter on the empty prompt is cancel-and-send — the
-//! running turn is cancelled (silently: no "Turn cancelled by user" marker)
+//! running turn is cancelled (silently: no "Turn cancelled" marker)
 //! and the queued row runs as the next turn, arriving on the wire as a
 //! standard `<user_query>` prompt with no interjection preamble.
 
@@ -102,9 +102,9 @@ pub async fn assert_empty_enter_force_sends_top_queued() -> Result<()> {
         .await
         .context("promoted turn expectation timeout")?;
 
-    // A send-now cancel is silent: no "Turn cancelled by user" marker may
+    // A send-now cancel is silent: no "Turn cancelled" marker may
     // appear between the partial turn-1 output and the promoted prompt.
-    if harness.contains_text("Turn cancelled by user") {
+    if harness.contains_text("Turn cancelled") {
         bail!(
             "send-now cancel must not render a cancelled marker\n{}",
             harness.screen_contents()

@@ -4,7 +4,7 @@ use super::common::*;
 
 /// The no-rewind boundary: once the server has streamed ANY activity, Ctrl+C
 /// is a standard cancel — the prompt stays a committed "❯ " block (exactly
-/// once, NOT restored to the composer) and the "Turn cancelled by user"
+/// once, NOT restored to the composer) and the "Turn cancelled"
 /// marker renders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
@@ -36,7 +36,7 @@ async fn ctrlc_after_activity_no_rewind_prompt_once() {
 
     harness.inject_keys(keys::CTRL_C).expect("Ctrl+C cancel");
     harness
-        .wait_for_text("Turn cancelled by user", Duration::from_secs(10))
+        .wait_for_text("Turn cancelled", Duration::from_secs(10))
         .expect("standard cancel marker");
 
     // No rewind: the composer stays empty and the committed block stays put,
