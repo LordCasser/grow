@@ -95,29 +95,32 @@ permission_mode = "always-approve"
             "test-model",
         )),
     );
+    let mut spawn_a_events = sse::responses_api_reasoning_then_tool_call_events(
+        "Delegate A",
+        "call_background_a",
+        "spawn_subagent",
+        &spawn("Run background A"),
+        "test-model",
+    );
+    // Block response.completed itself: the sampler does not wait for [DONE].
+    assert_eq!(spawn_a_events.pop().unwrap().data, "[DONE]");
     let spawn_a = content.expect_response_blocked(
         "spawn A after B starts",
         Matcher::foreground(Endpoint::Responses),
-        ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
-            "Delegate A",
-            "call_background_a",
-            "spawn_subagent",
-            &spawn("Run background A"),
-            "test-model",
-        )),
+        ScriptedResponse::sse(spawn_a_events),
     );
     let _parent_idle = content.expect_response(
         "parent settles before A completes",
         Matcher::foreground(Endpoint::Responses),
         ScriptedResponse::sse(sse::responses_api_script_exact("PARENT_IDLE", "test-model")),
     );
+    let mut notification_events =
+        sse::responses_api_script_exact("NOTIFICATION_RUNNING", "test-model");
+    assert_eq!(notification_events.pop().unwrap().data, "[DONE]");
     let mut notification = content.expect_response_blocked(
         "parent child-completion notification",
         Matcher::foreground(Endpoint::Responses),
-        ScriptedResponse::sse(sse::responses_api_script_exact(
-            "NOTIFICATION_RUNNING",
-            "test-model",
-        )),
+        ScriptedResponse::sse(notification_events),
     );
     let command_b = format!(
         "printf 'started\\n' >> {}; while [ ! -e {} ]; do /bin/sleep 0.05; done",
