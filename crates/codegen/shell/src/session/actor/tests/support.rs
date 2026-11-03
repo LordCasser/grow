@@ -333,14 +333,22 @@ async fn test_agent_from_config(
     use tools::registry::types::SessionContext;
     let builder = tools::bridge::ToolBridge::get_builder();
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
-    // Every actor owns an independent persistence path. A shared
-    // resources-state path lets parallel tests rename/remove one another's
-    // durable snapshot and turns a real persistence acknowledgement into a
-    // nondeterministic ENOENT.
+    // Every actor owns an independent session-style persistence directory. A
+    // shared resources-state path lets parallel tests rename/remove one
+    // another's durable snapshot; using the session store also keeps these
+    // Shell tests on the same platform-specific persistence path as production.
     let state_root =
         std::env::temp_dir().join(format!("grow-test-tool-state-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&state_root).expect("create isolated tool-state test directory");
-    let state_path = state_root.join("resources_state.json");
+    let state_directory = std::sync::Arc::new(
+        crate::session::storage::ContainedDirectory::open(
+            &state_root,
+            std::path::Path::new(""),
+            "test tool-state directory",
+            false,
+        )
+        .expect("pin isolated tool-state test directory"),
+    );
     let ctx = SessionContext {
         backend,
         fs,
@@ -352,10 +360,7 @@ async fn test_agent_from_config(
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        resources_persistence: std::sync::Arc::new(
-            tools::persistence::ResourcesPersistence::local(state_path)
-                .expect("pin resources state test store"),
-        ),
+        resources_persistence: crate::session::storage::resources_persistence(state_directory),
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,

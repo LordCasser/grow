@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-04
+skip_specs: true
+reason: Shell actor test fixture maintenance. The fixture will use the production session resources store; no runtime contract changes.

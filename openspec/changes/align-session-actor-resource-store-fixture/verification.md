@@ -1,0 +1,9 @@
+# Verification
+
+The first Windows native job failed three image-coordination cases with `PublishedPersistenceError(PermissionDenied, OS 5)`: 61 passed / 3 failed. See [job 126045426954](https://github.com/LordCasser/grow/actions/runs/41672827694/job/126045426954) and `/tmp/grow-260-candidate-windows-ci-failure-excerpt.log`.
+
+The shared Shell actor fixture selected `ResourcesPersistence::local`, whose strict parent-directory sync differs from the SessionActor production adapter. The local directory clone does not have the writable file access required by [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers). The error was correctly classified as after publication. The fixture now uses `ContainedDirectory` and `session::storage::resources_persistence`, matching the real Shell host. It still writes and flushes real files, publishes atomically, and awaits real persistence acknowledgements. The Local store, its strict directory barrier, and error semantics are unchanged.
+
+The standalone Shell library suite on macOS passed: 4572 passed / 0 failed / 9 ignored, `/tmp/grow-260-session-resource-fixture-shell-final.log`. All three Windows-failing selectors, cold birth-authority restore, actor observation/cancellation boundaries and image projection tests passed in this run. This standalone feature set differs from the earlier combined 18-crate suite (4576 Shell cases); counts are kept separate.
+
+Rust formatting, diff check and strict OpenSpec validation pass. Native Windows CI on the repaired candidate is still required; no Windows pass or archival is claimed here.

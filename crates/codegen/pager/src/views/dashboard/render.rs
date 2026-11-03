@@ -387,15 +387,11 @@ fn rename_cursor_pos(state: &DashboardState, rows: &[DashboardRow]) -> Option<(u
 /// inflate the tallies if counted directly. Chips with zero count are
 /// suppressed.
 ///
-/// Reintroduces a `[+ New session]` button on the right edge of
-/// the header. The button is the default cursor target whenever
-/// no row is selected — Up-arrow from the first row, Esc deselect,
-/// and dashboard-open-without-prior-agent all land here. While
-/// focused, Enter on an empty prompt creates a session and opens
-/// detail view; click does the same. The focused colour bumps to
-/// the green `accent_success` (mirroring the affirmative "create"
-/// affordance) so the cursor's location is obvious without a
-/// separate marker.
+/// Render the `[+ New session]` button on the right edge of the header.
+/// The button is the list cursor target when no row is selected. It paints
+/// green only while the list also owns keyboard focus; a fresh dashboard
+/// keeps focus in the dispatch input. Enter on the focused button or a click
+/// creates a session and opens its detail view.
 fn render_header(
     buf: &mut Buffer,
     area: Rect,
@@ -4044,12 +4040,18 @@ mod tests {
     /// when focused so the cursor is obvious, and dim gray otherwise.
     #[test]
     fn header_new_agent_button_focused_is_green() {
-        let theme = Theme::current();
+        let theme = Theme::grownight();
+        assert_ne!(
+            theme.accent_success, theme.gray,
+            "the fixed test theme must distinguish focused and unfocused colors"
+        );
         let rows: Vec<DashboardRow> = Vec::new();
         let area = Rect::new(0, 0, 120, 1);
 
-        // Focused (default for a fresh dashboard with no row selected).
+        // The header button is the cursor target, but it is only visually
+        // focused while the overview list owns keyboard focus.
         let mut focused = DashboardState::new();
+        focused.list_focused = true;
         focused.focus_new_agent_button();
         let mut buf = Buffer::empty(area);
         render_header(&mut buf, area, &theme, &rows, &mut focused, None);
@@ -4064,8 +4066,33 @@ mod tests {
             buf[(rect.x, rect.y)].fg,
         );
 
-        // Unfocused (a row holds the cursor instead).
+        // The dispatch input owns focus on a fresh dashboard. Even though the
+        // button remains the list cursor target, it must stay dim until the
+        // user gives keyboard focus to the list.
+        let mut input_focused = DashboardState::new();
+        input_focused.focus_new_agent_button();
+        let mut input_buf = Buffer::empty(area);
+        render_header(
+            &mut input_buf,
+            area,
+            &theme,
+            &rows,
+            &mut input_focused,
+            None,
+        );
+        let input_rect = input_focused
+            .new_agent_button_hit
+            .rect
+            .expect("button must render");
+        assert_eq!(
+            input_buf[(input_rect.x, input_rect.y)].fg,
+            theme.gray,
+            "the button stays dim while the dispatch input owns focus",
+        );
+
+        // The list owns keyboard focus, but a row holds its cursor instead.
         let mut unfocused = DashboardState::new();
+        unfocused.list_focused = true;
         unfocused.focus_row(super::super::state::DashboardRowId::TopLevel(
             crate::app::session::AgentId(0),
         ));
