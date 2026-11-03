@@ -29,8 +29,19 @@ async fn minimal_ctrl_d_confirms_and_quits() {
             )
         });
 
-    // Second Ctrl+D within the confirm window exits the process.
-    harness.inject_keys(b"\x04").expect("confirm Ctrl+D quit");
+    // The screen wait pumps PTY output and may itself outlive Ctrl+D's
+    // one-second confirmation window on a loaded CI runner. Ctrl+C clears
+    // that old arm; a single PTY write then keeps the confirming pair within
+    // the product's existing window.
+    harness
+        .inject_keys(b"\x03")
+        .expect("Ctrl+C must clear the prior quit confirmation");
+    harness
+        .wait_for_text_absent("again to quit", Duration::from_secs(2))
+        .expect("Ctrl+C clears the old quit confirmation");
+    harness
+        .inject_keys(b"\x04\x04")
+        .expect("send Ctrl+D confirmation pair together");
     let exit = harness
         .wait_exit_code(Duration::from_secs(5))
         .expect("wait for minimal pager exit");

@@ -1,0 +1,3 @@
+## Design
+
+The archived client-surfaces contract confirms Quit only when the second Ctrl+D arrives within the existing one-second `PendingAction` window; another key clears the pending confirmation. The PTY harness's `wait_for_text` pumps output in up-to-50ms slices until the text appears, with a five-second timeout and no guarantee that the hint is observed before the one-second product window expires. The fixture therefore observes the first hint, clears that old pending action with Ctrl+C, confirms that the hint disappears, and writes both Ctrl+D bytes in one `inject_keys` call. The application window and process-exit deadline remain unchanged.

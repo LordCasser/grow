@@ -1,3 +1,3 @@
 - [x] Gate both login environment parser tests with the parser's Unix cfg.
 - [x] Gate the Bash `background_check` test module with Unix to avoid an unused wildcard import on Windows.
-- [ ] Run Unix terminal and Bash selectors, Windows tools tests, and strict OpenSpec validation; record platform coverage without claiming local macOS as Windows validation.
+- [x] Run Unix terminal and Bash selectors, Windows tools tests, and strict OpenSpec validation; record platform coverage without claiming local macOS as Windows validation.
