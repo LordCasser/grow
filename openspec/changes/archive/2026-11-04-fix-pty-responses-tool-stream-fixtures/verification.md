@@ -26,4 +26,4 @@ The local binary `target/release/grow` is Mach-O arm64, reports `grow 2.6.0 (bbd
 
 ## 归档收尾（2026-11-04）
 
-已执行 `openspec archive fix-pty-responses-tool-stream-fixtures --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../../close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。
+已执行 `openspec archive fix-pty-responses-tool-stream-fixtures --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../2026-11-04-close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。

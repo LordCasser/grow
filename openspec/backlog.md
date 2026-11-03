@@ -1,6 +1,6 @@
 # Backlog
 
-这里只保留已有明确暂缓决定或启动门槛的事项。v2.6.0 非延期验证债务已按本机证据闭合或明确保留残余边界；逐项 owner、结果和未完成门禁见[发布阻塞闭合矩阵](changes/close-v2-6-0-release-blockers/verification.md#八项闭合矩阵)，原始八项快照见[backlog-before.md](changes/close-v2-6-0-release-blockers/backlog-before.md)。既有历史整理记录见[本轮闭合记录](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/algorithm-inventory.md)及其[清理前快照](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/backlog-before.md)。
+这里只保留已有明确暂缓决定或启动门槛的事项。八项非延期验证债务已完成修复、验证并随 [v2.6.0](https://github.com/LordCasser/grow/releases/tag/v2.6.0) 发布；逐项 owner、证据和剩余边界见[发布阻塞闭合矩阵](changes/archive/2026-11-04-close-v2-6-0-release-blockers/verification.md#八项闭合矩阵)，原始八项快照见[backlog-before.md](changes/archive/2026-11-04-close-v2-6-0-release-blockers/backlog-before.md)。既有历史整理记录见[本轮闭合记录](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/algorithm-inventory.md)及其[清理前快照](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/backlog-before.md)。
 
 ## 明确暂缓
 

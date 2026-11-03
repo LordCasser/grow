@@ -12,8 +12,8 @@
 
 ## 限制
 
-最终核心运行在 18 个 crate block 汇总为 19233 passed / 0 failed / 51 ignored。候选版 workspace check PASS（1m30s，无 warning），Settings E2E 235 passed，strict pre-archive validation 26 passed / 0 failed，普通本地 release build PASS（3m21s）。本机结果不代表 native cross-platform CI 或官方分发/发布；归档及这些剩余门禁仍未完成。早期 watcher/MCP 失败和中途修复记录保留在[发布阻塞总表](../../close-v2-6-0-release-blockers/verification.md)中，最终结果只替代相同本机门禁的旧结论。
+最终核心运行在 18 个 crate block 汇总为 19233 passed / 0 failed / 51 ignored。候选版 workspace check PASS（1m30s，无 warning），Settings E2E 235 passed，strict pre-archive validation 26 passed / 0 failed，普通本地 release build PASS（3m21s）。本机结果不代表 native cross-platform CI 或官方分发/发布；归档及这些剩余门禁仍未完成。早期 watcher/MCP 失败和中途修复记录保留在[发布阻塞总表](../2026-11-04-close-v2-6-0-release-blockers/verification.md)中，最终结果只替代相同本机门禁的旧结论。
 
 ## 归档收尾（2026-11-04）
 
-已执行 `openspec archive offload-dynamic-config-watch-updates --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../../close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。
+已执行 `openspec archive offload-dynamic-config-watch-updates --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../2026-11-04-close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。

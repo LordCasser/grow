@@ -9,10 +9,10 @@
 - [x] 7. 完成 Responses 单工具/parallel PTY fixtures 的真实 Responses backend 验证。
 - [x] 8. 完成临时目录 skipped/written 回执在 storage、flush、session-end 的修复和回归。
 - [x] 9. 完成 task cancellation entry scope 的实现、拒绝/幂等对抗性测试和 SessionActor receipt 验证。
-- [ ] 10. 为八项逐条补充实际命令、结果、日志/源码身份和残余平台边界；只在证据满足矩阵后关闭对应项。
+- [x] 10. 为八项逐条补充实际命令、结果、日志/源码身份和残余平台边界；只在证据满足矩阵后关闭对应项。
 
 ## 最终发布门禁
 
 - [x] 11. 在最终 candidate source 上运行发布相关 workspace 检查、原 18 crate 核心套件、格式与 OpenSpec 全量/归档校验；保留失败和 skipped 计数。
-- [ ] 12. 验证 clean committed HEAD 与 annotated v2.6.0 tag 一致，执行 `bash scripts/validate-release.sh v2.6.0` 并记录官方 required gates、平台构建与资产来源结果。
-- [ ] 13. 对最终闭合矩阵进行只读对抗性 review；发布阻塞未闭合时不得把候选标成可发布。
+- [x] 12. 验证 clean committed HEAD 与 annotated v2.6.0 tag 一致，执行 `bash scripts/validate-release.sh v2.6.0` 并记录官方 required gates、平台构建与资产来源结果。
+- [x] 13. 对最终闭合矩阵进行只读对抗性 review；发布阻塞未闭合时不得把候选标成可发布。

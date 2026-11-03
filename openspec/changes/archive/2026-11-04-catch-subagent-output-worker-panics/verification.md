@@ -7,8 +7,8 @@
 
 The containment claim applies to an unwind from the persisted-output reader future. It does not claim recovery from process abort: `Cargo.toml` sets `[profile.release] panic = "abort"`, inherited by `release-dist`. The test demonstrates the unwind boundary in the Rust test binary only.
 
-Earlier fixture failures and corrections remain in the [umbrella verification](../../close-v2-6-0-release-blockers/verification.md); the final core run supersedes the prior local Tools result. Candidate-wide core results are 19233 passed / 0 failed / 51 ignored across 18 crate blocks; workspace check passed in 1m30s without warnings, Settings E2E passed 235/235, strict pre-archive validation passed 26/26, and the ordinary local release build passed in 3m21s. Archival, the required native cross-platform matrix and official publication remain incomplete.
+Earlier fixture failures and corrections remain in the [umbrella verification](../2026-11-04-close-v2-6-0-release-blockers/verification.md); the final core run supersedes the prior local Tools result. Candidate-wide core results are 19233 passed / 0 failed / 51 ignored across 18 crate blocks; workspace check passed in 1m30s without warnings, Settings E2E passed 235/235, strict pre-archive validation passed 26/26, and the ordinary local release build passed in 3m21s. Archival, the required native cross-platform matrix and official publication remain incomplete.
 
 ## 归档收尾（2026-11-04）
 
-已执行 `openspec archive catch-subagent-output-worker-panics --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../../close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。
+已执行 `openspec archive catch-subagent-output-worker-panics --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../2026-11-04-close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。

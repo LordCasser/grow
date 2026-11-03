@@ -7,7 +7,7 @@
 
 The active-discovery tests preserve the distinction between an individual forgotten ID and an unavailable or empty child inventory. They do not synthesize an empty inventory from a single missing result. The panic case proves unwind recovery in the test binary only; release profiles use `panic=abort` as recorded in the [panic containment verification](../2026-11-04-catch-subagent-output-worker-panics/verification.md).
 
-The local final core run is not the required macOS/Linux/Windows native CI matrix. Earlier fixture failures are retained in the [umbrella verification](../../close-v2-6-0-release-blockers/verification.md). Strict OpenSpec validation and archive review remain outside this record.
+The local final core run is not the required macOS/Linux/Windows native CI matrix. Earlier fixture failures are retained in the [umbrella verification](../2026-11-04-close-v2-6-0-release-blockers/verification.md). Strict OpenSpec validation and archive review remain outside this record.
 
 ## Native platform gate on the repaired source
 

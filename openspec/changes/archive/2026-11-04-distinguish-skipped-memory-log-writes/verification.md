@@ -9,8 +9,8 @@
 
 The Shell crate finished with 4576 passed / 0 failed / 9 ignored in the final core run. These tests establish that an ephemeral policy skip is reported as skipped and does not count as a successful flush checkpoint; they do not change the existing ephemeral-write policy. Candidate-wide core results are 19233 passed / 0 failed / 51 ignored across 18 crate blocks (`/tmp/grow-260-final-core5.log`); workspace check passed in 1m30s with no warnings, Settings E2E passed 235/235, and strict pre-archive validation passed 26/26 (`/tmp/grow-260-final-strict-prearchive.log`). Ordinary local release build passed in 3m21s; it is not an official distribution build.
 
-Archival, native cross-platform CI, PTY gates and official publication remain separate and incomplete. Earlier targeted evidence and release-blocker chronology remain in the [umbrella verification](../../close-v2-6-0-release-blockers/verification.md).
+Archival, native cross-platform CI, PTY gates and official publication remain separate and incomplete. Earlier targeted evidence and release-blocker chronology remain in the [umbrella verification](../2026-11-04-close-v2-6-0-release-blockers/verification.md).
 
 ## 归档收尾（2026-11-04）
 
-已执行 `openspec archive distinguish-skipped-memory-log-writes --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../../close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。
+已执行 `openspec archive distinguish-skipped-memory-log-writes --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../2026-11-04-close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。

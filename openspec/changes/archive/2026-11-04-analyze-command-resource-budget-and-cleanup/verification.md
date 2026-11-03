@@ -9,10 +9,10 @@
 
 ## 结论边界
 
-本次调查未增加固定内存预算、CPU/进程配额或全局运行开关。高资源试验预算仍须由调用方/宿主显式给定；上述临时副本脚本是低资源中断协议验证，不是高负载试验。早期失控 probe 未运行且已删除；先前测试失败和修复过程保留在[发布阻塞总表](../../close-v2-6-0-release-blockers/verification.md)。
+本次调查未增加固定内存预算、CPU/进程配额或全局运行开关。高资源试验预算仍须由调用方/宿主显式给定；上述临时副本脚本是低资源中断协议验证，不是高负载试验。早期失控 probe 未运行且已删除；先前测试失败和修复过程保留在[发布阻塞总表](../2026-11-04-close-v2-6-0-release-blockers/verification.md)。
 
 候选版最终本机核心测试在 `/tmp/grow-260-final-core5.log` 汇总为 18 个 crate、19233 passed / 0 failed / 51 ignored；workspace check 为 PASS（1m30s，无 warning），Settings E2E 为 235 passed，strict pre-archive 校验为 26 passed / 0 failed。普通本地 release build 通过（3m21s），但不是 official distribution build。macOS 本机结果不代表 Linux/Windows native CI；归档与正式发布仍未完成。
 
 ## 归档收尾（2026-11-04）
 
-已执行 `openspec archive analyze-command-resource-budget-and-cleanup --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../../close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。
+已执行 `openspec archive analyze-command-resource-budget-and-cleanup --yes`，相应 delta 已合入主规范；纯维护/调查 change 按 skip_specs 归档。最终本机结果见上表，跨平台 CI 与官方发布仍由[发布闭合记录](../2026-11-04-close-v2-6-0-release-blockers/verification.md)跟踪。归档后的严格校验日志为 `/tmp/grow-260-postarchive-active-final.log` 和 `/tmp/grow-260-postarchive-archived-final.log`。

@@ -2,7 +2,7 @@
 
 ## 范围与证据状态
 
-本记录最初核对生产入口、平台实现和 cleanup 缺陷；下述 leader-exit 缺陷已由 [`finish-command-groups-before-leader-reap`](../2026-11-04-finish-command-groups-before-leader-reap/design.md) 修复。最初的临时 `command_cleanup_probe.rs` 是调查 fixture，未运行，之后已删除；正式回归合并到 `terminal.rs` 的 `command_cleanup_finishes_term_ignoring_descendants_before_leader_reap`，`/tmp/grow-260-tools7-target-1.log` 记录 1/1 通过。资源策略仍不设置全局内存值；一次性变异副本中断脚本按 parent 运行报告 PASS，脚本与边界见下文。相关跨发布 blocker 的协调验收见 [`close-v2-6-0-release-blockers`](../../close-v2-6-0-release-blockers/design.md)。
+本记录最初核对生产入口、平台实现和 cleanup 缺陷；下述 leader-exit 缺陷已由 [`finish-command-groups-before-leader-reap`](../2026-11-04-finish-command-groups-before-leader-reap/design.md) 修复。最初的临时 `command_cleanup_probe.rs` 是调查 fixture，未运行，之后已删除；正式回归合并到 `terminal.rs` 的 `command_cleanup_finishes_term_ignoring_descendants_before_leader_reap`，`/tmp/grow-260-tools7-target-1.log` 记录 1/1 通过。资源策略仍不设置全局内存值；一次性变异副本中断脚本按 parent 运行报告 PASS，脚本与边界见下文。相关跨发布 blocker 的协调验收见 [`close-v2-6-0-release-blockers`](../2026-11-04-close-v2-6-0-release-blockers/design.md)。
 
 ## 生产入口与现存预算
 
