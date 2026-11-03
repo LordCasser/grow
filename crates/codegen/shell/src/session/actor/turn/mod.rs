@@ -734,7 +734,7 @@ impl SessionActor {
                 return result;
             }
             if matches!(result, Ok(TurnOutcome::Completed { .. }))
-                && self.close_steering_and_drain(req_id).await
+                && self.close_steering_and_drain(req_id).await?
             {
                 tracing::info!(
                     "Drained steering that raced final response settlement — continuing"
@@ -1758,7 +1758,7 @@ impl SessionActor {
                 self.drain_pending_interjections().await;
                 self.drain_deferred_completions().await;
                 self.flush_pending_system_reminders().await;
-                self.drain_active_notifications().await;
+                self.drain_active_notifications().await?;
                 let memory_reminder = self.first_turn_memory_reminder().await;
                 let memory_reminder = match self
                     .local_planning_context()
@@ -3104,20 +3104,20 @@ mod identical_tool_call_run_tests {
     fn nudge_latch_fires_once_per_run_after_threshold() {
         let mut run = IdenticalToolCallRun::default();
         for i in 1..NUDGE_AFTER_IDENTICAL_TOOL_CALLS {
-            assert_eq!(run.observe("poll", "get_task_output", false), i);
+            assert_eq!(run.observe("poll", "get_command_output", false), i);
             assert!(
                 !run.take_nudge(),
                 "must not nudge before threshold; run_len={i}"
             );
         }
         assert_eq!(
-            run.observe("poll", "get_task_output", false),
+            run.observe("poll", "get_command_output", false),
             NUDGE_AFTER_IDENTICAL_TOOL_CALLS
         );
         assert!(run.take_nudge());
         assert!(!run.take_nudge());
         assert_eq!(
-            run.observe("poll", "get_task_output", false),
+            run.observe("poll", "get_command_output", false),
             NUDGE_AFTER_IDENTICAL_TOOL_CALLS + 1
         );
         assert!(!run.take_nudge());

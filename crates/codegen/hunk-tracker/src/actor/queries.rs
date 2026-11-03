@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::diff::generate_hunk_patch;
+use crate::diff::generate_hunk_patches;
 use crate::types::{
     FileContentView, FileHunkData, Hunk, HunkId, HunkSourceFilter, SessionSummary, TurnSummary,
 };
@@ -43,24 +43,37 @@ impl HunkTrackerActor {
                 let baseline_text = state.baseline.as_str();
                 let current_text = state.current_content.as_str();
 
-                // Generate patch for each hunk
+                // A file query shares the two borrowed line tables across all
+                // its hunks. Keep the prior empty-side formatting when one
+                // side has no retained Full text; when neither side has text,
+                // preserve the existing absent-patch result.
+                let patches = if state.hunks.is_empty() {
+                    Vec::new()
+                } else {
+                    match (baseline_text, current_text) {
+                        (Some(baseline), Some(current)) => {
+                            generate_hunk_patches(baseline, current, &state.hunks)
+                                .into_iter()
+                                .map(Some)
+                                .collect()
+                        }
+                        (None, Some(current)) => generate_hunk_patches("", current, &state.hunks)
+                            .into_iter()
+                            .map(Some)
+                            .collect(),
+                        (Some(baseline), None) => generate_hunk_patches(baseline, "", &state.hunks)
+                            .into_iter()
+                            .map(Some)
+                            .collect(),
+                        (None, None) => vec![None; state.hunks.len()],
+                    }
+                };
+                debug_assert_eq!(patches.len(), state.hunks.len());
                 let hunks_with_patches: Vec<Arc<Hunk>> = state
                     .hunks
                     .iter()
-                    .map(|hunk| {
-                        // Generate patch if we have both baseline and current content
-                        let patch = match (baseline_text, current_text) {
-                            (Some(baseline), Some(current)) => {
-                                Some(generate_hunk_patch(baseline, current, hunk))
-                            }
-                            // New file: diff from empty
-                            (None, Some(current)) => Some(generate_hunk_patch("", current, hunk)),
-                            // Deleted file: diff to empty
-                            (Some(baseline), None) => Some(generate_hunk_patch(baseline, "", hunk)),
-                            (None, None) => None,
-                        };
-
-                        // Clone the hunk and add the patch
+                    .zip(patches)
+                    .map(|(hunk, patch)| {
                         let mut hunk_with_patch = (**hunk).clone();
                         hunk_with_patch.patch = patch;
                         Arc::new(hunk_with_patch)

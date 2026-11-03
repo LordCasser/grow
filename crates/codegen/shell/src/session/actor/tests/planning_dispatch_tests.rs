@@ -7,6 +7,9 @@ use tool_types::planning::{
 };
 use tools::implementations::grow_build::todo::runtime::PlanningCommand;
 
+#[path = "planning_review_binding_tests.rs"]
+mod review_binding_tests;
+
 #[derive(Clone)]
 struct PlanningAckProbe {
     events: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,

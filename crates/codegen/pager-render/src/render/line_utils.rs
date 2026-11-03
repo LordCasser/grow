@@ -2,7 +2,7 @@
 
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 pub use super::tool_paths::{path_basename, path_for_tool_header, shorten_path};
 
@@ -63,8 +63,8 @@ pub fn floor_char_boundary(s: &str, index: usize) -> usize {
 /// Returns `s.len()` when the entire string fits.
 pub fn byte_offset_at_width(s: &str, max_width: usize) -> usize {
     let mut width = 0;
-    for (i, ch) in s.char_indices() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+    for (i, grapheme) in s.grapheme_indices(true) {
+        let cw = grapheme.width();
         if width + cw > max_width {
             return i;
         }
@@ -88,16 +88,9 @@ pub fn truncate_str(s: &str, max_width: usize) -> String {
     let end = byte_offset_at_width(s, max_width);
     let needs_ellipsis = end < s.len();
 
-    if needs_ellipsis && max_width > 1 {
-        // Back up one char to make room for '…' (1 display column).
-        let truncated_end = s[..end]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+    if needs_ellipsis {
+        let truncated_end = byte_offset_at_width(s, max_width - 1);
         format!("{}…", &s[..truncated_end])
-    } else if needs_ellipsis {
-        "…".to_string()
     } else {
         s[..end].to_string()
     }
@@ -226,17 +219,7 @@ pub fn fit_line_to_width<'a>(line: Line<'a>, width: usize) -> Line<'a> {
 
 /// Take the first `n` display columns from a string.
 fn take_width(s: &str, n: usize) -> String {
-    let mut width = 0;
-    let mut end = s.len();
-    for (i, ch) in s.char_indices() {
-        let cw = ch.width().unwrap_or(0);
-        if width + cw > n {
-            end = i;
-            break;
-        }
-        width += cw;
-    }
-    s[..end].to_string()
+    s[..byte_offset_at_width(s, n)].to_string()
 }
 
 /// Cascade-truncate multiple text elements to fit within `avail` display columns.
@@ -320,6 +303,33 @@ mod tests {
     fn truncate_str_fits() {
         assert_eq!(truncate_str("hello", 10), "hello");
         assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn grapheme_layout_truncates_whole_symbols_within_budget() {
+        use ratatui::style::{Color, Style};
+
+        for (text, width, expected) in [
+            ("a⚠️b", 3, "a…"),
+            ("a👩🏽‍💻bc", 4, "a👩🏽‍💻…"),
+            ("e\u{301}abc", 2, "e\u{301}…"),
+            ("中文内容", 5, "中文…"),
+            ("⚠️", 2, "⚠️"),
+            ("👩🏽‍💻", 1, "…"),
+        ] {
+            let result = truncate_str(text, width);
+            assert_eq!(result, expected, "{text:?}, width={width}");
+            assert!(result.width() <= width);
+        }
+        assert_eq!(byte_offset_at_width("a⚠️b", 2), 1);
+        assert_eq!(byte_offset_at_width("a👩🏽‍💻b", 3), "a👩🏽‍💻".len());
+        let line = Line::from(vec![
+            Span::raw("中"),
+            Span::styled("⚠️ab", Style::default().fg(Color::Red)),
+        ]);
+        let result = truncate_line(line, 4);
+        assert_eq!(line_text(&result), "中…");
+        assert!(result.width() <= 4);
     }
 
     #[test]

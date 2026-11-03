@@ -1272,15 +1272,6 @@ const REWOUND_PROMPT_ID_CAP: usize = 64;
 /// is tiny), so a small bounded map is plenty; an overflow evicts the oldest
 /// buffered entry (FIFO) rather than the whole map.
 const MAX_PENDING_FOLLOW_UPS: usize = 16;
-/// Outcome of [`AgentView::dashboard_answer_question`] — tells the
-/// dashboard dispatcher whether the whole ask form was submitted (close
-/// the peek), the form advanced to the next question (keep the peek open
-/// but reset its per-question draft), or nothing happened.
-pub(crate) enum PeekAnswerOutcome {
-    Submitted,
-    Advanced,
-    NoOp,
-}
 /// Test-only re-export of [`translate_local_submit`] so dispatch tests
 /// can verify the local-question -> Action mapping without spinning up
 /// a full agent view.
@@ -1371,11 +1362,6 @@ fn translate_local_submit(
             } else {
                 InputOutcome::Action(Action::DoctorFixCancelled(target))
             }
-        }
-        LocalQuestionKind::DeleteCurrentSession => {
-            InputOutcome::Action(Action::DeleteCurrentSessionAnswered {
-                confirmed: *idx == 0,
-            })
         }
         LocalQuestionKind::ProjectSelect { .. } => unreachable!(),
     }
@@ -1746,7 +1732,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::DashboardSelectPrev
         | ActionId::DashboardTogglePin
         | ActionId::DashboardBeginRename
-        | ActionId::DashboardStop
         | ActionId::DashboardToggleGrouping
         | ActionId::DashboardReorderUp
         | ActionId::DashboardReorderDown
@@ -1754,7 +1739,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::DashboardOverlayExit
         | ActionId::DashboardOverlayPrev
         | ActionId::DashboardOverlayNext
-        | ActionId::DashboardOverlayStop
+        | ActionId::SessionCommands
         | ActionId::DashboardOpenLocationPicker
         | ActionId::DashboardToggleWorktree => return None,
     };
@@ -1863,7 +1848,7 @@ pub(crate) mod test_fixtures {
             acp::SessionUpdate::ToolCall(
                 acp::ToolCall::new(
                     acp::ToolCallId::new(Arc::from(tool_call_id)),
-                    "get_command_or_subagent_output",
+                    "get_command_output",
                 )
                 .kind(acp::ToolKind::Other)
                 .status(acp::ToolCallStatus::Pending)

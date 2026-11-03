@@ -109,9 +109,9 @@ impl SessionMemory {
 
     /// Record a flush result and increment the appropriate counter.
     ///
-    /// Matches the original three-way logic: "written" increments success,
-    /// "error" increments error, anything else ("nothing_to_store", "rejected")
-    /// increments only the total flush count.
+    /// "written" increments success, "error" increments error, and non-error
+    /// outcomes such as "nothing_to_store", "rejected" and "skipped" increment
+    /// only the total flush count.
     pub fn record_flush_result(&self, outcome: &str) {
         self.flush_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

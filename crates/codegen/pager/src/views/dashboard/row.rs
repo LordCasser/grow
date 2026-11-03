@@ -82,6 +82,8 @@ pub enum RowBadge {
     BgTask,
     Pinned,
     Failed,
+    /// The roster reports an instance resident outside this pager.
+    OtherTerminal,
 }
 impl RowBadge {
     pub fn label(self) -> &'static str {
@@ -91,6 +93,7 @@ impl RowBadge {
             Self::BgTask => "bg",
             Self::Pinned => "pinned",
             Self::Failed => "failed",
+            Self::OtherTerminal => "other terminal",
         }
     }
 }
@@ -212,7 +215,7 @@ fn build_local_rows(
         {
             continue;
         }
-        let row = top_level_row(
+        let mut row = top_level_row(
             *id,
             agent,
             pinned.contains(&top_id),
@@ -221,6 +224,14 @@ fn build_local_rows(
             now,
             wall_now,
         );
+        if let Some(source) = agent.session.forked_from.and_then(|id| agents.get(&id)) {
+            let detail = row
+                .secondary_line
+                .take()
+                .map(|text| format!(" · {text}"))
+                .unwrap_or_default();
+            row.secondary_line = Some(format!("Fork of {}{detail}", top_level_label(source)));
+        }
         rows.push(row);
         if !include_subagents {
             continue;
@@ -355,6 +366,9 @@ fn append_roster_rows(
             _ => None,
         };
         let mut badges = Vec::new();
+        if entry.resident {
+            badges.push(RowBadge::OtherTerminal);
+        }
         if entry.is_worktree {
             badges.push(RowBadge::Worktree);
         }
@@ -959,10 +973,35 @@ pub fn sort_rows(
 ) {
     use super::state::Grouping;
     match grouping {
+        Grouping::Open => sort_open_sessions(rows, reorder),
         Grouping::State => sort_within_groups(rows, reorder),
         Grouping::Directory => sort_within_directory_groups(rows, reorder),
     }
 }
+/// Pinned/manual placement is explicit; all other rows keep identity order.
+fn sort_open_sessions(rows: &mut [DashboardRow], reorder: &[DashboardRowId]) {
+    let mut clusters = build_clusters(rows);
+    clusters.sort_by_key(|(start, _)| {
+        let row = &rows[*start];
+        (
+            !row.pinned,
+            reorder
+                .iter()
+                .position(|id| id == &row.id)
+                .unwrap_or(usize::MAX),
+            row.id.clone(),
+        )
+    });
+    let snapshot = rows.to_vec();
+    let mut write = 0;
+    for (start, end) in clusters {
+        for row in &snapshot[start..end] {
+            rows[write] = row.clone();
+            write += 1;
+        }
+    }
+}
+
 fn sort_within_groups(rows: &mut [DashboardRow], reorder: &[DashboardRowId]) {
     let clusters = build_clusters(rows);
     let mut indexed: Vec<(usize, usize, ClusterKey)> = clusters
@@ -2127,5 +2166,53 @@ mod tests {
                 RowState::Failed,
             ],
         );
+    }
+    #[test]
+    fn open_order_ignores_activity_churn_and_keeps_children_with_parent() {
+        use super::super::state::Grouping;
+        let first = DashboardRowId::TopLevel(AgentId(1));
+        let second = DashboardRowId::TopLevel(AgentId(2));
+        let child = DashboardRowId::Subagent {
+            parent: AgentId(1),
+            child_session_id: "child".into(),
+        };
+        let mut rows = vec![
+            make_row_with_id(second.clone(), 0, RowState::Working),
+            make_row_with_id(first.clone(), 0, RowState::Idle),
+            make_row_with_id(child.clone(), 1, RowState::Working),
+        ];
+        sort_rows(&mut rows, Grouping::Open, &[]);
+        assert_eq!(
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            vec![first.clone(), child.clone(), second.clone()]
+        );
+        rows[0].state = RowState::Working;
+        rows[2].state = RowState::Idle;
+        rows[2].last_change_at = SystemTime::now() + Duration::from_secs(10);
+        sort_rows(&mut rows, Grouping::Open, &[]);
+        assert_eq!(
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            vec![first, child, second]
+        );
+    }
+
+    #[test]
+    fn roster_residency_is_independent_of_execution_state() {
+        let mut resident = roster_entry("other-terminal", now_unix_ms());
+        resident.activity = RosterActivity::Idle;
+        resident.resident = true;
+        let saved = roster_entry("saved", now_unix_ms());
+        let mut rows = Vec::new();
+        append_roster_rows(
+            &mut rows,
+            &[resident, saved],
+            &IndexMap::new(),
+            &Default::default(),
+            None,
+            SystemTime::now(),
+        );
+        assert_eq!(rows[0].state, rows[1].state);
+        assert!(rows[0].badges.contains(&RowBadge::OtherTerminal));
+        assert!(!rows[1].badges.contains(&RowBadge::OtherTerminal));
     }
 }

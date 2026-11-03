@@ -204,6 +204,14 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: Switch
     if matches!(app.active_view, ActiveView::Agent(current) if current == target) {
         return;
     }
+    if let ActiveView::Agent(current) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&current)
+    {
+        agent.clear_session_commands();
+    }
+    if let Some(agent) = app.agents.get_mut(&target) {
+        agent.clear_session_commands();
+    }
     app.active_view = ActiveView::Agent(target);
     // Re-anchor the global permission-mode mirror to the now-active agent so the
     // cycle's `sync_active_auto_flag` (which derives from the global) can't copy a

@@ -107,6 +107,9 @@ When a session ends, Grow saves a structured metadata summary to that session's 
 
 Grow builds the summary from conversation metadata without an LLM call, without added latency. Grow skips the save for trivial sessions -- those with fewer than three substantive prompts, or fewer than 50 bytes of user text.
 
+For workspaces under an OS temporary directory, Grow also suppresses session-log writes. In that case `/flush` reports that the log was skipped and does not claim a file path.
+The skipped write is not recorded as a successful flush checkpoint; only a write or confirmed nothing-to-store result advances the flush history watermark. See the [flush checkpoint contract](../../../../../openspec/specs/memory-search/spec.md#requirement-idle-memory-flush-waits-for-inactivity-and-checkpoints-only-success).
+
 The summary does not record tool usage, file paths, or shell commands. The session ID forms part of the log filename. To turn automatic saves off, set `session.save_on_end = false`. For richer capture of decisions, patterns, and reasoning, use `/flush`.
 
 ---
@@ -120,6 +123,12 @@ For richer capture -- decisions, patterns, debugging workflows, API discoveries 
 ```
 
 This triggers an LLM-generated summary of the current session's most important content and writes it to a dated session log. The summary is indexed and searchable in future sessions.
+
+Manual `/flush` can run alongside an active foreground turn through a separate
+memory request; it does not enter the prompt queue. Memory must be enabled,
+and concurrent flushes share one execution lock. The ACP `grow/memory/flush`
+entry waits for the outcome and reports failure when the flush was skipped or
+failed; success may mean written content or confirmed nothing to store.
 
 Use `/flush` when you want to preserve important context:
 - Before compaction (which discards old conversation turns)
@@ -407,8 +416,8 @@ You configure flush under `[compaction]`, not `[memory]`, because it is a compac
 | `enabled` | `true` | Enable the pre-compaction memory flush |
 | `soft_threshold_tokens` | `4000` | Token headroom before the compact threshold that triggers a flush |
 | `max_flush_write_chars` | `8000` | Maximum characters the flush may write to memory |
-| `flush_model` | unset | Model for the flush turn. When unset, Grow uses the session's primary model. |
-| `idle_timeout_secs` | unset | Idle seconds before a background flush. When unset, flush runs only before compaction. |
+| `flush_model` | unset | Configured auxiliary model selector, including its Provider endpoint, backend and credentials. When unset, Grow uses the session's primary route; an unavailable explicit model fails without fallback. |
+| `idle_timeout_secs` | unset | Positive inactivity interval before an automatic background flush, after foreground work and session activities settle. Unset or zero disables idle flush. |
 | `semantic_dedup_threshold` | unset | Cosine-similarity threshold for de-duplicating flushed content. When unset, defaults to `0.92`. |
 
 ## Memory Staleness

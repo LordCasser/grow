@@ -1,0 +1,3 @@
+- [x] Add a coordinator regression that injects a persisted-output reader panic, checks the affected query returns `Unavailable`, and verifies the coordinator still answers a later request.
+- [x] Catch unwind only around each queued output-read future and settle panic through the existing unavailable output-read path.
+- [x] Run the targeted panic test and reader saturation/permit reuse test on the shared Rust 1.93.1 build; run strict OpenSpec validation and record results.

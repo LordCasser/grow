@@ -22,6 +22,12 @@ mod compaction_admission_tests;
 #[path = "planning_completion_tests.rs"]
 mod planning_completion_tests;
 
+#[path = "message_delivery_tests.rs"]
+mod message_delivery_tests;
+
+#[path = "subagent_observation_boundary_tests.rs"]
+mod subagent_observation_boundary_tests;
+
 fn prompt(text: impl Into<String>, index: usize) -> ConversationItem {
     let mut item = ConversationItem::user(text);
     item.set_prompt_index(index);
@@ -193,7 +199,7 @@ async fn assert_goal_wait_stays_quiet<T>(
 // ─── Messages-API SSE builders ────────────────────────────────────────────
 
 /// A text `content_block`.
-fn text_block(text: &str) -> serde_json::Value {
+pub(crate) fn text_block(text: &str) -> serde_json::Value {
     json!({ "type": "text", "text": text })
 }
 
@@ -211,7 +217,7 @@ fn thinking_block(text: &str, signature: &str) -> serde_json::Value {
 
 /// A `tool_use` block; `complete` controls whether the terminating
 /// `content_block_stop` is emitted (incomplete tool_use fails the response).
-fn tool_use_block(id: &str, name: &str, input_json: &str) -> serde_json::Value {
+pub(crate) fn tool_use_block(id: &str, name: &str, input_json: &str) -> serde_json::Value {
     json!({
         "type": "tool_use",
         "id": id,
@@ -233,7 +239,7 @@ fn tool_use_block_incomplete(id: &str, name: &str, input_json: &str) -> serde_js
 /// Assemble a Messages-API SSE turn from content blocks and a terminal
 /// `stop_reason`. Each block is streamed as start → delta(s) → stop; the
 /// stream ends with `message_delta` carrying `stop_reason` + `message_stop`.
-fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> ScriptedResponse {
+pub(crate) fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> ScriptedResponse {
     let mut events: Vec<String> = vec![
         json!({
             "type": "message_start",
@@ -504,6 +510,35 @@ async fn actor_with_sampler_delivery_with_max_turns(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    actor_with_sampler_delivery_for_session(server, api_backend, delivery, max_turns, None).await
+}
+
+pub(crate) async fn actor_with_sampler_named(
+    server: &MockInferenceServer,
+    session_id: &str,
+) -> std::sync::Arc<SessionActor> {
+    actor_with_sampler_delivery_for_session(
+        server,
+        sampling_types::ApiBackend::Messages,
+        sampler::OutputDelivery::Irreversible,
+        None,
+        Some(session_id),
+    )
+    .await
+    .0
+}
+
+async fn actor_with_sampler_delivery_for_session(
+    server: &MockInferenceServer,
+    api_backend: sampling_types::ApiBackend,
+    delivery: sampler::OutputDelivery,
+    max_turns: Option<usize>,
+    session_id: Option<&str>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     tokio::task::spawn_local(async move {
@@ -513,7 +548,7 @@ async fn actor_with_sampler_delivery_with_max_turns(
             }
         }
     });
-    let (actor, events) = create_test_actor_ex_with_projection_error(
+    let (mut actor, events) = create_test_actor_ex_with_projection_error(
         0,
         256_000,
         85,
@@ -522,6 +557,9 @@ async fn actor_with_sampler_delivery_with_max_turns(
         None,
     )
     .await;
+    if let Some(session_id) = session_id {
+        actor.session_info.id = acp::SessionId::new(session_id);
+    }
     configure_actor_with_sampler(
         server,
         api_backend,
@@ -620,7 +658,7 @@ async fn configure_actor_with_sampler(
 
 /// Drive one user turn through the real loop. Bounded by a generous timeout
 /// so a broken continue loop fails the test instead of hanging it.
-async fn run_user_turn(
+pub(crate) async fn run_user_turn(
     actor: &std::sync::Arc<SessionActor>,
     prompt_id: &str,
 ) -> Result<PromptTurnOk, acp::Error> {
@@ -635,7 +673,7 @@ async fn run_user_turn_with_schema(
     install_test_foreground(actor, prompt_id).await;
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        actor.handle_prompt(
+        Box::pin(actor.handle_prompt(
             prompt_id,
             crate::session::actor::tests::support::admit_test_human_input(actor, prompt_id).await,
             crate::session::PromptOrigin::User,
@@ -650,7 +688,7 @@ async fn run_user_turn_with_schema(
             false,
             schema,
             None,
-        ),
+        )),
     )
     .await
     .expect("turn must finish within the timeout (no runaway continue loop)")

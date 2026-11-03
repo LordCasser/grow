@@ -134,6 +134,13 @@ guidance and renders the body through MiniJinja. Mandatory foundation and
 audience remain in the stable system head; Behavior remains a separate Control
 layer; tool-dependent session extensions remain in the Agent layer.
 
+Subagent discovery, status and wait guidance is rendered by
+`prompts/extensions/session.md` using the finalized tool names. It is retained
+in both composition modes and omitted for unavailable capabilities. Keep tool
+conditionals out of the stable audience templates: production renders the
+system head without a tool catalog. See the
+[coordination guidance contract](../../../openspec/specs/local-coordination/spec.md#requirement-primary-guidance-advances-independently-ready-work).
+
 ### With a completion requirement
 
 ```markdown
@@ -220,7 +227,10 @@ messages with their own owners.
 | `${{ tools.list_dir }}` | Resolved name for `list_dir` |
 | `${{ tools.todo_write }}` | Resolved name for `todo_write` |
 | `${{ tools.skill }}` | Resolved name for `skill` |
-| `${{ tools.get_task_output }}` | Resolved name for `get_task_output` |
+| `${{ tools.get_command_output }}` | Background command output tool |
+| `${{ tools.list_subagent }}` | Subagent inventory tool |
+| `${{ tools.get_subagent_status }}` | Subagent details tool |
+| `${{ tools.wait_subagent }}` | Subagent wait and result tool |
 | `${{ tools.kill_task }}` | Resolved name for `kill_task` |
 
 Conditionals: `${%- if tools.todo_write %}...${%- endif %}` — block

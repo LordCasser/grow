@@ -1,0 +1,5 @@
+- [x] 核对现行规范、前次审计及本机恢复证据，区分已成功恢复和待重试会话。
+- [x] 追踪 source hash、ProjectInstructions/classifier、load/barrier owner 与配置恢复路径。
+- [x] 写明保留、移除、降级校验的依据及最小实施方案。
+- [x] 保存对抗性验证矩阵、后续切分与验证限制。
+- [x] 完成 strict OpenSpec 校验、归档及归档后检查。

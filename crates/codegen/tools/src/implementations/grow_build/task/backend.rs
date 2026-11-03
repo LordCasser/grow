@@ -1,7 +1,7 @@
 //! Backend trait abstracting how subagent operations are dispatched.
 //!
 //! `SubagentBackend` decouples the tool implementations (`TaskTool`,
-//! `TaskOutputTool`, `KillTaskTool`) from the transport mechanism used to
+//! `WaitSubagentTool`, `KillTaskTool`) from the transport mechanism used to
 //! communicate with the subagent coordinator.
 //!
 //! All hosts use [`ChannelBackend`].
@@ -23,11 +23,12 @@ use super::types::{
 };
 use crate::register_resource;
 use tool_runtime::ToolError;
+use tool_types::{SubagentDetails, SubagentListScope, SubagentStatus, SubagentSummary};
 
 /// Abstraction over the mechanism used to spawn, query, and cancel subagents.
 ///
 /// Injected into `Resources` as [`SubagentBackendResource`] so that
-/// `TaskTool`, `TaskOutputTool`, and `KillTaskTool` can operate
+/// `TaskTool`, `WaitSubagentTool`, and `KillTaskTool` can operate
 /// identically regardless of the underlying transport.
 #[async_trait::async_trait]
 pub trait SubagentBackend: Send + Sync + 'static {
@@ -51,13 +52,38 @@ pub trait SubagentBackend: Send + Sync + 'static {
     /// Query the current state of a subagent by ID.
     ///
     /// When `block` is true the backend waits (up to `timeout_ms`) for the
-    /// subagent to reach a terminal state before responding.
+    /// subagent to reach a terminal state before responding. A per-query
+    /// transport cap can return a nonterminal snapshot sooner; callers owning
+    /// a longer wait budget must continue within their original deadline.
     async fn query(
         &self,
         id: &str,
         block: bool,
         timeout_ms: Option<u64>,
     ) -> Result<Option<SubagentSnapshot>, SubagentObservationError>;
+
+    /// List active children owned by this backend's bound source session.
+    async fn list_running(&self) -> Result<Vec<SubagentInspection>, SubagentObservationError> {
+        Err(SubagentObservationError::Unavailable)
+    }
+
+    /// List basic lifecycle state from the session bound to this backend.
+    async fn list_subagents(
+        &self,
+        _scope: SubagentListScope,
+        _deadline: tokio::time::Instant,
+    ) -> Result<Vec<SubagentSummary>, SubagentObservationError> {
+        Err(SubagentObservationError::Unavailable)
+    }
+
+    /// Get structured metadata and status for multiple children without loading answers.
+    async fn get_statuses(
+        &self,
+        _ids: &[String],
+        _deadline: tokio::time::Instant,
+    ) -> Result<Vec<SubagentDetails>, SubagentObservationError> {
+        Err(SubagentObservationError::Unavailable)
+    }
 
     /// Request cancellation of a subagent by ID.
     async fn cancel(&self, id: &str) -> Result<SubagentCancelOutcome, SubagentObservationError>;
@@ -132,7 +158,27 @@ register_resource!(
 pub struct ChannelBackend {
     tx: mpsc::UnboundedSender<SubagentEvent>,
     parent_session_id: Option<Arc<str>>,
+    history_query: Option<Arc<HistoryQuery>>,
+    history_list: Option<Arc<HistoryList>>,
+    history_status: Option<Arc<HistoryStatus>>,
 }
+
+type HistoryQuery = dyn Fn(
+        String,
+    ) -> super::coordinator::SendBoxFuture<
+        Result<Option<SubagentInspection>, SubagentObservationError>,
+    > + Send
+    + Sync;
+type HistoryList = dyn Fn()
+        -> super::coordinator::SendBoxFuture<Result<Vec<SubagentSummary>, SubagentObservationError>>
+    + Send
+    + Sync;
+type HistoryStatus = dyn Fn(
+        Vec<String>,
+    )
+        -> super::coordinator::SendBoxFuture<Result<Vec<SubagentDetails>, SubagentObservationError>>
+    + Send
+    + Sync;
 
 impl ChannelBackend {
     /// Host-only observer after source access has been established from the
@@ -141,6 +187,9 @@ impl ChannelBackend {
         Self {
             tx,
             parent_session_id: None,
+            history_query: None,
+            history_list: None,
+            history_status: None,
         }
     }
 
@@ -157,7 +206,48 @@ impl ChannelBackend {
         Self {
             tx,
             parent_session_id: Some(parent_session_id.into()),
+            history_query: None,
+            history_list: None,
+            history_status: None,
         }
+    }
+
+    /// Read the owning session's durable facts when the runtime registry has
+    /// no authorized entry. The reader must independently authorize its source.
+    pub fn with_history_query<F, Fut>(mut self, query: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<
+                Output = Result<Option<SubagentInspection>, SubagentObservationError>,
+            > + Send
+            + 'static,
+    {
+        self.history_query = Some(Arc::new(move |id| Box::pin(query(id))));
+        self
+    }
+
+    /// Read the bound source's complete durable subagent inventory.
+    pub fn with_history_list<F, Fut>(mut self, list: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Vec<SubagentSummary>, SubagentObservationError>>
+            + Send
+            + 'static,
+    {
+        self.history_list = Some(Arc::new(move || Box::pin(list())));
+        self
+    }
+
+    /// Read requested statuses from the bound source's durable history in one operation.
+    pub fn with_history_status<F, Fut>(mut self, status: F) -> Self
+    where
+        F: Fn(Vec<String>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Vec<SubagentDetails>, SubagentObservationError>>
+            + Send
+            + 'static,
+    {
+        self.history_status = Some(Arc::new(move |ids| Box::pin(status(ids))));
+        self
     }
 
     fn parent_session_id(&self) -> Option<String> {
@@ -238,18 +328,57 @@ impl ChannelBackend {
             .map_err(|_| SubagentObservationError::TimedOut)?
             .map_err(|_| SubagentObservationError::Unavailable)?;
         let (respond_to, response_rx) = oneshot::channel();
-        self.tx
-            .send(SubagentEvent::Inspect(SubagentInspectRequest {
-                subagent_id: id.to_owned(),
-                parent_session_id: self.parent_session_id(),
-                respond_to,
-            }))
-            .map_err(|_| SubagentObservationError::Unavailable)?;
-        match tokio::time::timeout_at(deadline, response_rx).await {
-            Err(_) => Err(SubagentObservationError::TimedOut),
-            Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
-            Ok(Ok(result)) => result,
+        let sent = self.tx.send(SubagentEvent::Inspect(SubagentInspectRequest {
+            subagent_id: id.to_owned(),
+            parent_session_id: self.parent_session_id(),
+            respond_to,
+        }));
+        let result = if sent.is_err() {
+            Err(SubagentObservationError::Unavailable)
+        } else {
+            match tokio::time::timeout_at(deadline, response_rx).await {
+                Err(_) => Err(SubagentObservationError::TimedOut),
+                Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
+                Ok(Ok(result)) => result,
+            }
+        };
+        match result {
+            Ok(Some(inspection)) => Ok(Some(inspection)),
+            Ok(None) if self.history_query.is_some() => {
+                self.read_history_inspection(id, deadline).await
+            }
+            Ok(None) => Ok(None),
+            Err(error) if self.should_read_history(&error) => {
+                self.read_history_inspection(id, deadline).await
+            }
+            Err(error) => Err(error),
         }
+    }
+
+    fn should_read_history(&self, error: &SubagentObservationError) -> bool {
+        self.history_query.is_some()
+            && matches!(
+                error,
+                SubagentObservationError::Unauthorized
+                    | SubagentObservationError::Unavailable
+                    | SubagentObservationError::TimedOut
+            )
+    }
+
+    async fn read_history_inspection(
+        &self,
+        id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<SubagentInspection>, SubagentObservationError> {
+        let Some(query) = &self.history_query else {
+            return Err(SubagentObservationError::Unavailable);
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(SubagentObservationError::TimedOut);
+        }
+        tokio::time::timeout_at(deadline, query(id.to_owned()))
+            .await
+            .map_err(|_| SubagentObservationError::TimedOut)?
     }
 
     pub async fn list_running(
@@ -343,6 +472,218 @@ impl Drop for CancelResultReceiverOnDrop {
 
 #[async_trait::async_trait]
 impl SubagentBackend for ChannelBackend {
+    async fn list_running(&self) -> Result<Vec<SubagentInspection>, SubagentObservationError> {
+        let Some(parent_session_id) = self.parent_session_id.as_deref() else {
+            return Err(SubagentObservationError::Unauthorized);
+        };
+        ChannelBackend::list_running(self, parent_session_id).await
+    }
+
+    async fn list_subagents(
+        &self,
+        scope: SubagentListScope,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<SubagentSummary>, SubagentObservationError> {
+        let Some(parent_session_id) = self.parent_session_id.as_deref() else {
+            return Err(SubagentObservationError::Unauthorized);
+        };
+        let runtime = async {
+            let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
+                .await
+                .map_err(|_| SubagentObservationError::TimedOut)?
+                .map_err(|_| SubagentObservationError::Unavailable)?;
+            let (respond_to, response_rx) = oneshot::channel();
+            self.tx
+                .send(SubagentEvent::ListSubagents(
+                    super::types::SubagentListRequest {
+                        parent_session_id: parent_session_id.to_owned(),
+                        scope,
+                        respond_to,
+                    },
+                ))
+                .map_err(|_| SubagentObservationError::Unavailable)?;
+            tokio::time::timeout_at(deadline, response_rx)
+                .await
+                .map_err(|_| SubagentObservationError::TimedOut)?
+                .map_err(|_| SubagentObservationError::Unavailable)
+        };
+
+        let Some(history_list) = &self.history_list else {
+            if scope == SubagentListScope::All {
+                return Err(SubagentObservationError::Unavailable);
+            }
+            let mut summaries = runtime.await?;
+            summaries.retain(|summary| !summary.status.is_terminal());
+            summaries.sort_by(|left, right| left.subagent_id.cmp(&right.subagent_id));
+            return Ok(summaries);
+        };
+
+        let (runtime, history) = tokio::join!(
+            tokio::time::timeout_at(deadline, runtime),
+            tokio::time::timeout_at(deadline, history_list()),
+        );
+        let runtime = runtime.unwrap_or(Err(SubagentObservationError::TimedOut));
+        let history = history.unwrap_or(Err(SubagentObservationError::TimedOut));
+        let mut summaries = match (runtime, history) {
+            (runtime, Ok(history)) => merge_subagent_lists(runtime, history),
+            (_, Err(error)) => return Err(error),
+        }?;
+        if scope == SubagentListScope::Active {
+            summaries.retain(|summary| !summary.status.is_terminal());
+        }
+        summaries.sort_by(|left, right| left.subagent_id.cmp(&right.subagent_id));
+        Ok(summaries)
+    }
+
+    async fn get_statuses(
+        &self,
+        ids: &[String],
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<SubagentDetails>, SubagentObservationError> {
+        let Some(parent_session_id) = self.parent_session_id() else {
+            return Err(SubagentObservationError::Unauthorized);
+        };
+        let _permit = match tokio::time::timeout_at(deadline, query_semaphore().acquire()).await {
+            Err(_) => {
+                return Ok(ids
+                    .iter()
+                    .map(|id| unknown_status(id, SubagentObservationError::TimedOut))
+                    .collect());
+            }
+            Ok(Err(_)) => {
+                return Ok(ids
+                    .iter()
+                    .map(|id| unknown_status(id, SubagentObservationError::Unavailable))
+                    .collect());
+            }
+            Ok(Ok(permit)) => permit,
+        };
+        let mut details = std::collections::HashMap::new();
+        let mut pending = Vec::new();
+        let mut runtime_errors = std::collections::HashMap::new();
+
+        let (respond_to, response_rx) = oneshot::channel();
+        let runtime = self.tx.send(SubagentEvent::GetStatuses(
+            super::types::SubagentGetStatusesRequest {
+                subagent_ids: ids.to_vec(),
+                parent_session_id: Some(parent_session_id),
+                respond_to,
+            },
+        ));
+        let runtime = if runtime.is_err() {
+            Err(SubagentObservationError::Unavailable)
+        } else {
+            match tokio::time::timeout_at(deadline, response_rx).await {
+                Err(_) => Err(SubagentObservationError::TimedOut),
+                Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
+                Ok(Ok(results)) => {
+                    for (index, id) in ids.iter().enumerate() {
+                        match results.get(index) {
+                            Some(Ok(Some(detail))) => {
+                                details.insert(id.clone(), detail.clone());
+                            }
+                            Some(Err(SubagentObservationError::InvalidEvidence)) => {
+                                details.insert(
+                                    id.clone(),
+                                    unknown_status(id, SubagentObservationError::InvalidEvidence),
+                                );
+                            }
+                            Some(Err(error)) => {
+                                pending.push(id.clone());
+                                runtime_errors.insert(id.clone(), *error);
+                            }
+                            Some(Ok(None)) | None => {
+                                pending.push(id.clone());
+                                runtime_errors
+                                    .insert(id.clone(), SubagentObservationError::Unavailable);
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        };
+
+        if let Err(error) = runtime {
+            if error == SubagentObservationError::InvalidEvidence {
+                for id in ids {
+                    details.insert(id.clone(), unknown_status(id, error));
+                }
+            } else {
+                pending.extend(ids.iter().cloned());
+                for id in ids {
+                    runtime_errors.insert(id.clone(), error);
+                }
+            }
+        }
+
+        if !pending.is_empty() {
+            if let Some(history_status) = &self.history_status
+                && tokio::time::Instant::now() < deadline
+            {
+                match tokio::time::timeout_at(deadline, history_status(pending.clone())).await {
+                    Ok(Ok(history)) => {
+                        let pending_ids = pending
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<std::collections::HashSet<_>>();
+                        let mut returned = std::collections::HashSet::new();
+                        for detail in history {
+                            if !pending_ids.contains(detail.subagent_id.as_str()) {
+                                continue;
+                            }
+                            returned.insert(detail.subagent_id.clone());
+                            details.insert(detail.subagent_id.clone(), detail);
+                        }
+                        for id in &pending {
+                            if !returned.contains(id) {
+                                details.insert(
+                                    id.clone(),
+                                    unknown_status(id, SubagentObservationError::Unavailable),
+                                );
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        for id in &pending {
+                            details.insert(id.clone(), unknown_status(id, error));
+                        }
+                    }
+                    Err(_) => {
+                        for id in &pending {
+                            details.insert(
+                                id.clone(),
+                                unknown_status(id, SubagentObservationError::TimedOut),
+                            );
+                        }
+                    }
+                }
+            } else {
+                for id in &pending {
+                    details.insert(
+                        id.clone(),
+                        unknown_status(
+                            id,
+                            runtime_errors
+                                .get(id)
+                                .copied()
+                                .unwrap_or(SubagentObservationError::Unavailable),
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(ids
+            .iter()
+            .map(|id| {
+                details
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| unknown_status(id, SubagentObservationError::Unavailable))
+            })
+            .collect())
+    }
+
     async fn interact(
         &self,
         id: String,
@@ -353,7 +694,11 @@ impl SubagentBackend for ChannelBackend {
         let source_session_id = self
             .parent_session_id()
             .ok_or("Unbound agent communication source")?;
-        let wait_for_send = matches!(&action, super::interaction::AgentInteraction::Send { .. });
+        let wait_for_host = matches!(
+            &action,
+            super::interaction::AgentInteraction::Send { .. }
+                | super::interaction::AgentInteraction::Ask { .. }
+        );
         let (respond_to, response) = oneshot::channel();
         self.tx
             .send(SubagentEvent::Interact(
@@ -369,12 +714,12 @@ impl SubagentBackend for ChannelBackend {
             ))
             .map_err(|_| "Subagent coordinator closed")?;
 
-        // Send owns its cancellation/receipt race in the host runner. It must
+        // Send and Ask own their cancellation/admission race in the host. They must
         // keep the response receiver alive so a durable ACK that is ready at
         // the same time as cancellation can win, and so the runner can do its
-        // bounded read-only receipt check after a lost ACK. Ask is a sideband
-        // query and may still return promptly when its caller is cancelled.
-        if wait_for_send {
+        // bounded read-only receipt check after a lost ACK. Ask must report
+        // its actual target outcome after success admission wins cancellation.
+        if wait_for_host {
             return response
                 .await
                 .map_err(|_| "Agent interaction endpoint closed")?;
@@ -445,13 +790,27 @@ impl SubagentBackend for ChannelBackend {
             timeout_ms: coordinator_timeout_ms,
             respond_to,
         }));
-        if sent.is_err() {
-            return Err(SubagentObservationError::Unavailable);
-        }
-        match tokio::time::timeout_at(deadline, response_rx).await {
-            Err(_) => Err(SubagentObservationError::TimedOut),
-            Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
-            Ok(Ok(result)) => result,
+        let result = if sent.is_err() {
+            Err(SubagentObservationError::Unavailable)
+        } else {
+            match tokio::time::timeout_at(deadline, response_rx).await {
+                Err(_) => Err(SubagentObservationError::TimedOut),
+                Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
+                Ok(Ok(result)) => result,
+            }
+        };
+        match result {
+            Ok(Some(snapshot)) => Ok(Some(snapshot)),
+            Ok(None) if self.history_query.is_some() => self
+                .read_history_inspection(id, deadline)
+                .await
+                .map(|inspection| inspection.map(|inspection| inspection.snapshot)),
+            Err(error) if self.should_read_history(&error) => self
+                .read_history_inspection(id, deadline)
+                .await
+                .map(|inspection| inspection.map(|inspection| inspection.snapshot)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -521,6 +880,42 @@ impl SubagentBackend for ChannelBackend {
             }
         }
     }
+}
+
+fn merge_subagent_lists(
+    runtime: Result<Vec<SubagentSummary>, SubagentObservationError>,
+    history: Vec<SubagentSummary>,
+) -> Result<Vec<SubagentSummary>, SubagentObservationError> {
+    use std::collections::BTreeMap;
+
+    let mut merged = BTreeMap::new();
+    for summary in history {
+        merged.insert(summary.subagent_id.clone(), summary);
+    }
+    for summary in runtime.unwrap_or_default() {
+        match merged.get(&summary.subagent_id) {
+            Some(durable)
+                if (durable.status.is_terminal() && !summary.status.is_terminal())
+                    || matches!(
+                        durable.status,
+                        SubagentStatus::ObservationInvalidEvidence | SubagentStatus::Unauthorized
+                    ) => {}
+            _ => {
+                merged.insert(summary.subagent_id.clone(), summary);
+            }
+        }
+    }
+    Ok(merged.into_values().collect())
+}
+
+fn unknown_status(id: &str, error: SubagentObservationError) -> SubagentDetails {
+    let status = match error {
+        SubagentObservationError::Unavailable => SubagentStatus::ObservationUnavailable,
+        SubagentObservationError::TimedOut => SubagentStatus::ObservationTimedOut,
+        SubagentObservationError::InvalidEvidence => SubagentStatus::ObservationInvalidEvidence,
+        SubagentObservationError::Unauthorized => SubagentStatus::Unauthorized,
+    };
+    SubagentDetails::unknown(id.to_owned(), status, error.to_string())
 }
 
 /// Default `validate_type` timeout. Override via [`VALIDATE_TYPE_TIMEOUT_ENV_VAR`].

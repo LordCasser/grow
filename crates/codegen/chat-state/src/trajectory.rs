@@ -1476,6 +1476,7 @@ fn describe(
 
 fn notification_source_label(source: &NotificationSource) -> &'static str {
     match source {
+        NotificationSource::InquiryAnswered { .. } => "consultation answered",
         NotificationSource::ParentMessage { .. } => "parent message",
         NotificationSource::AgentReply { .. } => "agent reply",
         NotificationSource::MonitorProgress { .. } => "monitor progress",

@@ -1,0 +1,4 @@
+- [x] Existing bootstrap 从已验证主 Request 事实初始化原有 API 时间字段。
+- [x] 验证主 HTTP→Timeline→恢复时间及 Sideband 不改变时钟；无请求和新任务不伪造证据。
+- [x] fresh grow 构建，Full/Minimal cold-load 图片自动 recap 真实焦点端到端验证。
+- [x] 更新开发者说明，严格校验并归档。

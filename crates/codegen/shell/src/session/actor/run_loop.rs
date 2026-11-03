@@ -4,6 +4,100 @@
 use super::*;
 use futures_util::FutureExt as _;
 
+/// Keep native project discovery watcher work away from the session LocalSet.
+/// The blocking worker owns registration, refreshes and final drop. Cancellation
+/// stops the local observer promptly; an in-flight OS call retains its owner
+/// until it returns.
+pub(super) fn spawn_blocking_project_discovery_watcher<T, Start, Refresh, Ready, ReadyFuture>(
+    runtime: tokio::runtime::Handle,
+    start: Start,
+    shutdown: tokio_util::sync::CancellationToken,
+    mut refresh: Refresh,
+    mut ready: Ready,
+) -> tokio::task::JoinHandle<()>
+where
+    T: Send + 'static,
+    Start: FnOnce() -> Option<(
+            T,
+            tokio::sync::mpsc::UnboundedReceiver<crate::config::watcher::DiscoveryChange>,
+        )> + Send
+        + 'static,
+    Refresh: FnMut(&mut T) + Send + 'static,
+    Ready: FnMut(crate::config::watcher::DiscoveryChange) -> ReadyFuture + 'static,
+    ReadyFuture: std::future::Future<Output = ()> + 'static,
+{
+    let worker_shutdown = shutdown.child_token();
+    let observer_shutdown = worker_shutdown.clone();
+    let observer_guard = worker_shutdown.clone().drop_guard();
+    let guardian_guard = worker_shutdown.clone().drop_guard();
+    let native_shutdown = worker_shutdown;
+    let (changes_tx, mut changes_rx) = tokio::sync::mpsc::unbounded_channel();
+    let native_runtime = runtime.clone();
+    let worker = runtime.spawn_blocking(move || {
+        if native_shutdown.is_cancelled() {
+            return;
+        }
+        let Some((mut owner, mut native_changes)) = start() else {
+            return;
+        };
+        loop {
+            let change = native_runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = native_shutdown.cancelled() => None,
+                    change = native_changes.recv() => change,
+                }
+            });
+            let Some(change) = change else {
+                break;
+            };
+            refresh(&mut owner);
+            if changes_tx.send(change).is_err() {
+                break;
+            }
+        }
+        // `owner` is dropped here, on the blocking worker that owns its native
+        // registration and refresh operations.
+    });
+
+    // Runtime shutdown drops async tasks before joining its blocking pool. This
+    // guardian owns a cancellation guard so an idle native worker cannot keep
+    // the host runtime alive if its session observer has not yet been cancelled.
+    let guardian = runtime.spawn(async move {
+        let _guardian_guard = guardian_guard;
+        if let Err(error) = worker.await {
+            if !error.is_cancelled() {
+                tracing::warn!(%error, "project discovery watcher worker failed");
+            }
+        }
+    });
+
+    tokio::task::spawn_local(async move {
+        let _observer_guard = observer_guard;
+        tokio::pin!(guardian);
+        loop {
+            tokio::select! {
+                biased;
+                _ = observer_shutdown.cancelled() => break,
+                result = &mut guardian => {
+                    if let Err(error) = result && !error.is_cancelled() {
+                        tracing::warn!(%error, "project discovery watcher guardian failed");
+                    }
+                    break;
+                }
+                change = changes_rx.recv() => match change {
+                    Some(change) => tokio::select! {
+                        biased;
+                        _ = observer_shutdown.cancelled() => break,
+                        _ = ready(change) => {},
+                    },
+                    None => break,
+                }
+            }
+        }
+    })
+}
+
 async fn deliver_side_question<F>(
     mut respond_to: tokio::sync::oneshot::Sender<Result<String, crate::session::SideQuestionError>>,
     question: F,
@@ -861,13 +955,22 @@ pub(super) async fn run_session(
             }
         });
     }
-    if let Some((mut watcher, mut changes)) = crate::config::watcher::ProjectDiscoveryWatcher::start(
-        std::path::Path::new(session.session_info.cwd.as_str()),
-    ) {
-        let watch_session = session.clone();
-        let handle = tokio::task::spawn_local(async move {
-            while let Some(change) = changes.recv().await {
-                watcher.refresh_new_dirs();
+    let project_root = std::path::PathBuf::from(session.session_info.cwd.as_str());
+    let watcher_runtime = session
+        .tool_context
+        .watcher_runtime
+        .clone()
+        .unwrap_or_else(tokio::runtime::Handle::current);
+    let shutdown = session.background_service_shutdown.clone();
+    let watch_session = session.clone();
+    let handle = spawn_blocking_project_discovery_watcher(
+        watcher_runtime,
+        move || crate::config::watcher::ProjectDiscoveryWatcher::start(&project_root),
+        shutdown,
+        |watcher| watcher.refresh_new_dirs(),
+        move |change| {
+            let watch_session = watch_session.clone();
+            async move {
                 match change {
                     crate::config::watcher::DiscoveryChange::Skills => {
                         watch_session.reload_skills_from_disk().await;
@@ -877,9 +980,9 @@ pub(super) async fn run_session(
                     }
                 }
             }
-        });
-        session.project_discovery_worker.arm(handle);
-    }
+        },
+    );
+    session.project_discovery_worker.arm(handle);
     let fs_watch_handle = if fs_watch_caps.needs_watcher() {
         let deps = fs_watch::FsWatchDeps::from_session(
             &session,
@@ -960,7 +1063,10 @@ pub(super) async fn run_session(
     }
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
-    let idle_flush_sleep = match session.idle_flush_timeout {
+    let idle_flush_timeout = session
+        .idle_flush_timeout
+        .filter(|timeout| !timeout.is_zero());
+    let idle_flush_sleep = match idle_flush_timeout {
         Some(timeout) => tokio::time::sleep(timeout),
         None => tokio::time::sleep(std::time::Duration::MAX),
     };
@@ -985,42 +1091,60 @@ pub(super) async fn run_session(
                 // predicate at the top of the loop decides whether this was
                 // the final owner; no new work is admitted during shutdown.
             }
+            // Detached session activity may temporarily make an otherwise
+            // idle foreground busy. Its final owner release starts a fresh
+            // interval, and the expiry branch also checks the current count.
+            _ = session.session_activities.changed(), if idle_flush_timeout.is_some() && pending_shutdown.is_none() => {
+                if let Some(timeout) = idle_flush_timeout {
+                    idle_flush_sleep.as_mut().reset(tokio::time::Instant::now() + timeout);
+                }
+            }
             // Idle flush timer fired — run background flush.
-            _ = &mut idle_flush_sleep, if session.idle_flush_timeout.is_some()
+            _ = &mut idle_flush_sleep, if idle_flush_timeout.is_some()
                 && pending_shutdown.is_none()
                 && !runtime_suspend.load(std::sync::atomic::Ordering::Acquire)
                 && session.memory.is_enabled()
-                && !session.memory.is_flushing.load(std::sync::atomic::Ordering::Relaxed) => {
-                // Skip if no new messages since last idle flush
-                let current_len = session.chat_state_handle.get_conversation_len().await;
-                let last_len = session.last_idle_flush_conversation_len
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if current_len > last_len {
-                    tracing::info!(target: ::diagnostics::memory_log::TARGET,
-                        "MEMORY_IDLE_FLUSH: timer fired (conversation {last_len} → {current_len})");
-                    session.last_idle_flush_conversation_len
-                        .store(current_len, std::sync::atomic::Ordering::Relaxed);
-                    let activity = session
-                        .session_activities
-                        .try_start("memory_idle_flush")
-                        .expect("memory timer cannot fire after activity admission closes");
-                    tokio::task::spawn_local({
-                        let session = session.clone();
-                        async move {
-                            let _activity = activity;
-                            if !session.run_memory_flush("interval", None).await {
-                                tracing::info!(target: ::diagnostics::memory_log::TARGET,
-                                    "MEMORY_IDLE_FLUSH: skipped — another flush already in progress");
-                            }
-                            session.idle_arbiter.notify_one();
+                && cmd_rx.is_empty() => {
+                let idle_admission_open = {
+                    let state = session.state.lock().await;
+                    state.foreground.is_idle()
+                        && state.pending_inputs.is_empty()
+                        && state.pending_manual_compact.is_none()
+                };
+                let session_idle = session.session_activities.is_idle();
+                if idle_admission_open && session_idle
+                    && cmd_rx.is_empty()
+                    && !session.memory.is_flushing.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let current_len = session.chat_state_handle.get_conversation_len().await;
+                    let last_len = session.last_idle_flush_conversation_len
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if current_len > last_len {
+                        tracing::info!(target: ::diagnostics::memory_log::TARGET,
+                            "MEMORY_IDLE_FLUSH: idle interval elapsed (conversation {last_len} → {current_len})");
+                        if let Some(activity) = session.session_activities.try_start("memory_idle_flush") {
+                            tokio::task::spawn_local({
+                                let session = session.clone();
+                                async move {
+                                    let _activity = activity;
+                                    if session.run_memory_flush("interval", None).await {
+                                        session.last_idle_flush_conversation_len
+                                            .store(current_len, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    session.idle_arbiter.notify_one();
+                                }
+                            });
                         }
-                    });
+                    } else {
+                        tracing::debug!(target: ::diagnostics::memory_log::TARGET,
+                            "MEMORY_IDLE_FLUSH: skipped, no new messages since last successful flush (len={current_len})");
+                    }
                 } else {
                     tracing::debug!(target: ::diagnostics::memory_log::TARGET,
-                        "MEMORY_IDLE_FLUSH: skipped, no new messages since last flush (len={current_len})");
+                        "MEMORY_IDLE_FLUSH: skipped because session is not idle (admission={idle_admission_open}, activities={session_idle})");
                 }
                 // Reset for next idle period
-                if let Some(timeout) = session.idle_flush_timeout {
+                if let Some(timeout) = idle_flush_timeout {
                     idle_flush_sleep.as_mut().reset(tokio::time::Instant::now() + timeout);
                 }
             }
@@ -1185,6 +1309,15 @@ pub(super) async fn run_session(
                             }
                             if should_resume {
                                 arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
+                                if session.state.lock().await.foreground.is_idle()
+                                    && let Some(timeout) = session
+                                        .idle_flush_timeout
+                                        .filter(|timeout| !timeout.is_zero())
+                                {
+                                    idle_flush_sleep
+                                        .as_mut()
+                                        .reset(tokio::time::Instant::now() + timeout);
+                                }
                                 session.send_available_commands_update_if_idle().await;
                                 session.emit_session_idle_if_idle().await;
                             }
@@ -1324,6 +1457,11 @@ pub(super) async fn run_session(
                     session
                         .handle_turn_end(&prompt_id, suppress_goal_continuation)
                         .await;
+                    if let Some(timeout) = idle_flush_timeout {
+                        idle_flush_sleep
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + timeout);
+                    }
                 }
                 session.send_available_commands_update_if_idle().await;
                 session.emit_session_idle_if_idle().await;
@@ -1379,6 +1517,27 @@ pub(super) async fn run_session(
                     });
                     continue;
                 };
+
+                let resets_idle_flush = matches!(
+                    &cmd,
+                    SessionCommand::QueuePrompt { .. }
+                        | SessionCommand::ExecuteSlashCommand { .. }
+                        | SessionCommand::QueueControl { .. }
+                        | SessionCommand::CompactSession { .. }
+                        | SessionCommand::Rewind { .. }
+                        | SessionCommand::SetSessionModel { .. }
+                        | SessionCommand::PatchSessionEffort { .. }
+                        | SessionCommand::BehaviorChange { .. }
+                        | SessionCommand::ReceiveAgentMessage { .. }
+                        | SessionCommand::ReceivePlanGuidance { .. }
+                        | SessionCommand::ReceiveNotification { .. }
+                        | SessionCommand::FlushMemory { .. }
+                );
+                if resets_idle_flush && let Some(timeout) = idle_flush_timeout {
+                    idle_flush_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + timeout);
+                }
 
                 match cmd {
                     SessionCommand::SetGoalContextSnapshot { snapshot } => {
@@ -1615,6 +1774,7 @@ pub(super) async fn run_session(
                             | chat_state::NotificationSource::PlanHandoff { .. }
                             | chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::AgentReply { .. }
+                            | chat_state::NotificationSource::InquiryAnswered { .. }
                             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                         };
                         let admission = session
@@ -2955,6 +3115,13 @@ pub(super) async fn run_session(
                     );
                     terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                     return;
+                }
+                if pending_shutdown.is_none()
+                    && let Some(timeout) = idle_flush_timeout
+                {
+                    idle_flush_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + timeout);
                 }
                 arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
             }

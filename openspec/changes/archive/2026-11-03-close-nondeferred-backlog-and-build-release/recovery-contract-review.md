@@ -1,0 +1,11 @@
+# S2 执行依赖的独立事实复核
+
+reviewer `/root/rules_recovery_review` 只读调查，结合主规范、Atlas scoped facts及调用方；未读真实用户session、未运行Cargo。
+
+主规范是行为权威；2026-11-02分析稿关于“原执行源”的措辞不能扩大为普通tool永久冻结旧实现。`tool-authorization` 的 Suspended tool continuations 明确按当前definition/workspace/MCP generation重新preflight和授权，保留原call id、冻结最终参数和等待关联，不恢复旧permit。恢复accepted response确有NotDispatched/AwaitPermission/AwaitUser；不能把这些调用当未来新call，但现有current-definition重核对契约仍适用，不必新增root完整配置snapshot。
+
+Control保存typed有效role，不能把当前Agent文件正文当成原role。Hook Triggered.handlers只保存身份/策略，不含command/HTTP源；checkpoint前已有settle_hooks_for_suspension，Pending跳过、Started标未知，恢复禁止盲重跑，所以不因去整registry gate而新增完整Hook执行snapshot。Workflow仍必须使用既有frozen定义和validate_suspended_executions；WorkflowAgentDefinitionSnapshot目前无需为普通root抽出。
+
+child live权限的immutable出生上限是RWX+MCP server/client membership；native eligibility可随显式Agent选择替换，不是永久冻结全部native工具名单。真实缺口是Spawn尚未持久出生MCP集合。下一最小增量保存已知出生server名集合（区分缺事实与已知空集），从实际过滤后pool捕获并同源初始化；cold恢复与当前父许可求交，为保留成员绑定新incarnation，并继续generation/permit。缺事实明确拒绝，不用当前profile补证。
+
+旧checkpoint聚合digest不能反解，因此无法证明一次漂移仅涉及metadata；但可以在实际不变量具有独立事实后通过明确契约变更替换总gate，不必伪造旧source或设计兼容fallback。先补出生MCP，再处理目录身份、route及聚合gate；不裸删。

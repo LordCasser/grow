@@ -84,9 +84,11 @@ impl AgentView {
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
         if let Some(child) = self.subagent_views.get_mut(&child_sid) {
             child.mark_as_subagent_view();
+            child.leader_key_started_at = None;
         } else {
             return;
         }
+        self.clear_session_commands();
         crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
         self.active_subagent = Some(child_sid);
     }
@@ -1084,7 +1086,7 @@ impl AgentView {
         };
         let prompt_height = prompt_height
             .max(prompt_style.vpad_top + 1 + prompt_style.info_block(true))
-            .saturating_add(u16::from(leader_active));
+            .saturating_add(if leader_active { 2 } else { 0 });
         let prompt_height = if self.is_subagent_view {
             0
         } else {
@@ -2860,27 +2862,32 @@ impl AgentView {
                     labels.push("E Effort");
                 }
                 labels.push("P Permission");
-                labels.push("B Behavior");
+                if !self.is_subagent_view {
+                    labels.push("B Behavior");
+                }
                 let hint = labels.join("  ·  ");
-                let hint_area = Rect {
-                    x: layout.prompt.x,
-                    y: layout.prompt.y,
-                    width: layout.prompt.width,
-                    height: 1,
+                let management = if self.is_subagent_view {
+                    "X Stop child work · Esc Cancel"
+                } else {
+                    "X Stop work · C Close session · D Delete history · Esc Cancel"
                 };
-                buf.set_style(hint_area, Style::default().bg(theme.bg_base));
-                buf.set_stringn(
-                    hint_area.x.saturating_add(2),
-                    hint_area.y,
-                    hint,
-                    hint_area.width.saturating_sub(4) as usize,
-                    Style::default().fg(theme.gray_dim).bg(theme.bg_base),
-                );
+                for (line, text) in [hint.as_str(), management].into_iter().enumerate() {
+                    let y = layout.prompt.y + line as u16;
+                    if y < layout.prompt.bottom() {
+                        buf.set_stringn(
+                            layout.prompt.x.saturating_add(2),
+                            y,
+                            text,
+                            layout.prompt.width.saturating_sub(4) as usize,
+                            Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                        );
+                    }
+                }
                 Rect {
                     x: layout.prompt.x,
-                    y: layout.prompt.y.saturating_add(1),
+                    y: layout.prompt.y.saturating_add(2),
                     width: layout.prompt.width,
-                    height: layout.prompt.height.saturating_sub(1),
+                    height: layout.prompt.height.saturating_sub(2),
                 }
             } else {
                 layout.prompt
@@ -3406,18 +3413,14 @@ impl AgentView {
                 .render(layout.shortcuts, buf);
         } else {
             let mut hints = self.normal_pane_hints(registry, esc_owned_before_agent);
-            if in_dashboard_overlay {
-                use crate::views::shortcuts_bar::HintItem;
+            if let Some(def) = registry.find(ActionId::SessionCommands) {
                 hints.insert(
                     0,
-                    HintItem::new(
-                        registry
-                            .find(ActionId::DashboardOverlayStop)
-                            .map(|def| def.default_key)
-                            .unwrap_or(key!('x', CONTROL)),
-                        "stop",
-                    ),
+                    crate::views::shortcuts_bar::HintItem::new(def.default_key, "commands"),
                 );
+            }
+            if in_dashboard_overlay {
+                use crate::views::shortcuts_bar::HintItem;
                 hints.insert(
                     0,
                     HintItem {
@@ -4977,6 +4980,26 @@ mod empty_state_logo_tests {
 
     fn shows_motif(rows: &[String], motif: &str) -> bool {
         rows.iter().any(|row| row.contains(motif))
+    }
+
+    #[test]
+    fn session_command_guide_keeps_close_and_delete_visible_at_eighty_columns() {
+        let mut agent = make_agent();
+        agent.prompt.set_text("unsent draft");
+        agent.leader_key_started_at = Some(std::time::Instant::now());
+        let buf = draw(&mut agent, Rect::new(0, 0, 80, 24));
+        let rows = rendered_rows(&buf);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("C Close session") && row.contains("D Delete history")),
+            "management commands must remain visible: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("A Agent") && row.contains("P Permission"))
+        );
+        assert!(rows.iter().any(|row| row.contains("unsent draft")));
+        assert_eq!(agent.prompt.text(), "unsent draft");
     }
 
     #[test]

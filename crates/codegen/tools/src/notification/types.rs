@@ -121,7 +121,7 @@ pub struct BashExecutionBackgrounded {
     ///
     /// This is different from `tool_call_id`:
     /// - `tool_call_id` (in base): Correlates with the original tool call in TUI
-    /// - `task_id`: Used with `get_task_output` tool to query status later
+    /// - `task_id`: Used with `get_command_output` tool to query status later
     ///
     /// They are always different because task_id is generated when backgrounding,
     /// while tool_call_id was assigned when the tool was invoked.

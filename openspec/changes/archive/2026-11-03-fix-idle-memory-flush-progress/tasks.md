@@ -1,0 +1,4 @@
+- [x] 实现以真实 inactivity、前台/session idle 为门禁的 idle flush timer，并将零 timeout 视为禁用。
+- [x] 仅在 flush 成功 checkpoint 时推进现有历史长度水位，失败保留重试资格。
+- [x] 添加独立 run loop 到 loopback provider 的 idle flush 测试，覆盖 fork 初始长度、活动延迟、失败重试、rewind/compaction reset 及零 timeout。
+- [x] 运行目标 shell actor 测试与 OpenSpec strict validation。

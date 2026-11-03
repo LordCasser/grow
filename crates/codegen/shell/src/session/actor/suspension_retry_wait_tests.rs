@@ -65,6 +65,7 @@ async fn failed_first_suspend_then_restored_wait(
     resuspend: Option<RebindState>,
 ) {
     let (actor, _gateway) = build_actor().await;
+    crate::session::actor::tests::support::record_test_model_route(&actor).await;
     begin_test_causal_turn(&actor).await;
 
     const CALL_ID: &str = "suspended-human-wait";

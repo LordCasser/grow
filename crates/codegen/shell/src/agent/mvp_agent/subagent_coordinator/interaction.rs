@@ -384,19 +384,28 @@ async fn ask(
     {
         InquiryOutcome::terminal(&id, InquiryStatus::Unavailable, "Target agent closed")
     } else {
-        tokio::select! {
-            biased;
-            _ = request.cancellation.cancelled() => {
-                cancellation.cancel(InquiryCancellationReason::Explicit);
-                cancellation.outcome(&id)
-            }
-            result = tokio::time::timeout(INQUIRY_DEADLINE, response) => match result {
-                Ok(Ok(outcome)) => outcome,
-                Ok(Err(_)) => InquiryOutcome::terminal(&id, InquiryStatus::Unavailable, "Target agent closed before answering"),
-                Err(_) => {
-                    cancellation.cancel(InquiryCancellationReason::TimedOut);
-                    cancellation.outcome(&id)
+        let response = tokio::time::timeout(INQUIRY_DEADLINE, response);
+        tokio::pin!(response);
+        let mut cancel_requested = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = request.cancellation.cancelled(), if !cancel_requested => {
+                    cancel_requested = true;
+                    if cancellation.cancel(InquiryCancellationReason::Explicit) {
+                        break cancellation.outcome(&id);
+                    }
+                    // Target success admission won. Retain the original response
+                    // and its original deadline instead of inventing cancellation.
                 }
+                result = &mut response => break match result {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(_)) => InquiryOutcome::terminal(&id, InquiryStatus::Unavailable, "Target agent closed before answering"),
+                    Err(_) => {
+                        cancellation.cancel(InquiryCancellationReason::TimedOut);
+                        InquiryOutcome::terminal(&id, InquiryStatus::TimedOut, "coordination inquiry deadline exceeded")
+                    }
+                },
             }
         }
     };

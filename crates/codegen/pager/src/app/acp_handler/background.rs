@@ -72,15 +72,43 @@ pub(super) fn route_bg_task_stdout(
 /// entry's running state is cleared. Otherwise a fresh `BgTask` block
 /// is pushed.
 pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    // Parse the SessionNotification envelope
-    let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
+    let Ok(notification) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         tracing::warn!("Failed to parse grow/task_backgrounded");
         return false;
     };
+    let replay =
+        NotificationMeta::from_json(notification.meta.as_ref().and_then(|meta| meta.as_object()))
+            .is_replay;
+    let Some((matched, active, agent)) = resolve_notif_agent(app, &notification.session_id) else {
+        return false;
+    };
+    if !replay
+        && matches!(&matched, SessionMatch::Child(_))
+        && !crate::app::subagent::ensure_subagent_child_replayed(
+            agent,
+            notification.session_id.0.as_ref(),
+        )
+    {
+        return active;
+    }
+    let Some((session, scrollback)) =
+        resolve_target_view(agent, matched, notification.session_id.0.as_ref())
+    else {
+        return false;
+    };
+    apply_task_backgrounded(notification.update, replay, session, scrollback) && active
+}
 
+/// Project one background start through the same path for live and child replay.
+pub(crate) fn apply_task_backgrounded(
+    update: GrowSessionUpdate,
+    restored_from_replay: bool,
+    session: &mut AgentSession,
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+) -> bool {
     // Extract TaskBackgrounded fields
     let (tool_call_id, task_id, command, cwd, output_file, monitor_description, notif_description) =
-        match session_notif.update {
+        match update {
             GrowSessionUpdate::TaskBackgrounded {
                 tool_call_id,
                 task_id,
@@ -101,15 +129,17 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
             _ => return false,
         };
 
-    // Replayed (`session/load`) restores are historical context, not new
-    // activity: mark them so the tasks pane doesn't auto-open on resume.
-    let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
-    let restored_from_replay = meta.is_replay;
-
-    let (matched, is_active, agent) = match resolve_notif_agent(app, &session_notif.session_id) {
-        Some(t) => t,
-        None => return false,
-    };
+    if session
+        .bg_tasks
+        .get(&task_id)
+        .and_then(|task| task.scrollback_entry_id)
+        .and_then(|id| scrollback.get_by_id(id))
+        .is_some_and(
+            |entry| matches!(&entry.block, RenderBlock::BgTask(block) if block.task_id == task_id),
+        )
+    {
+        return true;
+    }
 
     tracing::info!(
         tool_call_id = %tool_call_id,
@@ -117,11 +147,6 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         restored_from_replay,
         "Background task started"
     );
-
-    let child_sid: &str = session_notif.session_id.0.as_ref();
-    let Some((session, scrollback)) = resolve_target_view(agent, matched, child_sid) else {
-        return false;
-    };
 
     // Check if this is a demotion (foreground→background): the execute block
     // already exists in scrollback as a pending tool in the tracker.
@@ -155,7 +180,13 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
 
     // Create central bg task state (description may still be filled from the
     // Execute block on demotion before we insert into the map).
-    let mut bg_task = BgTaskState {
+    let retained_task = if restored_from_replay {
+        session.bg_tasks.remove(&task_id)
+    } else {
+        None
+    };
+    let preserve_task_state = retained_task.is_some();
+    let mut bg_task = retained_task.unwrap_or_else(|| BgTaskState {
         task_id: task_id.clone(),
         tool_call_id: tool_call_id.clone(),
         command: command.clone(),
@@ -175,7 +206,7 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         scrollback_entry_id: None,
         is_monitor,
         restored_from_replay,
-    };
+    });
 
     let entry_id = if let Some(eid) = demotion_eid {
         // Demotion: extract stdout and swap the block in a single mutable borrow.
@@ -185,7 +216,9 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
             {
                 // Use `set_stdout` so the cached `stdout_line_count` and the
                 // TUI-side trim/truncated flag invariants stay in sync.
-                bg_task.set_stdout(exec.output.take().unwrap_or_default());
+                if !preserve_task_state {
+                    bg_task.set_stdout(exec.output.take().unwrap_or_default());
+                }
                 if description.as_ref().is_none_or(|d| d.trim().is_empty()) {
                     description = exec.description.take();
                 }
@@ -218,7 +251,9 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         eid
     };
 
-    bg_task.description = description;
+    if !preserve_task_state {
+        bg_task.description = description;
+    }
 
     session.bg_tasks.insert(task_id.clone(), bg_task);
     session
@@ -229,7 +264,7 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         bg.scrollback_entry_id = Some(entry_id);
     }
 
-    is_active
+    true
 }
 
 /// Handle `grow/monitor_event` — background task or monitor emitted new output.
@@ -478,23 +513,54 @@ pub(super) fn handle_git_head_changed(notif: &acp::ExtNotification, app: &mut Ap
 }
 
 pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    // The payload is a SessionNotification wrapping TaskCompleted { task_snapshot }
-    let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
+    let Ok(notification) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         tracing::warn!("Failed to parse grow/task_completed");
         return false;
     };
+    let Some((matched, active, agent)) = resolve_notif_agent(app, &notification.session_id) else {
+        return false;
+    };
+    let replay =
+        NotificationMeta::from_json(notification.meta.as_ref().and_then(|meta| meta.as_object()))
+            .is_replay;
+    if !replay
+        && matches!(&matched, SessionMatch::Child(_))
+        && !crate::app::subagent::ensure_subagent_child_replayed(
+            agent,
+            notification.session_id.0.as_ref(),
+        )
+    {
+        return active;
+    }
+    let Some((session, scrollback)) =
+        resolve_target_view(agent, matched, notification.session_id.0.as_ref())
+    else {
+        return false;
+    };
+    apply_task_completed(notification.update, false, session, scrollback) && active
+}
 
-    let task_snapshot = match session_notif.update {
+/// History may settle a running task, without replacing its retained output
+/// or rolling back a task that already reached its terminal state.
+pub(crate) fn apply_task_completed(
+    update: GrowSessionUpdate,
+    preserve_task_state: bool,
+    session: &mut AgentSession,
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+) -> bool {
+    let task_snapshot = match update {
         GrowSessionUpdate::TaskCompleted { task_snapshot, .. } => task_snapshot,
         _ => return false,
     };
 
-    let (matched, is_active, agent) = match resolve_notif_agent(app, &session_notif.session_id) {
-        Some(t) => t,
-        None => return false,
-    };
-
     let task_id = &task_snapshot.task_id;
+    if scrollback.iter_entries().any(|(_, entry)| {
+        matches!(&entry.block,
+        RenderBlock::BgTask(block) if &block.task_id == task_id
+            && !matches!(block.kind, crate::scrollback::blocks::BgTaskKind::Started))
+    }) {
+        return true;
+    }
     let exit_code = task_snapshot.exit_code;
     let signal = task_snapshot.signal.clone();
 
@@ -515,27 +581,33 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     // resumed scrollback (one per dead task — pure noise on every resume).
     let stale_on_load = signal.as_deref() == Some("session_restart");
 
-    let child_sid: &str = session_notif.session_id.0.as_ref();
-    let Some((session, scrollback)) = resolve_target_view(agent, matched, child_sid) else {
-        return false;
-    };
-
     // Compute elapsed duration from the bg task state (if we have it).
     // Prefer the human description for "Task completed/failed: …" labels
     // (same as "Task started"), falling back to the raw command only when
     // no description was supplied.
     let (command, elapsed, mut description, scrollback_entry_id) =
         if let Some(bg_task) = session.bg_tasks.get_mut(task_id) {
-            bg_task.status = if success {
-                BgTaskStatus::Done
-            } else {
-                BgTaskStatus::Failed
-            };
-            bg_task.exit_code = exit_code;
-            bg_task.signal = signal.clone();
-            bg_task.end_time = Some(std::time::SystemTime::now());
-            bg_task.pending_kill = false;
-            bg_task.kill_requested_at = None;
+            if !preserve_task_state || bg_task.status == BgTaskStatus::Running {
+                bg_task.status = if success {
+                    BgTaskStatus::Done
+                } else {
+                    BgTaskStatus::Failed
+                };
+                bg_task.exit_code = exit_code;
+                bg_task.signal = signal.clone();
+                bg_task.end_time = if preserve_task_state || bg_task.restored_from_replay {
+                    bg_task.start_time = task_snapshot.start_time;
+                    Some(
+                        task_snapshot
+                            .end_time
+                            .unwrap_or_else(std::time::SystemTime::now),
+                    )
+                } else {
+                    Some(std::time::SystemTime::now())
+                };
+                bg_task.pending_kill = false;
+                bg_task.kill_requested_at = None;
+            }
             (
                 bg_task.command.clone(),
                 bg_task.elapsed(),
@@ -605,7 +677,7 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
         // The replayed "Task started" block above is finished (static
         // bullet); the pane row leaves the running filter via the status
         // update. No new scrollback block: nothing happened in THIS session.
-        return is_active;
+        return true;
     }
 
     // Emit "Task completed/failed" scrollback block — uses description when
@@ -619,5 +691,5 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     };
     scrollback.push_block(block);
 
-    is_active
+    true
 }

@@ -1,6 +1,34 @@
 #![allow(dead_code)]
 use super::*;
 
+/// Low-level fixtures bypass production spawn, which records this authority.
+pub(crate) async fn record_test_model_route(actor: &SessionActor) {
+    let route = actor.model_route.snapshot();
+    let config = &route.sampling_config;
+    let transport = sampling_types::model_image_input_key_from_parts(
+        &config.model,
+        &config.api_backend,
+        &config.base_url,
+        &config.query_params,
+    );
+    actor
+        .chat_state_handle
+        .record_timeline_event_durably(crate::session::persistence::model_change_event(
+            &route.model_id,
+            &route.model_id,
+            config.reasoning_effort,
+            config.reasoning_effort,
+            &config.model,
+            &config.model,
+            &transport,
+            &transport,
+            "session_start_route_baseline",
+            None,
+        ))
+        .await
+        .unwrap();
+}
+
 #[cfg(test)]
 pub(crate) async fn admit_test_human_input(actor: &SessionActor, label: &str) -> Vec<String> {
     let input_id = format!("test-input-{label}");
@@ -243,6 +271,28 @@ pub(crate) async fn record_test_prompt(actor: &SessionActor, prompt_text: &str) 
 #[cfg(test)]
 pub(crate) async fn test_agent_default() -> agent::Agent {
     test_agent_with_tools(vec![]).await
+}
+
+/// Run the two production coordination command arms against the actual actor.
+/// Foreground ownership stays with the real sampler/Turn fixture.
+pub(crate) fn serve_coordination_commands(
+    actor: std::sync::Arc<SessionActor>,
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(async move {
+        while let Some(command) = commands.recv().await {
+            match command {
+                crate::session::SessionCommand::RunCoordinationInquiry { inquiry } => {
+                    actor.enqueue_coordination_inquiry(inquiry).await;
+                }
+                crate::session::SessionCommand::RecordCoordinationInquiry { event, respond_to } => {
+                    let _ = respond_to.send(actor.persist_coordination_inquiry(event).await);
+                }
+                crate::session::SessionCommand::Shutdown => break,
+                _ => panic!("unexpected command in coordination-only fixture"),
+            }
+        }
+    })
 }
 /// Grow-build agent with the real `TodoWriteTool` (id `todo_write`, kind
 /// `Plan`) registered, so `tool_for_kind(ToolKind::Plan)` resolves through the
@@ -1229,6 +1279,7 @@ async fn create_test_actor_ex_inner(
         session_activities: SessionActivityTracker::new(),
         coordination_inquiries: std::cell::RefCell::new(std::collections::VecDeque::new()),
         coordination_inquiry_active: std::cell::Cell::new(false),
+        coordination_answer_next_seq: std::cell::Cell::new(0),
         mcp_dispatcher_worker: TaskSlot::new(),
         mcp_initialization_worker: TaskSlot::new(),
         project_discovery_worker: TaskSlot::new(),

@@ -2,6 +2,8 @@
 //! The shared coordinator actor lives in `tools`; this module plugs
 //! its `!Send` local-session runner into `spawn_local`.
 use super::*;
+#[cfg(test)]
+mod consultation_joint_tests;
 mod interaction;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
@@ -689,11 +691,11 @@ impl MvpAgent {
             parent_mcp_pool: None,
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
-            task_output_tool_name: {
+            subagent_wait_tool_name: {
                 let sessions = self.sessions.borrow();
                 sessions
                     .get(&parent_sid)
-                    .map(|h| h.tool_context.task_output_tool_name.clone())
+                    .map(|h| h.tool_context.subagent_wait_tool_name.clone())
                     .unwrap_or(None)
             },
             goal_loop_active: {
@@ -745,7 +747,7 @@ impl MvpAgent {
         ctx.hook_registry = handle.hook_registry.clone();
         ctx.permission_handle = Some(handle.permission_handle.clone());
         ctx.workspace_ops = handle.workspace_ops.clone();
-        ctx.task_output_tool_name = handle.tool_context.task_output_tool_name.clone();
+        ctx.subagent_wait_tool_name = handle.tool_context.subagent_wait_tool_name.clone();
         ctx.goal_loop_active = handle.tool_context.goal_loop_active_gate.clone();
         ctx.parent_terminal_backend = handle.terminal_backend.clone();
         ctx.parent_notification_handle = handle.tools_notification_handle.clone();

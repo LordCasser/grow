@@ -27,16 +27,18 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 async fn handle_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: CompactConversationRequest = parse_params(args)?;
     // send over the compact query here properly
-    let session_handle = {
-        let sessions = agent.sessions.borrow();
-        sessions.get(&req.session_id.into()).cloned()
-    };
+    let session_handle = agent
+        .session_handle_waiting_for_load(&req.session_id.into())
+        .await;
     let (tx, rx) = oneshot::channel();
     if let Some(session) = session_handle {
-        let _ = session.cmd_tx.send(SessionCommand::CompactSession {
-            user_context: req.user_context,
-            respond_to: tx,
-        });
+        session
+            .cmd_tx
+            .send(SessionCommand::CompactSession {
+                user_context: req.user_context,
+                respond_to: tx,
+            })
+            .map_err(|_| acp::Error::internal_error().data("session command channel closed"))?;
     }
     let status = rx
         .await
@@ -52,20 +54,24 @@ async fn handle_flush(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let req: MemoryFlushRequest = parse_params(args)?;
     let not_found_err = format!("session not found: {}", req.session_id);
-    let session_handle = {
-        let sessions = agent.sessions.borrow();
-        sessions.get(&req.session_id.into()).cloned()
-    };
+    let session_handle = agent
+        .session_handle_waiting_for_load(&req.session_id.into())
+        .await;
     let Some(session) = session_handle else {
         return Err(acp::Error::invalid_params().data(not_found_err));
     };
     let (tx, rx) = oneshot::channel();
-    let _ = session
+    session
         .cmd_tx
-        .send(SessionCommand::FlushMemory { respond_to: tx });
-    rx.await
+        .send(SessionCommand::FlushMemory { respond_to: tx })
+        .map_err(|_| acp::Error::internal_error().data("session command channel closed"))?;
+    let checkpointed = rx
+        .await
         .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
         .map_err(|e| acp::Error::internal_error().data(format!("{:?}", e)))?;
+    if !checkpointed {
+        return Err(acp::Error::internal_error().data("memory flush was skipped or failed"));
+    }
     to_ext_response(Ok(Empty {}))
 }
 

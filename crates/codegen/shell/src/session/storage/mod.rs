@@ -70,6 +70,23 @@ pub(crate) fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Prove workspace aliases against pinned directory entities, not path text.
+pub(crate) async fn same_workspace_directory(left: &Path, right: &Path) -> io::Result<bool> {
+    let left = left.to_path_buf();
+    let right = right.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let open = |path: &Path| {
+            let path = dunce::canonicalize(path)?;
+            ContainedDirectory::open(&path, Path::new(""), "session workspace", false)
+        };
+        let left = open(&left)?;
+        let right = open(&right)?;
+        Ok(left.entity_identity()? == right.entity_identity()?)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
 pub(crate) fn require_regular_directory(path: &Path, description: &str) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -2335,6 +2352,138 @@ pub(crate) fn validate_sideband_ledgers(
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     }
 
+    // New receipt identities must be backed by the exact original terminal,
+    // including after consumption. The temporary map is only load validation.
+    let mut consultation_proofs = BTreeMap::new();
+    let mut consultation_identities = std::collections::BTreeSet::new();
+    for event in parent.events() {
+        let fact = crate::coordination::InquiryEvent::from_timeline(event)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let Some(crate::coordination::InquiryEvent::Incoming { inquiry_id, audit }) = fact else {
+            continue;
+        };
+        let previous_terminal = audit.outcome.is_some()
+            && !consultation_identities
+                .insert((audit.source_session_id.clone(), inquiry_id.clone()));
+        let Some(proof) = &audit.answer_context else {
+            continue;
+        };
+        if proof.target_session_id != parent_timeline_id {
+            continue;
+        }
+        if previous_terminal {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate canonical consultation answer",
+            ));
+        }
+        if spawns
+            .get(proof.result_ref.timeline_id.as_str())
+            .is_none_or(|(spawn_seq, spawn)| {
+                *spawn_seq >= event.seq.get()
+                    || spawn.purpose != chat_state::SidebandPurpose::InfoRequest
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "consultation proof does not reference its InfoRequest Sideband",
+            ));
+        }
+        let expected_prompt = crate::coordination::inquiry_prompt(
+            &audit.source_session_id,
+            &audit.source_cwd,
+            &audit.question,
+        );
+        if !matches!(ledgers.get(&proof.result_ref.timeline_id).and_then(|events| events.first()).map(|event| &event.kind),
+            Some(chat_state::SidebandEventKind::Request(request)) if request.prompt == expected_prompt)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "consultation proof belongs to a different question or source",
+            ));
+        }
+        let result = completed_sideband_result(
+            ledgers,
+            &proof.result_ref.timeline_id,
+            proof.result_ref.first_seq,
+            "consultation",
+        )?;
+        if audit
+            .outcome
+            .as_ref()
+            .and_then(|outcome| outcome.answer.as_deref())
+            != Some(result.raw_output.as_str())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "consultation answer differs from its completed Sideband result",
+            ));
+        }
+        let body = audit.answer_context_body().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "consultation proof has no answer",
+            )
+        })?;
+        if body.len() as u64 > chat_state::MAX_NOTIFICATION_PAYLOAD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "consultation context exceeds the notification payload limit",
+            ));
+        }
+        if audit.direction == crate::coordination::InquiryDirection::Peer {
+            crate::coordination::validate_peer_inquiry_outcome(
+                audit
+                    .outcome
+                    .as_ref()
+                    .expect("validated consultation has an outcome"),
+            )
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("consultation result exceeds its IPC frame: {error}"),
+                )
+            })?;
+        }
+        consultation_proofs.insert(
+            format!("{parent_timeline_id}:{}", event.seq.get()),
+            (event.seq, audit.source_session_id, inquiry_id, body),
+        );
+    }
+    for event in parent.events() {
+        let chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+            owner_session_id,
+            source:
+                chat_state::NotificationSource::InquiryAnswered {
+                    source_session_id,
+                    inquiry_id,
+                },
+            source_version: chat_state::NotificationSourceVersion::Opaque { value },
+            payload_ref,
+            ..
+        }) = &event.kind
+        else {
+            continue;
+        };
+        let valid =
+            consultation_proofs
+                .get(value)
+                .is_some_and(|(terminal_seq, asker, inquiry, body)| {
+                    *terminal_seq < event.seq
+                        && owner_session_id == parent_timeline_id
+                        && source_session_id == asker
+                        && inquiry_id == inquiry
+                        && payload_ref.bytes == body.len() as u64
+                        && payload_ref.blake3 == blake3::hash(body.as_bytes()).to_hex().as_str()
+                });
+        if !valid {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "consultation receipt is not backed by its canonical answer proof",
+            ));
+        }
+    }
+
     for (_, spawn) in spawns.values() {
         if let Some(source_ref) = spawn
             .source_refs
@@ -3520,6 +3669,15 @@ pub struct TimelineLedgerReader {
     snapshot_len: u64,
 }
 
+/// Rebuildable read state, owned by the search worker's single last-session
+/// entry. It carries no writer lease, open file or independent authority.
+pub(crate) struct TimelineReadProjection {
+    timeline: chat_state::Timeline,
+    state: crate::session::history::AppendState,
+    complete_len: u64,
+    prefix_hash: blake3::Hash,
+}
+
 impl TimelineLedgerReader {
     pub(crate) fn from_file(file: std::fs::File, label: PathBuf) -> io::Result<Self> {
         let snapshot_len = file.metadata()?.len();
@@ -3902,6 +4060,8 @@ pub fn stream_session_history_at(
                         crate::extensions::notification::SessionUpdate::UiNotice(_)
                             | crate::extensions::notification::SessionUpdate::ImageRecoveryOperation { .. }
                             | crate::extensions::notification::SessionUpdate::TurnCompleted { .. }
+                            | crate::extensions::notification::SessionUpdate::TaskBackgrounded { .. }
+                            | crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
                     ) =>
                 {
                     emit(SessionUpdate::Grow(n.clone()));

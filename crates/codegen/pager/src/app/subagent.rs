@@ -217,8 +217,16 @@ fn enrich_projected_subagent(
 pub(crate) fn replay_inherited_updates(
     child_view: &mut crate::app::agent_view::AgentView,
     child_session_id: &str,
-) {
+) -> Option<ReplayEmission> {
     let home = effective_grow_home();
+    // Replaying display facts may repair entry links, but cannot replace the
+    // current owner of a task's stdout, cancellation or completion state.
+    let retained_tasks = child_view
+        .session
+        .bg_tasks
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let outcome = match stream_session_history_at(child_session_id, &home, |update| match update {
         shell::session::storage::SessionUpdate::Acp(notification) => {
             let mut meta =
@@ -229,8 +237,51 @@ pub(crate) fn replay_inherited_updates(
                 &meta,
                 &mut child_view.scrollback,
             );
+            // Writer restoration reseeds transport IDs above the durable
+            // history. Keep the ACP watermark separate from Grow updates so
+            // queued copies of replayed tool/user events cannot render twice.
+            if let Some(seq) = meta.event_seq {
+                child_view.session.last_applied_event_seq = Some(
+                    child_view
+                        .session
+                        .last_applied_event_seq
+                        .map_or(seq, |last| last.max(seq)),
+                );
+            }
+            // Canonical replay can already include a response whose live
+            // preview is still queued. Reuse the attempt lifecycle to keep
+            // those late chunks from appending the same response again.
+            if let (Some(request_id), Some(attempt)) =
+                (meta.sampling_request_id, meta.sampling_attempt)
+            {
+                child_view.session.tracker.handle_sampling_attempt(
+                    request_id,
+                    attempt,
+                    shell::extensions::notification::SamplingAttemptState::Accepted,
+                    &mut child_view.scrollback,
+                );
+            }
         }
         shell::session::storage::SessionUpdate::Grow(notification) => match notification.update {
+            update @ shell::extensions::notification::SessionUpdate::TaskBackgrounded { .. } => {
+                crate::app::acp_handler::apply_task_backgrounded(
+                    update,
+                    true,
+                    &mut child_view.session,
+                    &mut child_view.scrollback,
+                );
+            }
+            update @ shell::extensions::notification::SessionUpdate::TaskCompleted { .. } => {
+                let preserve = matches!(&update,
+                    shell::extensions::notification::SessionUpdate::TaskCompleted { task_snapshot }
+                        if retained_tasks.contains(&task_snapshot.task_id));
+                crate::app::acp_handler::apply_task_completed(
+                    update,
+                    preserve,
+                    &mut child_view.session,
+                    &mut child_view.scrollback,
+                );
+            }
             shell::extensions::notification::SessionUpdate::UiNotice(notice) => {
                 crate::app::acp_handler::apply_ui_notice(child_view, notice, None, true);
             }
@@ -271,12 +322,30 @@ pub(crate) fn replay_inherited_updates(
         Ok(outcome) => outcome,
         Err(e) => {
             tracing::warn!(session_id = %child_session_id, error = %e, "failed to read updates for replay");
-            ReplayEmission::Empty
+            let mut notice = crate::scrollback::blocks::NoticeBlock::new(format!(
+                "Could not load child history: {e}. Reopen the child to retry.",
+            ));
+            notice.event_id = Some(format!("child-history-error:{child_session_id}"));
+            child_view
+                .scrollback
+                .push_block_if_absent(crate::scrollback::block::RenderBlock::Notice(notice));
+            return None;
         }
     };
+    let error_id = format!("child-history-error:{child_session_id}");
+    let error_entry = child_view
+        .scrollback
+        .iter_entries()
+        .find_map(|(id, entry)| {
+            (entry.block.immutable_event_id() == Some(error_id.as_str())).then_some(id)
+        });
+    if let Some(id) = error_entry {
+        child_view.scrollback.remove_entry(id);
+    }
     if outcome == ReplayEmission::Emitted {
         crate::memory_release::release_retained_memory_with("subagent-replay");
     }
+    Some(outcome)
 }
 
 /// Rebuild the flat descendant index after a root session load. Root replay
@@ -480,7 +549,7 @@ fn subagent_child_needs_replay(child_view: &crate::app::agent_view::AgentView) -
 pub(crate) fn ensure_subagent_child_replayed(
     parent: &mut crate::app::agent_view::AgentView,
     child_sid: &str,
-) {
+) -> bool {
     let should_replay = parent
         .session
         .subagent_sessions
@@ -491,7 +560,7 @@ pub(crate) fn ensure_subagent_child_replayed(
             .get(child_sid)
             .is_some_and(|v| subagent_child_needs_replay(v.as_ref()));
     if !should_replay {
-        return;
+        return true;
     }
     let finished_elapsed = parent
         .session
@@ -503,7 +572,22 @@ pub(crate) fn ensure_subagent_child_replayed(
     let parent_turn_running =
         parent.session.state.is_turn_running() || parent.session.state.is_cancelling();
     if let Some(child_view) = parent.subagent_views.get_mut(child_sid) {
-        replay_inherited_updates(child_view, child_sid);
+        let Some(emission) = replay_inherited_updates(child_view, child_sid) else {
+            return false;
+        };
+        if finished_elapsed.is_some()
+            && emission == ReplayEmission::Empty
+            && subagent_child_needs_replay(child_view)
+        {
+            let mut notice = crate::scrollback::blocks::NoticeBlock::new(
+                "Child history is unavailable. Reopen the child to retry.",
+            );
+            notice.event_id = Some(format!("child-history-error:{child_sid}"));
+            child_view
+                .scrollback
+                .push_block_if_absent(crate::scrollback::block::RenderBlock::Notice(notice));
+            return false;
+        }
         if let Some(elapsed) = finished_elapsed {
             finalize_finished_child_view(child_view, elapsed);
         } else if !parent_turn_running {
@@ -520,6 +604,7 @@ pub(crate) fn ensure_subagent_child_replayed(
     {
         crate::app::acp_handler::sync_child_control_projection(parent, child_sid);
     }
+    true
 }
 /// Finalize a finished child view: end the turn and append the `TurnCompleted`
 /// footer. Shared by the live `SubagentFinished` path and the deferred resume path.
@@ -537,13 +622,19 @@ pub(crate) fn finalize_finished_child_view(
         .tracker
         .finish_turn(&mut child_view.scrollback);
     child_view.scrollback.finish_all_running();
-    child_view
-        .scrollback
-        .push_block(crate::scrollback::block::RenderBlock::session_event(
+    let event_id = child_view
+        .session
+        .session_id
+        .as_ref()
+        .map(|sid| format!("subagent-finished:{}", sid.0));
+    child_view.scrollback.push_block_if_absent(
+        crate::scrollback::block::RenderBlock::session_event_with_id(
             crate::scrollback::blocks::SessionEvent::TurnCompleted {
                 elapsed: Some(elapsed),
             },
-        ));
+            event_id,
+        ),
+    );
 }
 fn join_meta_parts(parts: &[Option<&str>]) -> String {
     let non_empty: Vec<&str> = parts.iter().copied().flatten().collect();
@@ -1310,6 +1401,7 @@ mod tests {
                     resumed_from: None,
                     parent_prompt_id: None,
                     capability_mode: None,
+                    birth_mcp_servers: Some(Default::default()),
                     permission_mode: None,
                     effective_permission_mode: None,
                     workflow_run_id: None,
@@ -1341,6 +1433,137 @@ mod tests {
         shell::session::testkit::write_timeline_history_fixture(dir, timeline.events(), &updates)
             .unwrap();
     }
+
+    #[test]
+    fn replayed_canonical_response_rejects_overlapping_live_attempt_chunks() {
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-canonical-response-overlap";
+        let session_dir =
+            setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), child_sid);
+        let request_id = "canonical-request";
+        let attempt = 2;
+        let turn = chat_state::TurnId(1);
+        let step = chat_state::StepId { turn, index: 0 };
+        let mut timeline = chat_state::Timeline::default();
+        for kind in [
+            chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+                id: turn,
+                prompt_id: "child-prompt".into(),
+                input_ids: Vec::new(),
+                identity: chat_state::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "test-model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: chat_state::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }),
+            chat_state::TimelineEventKind::Step(chat_state::StepEvent::Started { id: step }),
+            chat_state::TimelineEventKind::Request(chat_state::RequestEvent::Started {
+                id: request_id.into(),
+                turn,
+                step,
+                model_id: "test-model".into(),
+                input_message_count: 0,
+                tool_count: 0,
+            }),
+            chat_state::TimelineEventKind::Request(chat_state::RequestEvent::Completed {
+                id: request_id.into(),
+                duration_ms: 1,
+                time_to_first_token_ms: None,
+                usage: chat_state::RequestUsage::default(),
+                response_message_count: 2,
+                attempt,
+                provider_terminal: None,
+            }),
+            chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
+                cause: chat_state::MessageCause::Assistant,
+                items: vec![
+                    shell::sampling::conversation::ConversationItem::Reasoning(
+                        shell::sampling::conversation::synthesized_reasoning_item(
+                            "canonical thought",
+                        ),
+                    ),
+                    shell::sampling::conversation::ConversationItem::assistant("canonical answer"),
+                ],
+                surface: chat_state::SurfaceOp::Append,
+                response_admission: Some(chat_state::ResponseAdmission {
+                    identity: chat_state::ResponseAdmissionIdentity {
+                        request_id: request_id.into(),
+                        attempt,
+                    },
+                    quarantined_tool_exchanges: 0,
+                }),
+            }),
+        ] {
+            timeline.record(kind).unwrap();
+        }
+        write_history_fixture(&session_dir, &timeline, vec![]);
+        set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
+
+        let mut child = make_min_child_view();
+        assert_eq!(
+            replay_inherited_updates(&mut child, child_sid),
+            Some(ReplayEmission::Emitted)
+        );
+
+        let live_meta = NotificationMeta {
+            sampling_request_id: Some(request_id.into()),
+            sampling_attempt: Some(attempt),
+            ..NotificationMeta::default()
+        };
+        for (update, text) in [
+            (
+                acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("canonical thought")),
+                )),
+                "canonical thought",
+            ),
+            (
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("canonical answer")),
+                )),
+                "canonical answer",
+            ),
+        ] {
+            child
+                .session
+                .handle_update(update, &live_meta, &mut child.scrollback);
+            let count = (0..child.scrollback.len())
+                .filter_map(|index| child.scrollback.entry(index))
+                .filter(|entry| match (&entry.block, text) {
+                    (RenderBlock::Thinking(block), "canonical thought") => block.text() == text,
+                    (RenderBlock::AgentMessage(block), "canonical answer") => block.text() == text,
+                    _ => false,
+                })
+                .count();
+            assert_eq!(count, 1, "overlapping live chunk must not duplicate {text}");
+        }
+
+        let distinct_meta = NotificationMeta {
+            sampling_request_id: Some("later-request".into()),
+            sampling_attempt: Some(1),
+            ..NotificationMeta::default()
+        };
+        child.session.handle_update(
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new("later answer"),
+            ))),
+            &distinct_meta,
+            &mut child.scrollback,
+        );
+        assert!((0..child.scrollback.len())
+            .filter_map(|index| child.scrollback.entry(index))
+            .any(|entry| matches!(&entry.block, RenderBlock::AgentMessage(block) if block.text() == "later answer")));
+        set_replay_grow_home_for_tests(None);
+    }
+
     fn write_parent_receipt_session(
         grow_home: &std::path::Path,
         session_id: &str,
@@ -1503,7 +1726,10 @@ mod tests {
         write_history_fixture(&session_dir, &chat_state::Timeline::default(), lines.into());
 
         let mut child = make_min_child_view();
-        replay_inherited_updates(&mut child, child_sid);
+        assert_eq!(
+            replay_inherited_updates(&mut child, child_sid),
+            Some(ReplayEmission::Emitted)
+        );
         set_replay_grow_home_for_tests(None);
 
         let entries = child

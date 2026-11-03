@@ -2516,8 +2516,10 @@ pub fn resolve_aux_model_sampling_config(
 }
 /// Stamp the session-local attribution, bearer resolver, and retry policy
 /// from the active session onto a routed aux `SamplerConfig` so a
-/// helper model keeps the session's auth/attribution. Shared by image-describe
-/// and the auto-mode classifier so the two can't drift.
+/// helper model keeps the existing session-local attribution and eligible
+/// service bearer behavior while retaining its own endpoint, backend, and
+/// provider credentials. Used by image-describe, auxiliary sideband clients,
+/// and the auto-mode classifier.
 ///
 /// The resolver gate is host-based so an auxiliary sampler cannot leak a
 /// managed-service bearer to an arbitrary provider endpoint.

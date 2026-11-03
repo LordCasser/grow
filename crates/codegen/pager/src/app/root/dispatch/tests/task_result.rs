@@ -5,6 +5,8 @@ use super::super::task_result::{
     wrap_host_image_request_eligible,
 };
 use super::*;
+use crate::app::root::dispatch::ctx::find_agent_view_by_session_id;
+use crate::app::root::dispatch::session::load::dispatch_load_session;
 use shell::session::unified_list::ListScope;
 
 #[test]
@@ -3271,14 +3273,23 @@ fn delete_session_complete_clears_local_picker_entries_and_content_hits() {
     app.session_picker_state.set_query("shared");
     app.session_picker_content_results = Some(vec![hit]);
 
+    let removed = AgentId(99);
+    let session = make_test_agent_session(&app, removed, "shared");
+    app.agents
+        .insert(removed, AgentView::new(session, ScrollbackState::new()));
     let _ = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &("shared")),
             session_id: "shared".into(),
             after: crate::app::actions::AfterSessionDelete::Stay,
         },
         &mut app,
     );
 
+    assert!(
+        !app.agents.contains_key(&removed),
+        "Stay must retire the matching local view"
+    );
     let agent = get_active_agent(&app).unwrap();
     let Some(ActiveModal::SessionPicker {
         entries: Some(modal_entries),
@@ -3348,8 +3359,10 @@ fn delete_session_failed_keeps_all_entries() {
 
     let _ = dispatch_task_result(
         TaskResult::DeleteSessionFailed {
+            bindings: session_delete_bindings(&app, &("s1")),
             session_id: "s1".into(),
             error: "boom".into(),
+            runtime_invalidated: None,
         },
         &mut app,
     );
@@ -3730,4 +3743,172 @@ fn doctor_report_from_removed_origin_does_not_fall_back_to_another_agent() {
         );
         assert!(app.agents[&other].scrollback.is_empty());
     }
+}
+
+#[test]
+fn delete_session_stay_retires_active_target_and_preserves_a_peer_draft() {
+    let mut app = test_app_with_agent();
+    let removed = AgentId(0);
+    let peer = AgentId(1);
+    let session = make_test_agent_session(&app, peer, "peer-stays");
+    let mut view = AgentView::new(session, ScrollbackState::new());
+    view.prompt.set_text("peer draft");
+    app.agents.insert(peer, view);
+    dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &("test-session")),
+            session_id: "test-session".into(),
+            after: crate::app::actions::AfterSessionDelete::Stay,
+        },
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&removed));
+    assert_eq!(app.agents[&peer].prompt.text(), "peer draft");
+    assert!(!matches!(app.active_view, ActiveView::Agent(id) if id == removed));
+}
+
+#[test]
+fn delete_session_failure_preserves_confirmed_owner_or_releases_uncertain_views_for_resume() {
+    for runtime_invalidated in [Some(false), Some(true), None] {
+        let mut app = test_app_with_agent();
+        let target = AgentId(0);
+        let peer = AgentId(1);
+        let session = make_test_agent_session(&app, peer, "delete-peer");
+        let mut view = AgentView::new(session, ScrollbackState::new());
+        view.prompt.set_text("peer draft stays");
+        app.agents.insert(peer, view);
+        app.next_agent_id = 2;
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.prompt.set_text("target recoverable draft");
+        agent.session.state = AgentState::TurnRunning;
+        let child = crate::app::agent_view::test_agent_view(Some("old-child"), "/tmp".into());
+        agent
+            .subagent_views
+            .insert("old-child".into(), Box::new(child));
+        dispatch_task_result(
+            TaskResult::DeleteSessionFailed {
+                bindings: session_delete_bindings(&app, &("test-session")),
+                session_id: "test-session".into(),
+                error: "deletion refused".into(),
+                runtime_invalidated,
+            },
+            &mut app,
+        );
+        if runtime_invalidated == Some(false) {
+            assert!(app.agents[&target].session.state.is_turn_running());
+            assert!(app.agents[&target].subagent_views.contains_key("old-child"));
+            assert_eq!(app.active_view, ActiveView::Agent(target));
+        } else {
+            assert!(!app.agents.contains_key(&target));
+            assert!(find_agent_view_by_session_id(&mut app.agents, "old-child").is_none());
+            let effects =
+                dispatch_load_session(&mut app, "test-session".into(), Some("/tmp".into()));
+            assert!(effects.iter().any(|effect| matches!(effect,Effect::LoadSession {session_id,..} if session_id == "test-session")), "resume must load, not focus a dead page: {effects:?}");
+        }
+        assert_eq!(app.agents[&peer].prompt.text(), "peer draft stays");
+    }
+}
+
+#[test]
+fn delete_session_late_failure_preserves_a_replacement_identity() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id(acp::SessionId::new("replacement"));
+    dispatch_task_result(
+        TaskResult::DeleteSessionFailed {
+            bindings: session_delete_bindings(&app, &("test-session")),
+            session_id: "test-session".into(),
+            error: "old request".into(),
+            runtime_invalidated: Some(true),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .session
+            .session_id
+            .as_ref()
+            .unwrap()
+            .0
+            .as_ref(),
+        "replacement"
+    );
+    assert_eq!(app.active_view, ActiveView::Agent(id));
+}
+
+#[test]
+fn delete_session_last_failure_has_visible_recovery_on_welcome() {
+    let mut app = test_app_with_agent();
+    dispatch_task_result(
+        TaskResult::DeleteSessionFailed {
+            bindings: session_delete_bindings(&app, &("test-session")),
+            session_id: "test-session".into(),
+            error: "transport lost".into(),
+            runtime_invalidated: None,
+        },
+        &mut app,
+    );
+    assert!(app.agents.is_empty());
+    assert_eq!(app.active_view, ActiveView::Welcome);
+    assert!(app.welcome_toast.as_ref().unwrap().0.contains("/resume"));
+}
+
+#[test]
+fn delete_session_late_failure_does_not_retire_a_new_binding_of_the_same_history() {
+    for same_agent in [false, true] {
+        let mut app = test_app_with_agent();
+        if same_agent {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.unbind_session_id();
+            agent.bind_session_id(acp::SessionId::new("test-session"));
+        } else {
+            close_session_and_ack(&mut app, AgentId(0));
+            dispatch_load_session(&mut app, "test-session".into(), Some("/tmp".into()));
+        }
+        let ActiveView::Agent(replacement) = app.active_view else {
+            panic!("replacement view");
+        };
+        dispatch_task_result(
+            TaskResult::DeleteSessionFailed {
+                bindings: vec![(AgentId(0), 0)],
+                session_id: "test-session".into(),
+                error: "old request after teardown".into(),
+                runtime_invalidated: Some(true),
+            },
+            &mut app,
+        );
+        assert!(
+            app.agents.contains_key(&replacement),
+            "the old request does not own a fresh binding"
+        );
+    }
+}
+
+#[test]
+fn delete_session_late_success_preserves_a_replacement_binding_and_its_registry() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let old_scope = session_delete_bindings(&app, "test-session");
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.unbind_session_id();
+    agent.bind_session_id(acp::SessionId::new("test-session"));
+    agent.prompt.set_text("new binding draft");
+    let effects = dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            bindings: old_scope,
+            session_id: "test-session".into(),
+            after: crate::app::actions::AfterSessionDelete::Welcome,
+        },
+        &mut app,
+    );
+    assert_eq!(app.active_view, ActiveView::Agent(id));
+    assert_eq!(app.agents[&id].prompt.text(), "new binding draft");
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::UnregisterActiveSession { .. }))
+    );
 }

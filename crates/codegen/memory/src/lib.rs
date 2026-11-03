@@ -40,7 +40,7 @@ pub mod watcher;
 pub use backend::{MemoryBackendImpl, MemoryBackendParams};
 pub use embedding::EmbeddingEndpoint;
 pub use index::{MemoryIndex, init_sqlite_vec};
-pub use storage::{MemoryScope, MemoryStorage};
+pub use storage::{DailyLogWriteResult, MemoryScope, MemoryStorage};
 
 /// Embed all chunks that don't have embeddings yet.
 ///

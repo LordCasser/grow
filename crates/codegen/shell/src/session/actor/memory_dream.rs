@@ -460,14 +460,22 @@ impl SessionActor {
     ///
     /// Flush failure is non-fatal; compaction proceeds regardless.
     ///
-    /// Returns `true` if a flush was executed, `false` if skipped because
-    /// another flush is already in progress.
+    /// Returns `true` only for a successful checkpoint (written or nothing to
+    /// store). Failed and skipped flushes leave automatic progress eligible.
     pub(super) async fn run_memory_flush(
         &self,
         trigger: &str,
         snapshot: Option<MemoryFlushSnapshot>,
     ) -> bool {
         use crate::session::helpers::memory_flush::*;
+
+        if !self.memory.is_enabled() {
+            tracing::info!(
+                target: ::diagnostics::memory_log::TARGET,
+                "MEMORY_FLUSH: skipped — memory is disabled (trigger={trigger})"
+            );
+            return false;
+        }
 
         // Atomically acquire the flushing lock. If another flush is already
         // running (idle timer, pre-compaction, or user-requested), skip.
@@ -493,7 +501,27 @@ impl SessionActor {
             .await;
 
         let result = async {
-            let sampling_client = self.prepare_chat_completion(false).await?;
+            let mut prepared = self.prepare_chat_completion_config(false).await;
+            if let Some(model) = &self.memory.flush_config.flush_model {
+                let mut flush_route = self.resolve_aux_sampler_config(model).await.ok_or_else(|| {
+                    acp::Error::invalid_params().data(format!("configured flush model `{model}` is unavailable"))
+                })?;
+                crate::agent::config::stamp_session_local_sampler_fields(
+                    &mut flush_route,
+                    &prepared,
+                    Some(self.max_retries.get()),
+                );
+                prepared = flush_route;
+            }
+            let model = prepared.model.clone();
+            let image_key = sampling_types::model_image_input_key_from_parts(
+                &prepared.model,
+                &prepared.api_backend,
+                &prepared.base_url,
+                &prepared.query_params,
+            );
+            let sampling_client = sampler::SamplingClient::new(prepared)
+                .map_err(|error| self.to_acp_error(error))?;
             let MemoryFlushSnapshot {
                 counts,
                 surface,
@@ -507,6 +535,9 @@ impl SessionActor {
                         .data("memory flush could not freeze its Timeline input")
                 })?,
             };
+            if !self.memory.is_enabled() {
+                return Err(acp::Error::invalid_request().data("memory was disabled while freezing flush input"));
+            }
             ::diagnostics::session_ctx::log_event(
                 ::diagnostics::memory_events::MemoryFlushStart {
                     session_id: self.session_info.id.to_string(),
@@ -534,7 +565,7 @@ impl SessionActor {
                 FLUSH_SYSTEM_PROMPT.to_owned()
             };
             let sideband_prompt = format!("{system_prompt}\n\n{FLUSH_CLOSING_INSTRUCTION}");
-            let (items, context_surface_ids) =
+            let (mut items, context_surface_ids) =
                 super::helpers::memory_flush::build_flush_request_items(
                     &surface,
                     &surface_ids,
@@ -545,23 +576,20 @@ impl SessionActor {
                         "memory flush newest complete turn exceeds its input budget or is absent",
                     )
                 })?;
+            self.prepare_sideband_images(&mut items, (&surface, &surface_ids, surface_revision), &image_key)
+                .await
+                .map_err(|error| acp::Error::internal_error().data(error))?;
             tracing::info!(
                 target: ::diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: sending {n} recent messages to model (+ system prompt + user closer)",
                 n = items.len().saturating_sub(2),
             );
 
-            let model = match self.memory.flush_config.flush_model.clone() {
-                Some(m) => m,
-                None => self.chat_state_handle.get_sampling_config().await
-                    .map(|c| c.model)
-                    .unwrap_or_default(),
-            };
             tracing::info!(
                 target: ::diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: using model={model}"
             );
-            let request = ConversationRequest {
+            let mut request = ConversationRequest {
                 items,
                 model: Some(model.clone()),
                 ..Default::default()
@@ -571,7 +599,9 @@ impl SessionActor {
                     chat_state::SidebandPurpose::MemoryFlush,
                     sideband_prompt,
                     SidebandSource::Frozen(vec![input_ref.clone()]),
-                    chat_state::SidebandBudgetPolicy::for_request(&request, 1),
+                    { let mut policy = chat_state::SidebandBudgetPolicy::for_request(&request, 2);
+                    policy.max_input_tokens_per_attempt = super::helpers::memory_flush::MAX_FLUSH_INPUT_TOKENS;
+                    policy },
                     chat_state::SidebandRoute {
                         model,
                         backend: sampling_client.api_backend(),
@@ -600,8 +630,23 @@ impl SessionActor {
                         "memory flush Sideband attempt could not commit: {error}"
                     ))
                 })?;
-            match sideband
-                .run_provider(sampling_client.conversation_collect(request))
+            if !self.memory.is_enabled() {
+                sideband
+                    .fail(
+                        chat_state::SidebandOutcome::Cancelled,
+                        "memory was disabled before flush provider admission".to_owned(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        acp::Error::internal_error().data(format!(
+                            "disabled memory flush Sideband cancellation could not commit: {error}"
+                        ))
+                    })?;
+                return Err(acp::Error::invalid_request()
+                    .data("memory was disabled before flush provider admission".to_owned()));
+            }
+            match self
+                .collect_sideband_with_image_recovery(&mut sideband, &sampling_client, &mut request, (&surface, &surface_ids, surface_revision), &image_key)
                 .await
             {
                 Ok(Ok(response)) => {
@@ -742,7 +787,7 @@ impl SessionActor {
                                 match storage
                                     .write_daily_log(&date, trigger, session_id, &content, true)
                                 {
-                                    Ok(path) => {
+                                    Ok(memory::storage::DailyLogWriteResult::Written(path)) => {
                                         tracing::info!("memory flush wrote session log");
                                         self.reindex_and_embed(&path, "session").await;
                                         *self.memory.last_flush_content.borrow_mut() =
@@ -753,6 +798,18 @@ impl SessionActor {
                                             acc_len,
                                             truncated,
                                             Some(path.display().to_string()),
+                                        )
+                                    }
+                                    Ok(memory::storage::DailyLogWriteResult::SkippedEphemeral) => {
+                                        tracing::info!(
+                                            "memory flush skipped for ephemeral workspace"
+                                        );
+                                        (
+                                            "skipped: ephemeral workspace suppresses daily log write".to_string(),
+                                            resp_len,
+                                            acc_len,
+                                            truncated,
+                                            None,
                                         )
                                     }
                                     Err(e) => {
@@ -803,6 +860,8 @@ impl SessionActor {
             "rejected"
         } else if outcome.starts_with("semantic duplicate") {
             "nothing_to_store"
+        } else if outcome.starts_with("skipped: ephemeral workspace") {
+            "skipped"
         } else {
             "error"
         };
@@ -845,15 +904,12 @@ impl SessionActor {
             path: flush_path,
         })
         .await;
-        true
+        matches!(flush_outcome, "written" | "nothing_to_store")
     }
 
     /// Capture the flush inputs before compaction mutates conversation history.
     pub(super) async fn snapshot_memory_flush_state(&self) -> Option<MemoryFlushSnapshot> {
-        let materialized = self
-            .chat_state_handle
-            .materialize_timeline(self.session_info.id.to_string())
-            .await?;
+        let materialized = self.freeze_sideband_surface().await.ok()?;
         let counts = chat_state::ConversationCounts::from_items(&materialized.surface);
         Some(MemoryFlushSnapshot {
             counts,
@@ -884,10 +940,10 @@ impl SessionActor {
             ));
         }
 
-        let sampling_client = self
-            .prepare_chat_completion(false)
+        let (sampling_client, model) = self
+            .build_auxiliary_sampling_client("grow-build")
             .await
-            .map_err(|e| format!("failed to prepare client: {e}"))?;
+            .map_err(|e| format!("failed to prepare memory rewrite route: {e}"))?;
 
         let system = "You are a memory note formatter. Rewrite the user's note into \
             well-structured markdown suitable for a persistent MEMORY.md file. The note should be:\n\
@@ -913,7 +969,7 @@ impl SessionActor {
         let request = ConversationRequest {
             items,
             tools: vec![],
-            model: Some("grow-build".to_owned()),
+            model: Some(model),
             ..Default::default()
         };
 

@@ -539,6 +539,7 @@ mod permit_tests {
             tool_name: "fixture".to_owned(),
             raw_arguments: args.to_string(),
             parsed_args: args.clone(),
+            wait_input: None,
             model_id: "fixture-model".to_owned(),
             concatenated_json_count: 0,
             dispatch_target_name: None,

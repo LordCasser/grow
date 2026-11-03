@@ -858,7 +858,7 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         config
             .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
+            .set(Some("get_command_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let snapshot = make_task_snapshot("bg-123", TaskKind::Bash);
         let notification = ToolNotification::TaskCompleted(snapshot);
@@ -874,8 +874,10 @@ mod tests {
                 ));
                 assert!(body.contains("bg-123"));
                 assert!(body.contains("exit code: 0"));
-                assert!(body.contains(r#"get_command_or_subagent_output("bg-123")"#));
-                assert!(!body.contains(r#"get_task_output("bg-123")"#));
+                assert!(
+                    body.contains("Use get_command_output to see the full output for ID bg-123.")
+                );
+                assert!(!body.contains("get_task_output"));
             }
             _ => panic!("expected ReceiveNotification"),
         }
@@ -903,7 +905,7 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         config
             .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
+            .set(Some("get_command_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let snapshot = make_task_snapshot("bg-normal", TaskKind::Bash);
         let mut offsets = HashMap::new();
@@ -930,7 +932,7 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         config
             .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
+            .set(Some("get_command_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let mut snapshot = make_task_snapshot("instant-goal", TaskKind::Bash);
         snapshot.goal_id = Some("goal-fast".into());
@@ -1050,7 +1052,7 @@ mod tests {
         let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
+            .set(Some("get_command_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let mut offsets = HashMap::new();
         handle_notification(
@@ -1125,7 +1127,7 @@ mod tests {
         let (config, mut gateway_rx, mut persistence_rx, cmd_rx) = make_test_config_full_raw();
         config
             .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
+            .set(Some("get_command_output".to_string()))
             .expect("slot is fresh in this test fixture");
         drop(cmd_rx);
         let mut offsets = HashMap::new();
@@ -1155,7 +1157,7 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         config
             .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
+            .set(Some("get_command_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let mut snapshot = make_task_snapshot("mon-456", TaskKind::Monitor);
         snapshot.display_command = Some("[monitor] watch deploy".into());
@@ -1186,7 +1188,7 @@ mod tests {
                     "auto-wake should include the monitor description: {text}"
                 );
                 assert!(
-                    text.contains("get_command_or_subagent_output(\"mon-456\")"),
+                    text.contains("Use get_command_output to see the full output for ID mon-456."),
                     "auto-wake should point at the poll tool: {text}"
                 );
             }
@@ -1204,7 +1206,7 @@ mod tests {
         let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
+            .set(Some("get_command_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let mut offsets = HashMap::new();
         handle_notification(

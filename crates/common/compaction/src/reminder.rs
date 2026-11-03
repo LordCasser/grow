@@ -269,14 +269,14 @@ mod tests {
 
     fn tools_native() -> SubagentToolNames<'static> {
         SubagentToolNames {
-            poll: "get_task_output",
+            poll: "get_subagent_status",
             cancel: "kill_task",
         }
     }
 
     fn tools_renamed() -> SubagentToolNames<'static> {
         SubagentToolNames {
-            poll: "get_command_or_subagent_output",
+            poll: "inspect_child",
             cancel: "kill_command_or_subagent",
         }
     }
@@ -382,8 +382,8 @@ mod tests {
             ..Default::default()
         };
         let out = format_active_agent_reminder(&state, Some(&tools_renamed())).expect("reminder");
-        assert!(out.contains("get_command_or_subagent_output"));
-        assert!(!out.contains("get_task_output"));
+        assert!(out.contains("inspect_child"));
+        assert!(!out.contains("get_subagent_status"));
     }
 
     #[test]

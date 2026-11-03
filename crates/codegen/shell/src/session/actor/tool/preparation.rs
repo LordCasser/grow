@@ -393,6 +393,24 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            ToolInput::SubagentWait(input) => (
+                format!("Wait for subagents: {}", input.subagent_ids.join(", ")),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::SubagentStatus(input) => (
+                format!("Subagent status: {}", input.subagent_ids.join(", ")),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::SubagentList(input) => (
+                format!("List subagents ({:?})", input.scope),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::TaskOutput(task_output) => {
                 let ids = task_output.resolved_task_ids();
                 let label = match ids.as_slice() {
@@ -1568,7 +1586,7 @@ impl SessionActor {
                     "plan_control intercepted; requesting user approval"
                 );
                 let resp = self
-                    .request_plan_approval(&tool_call_id, plan_content.clone())
+                    .request_plan_approval(&tool_call_id, &approval_snapshot, plan_content.clone())
                     .await;
                 match resp {
                     Ok(parsed) => {
@@ -1807,6 +1825,7 @@ impl SessionActor {
             tool_name: call.function.name.clone(),
             raw_arguments: call.function.arguments.clone(),
             parsed_args: raw_input.clone(),
+            wait_input: super::result::interruptible_wait_input(&call.function.name, &tool_input),
             model_id: model_id_str,
             concatenated_json_count,
             dispatch_target_name,

@@ -463,36 +463,11 @@ fn spawn_agent_thread_direct(
                         return Err(error.into());
                     }
                 };
-                let _config_watcher = if let Some(watcher) = config_watcher {
-                    Some(Rc::new(std::cell::RefCell::new(watcher)))
-                } else {
-                    None
-                };
-
-                // Start config processing as soon as its watcher is ready.
-                // Skills watcher registration is an independent blocking OS
-                // call and must not pause MCP catalog or policy hot reloads.
-                if let (Some(watcher), Some(mut path_rx)) =
-                    (_config_watcher.as_ref(), config_path_rx)
-                {
-                    while let Ok(update) = path_rx.try_recv() {
-                        watcher.borrow_mut().apply_session_update(update);
-                    }
-                    let watcher_for_paths = watcher.clone();
-                    let cancel_paths = cancel.clone();
-                    watcher_tasks.push(tokio::task::spawn_local(async move {
-                        loop {
-                            tokio::select! {
-                                biased;
-                                _ = cancel_paths.cancelled() => break,
-                                path = path_rx.recv() => match path {
-                                    Some(update) => watcher_for_paths.borrow_mut().apply_session_update(update),
-                                    None => break,
-                                },
-                            }
-                        }
-                    }));
-                }
+                let config_ready = config_watcher.map(|watcher| {
+                    let (task, ready) = watcher.spawn_session_updates(config_path_rx, cancel.clone());
+                    watcher_tasks.push(task);
+                    ready
+                });
 
                 let agent_for_updates = agent_rc.clone();
                 let cancel_updates = cancel.clone();
@@ -511,14 +486,22 @@ fn spawn_agent_thread_direct(
                         }
                     }
                 }));
-                let _ = startup_config_update_tx.send(
-                    shell::config::reloader::ConfigUpdate::SubagentToggleChanged,
-                );
-                let _ = startup_config_update_tx.send(
-                    shell::config::reloader::ConfigUpdate::McpCatalogChanged {
-                        project_root: None,
-                    },
-                );
+                let startup_cancel = cancel.clone();
+                watcher_tasks.push(tokio::task::spawn_local(async move {
+                    if let Some(ready) = config_ready {
+                        tokio::select! {
+                            biased;
+                            _ = startup_cancel.cancelled() => return,
+                            result = ready => if result.is_err() { return; },
+                        }
+                    }
+                    let _ = startup_config_update_tx.send(
+                        shell::config::reloader::ConfigUpdate::SubagentToggleChanged,
+                    );
+                    let _ = startup_config_update_tx.send(
+                        shell::config::reloader::ConfigUpdate::McpCatalogChanged { project_root: None },
+                    );
+                }));
 
                 #[cfg(test)]
                 let skills_home = shell::util::grow_home::grow_home();

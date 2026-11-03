@@ -1,0 +1,17 @@
+# 设计
+
+复用原coordinator与来源绑定的Shell只读历史reader，不新增任务账本或恢复执行。三个模型工具使用独立的ToolKind，终端输出沿用BackgroundTaskAction；同一工具名只有一个职责。
+
+list_subagent默认scope=active；active是当前来源可见的未终态或状态未知任务，包括pending/initializing、running、suspended、finalization_pending，避免仅列执行中而漏掉仍有责任的身份。all包含这些任务及同一授权来源的全部持久Spawn历史。它不扫描全机所有会话，不暴露Workflow隐藏child，不改变root/direct-parent权限和直接父级消息权限。
+
+枚举从coordinator的pending/active/suspended/completed投影基本信息，并与已授权canonical Spawn/Ended/Result引用合并。历史按source ChatState或共享只读source/root事实核对，终态须验证适用Result链；不读输出artifact和具体tool事实。可信canonical终态优先于旧runtime开放状态；已知Spawn但runtime不可达仍保留身份并表达观察未知。源历史失败不能以只读runtime缓存冒充all。整个枚举五秒；后台reader继续持有原worker许可直至实际退出。
+
+详情仅接收非空subagent_ids组（最大20项），同一五秒绝对期限内一次批量查询独立subagent backend；后备仅为运行期缺项子集取得一份source快照，避免父history逐ID重复复制，无Terminal前置探测。输出为结构化字段；未知计数为null而非0。详情不读取答案artifact，不消费完成通知。wait返回真实终态和适用最终答案，已完成任务立即返回；只有交付终态结果才消费完成通知，沿用原canonical结果链。失败/取消终态的已知计数从同一result事实保留，不伪造丢失统计。
+
+wait_subagent接收同一ID组与正timeout_ms（默认30秒，现有cap生效），使用一个绝对期限，分段Running继续等；等待结束原因和实际耗时分开表达，终态不等于成功。中断仍保留全部规范化身份和通知交接，不取消子任务。列表和详情不具有等待控制语义。
+
+command从旧混合入口迁出到get_terminal_command_output，保留现有命令输出与等待能力，不注册旧get_task_output或其混合别名。子任务启动回执指向wait工具，完成结果通知指向等待/结果工具，状态提示指向详情工具；compaction、工具依赖和Pager按新ToolKind/名称分类。
+
+顺序完成三个可运行增量：枚举（含历史）→详情与独立等待→注册/command分离及调用方切换，最后对抗复核与归档。不得同时推进其他功能。
+
+取消工具不在本次拆分范围。审查发现terminal-only取消描述仍委托混合实现，单独记录在audit与backlog，未借输出工具变更重构取消协议。

@@ -1917,3 +1917,42 @@ async fn test_headless_waits_for_short_background_task_and_exits_clean() {
         stderr_tail(&result.stderr, 2000)
     );
 }
+
+/// Delete acknowledges both runtime retirement and durable history removal.
+#[tokio::test]
+#[ignore = "requires pre-built grow binary"]
+async fn test_stdio_session_delete_retires_runtime_and_history() {
+    with_local_set(|| async {
+        let server = MockInferenceServer::start().await.expect("mock server");
+        let workdir = git_workdir();
+        let sandbox = TestSandbox::new();
+        configure_lifecycle_model(&server, &sandbox);
+        let client =
+            GrowStdioClient::spawn_with_sandbox(&server, workdir.workspace(), sandbox).await;
+        client.initialize_with_timeout().await;
+        let session_id = client
+            .create_session_with_timeout(workdir.workspace())
+            .await;
+        for _ in 0..2 {
+            let response = client
+                .ext_method(
+                    "grow/session/delete",
+                    serde_json::json!({"sessionId":session_id.0}),
+                )
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
+            assert_eq!(value["success"], true);
+            let info = client
+                .ext_method(
+                    "grow/session/info",
+                    serde_json::json!({"sessionId":session_id.0}),
+                )
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(info.0.get()).unwrap();
+            assert_eq!(value["result"]["status"], "absent");
+        }
+    })
+    .await;
+}

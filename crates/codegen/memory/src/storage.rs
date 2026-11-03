@@ -20,6 +20,15 @@ pub enum MemoryScope {
     Workspace,
 }
 
+/// Result of writing a daily session log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DailyLogWriteResult {
+    /// The log was written and this is its persisted path.
+    Written(PathBuf),
+    /// The existing ephemeral-workspace policy suppressed the write.
+    SkippedEphemeral,
+}
+
 /// Handles file I/O for the memory storage layer.
 ///
 /// Memory files are human-readable/editable Markdown stored under
@@ -172,7 +181,7 @@ impl MemoryStorage {
         session_id: &str,
         content: &str,
         append: bool,
-    ) -> std::io::Result<PathBuf> {
+    ) -> std::io::Result<DailyLogWriteResult> {
         let sessions_dir = self.sessions_dir();
         let sid8 = &session_id[..session_id.len().min(8)];
         let filename = format!("{date}-{slug}-{sid8}.md");
@@ -180,7 +189,7 @@ impl MemoryStorage {
 
         if self.ephemeral {
             tracing::debug!(path = %path.display(), "MEMORY_EPHEMERAL_SKIP: daily log write skipped");
-            return Ok(path);
+            return Ok(DailyLogWriteResult::SkippedEphemeral);
         }
 
         std::fs::create_dir_all(&sessions_dir)?;
@@ -195,7 +204,7 @@ impl MemoryStorage {
         }
         tracing::debug!(path = %path.display(), append, "wrote daily session log");
 
-        Ok(path)
+        Ok(DailyLogWriteResult::Written(path))
     }
 
     /// Write the curated long-term `MEMORY.md` for the given scope.
@@ -892,9 +901,12 @@ mod tests {
         let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
 
         let content = "## Session Summary\n\nWorked on feature X.";
-        let path = storage
+        let DailyLogWriteResult::Written(path) = storage
             .write_daily_log("2026-02-23", "fix-auth", "session12345678", content, false)
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("persistent storage must write the daily log");
+        };
 
         assert!(path.exists());
         assert!(
@@ -917,9 +929,12 @@ mod tests {
         let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
 
         let content = "line 0\nline 1\nline 2\nline 3\nline 4";
-        let path = storage
+        let DailyLogWriteResult::Written(path) = storage
             .write_daily_log("2026-02-23", "test", "sess12345678", content, false)
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("persistent storage must write the daily log");
+        };
 
         // Read lines 1..3 (0-indexed)
         let partial = storage.read_file(&path, Some(1), Some(2)).unwrap();
@@ -1079,12 +1094,18 @@ mod tests {
         let workspace_dir = global_dir.join("abc123");
         let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
 
-        let path1 = storage
+        let DailyLogWriteResult::Written(path1) = storage
             .write_daily_log("2026-02-23", "test", "sess12345678", "first", false)
-            .unwrap();
-        let path2 = storage
+            .unwrap()
+        else {
+            panic!("persistent storage must write the daily log");
+        };
+        let DailyLogWriteResult::Written(path2) = storage
             .write_daily_log("2026-02-23", "test", "sess12345678", "second", false)
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("persistent storage must write the daily log");
+        };
 
         assert_eq!(path1, path2);
         let content = std::fs::read_to_string(&path2).unwrap();
@@ -1098,16 +1119,22 @@ mod tests {
         let workspace_dir = global_dir.join("abc123");
         let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
 
-        let path1 = storage
+        let DailyLogWriteResult::Written(path1) = storage
             .write_daily_log("2026-02-23", "flush", "sess12345678", "## First", true)
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("persistent storage must write the daily log");
+        };
         // First write to a new file uses write (no separator).
         let content = std::fs::read_to_string(&path1).unwrap();
         assert_eq!(content, "## First");
 
-        let path2 = storage
+        let DailyLogWriteResult::Written(path2) = storage
             .write_daily_log("2026-02-23", "flush", "sess12345678", "## Second", true)
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("persistent storage must write the daily log");
+        };
         assert_eq!(path1, path2);
 
         let content = std::fs::read_to_string(&path2).unwrap();
@@ -1576,11 +1603,18 @@ mod tests {
             ephemeral: true,
         };
 
-        // write_daily_log returns Ok but must not create the file
-        let path = storage
-            .write_daily_log("2026-05-07", "test", "sess12345678", "content", false)
-            .unwrap();
-        assert!(!path.exists());
+        // write_daily_log reports the suppression and must not create the file
+        assert_eq!(
+            storage
+                .write_daily_log("2026-05-07", "test", "sess12345678", "content", false)
+                .unwrap(),
+            DailyLogWriteResult::SkippedEphemeral
+        );
+        assert!(
+            !workspace_dir
+                .join("sessions/2026-05-07-test-sess1234.md")
+                .exists()
+        );
 
         // write_long_term for workspace should no-op
         storage

@@ -61,6 +61,7 @@ use routing::{
     resolve_target_agent_view, resolve_target_view,
 };
 
+pub(crate) use background::{apply_task_backgrounded, apply_task_completed};
 pub(crate) use settings::apply_models_state_update;
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
@@ -670,11 +671,58 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     // carry an owned String (see find_session_match docs).
                     let child_key: &str = notif.request.session_id.0.as_ref();
 
+                    // Unloaded terminal transcripts keep their highwater, so a
+                    // duplicate must not force their heavy history back in RAM.
+                    if !meta.is_replay
+                        && meta.event_seq.is_some_and(|seq| {
+                            parent.subagent_views[child_key]
+                                .session
+                                .last_applied_event_seq
+                                .is_some_and(|last| seq <= last)
+                        })
+                    {
+                        notif.response_tx.send(Ok(())).ok();
+                        return is_active;
+                    }
+
+                    // A resumed child can stream before its first open. Hydrate
+                    // the deferred transcript before live content can veto it.
+                    if !meta.is_replay
+                        && matches!(
+                            &notif.request.update,
+                            acp::SessionUpdate::UserMessageChunk(_)
+                                | acp::SessionUpdate::AgentMessageChunk(_)
+                                | acp::SessionUpdate::AgentThoughtChunk(_)
+                                | acp::SessionUpdate::ToolCall(_)
+                                | acp::SessionUpdate::ToolCallUpdate(_)
+                        )
+                    {
+                        if !crate::app::subagent::ensure_subagent_child_replayed(parent, child_key)
+                        {
+                            notif.response_tx.send(Ok(())).ok();
+                            return is_active;
+                        }
+                    }
+
                     let activity_label = {
                         let child_view = parent
                             .subagent_views
                             .get_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
+                        if !meta.is_replay {
+                            if meta.event_seq.is_some_and(|seq| {
+                                child_view
+                                    .session
+                                    .last_applied_event_seq
+                                    .is_some_and(|last| seq <= last)
+                            }) {
+                                notif.response_tx.send(Ok(())).ok();
+                                return is_active;
+                            }
+                            if let Some(seq) = meta.event_seq {
+                                child_view.session.last_applied_event_seq = Some(seq);
+                            }
+                        }
                         if let Some(tokens) = meta.total_tokens {
                             confirm_context_used(child_view, tokens);
                         }

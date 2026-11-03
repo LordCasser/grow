@@ -18,13 +18,15 @@ Agent 销毁时也向仍驻留的主会话和活跃子会话 actor 发送既有 
 
 1. 来源先将结构化 `OutgoingStarted` 写入 Timeline 并等待 durable ACK，再解析目标；首次解析的 peer/incarnation 固定在该请求上。
 2. 目标先将接收事实写入 Timeline，再进入 Session 的 FIFO 队列；队列最多 32 个等待项，单个 inquiry 执行。
-3. 在出队时快照 Surface。同 cwd 自动允许，不同 cwd 要求目标 UI 单次批准；没有在线 UI 则拒绝。自动允许与 UI 审批结果都先进入 Timeline，再决定是否执行旁路请求。
-4. 复用 `InfoRequest` sideband，只调用一次模型，不提供工具，不修改主 Surface。主 turn 忙不是拒绝理由。
+3. 同 cwd 自动允许，不同 cwd 要求目标 UI 单次批准；没有在线 UI 则拒绝。自动允许与 UI 审批结果都先进入 Timeline。批准后固定接收方采样路由，等待正在进行的主图片转换及 durable ACK，再冻结 Surface。
+4. 复用 `InfoRequest` sideband，只调用一次模型，不提供工具，生成期间不修改主 Surface。成功问答按下面的被动消费路径同步，主 turn 忙不是拒绝理由。
 5. 同来源、同 ID、同 payload 复用运行或结果；payload 不同返回 `conflict`。IPC 断线重连到原 incarnation，发现目标更换进程身份则返回 `target_restarted`，不自动重新执行。
 
 询问从 ChatState 一次物化 Surface 与 input_ref，再复用 `sampling-types::project_portable_history` 生成独立请求。已配对的工具调用、参数、结果与附件都保留，包括连续工具尾部；未返回的调用不生成悬空协议，同批已完成的结果仍保留。不要按消息类型循环删除尾部，那会让回答丢掉已完成的 `ask_parent` 等执行事实。快照之后的进展不在本次回答中，未出现的记录也不能当作“从未发生”的证明。行为见 [询问工具证据契约](../../openspec/specs/local-coordination/spec.md#requirement-inquiry-snapshots-retain-completed-tool-evidence)。
 
-这与 `/btw`、recap 共用既有协议投影规则；来源范围和预算仍由各消费者负责，Sideband 不统一改写输入。自动工具权限判断通过共享 permission handle 进入 `PermissionJudgment`，使用专门的授权策略与真实用户输入证据，不经过 `ask_parent`。询问界面显示 `Answered` 表示独立回答已完成，不表示目标主对话收到新消息或授予了工具权限。
+协调问答与 `/btw` 共用 `freeze_sideband_context`，只在请求副本选择已经持久确认的图片描述，原图仍保留在主会话。已知纯文本路由的未描述图片在请求前报错；未知路由维持首次乐观发送，失败不启动主图片恢复。等待可被询问或会话取消，provider 请求前释放图片读锁。行为见 [询问图片分支契约](../../openspec/specs/local-coordination/spec.md#requirement-inquiry-snapshots-reuse-durable-image-descriptions)。
+
+这与 recap 共用既有协议投影规则；来源范围和预算仍由各消费者负责，Sideband 不统一改写输入。自动工具权限判断通过共享 permission handle 进入 `PermissionJudgment`，使用专门的授权策略与真实用户输入证据，不经过 `ask_parent`。询问界面显示 `Answered` 表示独立回答已完成，不表示目标前台已经消费、请求已经送达模型或授予了工具权限。
 
 来源清单短暂读失败不会立即取消任务，但也不能续租：只沿用最后一次验证过的 `expiresAt`。明确 Session 关闭、租约到期或取消仍终止询问。
 
@@ -54,7 +56,9 @@ Coordination capability、私有 IPC 和 peer manifest schema 现在为 **2**，
 
 行为契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)、[local-coordination](../../openspec/specs/local-coordination/spec.md)、[session-timeline](../../openspec/specs/session-timeline/spec.md) 和 [model-sampling](../../openspec/specs/model-sampling/spec.md)。
 
-`ask_parent`、`ask_subagent`、`ask_session` 使用冻结 Surface 的无工具 Sideband。问题和答案保留在调用方的正常工具调用/结果中；接收侧 UI 可以展示问答，目标主 Surface 不追加这些内容。显式 `get_inquiry` 的查询结果进入调用方上下文，被动 phase、重连和 UI 回放不会生成模型输入。
+`ask_parent`、`ask_subagent`、`ask_session` 使用冻结 Surface 的无工具 Sideband。调用方保留原工具调用/结果。新成功终态绑定原回答 Session 和实际完成 Result 引用，回答方据此接纳 `InquiryAnswered` 被动收据；下一获准边界用 `Consumed` 与完整归属问答一起提交，再构造请求。该来源不进入 steering buffer、不抢占 stream/tool、单独不唤醒 idle，也不生成 PermissionEvidence。发布成功证明前按现有通知 payload 上限核对完整 UTF-8 问答正文；超限询问返回 Failed，不截断、不留下无法消费的成功义务，已完成 Sideband 和 usage 仍保留。目标 canonical 失败/取消没有成功上下文；询问取消与成功 terminal 接纳在原控制边界只选一个赢家，成功接纳后仍需 durable ACK 才形成同步义务。来源本地取消 bool 表示 intent 已接纳，不证明远端取消获胜，已派发 peer Ask 保留原响应流以取得实际终态。旧 Answered 无新证明不回填，fork 不取得来源 Session 的待消费权。显式 `get_inquiry` 仍只向其调用方返回普通工具结果，被动 phase、重连和 UI 回放不重复投递。契约见 [询问可见性](../../openspec/specs/local-coordination/spec.md#requirement-inquiry-context-visibility-is-scoped-to-each-participant)。
+
+成功事实与收据之间的缺口由合法 writer 协调。ChatState 提供按 EventSeq 捕获的 canonical suffix；actor 只在此前沿全部义务协调完成后推进进程内游标。冷加载验证 InfoRequest request 与问题/来源、Result/答案、原 owner、先后关系及每条收据的 terminal version/正文 hash；不会从 UI 文案造事实。消息消费错误必须抵达真实采样准入。流程控制与消息消费分别决策，其他上下文变更仍由原机制管理。
 
 `send_subagent_message` 使用同一入口发送和回复。初始发送提供 `subagent_id`，只接受直接 owned active child；回复提供 `reply_to: { source_session_id, message_id }`，两者二选一。Runtime 从调用者实际收到的 Timeline receipt 校验原发送者和操作 ID，沿该两方关系返回意见。猜中别人的消息 ID、第三方目标和上行 interrupt 均不获得路由权限。回复调用不授予文件/进程 RWX，收到的意见也不成为人类授权。
 
@@ -110,3 +114,5 @@ Windows 新增 accept cancellation、pipe busy、私有 DACL、长路径和持�
 - **P2，进行中不能收起。** 接收行在 Answering 和终态都按 Collapsed/Expanded 切换；普通执行工具的 running 折叠策略保持不变。
 
 回归覆盖双击事件、图片路径、来源身份、完整与增量重载、Minimal 提交，以及独立进程中的存活重连和崩溃恢复。代码使用共享 Rust 路径，Windows 也采用这些修复；开发机未执行 Windows 原生 TUI 验证，不能用本机结果替代 Windows CI。
+
+Peer 成功问答在目标接纳前同时遵守完整咨询正文的通知上限与实际 JSON Inquiry 响应的 IPC 帧上限。不能传送的结果保留 Completed Sideband 和用量，以 typed failure 结算，不发布不可交付的成功同步义务；直接父子询问不使用 Peer 传输限制。

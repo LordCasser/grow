@@ -13,13 +13,33 @@ const DONE_SENTINEL: &str = "VERB_GROUP_DONE";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn verb_group_fold_expand_collapse_pty() {
-    let content = ContentController::start().await.expect("start content");
-    git2::Repository::init(content.home()).expect("initialize isolated project");
+    let content = ContentController::start_with_models(vec![
+        MockModel::new("test-model").with_api_backend("responses"),
+    ])
+    .await
+    .expect("start content");
+    let workspace = content.home().join("project");
+    std::fs::create_dir_all(&workspace).expect("create project workspace");
+    git2::Repository::init(&workspace).expect("initialize isolated project");
     content.seed_llm_config().expect("seed mock LLM config");
+    let config_path = content.home().join(".grow/config.toml");
+    let config = std::fs::read_to_string(&config_path)
+        .expect("read mock LLM config")
+        .replace("default = \"mock/mock\"", "default = \"mock/test-model\"")
+        .replace(
+            "api_backend = \"chat_completions\"",
+            "api_backend = \"responses\"",
+        )
+        .replace(
+            "[provider.mock.models.mock]",
+            "[provider.mock.models.test-model]",
+        )
+        .replace("name = \"Mock\"", "name = \"test-model\"");
+    std::fs::write(config_path, config).expect("configure Responses backend");
     // Pin ON via the config tier so the test doesn't ride the client default.
     seed_ui_config(&content, "group_tool_verbs = true");
 
-    // Seed real files under the isolated HOME so the reads/edit succeed.
+    // Seed real files under the project workspace so the reads/edit succeed.
     let mut paths = Vec::new();
     for name in [
         "a1.txt",
@@ -29,7 +49,7 @@ async fn verb_group_fold_expand_collapse_pty() {
         "b1.txt",
         "b2.txt",
     ] {
-        let path = content.home().join(name);
+        let path = workspace.join(name);
         // a1's body is unique so opening MEMBER 0's block below has an
         // unambiguous sentinel (the edit diff already shows "hello verb
         // group" on screen).
@@ -44,7 +64,7 @@ async fn verb_group_fold_expand_collapse_pty() {
     fn read_args(p: &std::path::Path) -> String {
         json!({ "target_file": p.to_string_lossy() }).to_string()
     }
-    let home_str = content.home().to_string_lossy().into_owned();
+    let workspace_str = workspace.to_string_lossy().into_owned();
 
     // Five reads, two searches, and one edit form a single uninterrupted
     // activity; a plain completion settles the transcript afterward.
@@ -56,13 +76,13 @@ async fn verb_group_fold_expand_collapse_pty() {
             &content,
             "call_g1",
             "grep",
-            json!({ "pattern": "hello", "path": home_str }).to_string(),
+            json!({ "pattern": "hello", "path": workspace_str }).to_string(),
         ),
         expect_tool_turn(
             &content,
             "call_g2",
             "grep",
-            json!({ "pattern": "verb", "path": home_str }).to_string(),
+            json!({ "pattern": "verb", "path": workspace_str }).to_string(),
         ),
         expect_tool_turn(
             &content,
@@ -89,7 +109,7 @@ async fn verb_group_fold_expand_collapse_pty() {
         DEFAULT_COLS,
         &content,
         &["--permission-mode", "always-approve", "--trust"],
-        Some(content.home()),
+        Some(&workspace),
     )
     .expect("spawn pager");
 

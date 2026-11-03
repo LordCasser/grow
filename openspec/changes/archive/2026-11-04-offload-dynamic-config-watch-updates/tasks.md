@@ -1,0 +1,7 @@
+- [x] 增补相关 WHEN/THEN，完成 blocking owner 与目录实体复用。
+- [x] 同步 Pager 和 daemon 调用方及开发说明。
+- [x] Update the developer guide with dynamic watcher ownership and cancellation limits.
+- [x] 验证可控阻塞、取消、Drop 和真实目录创建/重建/来源释放。
+- [x] ProjectDiscoveryWatcher 的 start、refresh 和最终 Drop 全留在 host-runtime blocking owner；回归覆盖 command ACK、writer ACK 与 session dedicated runtime 在 native start 阻塞时先退出、host runtime shutdown 时 guardian 取消 idle worker，以及 owner 在线程内 Drop。
+- [x] 重跑 Pager MCP 门禁与相关 session/cold-load 回归，记录剩余根因。
+- [x] strict 全量验证、归档及 archive 复核。

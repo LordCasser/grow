@@ -640,6 +640,20 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let arguments = self.resolve_runtime_load_root(arguments).await?;
         let _load_guard = self.begin_session_load(&arguments.session_id);
         let _lifecycle_guard = self.lock_session_lifecycle(&arguments.session_id).await;
+        let failed_candidate = self.resident_resources.borrow().get(&arguments.session_id)
+            .is_some_and(|resources| resources.failed_suspended_restore);
+        if failed_candidate {
+            let candidate = self.control_session_handle(&arguments.session_id)
+                .or_else(|| self.sessions.borrow().get(&arguments.session_id).cloned());
+            if let Some(candidate) = candidate {
+                self.retire_failed_restore_candidate(&candidate).await
+                    .map_err(|error| acp::Error::internal_error().data(error))?;
+            } else {
+                self.drain_old_session_thread(&arguments.session_id).await
+                    .map_err(|error| acp::Error::internal_error().data(error))?;
+                self.resident_resources.borrow_mut().remove(&arguments.session_id);
+            }
+        }
         let catalog_transaction = self.model_reload_lock.lock().await;
         tracing::debug!("Received load session request {arguments:?}");
         let init = self
@@ -690,7 +704,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         ::diagnostics::session_ctx::log_session_event(crate::agent::session_metrics::SessionStarted {
             session_id: session_id.0.to_string(),
         });
-        let session_info = SessionInfo {
+        let mut session_info = SessionInfo {
             id: session_id.clone(),
             cwd: cwd.as_str().to_owned(),
         };
@@ -834,10 +848,17 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             != chat_state::session_runtime::RuntimePhase::Running;
         let restoring_committed_tree = timeline.runtime_lifecycle().phase
             == chat_state::session_runtime::RuntimePhase::Restoring;
-        if runtime_recovery_gated && summary.info.cwd != cwd.as_str() {
+        if runtime_recovery_gated && !crate::session::storage::same_workspace_directory(
+            std::path::Path::new(&summary.info.cwd), cwd.as_path(),
+        ).await.map_err(|error| crate::session::persistence::io_error_to_acp(&error))? {
             return Err(acp::Error::invalid_params().data(
                 "Suspended session workspace differs from its checkpoint; restore the original workspace before resuming.",
             ));
+        }
+        if runtime_recovery_gated {
+            // Keep the original storage namespace even when execution uses an
+            // equivalent cwd spelling. Writer ownership came from this Info.
+            session_info = summary.info.clone();
         }
         let persisted_behavior = control_snapshot
             .as_ref()
@@ -856,15 +877,38 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             summary.agent_name.clone_from(&persisted_agent_name);
         }
         let _persisted_goal_mode = control_snapshot.and_then(|control| control.goal);
+        let durable_model_selection = crate::session::persistence::latest_model_selection(timeline.events())
+            .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+        let checkpoint_model_selection = if runtime_recovery_gated {
+            match timeline.runtime_lifecycle().checkpoint.as_ref() {
+                Some(checkpoint) => crate::session::persistence::model_selection_at_frontier(timeline.events(), checkpoint.frontier)
+                    .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?,
+                None => durable_model_selection.clone(),
+            }
+        } else { durable_model_selection.clone() };
         let configured_models = self.models_manager.models();
-        let available_models = self.models_manager.available();
         let persisted_model_id = summary.current_model_id.clone();
-        summary.current_model_id = selectable_catalog_key_for_persisted(
-            &configured_models,
-            &available_models,
-            &summary.current_model_id,
-        )
-        .ok_or_else(|| {
+        let selected_model_id = if runtime_recovery_gated {
+            checkpoint_model_selection.as_ref().and_then(|(_, effort, _, transport)| {
+                self.models_manager.select_persisted_transport_model(
+                    &summary.current_model_id,
+                    transport,
+                    *effort,
+                )
+            })
+        } else {
+            selectable_catalog_key_for_persisted(
+                &configured_models,
+                &self.models_manager.available(),
+                &summary.current_model_id,
+            )
+        };
+        summary.current_model_id = selected_model_id.ok_or_else(|| {
+            if runtime_recovery_gated {
+                return acp::Error::invalid_params().data(
+                    "Suspended session provider route changed or is unavailable; no selectable model retains the checkpoint's original destination and effort.",
+                );
+            }
             let provider_list = configured_models
                 .keys()
                 .filter_map(|key| key.split_once('/').map(|(provider, _)| provider))
@@ -905,12 +949,10 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 &load_session_sampling.base_url,
                 &load_session_sampling.query_params,
             );
-            let previous = crate::session::persistence::latest_model_selection(timeline.events())
-                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            let previous = durable_model_selection;
             let missing_baseline = previous.is_none();
-            if runtime_recovery_gated && (missing_baseline || previous.as_ref().is_some_and(
-                |(model, effort, provider, transport)| model != &summary.current_model_id
-                    || effort != &summary.reasoning_effort
+            if runtime_recovery_gated && (checkpoint_model_selection.is_none() || checkpoint_model_selection.as_ref().is_some_and(
+                |(_, effort, provider, transport)| effort != &summary.reasoning_effort
                     || provider != &load_session_sampling.model || transport != &current_transport
             )) {
                 return Err(acp::Error::invalid_params().data(
@@ -1239,7 +1281,15 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             if restoring_committed_tree {
                 self.reconcile_loaded_children(&session_id, &subagent_projections, false, spawn_new_actor).await;
             }
-            self.restore_session_tree(&session_id).await.map_err(|error| acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}")))?;
+            let candidate = spawn_new_actor.then(|| self.control_session_handle(&session_id)).flatten();
+            if let Err(error) = self.restore_session_tree(&session_id).await {
+                if let Some(candidate) = candidate
+                    && let Err(retirement) = self.retire_failed_restore_candidate(&candidate).await
+                {
+                    return Err(acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}; {retirement}")));
+                }
+                return Err(acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}")));
+            }
         }
         // A control snapshot is part of session-load completion, not a
         // best-effort side effect. Fresh actors did not exist at the earlier
@@ -2076,7 +2126,10 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             "grow/session/suspend_for_exit" => {
                 let params: serde_json::Value = serde_json::from_str(args.params.get()).map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
                 let exit_id = params.get("exit_id").and_then(serde_json::Value::as_str).ok_or_else(|| acp::Error::invalid_params().data("missing exit_id"))?;
-                let result = match self.suspend_for_exit(exit_id.to_owned()).await {
+                let scope = params.get("leaderScope").cloned()
+                    .map(serde_json::from_value::<super::runtime_handoff::ExitScope>).transpose()
+                    .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+                let result = match self.suspend_for_exit(exit_id.to_owned(), scope).await {
                     Ok(()) => serde_json::json!({"status":"suspended"}),
                     Err(error) => serde_json::json!({"status":"unconfirmed","error":error}),
                 };
@@ -2277,6 +2330,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             && let Ok(params) = serde_json::from_str::<serde_json::Value>(args.params.get())
             && let Some(leader_client_id) = params.get("leaderClientId").and_then(|v| v.as_u64())
         {
+            self.exit_suspend.borrow_mut().remove(&Some(leader_client_id));
             for handle in self.sessions.borrow().values() {
                 let _ = handle.cmd_tx.send(
                     crate::session::SessionCommand::ReleaseQueueHoldsForClient {

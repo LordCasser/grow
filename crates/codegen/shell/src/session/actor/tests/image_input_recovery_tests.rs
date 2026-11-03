@@ -4,6 +4,13 @@ use serde_json::json;
 use test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
 use tokio::sync::mpsc;
 
+mod auxiliary;
+mod compact_flush_journey;
+mod disabled_memory;
+mod frozen_recovery;
+mod promoted_image;
+mod recap_clock;
+
 fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
@@ -25,13 +32,35 @@ async fn actor_with_sampler_and_persistence(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     ImageProjectionPersistence,
 ) {
-    actor_with_sampler_and_storage(server, image_description_model, None).await
+    actor_with_sampler_and_storage(server, image_description_model, None, None).await
 }
 
 async fn actor_with_sampler_and_storage(
     server: &MockInferenceServer,
     image_description_model: Option<&str>,
     storage: Option<crate::session::storage::jsonl::JsonlStorageAdapter>,
+    flush_model: Option<&str>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    ImageProjectionPersistence,
+) {
+    actor_with_sampler_and_storage_configured(
+        server,
+        image_description_model,
+        storage,
+        flush_model,
+        None,
+    )
+    .await
+}
+
+async fn actor_with_sampler_and_storage_configured(
+    server: &MockInferenceServer,
+    image_description_model: Option<&str>,
+    storage: Option<crate::session::storage::jsonl::JsonlStorageAdapter>,
+    flush_model: Option<&str>,
+    preflush_config: Option<(u8, u64)>,
 ) -> (
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
@@ -112,12 +141,17 @@ async fn actor_with_sampler_and_storage(
         create_test_actor_with_image_projection_persistence(
             0,
             256_000,
-            85,
+            preflush_config.map_or(85, |(threshold, _)| threshold),
             gateway_tx,
-            persistence_tx,
+            persistence_tx.clone(),
         )
         .await;
     let downstream = actor.notifications.persistence_tx.clone();
+    let sideband_downstream = if storage.is_some() {
+        persistence_tx
+    } else {
+        downstream.clone()
+    };
     let (sideband_tx, mut sideband_rx) = mpsc::unbounded_channel();
     actor.notifications.persistence_tx = sideband_tx;
     let sideband_gate = image_projection_persistence.clone();
@@ -128,16 +162,27 @@ async fn actor_with_sampler_and_storage(
                     if matches!(event.kind, chat_state::SidebandEventKind::Attempt(_)) =>
                 {
                     let (forward_reply, forward_ack) = tokio::sync::oneshot::channel();
-                    downstream
+                    sideband_downstream
                         .send(PersistenceMsg::SidebandDurablyAndAck {
                             event,
                             respond_to: forward_reply,
                         })
                         .unwrap();
                     let result = forward_ack.await.unwrap();
-                    if let Some(reply) = sideband_gate.delay_sideband_ack(respond_to) {
-                        let _ = reply.send(result);
+                    let (gate_reply, gate_rx) = tokio::sync::oneshot::channel();
+                    if let Some(reply) = sideband_gate.delay_sideband_ack(gate_reply) {
+                        let _ = reply.send(Ok(()));
                     }
+                    tokio::task::spawn_local(async move {
+                        tokio::task::spawn_local(async move {
+                            let _ = gate_rx.await;
+                            let _ = respond_to.send(result);
+                        });
+                    });
+                    continue;
+                }
+                sideband @ PersistenceMsg::SidebandDurablyAndAck { .. } => {
+                    let _ = sideband_downstream.send(sideband);
                     continue;
                 }
                 other => other,
@@ -190,6 +235,11 @@ async fn actor_with_sampler_and_storage(
             },
         );
         *actor.image_description_model.write() = Some(auxiliary_slug.to_owned());
+    }
+    actor.memory.flush_config.flush_model = flush_model.map(str::to_owned);
+    if let Some((_, soft_threshold_tokens)) = preflush_config {
+        actor.compaction.memory_flush_enabled = true;
+        actor.memory.flush_config.soft_threshold_tokens = soft_threshold_tokens;
     }
     let sampler_config = sampler::SamplerConfig {
         api_key: Some("test-key".to_string()),
@@ -1935,7 +1985,7 @@ fn assert_image_fallback_cold_restore(
                 server.enqueue_response("/v1/messages", messages_text_turn("regenerated under the fixed prompt", "vision-model"));
                 server.enqueue_response("/v1/messages", messages_text_turn("resumed after regeneration", "test-model"));
             }
-            let (actor, _gateway, persistence) = actor_with_sampler_and_storage(&server, Some("vision"), Some(storage.clone())).await;
+            let (actor, _gateway, persistence) = actor_with_sampler_and_storage(&server, Some("vision"), Some(storage.clone()), None).await;
             super::read_file_image_description_tests::run_image_result(&actor).await;
             if !already_projected { persistence.hold_projection_acknowledgement(); }
             let turn_actor = actor.clone();
@@ -2018,7 +2068,7 @@ fn assert_image_fallback_cold_restore(
                 while previous_actor.upgrade().is_some() { tokio::task::yield_now().await; }
             }).await.expect("the original actor and its cache must be dropped");
             let before = server.requests().len();
-            let (restored, _gateway, restored_persistence) = actor_with_sampler_and_storage(&server, with_auxiliary.then_some("vision"), Some(storage.clone())).await;
+            let (restored, _gateway, restored_persistence) = actor_with_sampler_and_storage(&server, with_auxiliary.then_some("vision"), Some(storage.clone()), None).await;
             let bridge = restored.agent.borrow().tool_bridge().clone();
             let resources = bridge.shared_resources().await;
             assert!(resources_persistence.load(&mut *resources.lock().await));
@@ -2172,6 +2222,332 @@ async fn prepared_image_key(actor: &SessionActor) -> sampling_types::ModelImageI
         &prepared.base_url,
         &prepared.query_params,
     )
+}
+
+fn image_context_inquiry(
+    actor: &SessionActor,
+) -> (
+    crate::coordination::InboundInquiry,
+    tokio::sync::oneshot::Receiver<crate::coordination::InquiryOutcome>,
+) {
+    let (progress, _) = tokio::sync::watch::channel(crate::coordination::InquiryPhase::Queued);
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    (
+        crate::coordination::InboundInquiry {
+            authority: crate::coordination::InquiryAuthority::Delegation,
+            direction: crate::coordination::InquiryDirection::ChildToParent,
+            inquiry_id: uuid::Uuid::now_v7().to_string(),
+            source_peer_id: "image-child-peer".into(),
+            source_session_id: "image-child".into(),
+            source_cwd: actor.session_info.cwd.clone(),
+            delegated_subagent_task_name: Some("image-child".into()),
+            target_session_id: actor.session_info.id.to_string(),
+            question: "What does the screenshot show?".into(),
+            cancellation: crate::coordination::InquiryCancellation::new(),
+            progress,
+            respond_to,
+        },
+        response,
+    )
+}
+
+#[test]
+fn coordination_reuses_image_descriptions_after_model_switch_on_all_backends() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            for backend in [
+                sampling_types::ApiBackend::Messages,
+                sampling_types::ApiBackend::ChatCompletions,
+                sampling_types::ApiBackend::Responses,
+            ] {
+                for tool_image in [false, true] {
+                    for known_text in [false, true] {
+                        let server = MockInferenceServer::start().await.unwrap();
+                        server.enqueue_response(
+                            "/v1/messages",
+                            messages_text_turn("Screenshot error E42.", "vision-model"),
+                        );
+                        server.set_response("The screenshot shows E42.");
+                        let (actor, _gateway, persistence) =
+                            actor_with_sampler_and_persistence(&server, Some("vision")).await;
+                        let image = inline_data_uri(&test_image_content());
+                        let history = if tool_image {
+                            vec![
+                                ConversationItem::user("source context"),
+                                ConversationItem::assistant_tool_calls(vec![
+                                    sampling_types::ToolCall {
+                                        id: "read_image".into(),
+                                        name: "read_file".into(),
+                                        arguments: "{}".into(),
+                                    },
+                                ]),
+                                ConversationItem::tool_result_with_images(
+                                    "read_image",
+                                    "tool evidence",
+                                    vec![sampling_types::ContentPart::Image {
+                                        url: image.into(),
+                                        description: None,
+                                    }],
+                                ),
+                            ]
+                        } else {
+                            let mut user = ConversationItem::user("source context");
+                            user.add_image(image);
+                            vec![user]
+                        };
+                        replace_test_surface(&actor.chat_state_handle, history).await;
+                        actor
+                            .project_conversation_images_for_text_model(
+                                &prepared_image_key(&actor).await,
+                            )
+                            .await
+                            .unwrap();
+                        let mut config =
+                            actor.chat_state_handle.get_sampling_config().await.unwrap();
+                        config.model = "text-model".into();
+                        config.api_backend = backend.clone();
+                        actor.chat_state_handle.replace_sampling_route(config);
+                        let key = prepared_image_key(&actor).await;
+                        if known_text {
+                            actor
+                                .record_unsupported_model_image_input(key.clone())
+                                .await
+                                .unwrap();
+                        }
+                        let before =
+                            serde_json::to_value(actor.chat_state_handle.get_conversation().await)
+                                .unwrap();
+                        let (inquiry, response) = image_context_inquiry(&actor);
+                        actor.enqueue_coordination_inquiry(inquiry).await;
+                        let outcome = response.await.unwrap();
+                        assert_eq!(
+                            outcome.answer.as_deref(),
+                            Some("The screenshot shows E42."),
+                            "{outcome:?}"
+                        );
+                        let requests = server.requests();
+                        assert_eq!(requests.len(), 2);
+                        let body = requests[1].body.as_ref().unwrap();
+                        assert_eq!(body["model"], "text-model");
+                        assert_eq!(
+                            count_wire_images(body),
+                            0,
+                            "{backend:?}, tool={tool_image}, known={known_text}"
+                        );
+                        assert!(body.to_string().contains("Screenshot error E42."));
+                        if tool_image {
+                            assert!(body.to_string().contains("tool evidence"));
+                        }
+                        assert!(
+                            body.get("tools")
+                                .is_none_or(|tools| tools.as_array().unwrap().is_empty())
+                        );
+                        assert_eq!(persistence.attempted_projections().len(), 1);
+                        assert_eq!(
+                            actor.model_image_input_is_unsupported(&key).await,
+                            known_text
+                        );
+                        assert_eq!(
+                            serde_json::to_value(actor.chat_state_handle.get_conversation().await)
+                                .unwrap(),
+                            before
+                        );
+                    }
+                }
+            }
+        }));
+    });
+}
+
+#[test]
+fn coordination_waits_for_image_projection_ack_and_keeps_its_prepared_route() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("Screenshot E42", "vision-model"),
+            );
+            server.set_response("Existing primary description.");
+            let (actor, _gateway, persistence) =
+                actor_with_sampler_and_persistence(&server, Some("vision")).await;
+            let mut user = ConversationItem::user("source context");
+            user.add_image(inline_data_uri(&test_image_content()));
+            replace_test_surface(&actor.chat_state_handle, vec![user]).await;
+            let key = prepared_image_key(&actor).await;
+            actor
+                .record_unsupported_model_image_input(key.clone())
+                .await
+                .unwrap();
+            let mut later = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            persistence.hold_next_sideband_attempt();
+            persistence.hold_projection_acknowledgement();
+            let main_actor = actor.clone();
+            let conversion = tokio::task::spawn_local(async move {
+                main_actor
+                    .project_conversation_images_for_text_model(&key)
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !persistence.sideband_ack_is_pending() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let prepared_model = later.model.clone();
+            let (inquiry, mut response) = image_context_inquiry(&actor);
+            actor.enqueue_coordination_inquiry(inquiry).await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut response)
+                    .await
+                    .is_err()
+            );
+            assert!(server.requests().is_empty());
+            persistence.release_sideband_ack();
+            wait_for_image_projection(&persistence).await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut response)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(server.requests().len(), 1);
+            later.model = "later-model".into();
+            later.base_url = "http://127.0.0.1:1".into();
+            actor.chat_state_handle.replace_sampling_route(later);
+            persistence.hold_next_sideband_attempt();
+            persistence.release_projection_acknowledgement();
+            conversion.await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !persistence.sideband_ack_is_pending() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(actor.image_projection_gate.try_write().is_ok());
+            assert_eq!(server.requests().len(), 1);
+            persistence.release_sideband_ack();
+            let outcome = response.await.unwrap();
+            assert_eq!(
+                outcome.answer.as_deref(),
+                Some("Existing primary description."),
+                "{outcome:?}"
+            );
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2);
+            let body = requests[1].body.as_ref().unwrap();
+            assert_eq!(body["model"], prepared_model);
+            assert_eq!(count_wire_images(body), 0);
+            assert!(body.to_string().contains("Screenshot E42"));
+            assert!(actor.image_projection_gate.try_write().is_ok());
+        }));
+    });
+}
+
+#[test]
+fn coordination_image_context_wait_observes_inquiry_and_session_cancellation() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            for session_cancel in [false, true] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let (actor, _gateway, _) = actor_with_sampler_and_persistence(&server, None).await;
+                let projection = actor.image_projection_gate.write().await;
+                let (inquiry, mut response) = image_context_inquiry(&actor);
+                let cancellation = inquiry.cancellation.clone();
+                actor.enqueue_coordination_inquiry(inquiry).await;
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(20), &mut response)
+                        .await
+                        .is_err()
+                );
+                if session_cancel {
+                    actor.sideband_cancel.cancel();
+                } else {
+                    cancellation.cancel(crate::coordination::InquiryCancellationReason::Explicit);
+                }
+                let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), response)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    outcome.status,
+                    crate::coordination::InquiryStatus::Cancelled
+                );
+                assert!(server.requests().is_empty());
+                drop(projection);
+            }
+        }));
+    });
+}
+
+#[test]
+fn coordination_does_not_send_images_after_primary_projection_failure() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("Screenshot E42", "vision-model"),
+            );
+            let (actor, _gateway, persistence) =
+                actor_with_sampler_and_persistence(&server, Some("vision")).await;
+            let mut user = ConversationItem::user("source context");
+            user.add_image(inline_data_uri(&test_image_content()));
+            replace_test_surface(&actor.chat_state_handle, vec![user]).await;
+            let key = prepared_image_key(&actor).await;
+            actor
+                .record_unsupported_model_image_input(key.clone())
+                .await
+                .unwrap();
+            persistence.hold_next_sideband_attempt();
+            persistence.fail_projection_commits();
+            let main_actor = actor.clone();
+            let conversion = tokio::task::spawn_local(async move {
+                main_actor
+                    .project_conversation_images_for_text_model(&key)
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !persistence.sideband_ack_is_pending() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let (inquiry, mut response) = image_context_inquiry(&actor);
+            actor.enqueue_coordination_inquiry(inquiry).await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut response)
+                    .await
+                    .is_err()
+            );
+            persistence.release_sideband_ack();
+            assert!(conversion.await.unwrap().is_err());
+            assert_eq!(
+                response.await.unwrap().status,
+                crate::coordination::InquiryStatus::Failed
+            );
+            assert_eq!(server.requests().len(), 1);
+            assert!(actor.image_projection_gate.try_write().is_ok());
+        }));
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2347,43 +2723,6 @@ async fn side_question_waits_for_primary_conversion_and_durable_ack() {
                     .contains("Screenshot E42")
             );
             assert!(actor.image_projection_gate.try_write().is_ok());
-        })
-        .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn side_question_does_not_start_missing_primary_conversion_or_recover_rejections() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            for known_text in [false, true] {
-                let server = MockInferenceServer::start().await.unwrap();
-                server.enqueue_response("/v1/messages", multimodal_capability_rejection());
-                let (actor, _gateway, persistence) =
-                    actor_with_sampler_and_persistence(&server, Some("vision")).await;
-                let mut user = ConversationItem::user("source context");
-                user.add_image(inline_data_uri(&test_image_content()));
-                replace_test_surface(&actor.chat_state_handle, vec![user]).await;
-                let before =
-                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
-                let key = prepared_image_key(&actor).await;
-                if known_text {
-                    actor
-                        .record_unsupported_model_image_input(key.clone())
-                        .await
-                        .unwrap();
-                }
-                assert!(actor.handle_side_question("What happened?").await.is_err());
-                assert_eq!(server.requests().len(), usize::from(!known_text));
-                assert!(persistence.attempted_projections().is_empty());
-                assert_eq!(
-                    actor.model_image_input_is_unsupported(&key).await,
-                    known_text
-                );
-                assert_eq!(
-                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(),
-                    before
-                );
-            }
         })
         .await;
 }

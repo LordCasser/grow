@@ -208,7 +208,11 @@ impl OpenedSession {
     }
 
     pub(crate) fn timeline_events(&self) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        JsonlStorageAdapter::read_timeline_from_directory(&self.directory).map_err(|error| {
+        Ok(self.journal_data()?.events)
+    }
+
+    fn journal_data(&self) -> io::Result<ledger::JournalData> {
+        JsonlStorageAdapter::read_journal_from_directory(&self.directory).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -228,6 +232,19 @@ impl OpenedSession {
                 error
             }
         })
+    }
+
+    /// Validate canonical references without loading model/display artifacts.
+    pub(crate) fn reference_timeline(&self) -> io::Result<Timeline> {
+        let journal = self.journal_data()?;
+        let timeline = Timeline::from_events(journal.events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        journal.history.validate(&timeline)?;
+        crate::session::history::HistorySnapshot::validate_owner(
+            &timeline,
+            self.summary.info.id.0.as_ref(),
+        )?;
+        Ok(timeline)
     }
 
     /// Preserve exact bytes: converting checksum-bearing facts through Value
@@ -2993,21 +3010,36 @@ impl JsonlStorageAdapter {
         Ok(Some(info))
     }
 
+    /// Read-only qualification before runtime teardown; deletion rechecks under its lease.
+    pub(crate) fn preflight_session_delete_by_id_sync(
+        &self,
+        session_id: &str,
+        cwd: Option<&str>,
+    ) -> io::Result<()> {
+        let Some(opened) = self.open_session_by_id(session_id)? else {
+            return Ok(());
+        };
+        if cwd.is_some_and(|expected| expected != opened.summary.info.cwd) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session workspace changed; refresh the session list before deleting",
+            ));
+        }
+        self.validate_session_deletion(&opened)
+    }
+
+    fn validate_session_deletion(&self, opened: &OpenedSession) -> io::Result<()> {
+        let timeline = opened.reference_timeline()?;
+        self.reject_linked_single_session_delete(opened, &timeline)
+    }
+
     fn delete_opened_session(&self, opened: OpenedSession) -> io::Result<()> {
         let info = opened.summary.info.clone();
         self.ensure_writer_lease(&info)?;
-        self.reject_linked_single_session_delete(&opened)?;
-        let timeline_id = info.id.to_string();
-        let timeline = opened.bounded_validated_timeline(&timeline_id)?.timeline;
-        let runtime = timeline.runtime_lifecycle();
-        if runtime.phase != chat_state::session_runtime::RuntimePhase::Running
-            && (runtime.checkpoint.is_some() || runtime.operation_id.is_some())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "session has an unfinished runtime handoff; resolve it before deleting history",
-            ));
-        }
+        self.validate_session_deletion(&opened)?;
+        // Explicit permanent deletion abandons this independent continuation.
+        // The writer lease and canonical links above still protect live writers
+        // and other sessions; TTL keeps its separate runtime retention rules.
         let parent = self.open_session_parent(&info)?;
         let name_string = info.id.to_string();
         let name = std::ffi::OsStr::new(&name_string);
@@ -3076,15 +3108,13 @@ impl JsonlStorageAdapter {
         Ok(())
     }
 
-    fn reject_linked_single_session_delete(&self, opened: &OpenedSession) -> io::Result<()> {
+    fn reject_linked_single_session_delete(
+        &self,
+        opened: &OpenedSession,
+        timeline: &Timeline,
+    ) -> io::Result<()> {
         let info = &opened.summary.info;
-        let timeline = opened
-            .bounded_validated_timeline(&info.id.to_string())?
-            .timeline;
         let mut linked = std::collections::BTreeSet::new();
-        if let Some(parent_id) = &opened.summary.parent_session_id {
-            linked.insert(parent_id.clone());
-        }
         for event in timeline.events() {
             match &event.kind {
                 chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
@@ -3098,26 +3128,31 @@ impl JsonlStorageAdapter {
                 _ => {}
             }
         }
-        for child in self.scan_opened_sessions_with_policy(
-            None,
-            true,
-            Some(TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES),
-            true,
-            |candidate| {
-                let child_id = candidate.summary().info.id.0.to_string();
-                let is_child = candidate.timeline_events()?.iter().any(|event| {
-                    matches!(
-                        &event.kind,
-                        chat_state::TimelineEventKind::SubagentSeed(seed)
-                            if seed.parent_timeline_id == info.id.0.as_ref()
-                    )
-                });
-                Ok::<_, io::Error>((child_id, is_child))
-            },
-        )? {
-            let (child_id, is_child) = child?;
-            if child_id != info.id.0.as_ref() && is_child {
-                linked.insert(child_id);
+        for relation in
+            self.scan_opened_sessions_with_policy(None, true, None, true, |candidate| {
+                let related_id = candidate.summary().info.id.0.to_string();
+                if related_id == info.id.0.as_ref() {
+                    return Ok((related_id, false));
+                }
+                let is_linked = candidate
+                    .reference_timeline()?
+                    .events()
+                    .iter()
+                    .any(|event| match &event.kind {
+                        chat_state::TimelineEventKind::SubagentSeed(seed) => {
+                            seed.parent_timeline_id == info.id.0.as_ref()
+                        }
+                        chat_state::TimelineEventKind::Subagent(
+                            chat_state::SubagentEvent::Spawned(spawn),
+                        ) => spawn.child_session_id == info.id.0.as_ref(),
+                        _ => false,
+                    });
+                Ok::<_, io::Error>((related_id, is_linked))
+            })?
+        {
+            let (related_id, is_linked) = relation?;
+            if related_id != info.id.0.as_ref() && is_linked {
+                linked.insert(related_id);
             }
         }
         linked.remove(info.id.0.as_ref());
@@ -4596,6 +4631,7 @@ impl JsonlStorageAdapter {
         summary: Summary,
         initial_surface: Vec<ConversationItem>,
         initial_prompt_blobs: crate::session::persistence::ImmutablePromptBlobs,
+        initial_presentation: crate::session::history::SeedPresentation,
         initial_facts: Vec<chat_state::TimelineEventKind>,
     ) -> io::Result<(Summary, Vec<chat_state::TimelineEvent>)> {
         let parent = self.ensure_session_parent(info)?;
@@ -4616,9 +4652,10 @@ impl JsonlStorageAdapter {
                     .record(fact)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
+            let facts = initial_presentation.into_facts(&timeline)?;
             staging.write_atomic(
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
-                &Self::encode_journal(timeline.events(), &[])?,
+                &Self::encode_journal(timeline.events(), &facts)?,
                 true,
                 false,
             )?;
@@ -4932,7 +4969,6 @@ impl JsonlStorageAdapter {
                 .filter_map(ConversationItem::working_directory_switch_generation)
                 .max()
                 .unwrap_or(0);
-            let inherited_positions = inherited_ids.iter().enumerate().map(|(index, id)| ((id.event.get(), id.item as usize), index)).collect::<std::collections::BTreeMap<_, _>>();
             let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
                 .into_iter()
                 .flat_map(|u| transform_session_id_in_update(u, &target_info.id))
@@ -5047,33 +5083,10 @@ impl JsonlStorageAdapter {
                     .record(announcement_state.timeline_kind()?)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
-            let mut facts = Vec::new();
-            for update in &transformed_updates {
-                let mut update = update.clone();
-                let source = if let super::SessionUpdate::Acp(notification) = &mut update {
-                    let meta = notification.meta.get_or_insert_with(Default::default);
-                    let source = meta.get("grow/historyMessageEvent").and_then(serde_json::Value::as_u64).zip(meta.get("grow/historyMessageItem").and_then(serde_json::Value::as_u64));
-                    for key in ["samplingRequestId", "samplingAttempt", "responseProjection"] { meta.remove(key); }
-                    source
-                } else { None };
-                if let Some(mut fact) = crate::session::history::HistoryFact::from_update(&update)? {
-                    if let Some((event, ordinal)) = source
-                        && let Some(index) = inherited_positions.get(&(event, ordinal as usize)) {
-                            let reference = match &fact.content {
-                                crate::session::history::HistoryContent::Assistant(chunk) => Some((crate::session::history::TextChannel::Assistant, chunk.meta.clone())),
-                                crate::session::history::HistoryContent::Reasoning(chunk) if !options.strip_reasoning => Some((crate::session::history::TextChannel::Reasoning, chunk.meta.clone())),
-                                _ => None,
-                            };
-                            if let Some((channel, chunk_meta)) = reference { let source = fork_timeline.surface_ids().get(*index).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "fork seed source is absent"))?;
-                                fact.content = crate::session::history::HistoryContent::Message { event: source.event.get(), item: source.item as usize, channel, chunk_meta }; }
-                        }
-                    // Forks own display identities and no parent source authority.
-                    if let Some(meta) = fact.meta.as_mut() {
-                        for key in ["grow/historyCursor", "samplingRequestId", "samplingAttempt", "responseProjection"] { meta.remove(key); }
-                    }
-                    facts.push(fact);
-                }
-            }
+            let facts = crate::session::history::SeedPresentation {
+                source_ids: inherited_ids,
+                updates: transformed_updates,
+            }.into_facts(&fork_timeline)?;
             staging.write_atomic(
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
                 &Self::encode_journal(fork_timeline.events(), &facts)?, true, false,
@@ -5110,6 +5123,7 @@ impl StorageAdapter for JsonlStorageAdapter {
                         info,
                         summary,
                         Vec::new(),
+                        Default::default(),
                         Default::default(),
                         Vec::new(),
                     )

@@ -79,6 +79,24 @@ fn ext_control_rpc_outcome(response: &acp::ExtResponse) -> actions::ControlRpcOu
     control_rpc_outcome(status.as_deref())
 }
 
+fn session_close_result(response: &acp::ExtResponse) -> Result<(), String> {
+    let envelope: ExtMethodResult<serde_json::Value> = serde_json::from_str(response.0.get())
+        .map_err(|error| error.to_string())?;
+    if let Some(error) = envelope.error { return Err(error.to_string()); }
+    if envelope.result.as_ref().and_then(|result| result.get("success"))
+        .and_then(serde_json::Value::as_bool) == Some(true) { Ok(()) }
+    else { Err("The server did not confirm this action".into()) }
+}
+
+fn session_delete_result(response: &acp::ExtResponse) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    struct DeleteAcknowledgement { success: bool }
+    let response: DeleteAcknowledgement = serde_json::from_str(response.0.get())
+        .map_err(|error| error.to_string())?;
+    if response.success { Ok(()) }
+    else { Err("The server did not confirm this action".into()) }
+}
+
 fn recap_admission_error(response: &acp::ExtResponse) -> Option<String> {
     let Ok(envelope) = serde_json::from_str::<ExtMethodResult<serde_json::Value>>(response.0.get()) else {
         return Some("Invalid recap admission response".into());
@@ -293,7 +311,7 @@ pub(crate) fn execute(
             }
         }
         Effect::UnregisterActiveSession { session_id } => {
-            crate::app::signal_handler::set_current_session_id(None);
+            crate::app::signal_handler::clear_current_session_id(&session_id);
             unregister_active_session_best_effort(&session_id);
         }
         Effect::SuspendForExit { exit_id } => {
@@ -1917,8 +1935,7 @@ pub(crate) fn execute(
                                         images_dir: None,
                                         ..
                                     } => ProbedAttachment::Image(pasted),
-                                    ClipboardPasteTarget::DashboardDispatch
-                                    | ClipboardPasteTarget::DashboardPeek { .. } => {
+                                    ClipboardPasteTarget::DashboardDispatch => {
                                         ProbedAttachment::Image(pasted)
                                     }
                                 }
@@ -3141,6 +3158,18 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::CloseSession { agent_id, session_id, binding_epoch } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new("grow/session/close",
+                    serde_json::value::to_raw_value(&serde_json::json!({ "sessionId": session_id.0 }))
+                        .expect("serialize close params").into());
+                let result = acp_send(request, &tx).await.map_err(|error| error.to_string())
+                    .and_then(|response| session_close_result(&response))
+                    .map_err(|error| sanitize_user_error(&error));
+                TaskResult::SessionCloseResolved { agent_id, session_id, binding_epoch, result }
+            });
+        }
         Effect::RenameSession { agent_id, session_id, title, cwd } => {
             let tx = acp_tx.clone();
             tasks
@@ -3199,7 +3228,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::DeleteSession { session_id, cwd, after } => {
+        Effect::DeleteSession { session_id, cwd, after, bindings } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3221,40 +3250,26 @@ pub(crate) fn execute(
                             .into(),
                     );
                     match acp_send(request, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            if let Some(err) = wrapper
-                                .get("error")
-                                .filter(|v| !v.is_null())
-                            {
-                                let msg = err
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| err.to_string());
-                                return TaskResult::DeleteSessionFailed {
-                                    session_id,
-                                    error: msg,
-                                };
-                            }
-                            TaskResult::DeleteSessionComplete {
-                                session_id,
-                                after,
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::DeleteSessionFailed {
-                                session_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't delete session: {e}"),
-                                ),
-                            }
+                        Ok(response) => match session_delete_result(&response) {
+                            Ok(()) => TaskResult::DeleteSessionComplete { session_id, after, bindings },
+                            Err(error) => TaskResult::DeleteSessionFailed {
+                                session_id, error: sanitize_user_error(&error), runtime_invalidated: None, bindings,
+                            },
+                        },
+                        Err(error) => {
+                            let runtime_invalidated = error.data.as_ref()
+                                .and_then(|data| data.get(shell::extensions::session_admin::SESSION_DELETE_RUNTIME_INVALIDATED_KEY))
+                                .and_then(serde_json::Value::as_bool);
+                            let detail = error.data.as_ref().and_then(|data| data.get("detail"))
+                                .and_then(serde_json::Value::as_str).map(str::to_owned)
+                                .unwrap_or_else(|| error.to_string());
+                            TaskResult::DeleteSessionFailed { session_id,
+                                error: sanitize_user_error(&detail), runtime_invalidated, bindings }
                         }
                     }
                 });
         }
+
         Effect::ShowContextInfo { agent_id, session_id, session_binding_epoch, nonce } => {
             let tx = acp_tx.clone();
             tasks

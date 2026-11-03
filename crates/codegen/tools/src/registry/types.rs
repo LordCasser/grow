@@ -190,7 +190,7 @@ pub struct SubagentSessionResources {
 /// values. The builder converts these into type-erased `Resources` entries
 /// internally, so callers never touch `Resources` directly.
 pub struct SessionContext {
-    /// Terminal backend for shell execution (bash, kill_task, task_output).
+    /// Terminal backend for shell execution (bash, command output and cancellation).
     pub backend: Arc<dyn TerminalBackend>,
     /// Async file system abstraction (read_file, search_replace).
     pub fs: Arc<dyn AsyncFileSystem>,
@@ -760,8 +760,10 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::GetGoalTool>();
         b.register::<grow_build::UpdateGoalTool>();
         b.register::<grow_build::WorkflowTool>();
-        b.register::<grow_build::TaskOutputTool>();
-        b.register::<grow_build::GetTerminalCommandOutputTool>();
+        b.register::<grow_build::ListSubagentTool>();
+        b.register::<grow_build::GetSubagentStatusTool>();
+        b.register::<grow_build::GetCommandOutputTool>();
+        b.register::<grow_build::WaitSubagentTool>();
         b.register::<grow_build::TaskTool>();
         b.register_with_params::<grow_build::WebFetchTool, grow_build::web_fetch::WebFetchParams>();
         b.register::<grow_build::LspTool>();
@@ -2099,7 +2101,7 @@ fn explain_requirement_failure(
             .unwrap_or(true) => {
             let mut missing = vec![];
             if !has_tool_kind(proposed, ToolKind::BackgroundTaskAction) {
-                missing.push("Grow:get_task_output");
+                missing.push("Grow:get_command_output");
             }
             if !has_tool_kind(proposed, ToolKind::KillTaskAction) {
                 missing.push("Grow:kill_task");
@@ -2108,38 +2110,44 @@ fn explain_requirement_failure(
                 "unsatisfied requirements".to_string()
             } else {
                 format!(
-                    "enabled_background=true requires {} so background bash tasks can be observed and cancelled",
+                    "enabled_background=true requires {} so background terminal commands can be observed and cancelled",
                     missing.join(" and ")
                 )
             };
             RequirementError::new(fq_tool_id, message)
                 .with_field_path("params.enabled_background")
                 .with_expected(
-                    "set enabled_background=false or include get_task_output and kill_task",
+                    "set enabled_background=false or include get_command_output and kill_task",
                 )
                 .with_bad_value(serde_json::Value::Bool(true))
                 .with_category("requirements")
         }
         "Grow:task" => {
             let mut missing = vec![];
-            if !has_tool_kind(proposed, ToolKind::BackgroundTaskAction) {
-                missing.push("Grow:get_task_output");
+            if !has_tool_kind(proposed, ToolKind::SubagentList) {
+                missing.push("Grow:list_subagent");
+            }
+            if !has_tool_kind(proposed, ToolKind::SubagentStatus) {
+                missing.push("Grow:get_subagent_status");
+            }
+            if !has_tool_kind(proposed, ToolKind::SubagentWait) {
+                missing.push("Grow:wait_subagent");
             }
             if !has_tool_kind(proposed, ToolKind::KillTaskAction) {
                 missing.push("Grow:kill_task");
             }
             RequirementError::new(
-                    fq_tool_id,
-                    format!(
-                    "task requires {} so spawned background subagents can be monitored and cancelled",
+                fq_tool_id,
+                format!(
+                    "task requires {} so subagents can be enumerated, inspected, awaited and cancelled",
                     missing.join(" and ")
                 ),
-                )
-                .with_field_path("tools")
-                .with_expected("include get_task_output and kill_task")
-                .with_category("requirements")
+            )
+            .with_field_path("tools")
+            .with_expected("include list_subagent, get_subagent_status, wait_subagent and kill_task")
+            .with_category("requirements")
         }
-        "Grow:get_task_output" => {
+        "Grow:get_command_output" => {
             let has_grow_build_bash = has_tool_with_bool_param(
                 proposed,
                 "Grow",
@@ -2154,7 +2162,6 @@ fn explain_requirement_failure(
                 "enabled_background",
                 true,
             );
-            let has_task = has_tool(proposed, "Grow", "task");
             let mut notes = vec![];
             if has_tool(proposed, "Grow", "run_terminal_cmd")
                 && !has_grow_build_bash
@@ -2172,17 +2179,15 @@ fn explain_requirement_failure(
                         "GrowConcise:run_terminal_cmd is present but enabled_background=false",
                     );
             }
-            let mut message = "get_task_output requires a background-capable bash tool (Grow:run_terminal_cmd or GrowConcise:run_terminal_cmd with enabled_background=true), or Grow:task"
-                .to_string();
-            let has_provider = has_grow_build_bash || has_grow_build_concise_bash
-                || has_task;
+            let mut message = "get_command_output requires a background-capable bash tool (Grow:run_terminal_cmd or GrowConcise:run_terminal_cmd with enabled_background=true)".to_string();
+            let has_provider = has_grow_build_bash || has_grow_build_concise_bash;
             if !has_provider && !notes.is_empty() {
                 message.push_str(&format!("; {}", notes.join("; ")));
             }
             RequirementError::new(fq_tool_id, message)
                 .with_field_path("tools")
                 .with_expected(
-                    "include a background-capable bash tool or Grow:task",
+                    "include a background-capable bash tool",
                 )
                 .with_category("requirements")
         }
@@ -2440,7 +2445,7 @@ mod tests {
                 "read_file",
                 "search_replace",
                 "run_terminal_cmd",
-                "get_task_output",
+                "get_command_output",
                 "kill_task",
                 "grep",
                 "list_dir",
@@ -2448,6 +2453,9 @@ mod tests {
                 "plan_control",
                 "todo_write",
                 "task",
+                "list_subagent",
+                "get_subagent_status",
+                "wait_subagent",
                 "web_fetch",
                 "lsp",
                 "monitor",
@@ -2562,7 +2570,7 @@ mod tests {
                 ToolServerConfig {
                     tools: vec![
                         ToolConfig::from_id("Grow:run_terminal_cmd".to_string()),
-                        ToolConfig::from_id("Grow:get_task_output".to_string()),
+                        ToolConfig::from_id("Grow:get_command_output".to_string()),
                         ToolConfig::from_id("Grow:kill_task".to_string()),
                     ],
                 },
@@ -2585,7 +2593,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig::from_id("Grow:run_terminal_cmd".to_string()),
-                ToolConfig::from_id("Grow:get_task_output".to_string()),
+                ToolConfig::from_id("Grow:get_command_output".to_string()),
                 ToolConfig::from_id("Grow:kill_task".to_string()),
             ],
         };
@@ -2620,14 +2628,14 @@ mod tests {
         assert!(unchanged.get(TOOL_META_KEY).is_none());
     }
     /// `scope` must come from the per-tool override, not the kind default:
-    /// `get_task_output` is `BackgroundTaskAction` (default mutating) but
+    /// `get_command_output` is `BackgroundTaskAction` (default mutating) but
     /// overrides to read-only.
     #[tokio::test]
     async fn identity_scope_honors_per_tool_override() {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig::from_id("Grow:run_terminal_cmd".to_string()),
-                ToolConfig::from_id("Grow:get_task_output".to_string()),
+                ToolConfig::from_id("Grow:get_command_output".to_string()),
                 ToolConfig::from_id("Grow:kill_task".to_string()),
             ],
         };
@@ -2635,13 +2643,53 @@ mod tests {
         let toolset = ToolRegistryBuilder::new()
             .finalize(config, test_session_context(&tmp))
             .expect("toolset should finalize");
+        let toolset = std::sync::Arc::new(toolset);
+        let definitions = toolset.tool_definitions();
+        let names: Vec<&str> = definitions
+            .iter()
+            .map(|definition| definition.function.name.as_str())
+            .collect();
+        assert!(names.contains(&"get_command_output"), "defs: {names:?}");
+        assert!(
+            !names.contains(&"get_terminal_command_output"),
+            "defs: {names:?}"
+        );
         let identity = toolset
-            .tool_identity("get_task_output")
-            .expect("get_task_output resolves");
+            .tool_identity("get_command_output")
+            .expect("get_command_output resolves");
         assert_eq!(
             identity.max_access,
             tool_protocol::ToolAccess::Read,
             "background task output is observation-only",
+        );
+        assert!(
+            toolset
+                .tool_identity("get_terminal_command_output")
+                .is_none()
+        );
+        let result = toolset
+            .call(
+                "get_command_output",
+                serde_json::json!({"task_ids": ["missing-task"], "timeout_ms": 0}),
+                "call-command-output",
+                None,
+            )
+            .await
+            .expect("new command output name dispatches through the registry");
+        assert!(matches!(
+            result.output,
+            crate::types::output::ToolOutput::TaskOutput(_)
+        ));
+        assert!(
+            toolset
+                .call(
+                    "get_terminal_command_output",
+                    serde_json::json!({"task_ids": ["missing-task"], "timeout_ms": 0}),
+                    "call-old-command-output",
+                    None,
+                )
+                .await
+                .is_err()
         );
     }
     /// `ToolConfig::kind` parsing is strict; absent remains `None` for dynamic
@@ -2865,7 +2913,7 @@ mod tests {
                 },
                 ToolConfig::for_tool::<grow_build::GrepTool>(),
                 ToolConfig::for_tool::<grow_build::KillTaskTool>(),
-                ToolConfig::for_tool::<grow_build::TaskOutputTool>(),
+                ToolConfig::for_tool::<grow_build::GetCommandOutputTool>(),
                 ToolConfig {
                     id: "Grow:list_dir".to_string(),
                     params: None,
@@ -2914,7 +2962,7 @@ mod tests {
             "Grow:search_replace",
             "Grow:list_dir",
             "Grow:grep",
-            "Grow:get_terminal_command_output",
+            "Grow:get_command_output",
             "Grow:kill_terminal_command",
         ] {
             assert!(
@@ -3605,145 +3653,57 @@ mod tests {
             );
         }
     }
-    /// `task` tool must be rejected when neither `get_task_output` nor
-    /// `kill_task` are present in the toolset.
+    /// `task` requires independent subagent observation and cancellation tools.
     #[test]
-    fn task_tool_rejected_without_get_task_output_and_kill_task() {
+    fn task_tool_requires_subagent_observation_and_kill_tools() {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
-            tools: vec![ToolConfig {
-                id: "Grow:task".to_string(),
-                params: None,
-                name_override: None,
-                params_name_overrides: None,
-                description_override: None,
-                kind: None,
-            }],
+            tools: vec![ToolConfig::from_id("Grow:task".to_string())],
         };
         let errors = builder.validate_config(&config);
-        assert!(
-            !errors.is_empty(),
-            "task tool should be rejected without get_task_output and kill_task"
-        );
-        assert!(
-            errors.iter().any(|e| e.tool == "Grow:task"
-                && e.message.contains("Grow:get_task_output")
-                && e.message.contains("Grow:kill_task")),
-            "error should mention missing background task tools: {errors:?}",
-        );
+        let error = errors
+            .iter()
+            .find(|error| error.tool == "Grow:task")
+            .expect("task should report missing dependencies");
+        for missing in [
+            "Grow:list_subagent",
+            "Grow:get_subagent_status",
+            "Grow:wait_subagent",
+            "Grow:kill_task",
+        ] {
+            assert!(error.message.contains(missing), "{error:?}");
+        }
     }
-    /// `task` tool must be rejected when only `get_task_output` is present
-    /// (missing `kill_task`).
-    #[test]
-    fn task_tool_rejected_with_only_get_task_output() {
-        let builder = ToolRegistryBuilder::new();
-        let config = ToolServerConfig {
-            tools: vec![
-                ToolConfig {
-                    id: "Grow:task".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    kind: None,
-                },
-                ToolConfig {
-                    id: "Grow:get_task_output".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    kind: None,
-                },
-            ],
-        };
-        let errors = builder.validate_config(&config);
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.tool == "Grow:task" && e.message.contains("Grow:kill_task")),
-            "task tool should be rejected without kill_task: {errors:?}",
-        );
-    }
-    /// `task` tool must be rejected when only `kill_task` is present
-    /// (missing `get_task_output`).
-    #[test]
-    fn task_tool_rejected_with_only_kill_task() {
-        let builder = ToolRegistryBuilder::new();
-        let config = ToolServerConfig {
-            tools: vec![
-                ToolConfig {
-                    id: "Grow:task".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    kind: None,
-                },
-                ToolConfig {
-                    id: "Grow:kill_task".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    kind: None,
-                },
-            ],
-        };
-        let errors = builder.validate_config(&config);
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.tool == "Grow:task" && e.message.contains("Grow:get_task_output")),
-            "task tool should be rejected without get_task_output: {errors:?}",
-        );
-    }
-    /// `task` tool must be accepted when both `get_task_output` and
-    /// `kill_task` are present in the toolset.
     #[tokio::test]
-    async fn task_tool_accepted_with_both_get_task_output_and_kill_task() {
+    async fn task_tool_is_accepted_with_subagent_observation_and_kill_tools() {
         let tmp = TempDir::new().unwrap();
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
-            tools: vec![
-                ToolConfig {
-                    id: "Grow:task".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    kind: None,
-                },
-                ToolConfig {
-                    id: "Grow:get_task_output".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    kind: None,
-                },
-                ToolConfig {
-                    id: "Grow:kill_task".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    kind: None,
-                },
-            ],
+            tools: [
+                "Grow:task",
+                "Grow:list_subagent",
+                "Grow:get_subagent_status",
+                "Grow:wait_subagent",
+                "Grow:kill_task",
+            ]
+            .into_iter()
+            .map(|id| ToolConfig::from_id(id.to_string()))
+            .collect(),
         };
         let errors = builder.validate_config(&config);
         assert!(
             errors.is_empty(),
-            "task tool should be accepted with get_task_output and kill_task: {errors:?}"
+            "task dependencies should satisfy requirements: {errors:?}"
         );
-        let ctx = test_session_context(&tmp);
         let toolset = builder
-            .finalize(config, ctx)
-            .expect("finalize should succeed with task + get_task_output + kill_task");
-        let defs = toolset.tool_definitions();
-        let task_def = defs.iter().find(|d| d.function.name == "task");
-        assert!(task_def.is_some(), "task tool should be in definitions");
+            .finalize(config, test_session_context(&tmp))
+            .expect("finalize should succeed with required subagent tools");
+        assert!(
+            toolset
+                .tool_definitions()
+                .iter()
+                .any(|definition| definition.function.name == "task")
+        );
     }
     /// Verify that the task tool description renders correctly with the default
     /// grow-build agent config (all tools present) and that the new examples
@@ -3815,7 +3775,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "Grow:get_task_output".to_string(),
+                    id: "Grow:get_command_output".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3885,8 +3845,11 @@ mod tests {
             tools: vec![
                 tool("Grow:run_terminal_cmd"),
                 tool("Grow:task"),
-                tool("Grow:get_task_output"),
+                tool("Grow:list_subagent"),
+                tool("Grow:get_subagent_status"),
+                tool("Grow:wait_subagent"),
                 tool("Grow:kill_task"),
+                tool("Grow:get_command_output"),
             ],
         };
         let tmp = TempDir::new().unwrap();
@@ -3919,15 +3882,15 @@ mod tests {
             "bash description must resolve params.execute.is_background"
         );
         {
-            let name = "get_task_output";
+            let name = "get_command_output";
             let desc = desc_of(name);
             assert!(
                 desc.contains("is_background"),
                 "`{name}` description must resolve params.execute.is_background"
             );
             assert!(
-                desc.contains("run_in_background"),
-                "`{name}` description must resolve params.task.run_in_background"
+                !desc.contains("run_in_background"),
+                "`{name}` is command-only and must not refer to task parameters"
             );
             let timeout = defs
                 .iter()
@@ -4045,7 +4008,7 @@ mod tests {
         let errors = builder.validate_config(&config);
         assert!(
             errors.is_empty(),
-            "bash with disabled background should not require get_task_output/kill_task: {errors:?}"
+            "bash with disabled background should not require get_command_output/kill_terminal_command: {errors:?}"
         );
     }
     #[test]
@@ -4075,7 +4038,7 @@ mod tests {
             Some("params.enabled_background")
         );
         assert_eq!(error.bad_value, Some(serde_json::json!(true)));
-        assert!(error.message.contains("Grow:get_task_output"));
+        assert!(error.message.contains("Grow:get_command_output"));
         assert!(error.message.contains("Grow:kill_task"));
         assert!(
             error
@@ -4086,7 +4049,7 @@ mod tests {
         );
     }
     #[test]
-    fn task_requirement_error_lists_missing_background_tools() {
+    fn task_requirement_error_lists_missing_subagent_tools() {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
@@ -4106,16 +4069,22 @@ mod tests {
         );
         let error = &errors[0];
         assert_eq!(error.tool, "Grow:task");
-        assert!(error.message.contains("Grow:get_task_output"));
-        assert!(error.message.contains("Grow:kill_task"));
+        for missing in [
+            "Grow:list_subagent",
+            "Grow:get_subagent_status",
+            "Grow:wait_subagent",
+            "Grow:kill_task",
+        ] {
+            assert!(error.message.contains(missing), "{error:?}");
+        }
         assert_eq!(error.field_path.as_deref(), Some("tools"));
     }
     #[test]
-    fn get_task_output_requirement_error_mentions_supported_providers() {
+    fn get_command_output_requirement_error_mentions_supported_providers() {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "Grow:get_task_output".to_string(),
+                id: "Grow:get_command_output".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -4127,12 +4096,12 @@ mod tests {
         assert_eq!(
             errors.len(),
             1,
-            "expected one get_task_output requirement error: {errors:?}"
+            "expected one get_command_output requirement error: {errors:?}"
         );
         let error = &errors[0];
-        assert_eq!(error.tool, "Grow:get_task_output");
+        assert_eq!(error.tool, "Grow:get_command_output");
         assert!(error.message.contains("background-capable bash tool"));
-        assert!(error.message.contains("Grow:task"));
+        assert!(!error.message.contains("Grow:task"));
     }
     #[test]
     fn search_replace_requirement_error_mentions_read_tool() {
@@ -4233,8 +4202,11 @@ mod tests {
                     description_override: None,
                     kind: None,
                 },
+                ToolConfig::from_id("Grow:list_subagent".to_string()),
+                ToolConfig::from_id("Grow:get_subagent_status".to_string()),
+                ToolConfig::from_id("Grow:wait_subagent".to_string()),
                 ToolConfig {
-                    id: "Grow:get_task_output".to_string(),
+                    id: "Grow:get_command_output".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -4499,7 +4471,7 @@ mod tests {
                 ToolConfig::for_tool::<grow_build::ReadFileTool>(),
                 ToolConfig::for_tool::<grow_build::SearchReplaceTool>(),
                 bash_config_with_background(),
-                ToolConfig::for_tool::<grow_build::TaskOutputTool>(),
+                ToolConfig::for_tool::<grow_build::GetCommandOutputTool>(),
                 ToolConfig::for_tool::<grow_build::KillTaskTool>(),
                 ToolConfig::for_tool::<grow_build::GrepTool>(),
                 ToolConfig::for_tool::<grow_build::TodoWriteTool>(),

@@ -1640,7 +1640,7 @@ impl LocalTerminalActor {
                 }
                 // If no waiter actually received the completion — every
                 // oneshot receiver was dropped because the awaiting turn(s)
-                // were cancelled (e.g. Ctrl+C mid `get_task_output`) — the
+                // were cancelled (e.g. Ctrl+C mid `get_command_output`) — the
                 // model never saw the result. Clear `block_waited` so the
                 // TaskCompleted auto-wake in the notification bridge is NOT
                 // suppressed (this runs before step 3 emits the completion
@@ -1743,8 +1743,9 @@ impl LocalTerminalActor {
             .processes
             .iter()
             .filter(|(_, p)| {
-                if p.exit_status.is_none() {
-                    return false; // still running, keep
+                if p.exit_status.is_none() || p.child.id().is_some() {
+                    // A provisional timeout result does not release OS cleanup ownership.
+                    return false;
                 }
                 if !p.bg_status.is_backgrounded() {
                     return true; // foreground, already replied, evict
@@ -1816,11 +1817,9 @@ impl LocalTerminalActor {
                 // Already drained — nothing left to do for this process.
                 return;
             }
-            match process.child.try_wait() {
-                Ok(None) => {
-                    // Process was told to die but is still running — escalate to SIGKILL
-                    send_sigkill_to_group(process);
-                }
+            send_sigkill_to_group(process);
+            match try_wait_and_finish_group(process) {
+                Ok(None) => {}
                 Ok(Some(_)) => {
                     // Process finally exited — drain any remaining output
                     drain_remaining_output(process).await;
@@ -1894,7 +1893,7 @@ impl LocalTerminalActor {
         }
 
         // Batch write to file + flush so the output is visible to readers
-        // (e.g. `read_file` on the output_file from get_task_output).
+        // (e.g. `read_file` on the output_file from get_command_output).
         if !new_bytes.is_empty() {
             process.output_buffer.extend_from_slice(&new_bytes);
             process.total_bytes += new_bytes.len();
@@ -1977,7 +1976,7 @@ impl LocalTerminalActor {
 
         // Check if process exited (both streams at EOF or process exited)
         let process_done = stdout_eof && stderr_eof;
-        match process.child.try_wait() {
+        match try_wait_and_finish_group(process) {
             Ok(Some(status)) => {
                 // Process exited — drain any remaining stdout/stderr that arrived
                 // after the timeout-based reads above. This fixes a race where fast
@@ -2977,10 +2976,73 @@ fn send_sigkill_to_group(process: &mut ProcessState) {
         let _ = process.child.start_kill();
         return;
     }
+    #[cfg(unix)]
+    if let Some(pg) = process.process_group.take() {
+        let _ = pg.kill();
+        // Revoke the scope's weak registration before start_kill/wait can reap.
+        drop(pg);
+    }
+    #[cfg(windows)]
     if let Some(pg) = process.process_group.as_ref() {
         let _ = pg.kill();
     }
     let _ = process.child.start_kill();
+}
+
+/// Observe exit without releasing the Unix group identity, finish the group,
+/// then let Tokio reap its child. No other path may reap first and signal later.
+fn try_wait_and_finish_group(
+    process: &mut ProcessState,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    #[cfg(unix)]
+    if let Some(pid) = process.child.id() {
+        use nix::libc;
+        // SAFETY: waitid initializes siginfo; a zeroed si_pid also represents
+        // WNOHANG's no-event result. WNOWAIT leaves the child owned by Tokio.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        loop {
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => {
+                    // Another owner has already reaped it: the old PGID is unsafe.
+                    process.process_group = None;
+                    return process.child.try_wait();
+                }
+                _ => {
+                    tracing::warn!(%error, pid, "cannot observe child exit; finishing owned group");
+                    send_sigkill_to_group(process);
+                    return process.child.try_wait();
+                }
+            }
+        }
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(None);
+        }
+        send_sigkill_to_group(process);
+        process.process_group = None;
+    }
+    let status = process.child.try_wait()?;
+    #[cfg(unix)]
+    if status.is_some() {
+        process.process_group = None;
+    }
+    #[cfg(windows)]
+    if status.is_some() {
+        send_sigkill_to_group(process);
+    }
+    Ok(status)
 }
 
 /// Drain remaining stdout/stderr into the output buffer and file.
@@ -3048,17 +3110,16 @@ async fn drain_remaining_output(process: &mut ProcessState) -> bool {
 async fn graceful_kill_and_wait(process: &mut ProcessState) {
     send_sigterm_to_group(process);
 
-    // Wait up to SIGTERM_GRACE (1s) for graceful exit
-    if tokio::time::timeout(SIGTERM_GRACE, process.child.wait())
-        .await
-        .is_ok()
-    {
-        drain_remaining_output(process).await;
-        return; // exited cleanly
-    }
+    // Do not reap the leader during grace: its reserved PID keeps the final
+    // group signal safe even if it exits before a TERM-ignoring descendant.
+    tokio::time::sleep(SIGTERM_GRACE).await;
 
-    // Escalate to SIGKILL
+    // Escalate before releasing the group and reaping its leader.
     send_sigkill_to_group(process);
+    #[cfg(unix)]
+    {
+        process.process_group = None;
+    }
 
     // Wait for reap — bounded at 5s. SIGKILL is unconditional so this
     // almost always returns instantly. The cap protects against D-state
@@ -3092,7 +3153,7 @@ async fn kill_and_finalize(process: &mut ProcessState) -> KillOutcome {
     }
 
     // Fast path: process already exited on its own.
-    match process.child.try_wait() {
+    match try_wait_and_finish_group(process) {
         Ok(Some(status)) => {
             drain_remaining_output(process).await;
             finalize_process(process, Some(status)).await;
@@ -4647,6 +4708,75 @@ mod tests {
         assert_eq!(result.signal.as_deref(), Some("timeout"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_cleanup_finishes_term_ignoring_descendants_before_leader_reap() {
+        struct Cleanup(LocalTerminalBackend);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.cancel();
+            }
+        }
+        for mode in ["kill", "timeout", "normal"] {
+            let backend = Cleanup(LocalTerminalBackend::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let pid_file = tmp.path().join("worker.pid");
+            // The descendant is bounded even if an assertion or the owner fails.
+            let ending = if mode == "normal" {
+                "sleep 0.2; exit 0"
+            } else {
+                "wait"
+            };
+            let mut request = make_request(&format!(
+                "trap 'exit 0' TERM; (trap '' TERM; exec /bin/sleep 8) & printf '%s' $! > '{}'; {ending}",
+                pid_file.display(),
+            ));
+            request.working_directory = tmp.path().to_path_buf();
+            request.output_file = tmp.path().join("output");
+            request.tool_call_id = format!("cleanup-{mode}");
+            if mode == "timeout" {
+                request.timeout = Duration::from_millis(800);
+            }
+            if mode == "kill" {
+                let handle = backend.0.run_background(request).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !pid_file.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    backend.0.kill_task(&handle.task_id).await,
+                    KillOutcome::Killed
+                );
+            } else {
+                let result = backend.0.run(request).await.unwrap();
+                if mode == "timeout" {
+                    assert!(result.timed_out);
+                } else {
+                    assert_eq!(result.exit_code, Some(0));
+                }
+            }
+            let pid = std::fs::read_to_string(&pid_file).unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let status = std::process::Command::new("/bin/ps")
+                        .args(["-p", pid.trim(), "-o", "stat="])
+                        .output()
+                        .unwrap();
+                    let state = String::from_utf8_lossy(&status.stdout);
+                    if state.trim().is_empty() || state.trim().starts_with('Z') {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{mode}: same-group descendant survived leader cleanup"));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // CS3: Output drain tests
     // -----------------------------------------------------------------------
@@ -5468,7 +5598,7 @@ mod tests {
 
     /// A blocking wait whose receiver is dropped before the task completes
     /// (the awaiting turn was cancelled, e.g. Ctrl+C mid
-    /// `get_command_or_subagent_output`) must NOT leave `block_waited=true`
+    /// `get_command_output`) must NOT leave `block_waited=true`
     /// imprinted on the task. The model never received the result, so the
     /// completion must still auto-wake it.
     ///
@@ -5492,7 +5622,7 @@ mod tests {
         // 2. Register a blocking wait with a deadline far beyond the task's
         //    runtime, then cancel it (drop the future — and with it the
         //    oneshot receiver) long before the task exits. This mirrors a
-        //    turn abort while `get_task_output` blocks.
+        //    turn abort while `get_command_output` blocks.
         let cancelled = tokio::time::timeout(
             Duration::from_millis(100),
             backend.wait_for_completion(&bg.task_id, Some(Duration::from_secs(120))),

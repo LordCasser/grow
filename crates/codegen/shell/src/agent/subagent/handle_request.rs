@@ -347,6 +347,7 @@ async fn run_shell_child_inner(
     let mut restored_persistence = None;
     let mut restored_spawn = None;
     let mut restored_capability_mode = None;
+    let mut restored_mcp_servers = None;
     if let Some(checkpoint) = &restore {
         let source = match ctx.parent_chat_state.as_ref() {
             Some(parent) => parent.timeline_events().await.and_then(|events| events.into_iter().find(|event| {
@@ -375,6 +376,13 @@ async fn run_shell_child_inner(
                 }
             },
         );
+        let Some(birth_mcp_servers) = &spawn.birth_mcp_servers else {
+            return child_run_output(
+                failure_result(&request, "original child is missing birth MCP membership"),
+                completion_data,
+            );
+        };
+        restored_mcp_servers = Some(birth_mcp_servers.clone());
         let info = SessionInfo {
             id: acp::SessionId::new(spawn.child_session_id.clone()),
             cwd: spawn.child_cwd.clone(),
@@ -406,6 +414,45 @@ async fn run_shell_child_inner(
                         completion_data,
                     );
                 }
+                let selection = match session::persistence::model_selection_at_frontier(
+                    loaded.timeline.events(),
+                    runtime
+                        .checkpoint
+                        .as_ref()
+                        .expect("validated suspended checkpoint")
+                        .frontier,
+                ) {
+                    Ok(Some(selection)) => selection,
+                    Ok(None) => {
+                        return child_run_output(
+                            failure_result(
+                                &request,
+                                "original child model route baseline is missing",
+                            ),
+                            completion_data,
+                        );
+                    }
+                    Err(error) => {
+                        return child_run_output(
+                            failure_result(&request, &error.to_string()),
+                            completion_data,
+                        );
+                    }
+                };
+                let mut model_id = selection.0.clone();
+                if !request.owner.is_workflow()
+                    && let Some(selected) = ctx.models_manager.select_persisted_transport_model(
+                        &selection.0,
+                        &selection.3,
+                        selection.1,
+                    )
+                {
+                    model_id = selected;
+                }
+                request.runtime_overrides.model = Some(model_id.0.to_string());
+                request.runtime_overrides.model_transport_key = Some(selection.3);
+                request.runtime_overrides.reasoning_effort =
+                    Some(selection.1.map(|effort| effort.to_string()));
                 restored_persistence = Some((loaded, persistence));
             }
             Err(error) => {
@@ -419,10 +466,6 @@ async fn run_shell_child_inner(
             }
         }
         request.cwd = Some(spawn.child_cwd.clone());
-        request.runtime_overrides.model = Some(spawn.effective_model_id.clone());
-        request.runtime_overrides.model_transport_key = Some(spawn.model_transport_key.clone());
-        request.runtime_overrides.reasoning_effort =
-            Some(spawn.reasoning_effort.map(|effort| effort.to_string()));
         restored_spawn = Some(source);
     }
 
@@ -438,6 +481,16 @@ async fn run_shell_child_inner(
     if let Err(message) = validate_goal_context(&request) {
         return child_run_output(failure_result(&request, &message), completion_data);
     }
+    if !request.owner.is_workflow()
+        && restored_persistence
+            .as_ref()
+            .is_some_and(|(loaded, _)| loaded.control_snapshot.is_none())
+    {
+        return child_run_output(
+            failure_result(&request, "Original child Agent identity is missing"),
+            completion_data,
+        );
+    }
     let selected_agent = restored_persistence
         .as_ref()
         .and_then(|(loaded, _)| {
@@ -448,7 +501,10 @@ async fn run_shell_child_inner(
         })
         .unwrap_or(&request.subagent_type)
         .to_owned();
-    let type_validation = if request.owner.is_workflow() {
+    // Exact restore continues the admitted child's lifecycle. Its persisted
+    // active Agent is checked below; it is not a new delegation of the birth
+    // profile, which may have been replaced by an explicit Agent control.
+    let type_validation = if request.owner.is_workflow() || restored_persistence.is_some() {
         SubagentValidateTypeOutcome::Ok
     } else {
         gate_subagent_type(&request.subagent_type, &ctx)
@@ -473,6 +529,18 @@ async fn run_shell_child_inner(
         return child_run_output(failure_result(&request, &msg), completion_data);
     };
     if !request.owner.is_workflow() {
+        if restored_persistence.is_some() && !definition.matches_selector_identity(&selected_agent)
+        {
+            return child_run_output(
+                failure_result(
+                    &request,
+                    &format!(
+                        "Original child Agent `{selected_agent}` is unavailable; a different plugin cannot replace it."
+                    ),
+                ),
+                completion_data,
+            );
+        }
         resolve_subagent_toolset(&selected_agent, &ctx, &mut definition);
     }
     let mut effective_runtime = crate::agent::subagent::resolution::resolve_runtime_config(
@@ -891,9 +959,35 @@ async fn run_shell_child_inner(
     let effective_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd)
         .to_string_lossy()
         .into_owned();
-    let child_session_info = SessionInfo {
-        id: child_session_id.clone(),
-        cwd: effective_cwd,
+    let child_session_info = if let Some((loaded, _)) = &restored_persistence {
+        match session::storage::same_workspace_directory(
+            Path::new(&loaded.summary.info.cwd),
+            Path::new(&effective_cwd),
+        )
+        .await
+        {
+            Ok(true) => loaded.summary.info.clone(),
+            Ok(false) => {
+                return child_run_output(
+                    failure_result(&request, "original child workspace directory changed"),
+                    completion_data,
+                );
+            }
+            Err(error) => {
+                return child_run_output(
+                    failure_result(
+                        &request,
+                        &format!("original child workspace is unavailable: {error}"),
+                    ),
+                    completion_data,
+                );
+            }
+        }
+    } else {
+        SessionInfo {
+            id: child_session_id.clone(),
+            cwd: effective_cwd,
+        }
     };
     let child_session_dir = session::persistence::session_dir(&child_session_info);
     let InitialContext {
@@ -902,6 +996,7 @@ async fn run_shell_child_inner(
         prefix_len: mut inherited_prefix_len,
         conversation: mut forked_conversation,
         prompt_blobs: inherited_prompt_blobs,
+        presentation: inherited_presentation,
         verbatim_fork: context_verbatim_fork,
     } = if restore.is_some() {
         InitialContext {
@@ -910,6 +1005,7 @@ async fn run_shell_child_inner(
             prefix_len: Some(0),
             conversation: Vec::new(),
             prompt_blobs: Default::default(),
+            presentation: Default::default(),
             verbatim_fork: false,
         }
     } else {
@@ -955,6 +1051,54 @@ async fn run_shell_child_inner(
         )
     {
         return child_run_output(failure_result(&request, &message), completion_data);
+    }
+    if let Some((loaded, persistence)) = restored_persistence.as_mut() {
+        let selection = match session::persistence::latest_model_selection(loaded.timeline.events())
+        {
+            Ok(Some(selection)) => selection,
+            Ok(None) => {
+                return child_run_output(
+                    failure_result(&request, "original child model route baseline is missing"),
+                    completion_data,
+                );
+            }
+            Err(error) => {
+                return child_run_output(
+                    failure_result(&request, &error.to_string()),
+                    completion_data,
+                );
+            }
+        };
+        if selection.0 != effective_model_id {
+            let event = match loaded
+                .timeline
+                .record(session::persistence::model_change_event(
+                    &selection.0,
+                    &effective_model_id,
+                    selection.1,
+                    effective_sampling_config.reasoning_effort,
+                    &selection.2,
+                    &effective_sampling_config.model,
+                    &selection.3,
+                    &model_transport_key,
+                    "cold_load_catalog_rebind",
+                    None,
+                )) {
+                Ok(event) => event,
+                Err(error) => {
+                    return child_run_output(
+                        failure_result(&request, &error.to_string()),
+                        completion_data,
+                    );
+                }
+            };
+            if let Err(error) = persistence.append_timeline_event_durably(event).await {
+                return child_run_output(
+                    failure_result(&request, &error.to_string()),
+                    completion_data,
+                );
+            }
+        }
     }
     let task_prompt_text = prompt.clone();
     let inherited_prefix_len = inherited_prefix_len.unwrap_or(0);
@@ -1028,6 +1172,24 @@ async fn run_shell_child_inner(
             completion_data,
         );
     };
+    let mut parent_mcp_pool =
+        resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
+    if let (Some(pool), Some(birth_members)) =
+        (parent_mcp_pool.as_mut(), restored_mcp_servers.as_ref())
+    {
+        pool.restrict_to_servers(birth_members.iter().cloned());
+    }
+    if let Some(pool) = parent_mcp_pool.as_mut() {
+        freeze_child_mcp_grant(pool, ctx.parent_capability_ceiling.as_ref());
+    }
+    let birth_mcp_servers = parent_mcp_pool
+        .as_ref()
+        .map(|pool| {
+            pool.server_names()
+                .map(str::to_owned)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
     // Once the Spawn write is issued, a lost ACK is not evidence that the
     // child was never admitted. Keep the original identity pending.
     completion_data.spawn_admitted = true;
@@ -1053,6 +1215,7 @@ async fn run_shell_child_inner(
                     resumed_from: request.resume_from.clone(),
                     parent_prompt_id: request.parent_prompt_id.clone(),
                     capability_mode: capability_mode.clone(),
+                    birth_mcp_servers: Some(birth_mcp_servers),
                     permission_mode: permission_mode.clone(),
                     effective_permission_mode: effective_permission_mode.clone(),
                     workflow_run_id: workflow_run_id.clone(),
@@ -1181,6 +1344,10 @@ async fn run_shell_child_inner(
         return child_run_output(result, completion_data);
     }
 
+    let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
+    // The frozen cut is needed only for bootstrap and worktree planning, not
+    // for the lifetime of the derived child execution.
+    drop(resume_source);
     let mut restored_control = None;
     let mut restored_signals = None;
     let mut restored_workflow_runs = Vec::new();
@@ -1213,6 +1380,7 @@ async fn run_shell_child_inner(
                 },
                 forked_conversation.clone(),
                 inherited_prompt_blobs,
+                inherited_presentation,
             )
             .await
             {
@@ -1250,7 +1418,6 @@ async fn run_shell_child_inner(
                 }
             }
         };
-    let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
     let cwd_outside_parent = match (
         dunce::canonicalize(&child_cwd),
         dunce::canonicalize(&ctx.parent_cwd),
@@ -1403,24 +1570,6 @@ async fn run_shell_child_inner(
         );
     }
     let agent_mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer> = Vec::new();
-    let mut parent_mcp_pool =
-        resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
-    if let (Some(pool), Some(ceiling)) = (
-        parent_mcp_pool.as_mut(),
-        ctx.parent_capability_ceiling.as_ref(),
-    ) {
-        let allowed = pool
-            .eligibility()
-            .current_clients()
-            .into_iter()
-            .filter_map(|(server, _, client_id)| {
-                ceiling
-                    .permits_mcp_binding(&server, client_id)
-                    .then_some(server)
-            })
-            .collect::<Vec<_>>();
-        pool.restrict_to_servers(allowed);
-    }
     let mcp_inherited_count = parent_mcp_pool
         .as_ref()
         .map(|p| p.len() as u32)
@@ -1504,9 +1653,16 @@ async fn run_shell_child_inner(
         None,
         persistence,
         None,
-        crate::session::TimelineBootstrap::Existing {
-            timeline: Box::new(child_timeline),
-            history: child_history,
+        if restore.is_some() {
+            crate::session::TimelineBootstrap::Existing {
+                timeline: Box::new(child_timeline),
+                history: child_history,
+            }
+        } else {
+            crate::session::TimelineBootstrap::Seeded {
+                timeline: Box::new(child_timeline),
+                history: child_history,
+            }
         },
         None,
         None,
@@ -1696,7 +1852,10 @@ async fn run_shell_child_inner(
         }
         return child_run_output(result, completion_data);
     }
-    let progress_snapshot = std::sync::Arc::new(std::sync::RwLock::new(None));
+    let initial_progress = child_handle.signals_handle.snapshot().await;
+    let progress_snapshot = std::sync::Arc::new(std::sync::RwLock::new(
+        initial_progress.as_ref().map(progress_from_signals),
+    ));
     let promoted = reporter
         .started(StartedChild {
             child_session_id: child_session_id.0.to_string(),
@@ -1784,6 +1943,18 @@ async fn run_shell_child_inner(
         );
     }
     completion_data.spawned_notification_emitted = true;
+    let progress_cancellation = cancel_token.child_token();
+    let _progress_lifetime = progress_cancellation.clone().drop_guard();
+    spawn_progress_publisher(
+        child_handle.signals_handle.clone(),
+        progress_snapshot,
+        gateway.clone(),
+        ctx.parent_session_id.clone(),
+        request.id.clone(),
+        child_session_id.0.to_string(),
+        start,
+        progress_cancellation,
+    );
     let mut launch_error = None;
     // SubagentSpawned creates the Pager child view. Publish the child's
     // authoritative control snapshot before admitting its first prompt so
@@ -1970,22 +2141,6 @@ async fn run_shell_child_inner(
         }
         cancel_token.cancelled().await;
         wait_for_cancel_without_prompt = true;
-    }
-    if !restoring_open_turn
-        && launch_error.is_none()
-        && !wait_for_cancel_without_prompt
-        && !cancel_token.is_cancelled()
-    {
-        spawn_progress_publisher(
-            child_handle.signals_handle.clone(),
-            progress_snapshot,
-            gateway.clone(),
-            ctx.parent_session_id.clone(),
-            request.id.clone(),
-            child_session_id.0.to_string(),
-            start,
-            cancel_token.clone(),
-        );
     }
     if !restoring_open_turn
         && launch_error.is_none()

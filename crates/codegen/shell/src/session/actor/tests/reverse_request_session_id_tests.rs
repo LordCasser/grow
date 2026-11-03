@@ -181,6 +181,7 @@ async fn plan_approval_reverse_request_requires_durable_open_and_resolution() {
                         .plan_submission_id
                         .expect("submitted Plan has an identity")
                 };
+                let expected = actor.behavior.lock().snapshot();
 
                 let reverse_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let observed_calls = reverse_calls.clone();
@@ -216,6 +217,7 @@ async fn plan_approval_reverse_request_requires_durable_open_and_resolution() {
                         &agent_client_protocol::schema::v1::ToolCallId::new(
                             std::sync::Arc::<str>::from("plan-approval-boundary"),
                         ),
+                        &expected,
                         plan.into(),
                     ),
                 )
@@ -274,6 +276,7 @@ async fn plan_approval_transport_and_malformed_responses_close_the_exact_attempt
                 let (actor, mut gateway_rx, committed) = question_worker_actor(None).await;
                 let plan = "# Plan response fault\n\n1. Preserve the request boundary.\n";
                 submit_plan_candidate(&actor, plan);
+                let expected = actor.behavior.lock().snapshot();
                 let request_actor = actor.clone();
                 let request =
                     tokio::task::spawn_local(async move {
@@ -282,6 +285,7 @@ async fn plan_approval_transport_and_malformed_responses_close_the_exact_attempt
                                 &agent_client_protocol::schema::v1::ToolCallId::new(
                                     std::sync::Arc::<str>::from("plan-response-fault"),
                                 ),
+                                &expected,
                                 plan.into(),
                             )
                             .await
@@ -349,6 +353,7 @@ async fn suspended_plan_approval_rebinds_with_a_fresh_attempt() {
             let (actor, mut gateway_rx, committed) = question_worker_actor(None).await;
             let plan = "# Plan resumed\n\n1. Re-open approval after reconnect.\n";
             submit_plan_candidate(&actor, plan);
+            let expected = actor.behavior.lock().snapshot();
             let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
             let request_actor = actor.clone();
             let parked_request = tokio::task::spawn_local(async move {
@@ -357,6 +362,7 @@ async fn suspended_plan_approval_rebinds_with_a_fresh_attempt() {
                         &agent_client_protocol::schema::v1::ToolCallId::new(
                             std::sync::Arc::<str>::from("plan-rebind"),
                         ),
+                        &expected,
                         plan.into(),
                     )
                     .await
@@ -407,6 +413,7 @@ async fn suspended_plan_approval_rebinds_with_a_fresh_attempt() {
             rebound.behavior = actor.behavior.clone();
             rebound.pending_interactions = actor.pending_interactions.clone();
             let rebound = std::sync::Arc::new(rebound);
+            let rebound_expected = rebound.behavior.lock().snapshot();
             let rebound_actor = rebound.clone();
             let resumed_request = tokio::task::spawn_local(async move {
                 rebound_actor
@@ -414,6 +421,7 @@ async fn suspended_plan_approval_rebinds_with_a_fresh_attempt() {
                         &agent_client_protocol::schema::v1::ToolCallId::new(
                             std::sync::Arc::<str>::from("plan-rebind"),
                         ),
+                        &rebound_expected,
                         "# Plan resumed\n\n1. Re-open approval after reconnect.\n".into(),
                     )
                     .await

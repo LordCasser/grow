@@ -13,7 +13,7 @@ pub mod use_tool;
 pub use grow_build::bash::{BashError, BashToolInput};
 pub use grow_build::{
     AskUserQuestionTool, BashTool, GrepTool, KillTaskTool, ListDirTool, PlanControlTool,
-    ReadFileTool, SearchReplaceTool, TaskOutputTool, TaskTool, TodoWriteTool, WebFetchTool,
+    ReadFileTool, SearchReplaceTool, TaskTool, TodoWriteTool, WebFetchTool,
 };
 pub use memory::{MemoryGetImpl, MemorySearchImpl};
 pub use search_tool::SearchTool;

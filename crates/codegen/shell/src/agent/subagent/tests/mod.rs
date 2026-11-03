@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 mod delegation_identity_tests;
+mod observation_tests;
 use super::*;
 use super::handle_request::{
     canonical_total_tokens, child_task_prompt_identity, record_subagent_usage,
@@ -1193,6 +1194,7 @@ fn recovery_spawn(subagent_id: &str, child_session_id: &str) -> chat_state::Suba
         parent_prompt_id: None,
         goal_definition_revision: None,
         capability_mode: None,
+        birth_mcp_servers: Some(Default::default()),
         permission_mode: None,
         effective_permission_mode: None,
         workflow_run_id: None,
@@ -1635,7 +1637,14 @@ async fn nested_planning_result_and_summary_follow_direct_parent_edges() {
                     summary.session_kind = Some("subagent".into());
                 }
                 storage
-                    .init_session_with_summary(info, summary, Vec::new(), Default::default(), Vec::new())
+                    .init_session_with_summary(
+                        info,
+                        summary,
+                        Vec::new(),
+                        Default::default(),
+                        Default::default(),
+                        Vec::new(),
+                    )
                     .await
                     .unwrap();
             }

@@ -995,8 +995,13 @@ impl ChatStateHandle {
     }
 
     pub async fn timeline_events(&self) -> Option<Vec<crate::TimelineEvent>> {
+        self.timeline_events_from(0).await
+    }
+
+    /// Capture a canonical suffix without cloning the already-reconciled prefix.
+    pub async fn timeline_events_from(&self, from_seq: u64) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetTimelineEvents", |reply| {
-            ChatStateCommand::GetTimelineEvents { reply }
+            ChatStateCommand::GetTimelineEvents { from_seq, reply }
         })
         .await
     }

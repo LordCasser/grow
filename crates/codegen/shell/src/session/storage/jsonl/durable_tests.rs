@@ -309,6 +309,7 @@ async fn child_finalization_canonical_boundaries_retry_after_file_and_directory_
                 resumed_from: None,
                 parent_prompt_id: Some("parent-prompt".into()),
                 capability_mode: None,
+                birth_mcp_servers: Some(Default::default()),
                 permission_mode: None,
                 effective_permission_mode: None,
                 workflow_run_id: None,
@@ -1447,6 +1448,7 @@ async fn incoming_inquiry_notices_are_bound_to_typed_source_facts() {
     let incoming = |source_peer_id: &str, source_session_id: &str| InquiryEvent::Incoming {
         inquiry_id: "shared-inquiry".into(),
         audit: IncomingInquiryAudit {
+            answer_context: None,
             direction: InquiryDirection::ParentToChild,
             source_peer_id: source_peer_id.into(),
             source_session_id: source_session_id.into(),

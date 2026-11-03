@@ -1,0 +1,3 @@
+with_default包围同步request_span和post builder，测试路径无async dispatch；Capture同步Mutex<Vec> writer。当前没有证据证明其他测试global subscriber/callsite状态污染。独立review建议仅补失败日志，拒绝无依据的子进程隔离。当前执行的全259平行+32线程各一遍均通过；scratch std4threads同一callsite在recording/NoSubscriber切换100k无丢失，未覆盖原fmt及全部test peers，不能排除历史偶发或当作成功率证明。
+
+本次结论是关闭没有当前reproducer的调查候选，不把历史观察改写为已修复根因；复现若再次出现，新增完整capture可区分缺event、缺span或字段问题。原历史记录与当前验证保存在本change。

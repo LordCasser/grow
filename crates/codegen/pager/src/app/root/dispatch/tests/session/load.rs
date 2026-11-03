@@ -2229,3 +2229,122 @@ fn history_picker_without_query_focuses_search_without_empty_request() {
         Some(ActiveModal::SessionPicker { state, .. }) if state.query().is_empty() && state.search_active)
     );
 }
+
+#[test]
+fn replay_keeps_dashboard_and_peer_navigation_without_admitting_input() {
+    use crate::app::root::InputOutcome;
+    use crate::key;
+    use crossterm::event::{Event, KeyEvent};
+    for attached in [false, true] {
+        for (key, expected) in [
+            (key!('\\', CONTROL), Action::OpenDashboard),
+            (key!('[', CONTROL), Action::DashboardOverlayPrev),
+            (key!(']', CONTROL), Action::DashboardOverlayNext),
+        ] {
+            let mut app = test_app();
+            insert_placeholder_agent(&mut app, AgentId(0));
+            app.agents.get_mut(&AgentId(0)).unwrap().display_name = Some("Source session".into());
+            app.next_agent_id = 1;
+            app.active_view = ActiveView::Agent(AgentId(0));
+            dispatch(Action::LoadSession("loading-peer".into(), None), &mut app);
+            let id = AgentId(1);
+            if attached {
+                dispatch_open_dashboard(&mut app);
+                dispatch_dashboard_attach(
+                    &mut app,
+                    crate::views::dashboard::DashboardRowId::TopLevel(id),
+                );
+            }
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .prompt
+                .set_text("retained draft");
+            let outcome = app.handle_input(&Event::Key(KeyEvent::new(key.code, key.modifiers)));
+            let InputOutcome::Action(action) = outcome else {
+                panic!("loading navigation was swallowed: {outcome:?}")
+            };
+            if matches!(expected, Action::OpenDashboard) {
+                assert!(matches!(
+                    action,
+                    Action::OpenDashboard | Action::DashboardOverlayExit
+                ));
+            } else {
+                assert_eq!(
+                    std::mem::discriminant(&action),
+                    std::mem::discriminant(&expected)
+                );
+            }
+            dispatch(action, &mut app);
+            assert_ne!(
+                app.active_view,
+                ActiveView::Agent(id),
+                "attached={attached}, key={key:?}, agents={:?}, dashboard={:?}",
+                app.agents.keys(),
+                app.dashboard.as_ref().map(|d| (&d.filter, &d.selected))
+            );
+            assert!(app.agents[&id].session.loading_replay);
+            assert_eq!(app.agents[&id].prompt.text(), "retained draft");
+            assert!(app.agents[&id].session.pending_prompts.is_empty());
+        }
+    }
+}
+
+#[test]
+fn background_load_failure_retires_only_its_page_without_returning_to_old_origin() {
+    let mut app = test_app();
+    insert_placeholder_agent(&mut app, AgentId(0));
+    app.next_agent_id = 1;
+    app.active_view = ActiveView::Agent(AgentId(0));
+    dispatch(
+        Action::LoadSession("loading-background".into(), None),
+        &mut app,
+    );
+    let loading = AgentId(1);
+    insert_placeholder_agent(&mut app, AgentId(2));
+    switch_to_agent(&mut app, AgentId(2), SwitchCause::Picker);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: loading,
+            session_id: acp::SessionId::new("loading-background"),
+            error: "failed".into(),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(2)));
+    assert!(!app.agents.contains_key(&loading));
+    assert!(app.agents.contains_key(&AgentId(0)));
+}
+
+#[test]
+fn replay_attached_frame_navigation_keeps_loading_owner() {
+    use crate::app::root::InputOutcome;
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+    let mut app = test_app_with_agent();
+    dispatch(Action::LoadSession("loading-frame".into(), None), &mut app);
+    let id = AgentId(1);
+    dispatch_open_dashboard(&mut app);
+    dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .overlay_close_hit
+        .set(Some(Rect::new(10, 1, 8, 1)));
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 12,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let InputOutcome::Action(action @ Action::DashboardOverlayExit) = app.handle_input(&event)
+    else {
+        panic!("loading frame return was swallowed")
+    };
+    dispatch(action, &mut app);
+    assert_eq!(app.active_view, ActiveView::AgentDashboard);
+    assert!(app.agents[&id].session.loading_replay);
+}

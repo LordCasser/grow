@@ -77,8 +77,13 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     output_read_permits: Arc<tokio::sync::Semaphore>,
 }
 
-type OutputReadFuture =
-    TaggedFuture<SendBoxFuture<Result<Option<Arc<str>>, super::types::SubagentObservationError>>>;
+type OutputReadFuture = TaggedFuture<
+    futures::future::CatchUnwind<
+        std::panic::AssertUnwindSafe<
+            SendBoxFuture<Result<Option<Arc<str>>, super::types::SubagentObservationError>>,
+        >,
+    >,
+>;
 
 struct SuspendedChild<D> {
     request: SubagentRequest,
@@ -290,6 +295,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     let _ = respond_to.send(outcome);
                 }
                 Some((key, output)) = self.output_reads.next(), if !self.output_reads.is_empty() => {
+                    let output = match output {
+                        Ok(output) => output,
+                        Err(_) => {
+                            tracing::error!(
+                                subagent_id = key.split_once('\0').map_or(key.as_str(), |(id, _)| id),
+                                "persisted subagent output reader panicked"
+                            );
+                            Err(super::types::SubagentObservationError::Unavailable)
+                        }
+                    };
                     self.finish_output_read(&key, output);
                 }
                 command = self.commands.recv(), if commands_open => {
@@ -422,7 +437,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     _ => self.reject_interaction(
                         request,
                         "no_direct_route",
-                        "No active direct parent-child route for this operation",
+                        "No active direct parent-child route; task completion or cleanup was not confirmed",
                     ),
                 }
             }
@@ -529,6 +544,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     || self.active.contains_key(&id)
                     || self.suspended.contains_key(&id)
                     || self.completed.contains_key(&id)
+                    || self.finalizations.contains_key(&id)
+                    || self.retiring.contains_key(&id)
                 {
                     let _ = command.result_tx.send(SubagentResult {
                         success: false,
@@ -539,12 +556,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     });
                     return;
                 }
-                if self.pending.len() + self.active.len() + self.finalizations.len()
-                    >= MAX_FINALIZATIONS
-                {
+                // Reclaim owners whose existing retirement condition is already
+                // satisfied before deciding whether the shared bound is full.
+                self.sweep_retiring();
+                let capacity_used = self
+                    .pending
+                    .keys()
+                    .chain(self.active.keys())
+                    .chain(self.finalizations.keys())
+                    .chain(self.retiring.keys())
+                    .collect::<HashSet<_>>()
+                    .len();
+                if capacity_used >= MAX_FINALIZATIONS {
                     let _ = command.result_tx.send(SubagentResult {
                         not_dispatched: true,
-                        error: Some("subagent recovery capacity exhausted; resolve pending finalizations before spawning".into()),
+                        error: Some("subagent recovery capacity exhausted; wait for execution, finalization, or retirement owners to finish".into()),
                         subagent_id: request.id.clone(), child_session_id: request.id.clone(),
                         ..Default::default()
                     });
@@ -709,6 +735,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             SubagentEvent::ListRunning(request) => {
                 self.handle_list_running(request.parent_session_id, request.respond_to);
+            }
+            SubagentEvent::ListSubagents(request) => {
+                self.handle_list_subagents(
+                    request.parent_session_id,
+                    request.scope,
+                    request.respond_to,
+                );
+            }
+            SubagentEvent::GetStatuses(request) => {
+                self.handle_get_statuses(
+                    request.subagent_ids,
+                    request.parent_session_id,
+                    request.respond_to,
+                );
             }
             SubagentEvent::TeardownSession { parent_session_id } => {
                 self.spawn_blocked_sessions.remove(&parent_session_id);
@@ -1822,7 +1862,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         output.result.finalization_pending = false;
-        let Some(pending) = self.finalizations.remove(id) else {
+        let Some(mut pending) = self.finalizations.remove(id) else {
             return;
         };
         let Some(child) = self.completed.get_mut(id) else {
@@ -1831,6 +1871,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         child.result = output.result.clone();
         child.finalization_error = None;
         child.persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
+        let snapshot = completed_snapshot(child, Some(output.result.output.as_ref()), false);
+        let mut waiter_delivered = false;
+        for waiter in self.waiters.remove(id).unwrap_or_default() {
+            waiter_delivered |= waiter.respond_to.send(Ok(Some(snapshot.clone()))).is_ok();
+        }
+        pending.disposition.waiter_delivered |= waiter_delivered;
+        if waiter_delivered {
+            pending.disposition.should_surface = false;
+        }
         if child.persisted_output_ref.is_some() {
             child.result.output = Arc::from("");
         }

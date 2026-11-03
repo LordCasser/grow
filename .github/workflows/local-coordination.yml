@@ -94,6 +94,15 @@ jobs:
       - if: ${{ !inputs.process_only }}
         run: cargo test --locked -p pager-minimal --lib coordination -- --nocapture
       - if: ${{ !inputs.process_only }}
+        name: Run subagent observation and cancellation boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p tools --lib observation_boundary_tests -- --test-threads=1
+          cargo test --locked -p tools --lib implementations::grow_build::kill_task -- --test-threads=1
+          cargo test --locked -p shell --lib subagent_observation_boundary_tests -- --test-threads=1
+          cargo test --locked -p shell --lib project_discovery_startup_tests -- --test-threads=1
+      - if: ${{ !inputs.process_only }}
         name: Run cross-platform production transcript export tests
         shell: bash
         run: |

@@ -115,6 +115,15 @@ const RECAP_BUDGET_HEADROOM_TOKENS: u64 = 4_000;
 ///
 /// `context_window` MUST be the window of the model the recap is actually sent to
 /// (today the session model).
+/// Frozen admission ceiling shared by original and recovered representations.
+pub(crate) fn recap_input_budget(context_window: u64) -> u64 {
+    (context_window
+        .min(RECAP_CONTEXT_WINDOW_CAP)
+        .saturating_mul(RECAP_BUDGET_THRESHOLD_PERCENT)
+        / 100)
+        .saturating_sub(RECAP_BUDGET_HEADROOM_TOKENS)
+}
+
 pub(crate) fn budget_recap_items(
     conversation: Vec<ConversationItem>,
     tag: &str,
@@ -122,8 +131,7 @@ pub(crate) fn budget_recap_items(
     context_window: u64,
 ) -> Vec<ConversationItem> {
     let effective_window = context_window.min(RECAP_CONTEXT_WINDOW_CAP);
-    let prompt_budget = (effective_window.saturating_mul(RECAP_BUDGET_THRESHOLD_PERCENT) / 100)
-        .saturating_sub(RECAP_BUDGET_HEADROOM_TOKENS);
+    let prompt_budget = recap_input_budget(context_window);
 
     let instruction = ConversationItem::user(recap_instruction(tag));
     let snapshot_budget = prompt_budget.saturating_sub(estimate_item_tokens(&instruction));

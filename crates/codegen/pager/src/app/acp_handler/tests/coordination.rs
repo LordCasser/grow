@@ -101,6 +101,7 @@ fn leader_resync_of_child_reloads_root_and_failure_restores_old_view() {
 
 fn notice(id: &str, subject: &str, message: &str, tone: UiNoticeTone) -> GrowSessionUpdate {
     let audit = shell::coordination::IncomingInquiryAudit {
+        answer_context: None,
         direction: shell::coordination::InquiryDirection::Peer,
         source_peer_id: "peer-process".into(),
         source_session_id: "peer".into(),

@@ -659,3 +659,102 @@ mod interjection_broadcast_tests {
             .await;
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn long_utf8_steer_survives_admission_consumption_request_and_cold_replay() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            begin_test_active_causal_turn(&actor).await;
+            let middle = "MIDDLE_GUIDANCE_KEEP_THIS";
+            let tail = "TAIL_GUIDANCE_KEEP_THIS";
+            let text = format!("{}\n{middle}\n{}\n{tail}", "界".repeat(9_000), "前缀后继续");
+            assert!(text.len() > 25_000);
+            actor
+                .admit_human_steer(
+                    "test-active-turn",
+                    text.clone(),
+                    Vec::new(),
+                    Some("long-utf8-steer".into()),
+                )
+                .await
+                .expect("steer should be admitted");
+            let submitted = actor.chat_state_handle.timeline_events().await.unwrap();
+            let input_id = submitted
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
+                        input_id,
+                        intent: chat_state::InputIntent::Steer,
+                        ..
+                    }) => Some(input_id.clone()),
+                    _ => None,
+                })
+                .expect("steer admission has a durable input identity");
+
+            assert!(actor.drain_pending_interjections().await);
+            assert!(actor.pending_interjections.is_empty());
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let consumed: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                        input_ids,
+                        item,
+                        display_echo,
+                        ..
+                    }) if input_ids.contains(&input_id) => Some((item, display_echo)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(consumed.len(), 1, "admitted identity is consumed once");
+            let (item, display_echo) = consumed[0];
+            let model_text = item.text_content();
+            assert!(model_text.contains(middle) && model_text.contains(tail));
+            assert!(model_text.len() > 25_000);
+            let user = match item {
+                sampling_types::ConversationItem::User(user) => user,
+                _ => panic!("consumed steer must be a user item"),
+            };
+            assert_eq!(
+                user.permission_evidence.as_ref().map(|evidence| evidence.text()),
+                Some(text.as_str()),
+                "permission evidence retains the complete authored text"
+            );
+            let echo = display_echo.as_ref().expect("steer records its display echo");
+            let expected_echo = super::super::user_display_echo(
+                echo.message_id.clone(),
+                echo.prompt_index,
+                &[acp::ContentBlock::Text(acp::TextContent::new(text.clone()))],
+            );
+            assert_eq!(echo.blake3, expected_echo.blake3);
+
+            let request = actor
+                .chat_state_handle
+                .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
+                .await
+                .expect("build provider request from consumed steer");
+            assert!(request.items.iter().any(|item| {
+                item.text_content().contains(middle) && item.text_content().contains(tail)
+            }));
+            let replay = chat_state::Timeline::from_events(events)
+                .expect("cold Timeline replay retains consumed steer");
+            let replayed = replay
+                .surface()
+                .iter()
+                .find(|item| item.text_content().contains(middle))
+                .expect("replayed surface contains the model-visible steer");
+            assert!(replayed.text_content().contains(tail));
+            let consumed_count = replay
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed { input_ids, .. })
+                        if input_ids.contains(&input_id)
+                ))
+                .count();
+            assert_eq!(consumed_count, 1);
+        })
+        .await;
+}

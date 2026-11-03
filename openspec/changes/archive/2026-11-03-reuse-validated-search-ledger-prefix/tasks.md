@@ -1,0 +1,6 @@
+- [x] 架构核对、当前decode/fold/extract基线和owner决策
+- [x] 提取同一range scanner与可消费read projection
+- [x] worker单entry复用与成功后发布
+- [x] 实体/前缀/失败/正文差分及命中成本、保留量测量
+- [x] 相关Shell验证和独立对抗性review
+- [x] 严格校验并归档

@@ -482,7 +482,7 @@ impl SessionActor {
             };
             // Sanitizer drops `[Image #N: <path>]` → `[Image #N]` before the
             // text reaches the model, covering legacy-client raw text AND the
-            // queue-interject harvest. Wrapping and truncation stay in the
+            // queue-interject harvest. Lossless wrapping stays in the
             // shared crate (`format_interjection`).
             let sanitized =
                 crate::session::placeholder_images::strip_paths_from_image_placeholders(text);
@@ -675,15 +675,34 @@ impl SessionActor {
     /// Both sides hold `state`: an accepted steer is queued before this fence
     /// and injected into a successor step, or observes the closed gate and is
     /// rejected. It cannot be acknowledged behind the final drain.
-    pub(super) async fn close_steering_and_drain(&self, prompt_id: &str) -> bool {
+    pub(super) async fn close_steering_and_drain(
+        &self,
+        prompt_id: &str,
+    ) -> Result<bool, acp::Error> {
+        self.reconcile_coordination_answers()
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "consultation synchronization",
+                    error,
+                )
+            })?;
         let control_gate = self.step_control_gate.lock().await;
         let entries = {
             let mut state = self.state.lock().await;
+            if !state.can_continue_regular_turn(prompt_id)
+                || self.behavior.lock().behavior() != *self.turn_behavior.lock()
+            {
+                return Ok(false);
+            }
             let Some(task) = state.foreground.regular_mut() else {
-                return false;
+                return Ok(false);
             };
             if task.prompt_id != prompt_id {
-                return false;
+                return Ok(false);
+            }
+            if self.goal_provider_admission_closed() {
+                return Ok(false);
             }
             task.steering_open = false;
             if self.events.has_active_tool() {
@@ -692,27 +711,42 @@ impl SessionActor {
                 self.pending_interjections.drain_all()
             }
         };
+        // Candidate IDs are fixed while receipt admission is excluded by the
+        // same control gate. Later receipts may join an admitted successor, but
+        // cannot retroactively justify this final-response decision.
+        let selected = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .ok_or_else(|| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "notification query",
+                    "Timeline actor unavailable",
+                )
+            })?
+            .into_iter()
+            .filter(|item| {
+                matches!(
+                    item.source,
+                    chat_state::NotificationSource::ParentMessage { .. }
+                        | chat_state::NotificationSource::AgentReply { .. }
+                        | chat_state::NotificationSource::InquiryAnswered { .. }
+                )
+            })
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
         drop(control_gate);
         let had_interjections = !entries.is_empty();
         if had_interjections {
             self.inject_pending_interjections(entries).await;
         }
-        let has_parent_message = self
-            .chat_state_handle
-            .pending_notifications()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .any(|item| {
-                matches!(
-                    &item.source,
-                    chat_state::NotificationSource::ParentMessage { .. }
-                        | chat_state::NotificationSource::AgentReply { .. }
-                )
-            });
-        let delivered_parent_message =
-            has_parent_message && self.drain_active_notifications().await;
-        had_interjections || delivered_parent_message
+        let delivered = if selected.is_empty() {
+            false
+        } else {
+            self.drain_active_notifications_selected(&[], Some(&selected))
+                .await?
+        };
+        Ok(had_interjections || delivered)
     }
 
     pub(super) async fn reopen_steering(&self, prompt_id: &str) {
@@ -761,7 +795,7 @@ mod tests {
                             )
                             .await
                             .unwrap();
-                        assert!(actor.close_steering_and_drain("turn-1").await);
+                        assert!(actor.close_steering_and_drain("turn-1").await.unwrap());
                     } else {
                         actor
                             .inject_pending_interjections(vec![PendingInterjection {
@@ -830,7 +864,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                assert!(actor.close_steering_and_drain("turn-1").await);
+                assert!(actor.close_steering_and_drain("turn-1").await.unwrap());
                 assert!(
                     actor
                         .admit_human_steer(

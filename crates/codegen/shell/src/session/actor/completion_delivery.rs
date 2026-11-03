@@ -207,17 +207,18 @@ pub(super) fn wait_task_ids(args: &serde_json::Value) -> Vec<String> {
     if let Some(id) = args.get("task_id").and_then(serde_json::Value::as_str) {
         ids.push(id.to_owned());
     }
-    if let Some(values) = args.get("task_ids").and_then(serde_json::Value::as_array) {
-        ids.extend(
-            values
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned),
-        );
+    for field in ["task_ids", "subagent_ids"] {
+        if let Some(values) = args.get(field).and_then(serde_json::Value::as_array) {
+            ids.extend(
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
     }
-    ids.retain(|id| !id.trim().is_empty());
+    let mut ids = tool_types::resolve_task_ids(&ids);
     ids.sort();
-    ids.dedup();
     ids
 }
 
@@ -252,6 +253,7 @@ impl SessionActor {
                 | chat_state::NotificationSource::PlanHandoff { .. }
                 | chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::AgentReply { .. }
+                | chat_state::NotificationSource::InquiryAnswered { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => false,
             })
             .collect::<Vec<_>>();
@@ -327,6 +329,20 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_identity_matches_task_execution_and_completion() {
+        let args = serde_json::json!({"task_ids": [" child ", "child", "  "], "timeout_ms": 1000});
+        let input: tool_types::TaskOutputToolInput = serde_json::from_value(args.clone()).unwrap();
+        let ids = wait_task_ids(&args);
+        assert_eq!(ids, input.resolved_task_ids());
+        assert_eq!(ids, ["child"]);
+        let tracker = CompletionDeliveryTracker::default();
+        tracker.begin_wait(Some("turn"), &ids);
+        tracker.defer_wait(&ids);
+        assert!(tracker.complete("child".into()));
+        assert_eq!(tracker.ready_ids(), ["child"]);
+    }
 
     #[test]
     fn ready_before_defer_is_not_lost() {

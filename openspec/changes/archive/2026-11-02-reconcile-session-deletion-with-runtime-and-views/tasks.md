@@ -1,0 +1,5 @@
+- [x] 删除 preflight / late refusal / Stay / 失败重开回归。
+- [x] 接通存储资格、同一 lifecycle 事务及错误事实。
+- [x] 公共客户端结果收敛与删除 effect ACK。
+- [x] 定向验证、开发说明、strict。
+- [x] 归档与归档后检查。

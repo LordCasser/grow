@@ -290,13 +290,24 @@ impl GrowStdioClient {
         session_id: &acp::SessionId,
         text: &str,
     ) -> acp::Result<acp::PromptResponse> {
+        self.prompt_with_content(
+            session_id,
+            vec![acp::ContentBlock::Text(acp::TextContent::new(
+                text.to_string(),
+            ))],
+        )
+        .await
+    }
+
+    /// Send typed ACP content blocks, including images, without serializing
+    /// them through a shell command or text-only prompt helper.
+    pub async fn prompt_with_content(
+        &self,
+        session_id: &acp::SessionId,
+        content: Vec<acp::ContentBlock>,
+    ) -> acp::Result<acp::PromptResponse> {
         self.conn
-            .prompt(acp::PromptRequest::new(
-                session_id.clone(),
-                vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    text.to_string(),
-                ))],
-            ))
+            .prompt(acp::PromptRequest::new(session_id.clone(), content))
             .await
     }
 
@@ -417,6 +428,19 @@ impl GrowStdioClient {
         .unwrap_or_else(|_| panic!("prompt timed out\nstderr:\n{}", self.stderr()));
         Self::log_timing("prompt", started);
         r
+    }
+
+    pub async fn prompt_with_content_timeout(
+        &self,
+        session_id: &acp::SessionId,
+        content: Vec<acp::ContentBlock>,
+    ) -> acp::Result<acp::PromptResponse> {
+        tokio::time::timeout(
+            scaled(Duration::from_secs(30)),
+            self.prompt_with_content(session_id, content),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("content prompt timed out\nstderr:\n{}", self.stderr()))
     }
 
     pub async fn load_session_with_timeout(

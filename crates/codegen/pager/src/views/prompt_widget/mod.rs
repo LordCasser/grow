@@ -2571,24 +2571,6 @@ impl PromptWidget {
         std::mem::take(&mut self.images)
     }
 
-    /// Buffer text with `[Image #N]` chip placeholders removed, for
-    /// text-only surfaces (e.g. question/permission feedback) that must
-    /// not leak image tokens onto the wire.
-    pub(crate) fn text_without_image_chips(&self) -> String {
-        let text = self.textarea.text();
-        let mut out = String::with_capacity(text.len());
-        let mut prev_end = 0usize;
-        for elem in self.textarea.elements() {
-            if elem.kind != KIND_IMAGE {
-                continue;
-            }
-            out.push_str(&text[prev_end..elem.range.start]);
-            prev_end = elem.range.end;
-        }
-        out.push_str(&text[prev_end..]);
-        out
-    }
-
     /// Replace the prompt-side image list and restore `image_counter`.
     /// The caller must call `restore_chip_elements` beforehand to
     /// re-register the `KIND_IMAGE` textarea elements (with stored byte

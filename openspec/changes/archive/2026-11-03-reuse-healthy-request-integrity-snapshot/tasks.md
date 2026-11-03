@@ -1,0 +1,6 @@
+- [x] 核对两个caller、memory apply与ACK/public测试边界
+- [x] 建立健康成本和真实request-time边界测试
+- [x] 返回可复用副本并同步memory append
+- [x] ChatState全量验证
+- [x] 独立review
+- [x] 严格校验并归档

@@ -51,7 +51,7 @@ Separate primary Grow sessions can ask each other a bounded question without cre
 
 Discovery is local-only. Each Grow process publishes an owner-private manifest containing a fresh process incarnation, endpoint, session snapshot, and expiring heartbeat lease. Stale manifests are reclaimed, duplicate session identities are hidden, and reconnect accepts only the current incarnation. No TCP listener or MCP server is involved.
 
-The target answers from a frozen copy of its committed conversation through one tool-free Sideband request. It cannot run tools, edit files, resume a Workflow, or promise follow-up work. Same-workspace questions proceed directly; a different canonical workspace requires an online target UI to approve that inquiry once. Rejection, cancellation, timeout, target loss, and transport failure return typed terminal outcomes and do not become ordinary user prompts or foreground turns. Both sessions retain durable audit facts, while the frozen question context remains outside their model Surface.
+The target answers from a frozen copy of its committed conversation through one tool-free Sideband request. It cannot run tools, edit files, resume a Workflow, or promise follow-up work. Same-workspace questions proceed directly; a different canonical workspace requires an online target UI to approve that inquiry once. Rejection, cancellation, timeout, target loss, and transport failure return typed terminal outcomes and do not become ordinary user prompts or foreground turns. Both sessions retain durable audit facts. A successful answer reaches the calling Agent through its tool result; the answering Agent receives the attributed question and answer as passive context at its next admitted sampling boundary. This does not interrupt its work, start an idle turn, or grant authority.
 
 This facility is for coordination between already-running primary sessions. Use `spawn_subagent` when one session should own delegated execution and return a task result.
 
@@ -77,9 +77,9 @@ The `subagent_type` argument selects the child definition:
 | --- | --- |
 | `general-purpose` | General implementation and investigation work. |
 | `explore` | Read-focused codebase investigation. It can request execution when the definition allows it, but cannot request edits. |
-| `plan` | Exploration and implementation planning without file edits. |
+| `browser-use` | Web browsing with the capabilities available in the session. |
 
-Project and user definitions can add new types or intentionally shadow a built-in name.
+Project and user definitions can add new types. Project definitions can shadow a built-in ID; a user-level definition with the same ID does not replace a built-in. Nested files use their relative path without the extension as the ID, such as `review/backend`.
 
 ---
 
@@ -92,23 +92,32 @@ Project and user definitions can add new types or intentionally shadow a built-i
 | `prompt` | Complete delegated task. |
 | `description` | Short task label. |
 | `subagent_type` | Agent definition; defaults to `general-purpose`. |
-| `run_in_background` | Return immediately with a child ID (defaults to true). |
+| `background` | Return immediately with a child ID (defaults to true). |
 | `capability_mode` | Initial grant: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation` | `none` or an isolated git `worktree`. |
 | `resume_from` | Continue a completed child by ID. |
 | `cwd` | Child working directory; mutually exclusive with worktree isolation. |
+| `model` | Optional explicit model selector. Use an exact configured catalog ID from the Task tool's offered model list; a provider-facing wire-model name alone does not select a route. |
 | `parent_step_id` | Optional weak link to one TODO in the direct parent's current work scope. |
 | `required_deliverable` | Require explicit parent review of the linked result; requires `parent_step_id`. |
 
-Retrieve a background result with `get_command_or_subagent_output`.
+Observe children with three separate tools:
 
-Continue useful independent work after delegation. When the next step needs the child's result and no independent work remains, use the output tool's blocking wait on the original child ID with a positive `timeout_ms` within the advertised limit. The background-start receipt includes an example using the current tool and parameter names. Do not create sleep commands, polling loops, or extra tasks solely to wait. Omitting the timeout or passing zero only reads a snapshot; multiple IDs with a positive timeout wait for all selected tasks, so include only results needed next.
+- `list_subagent({"scope":"active"})` discovers visible unfinished or unknown children, including initialization, suspension and finalization. Use `"all"` to include authorized history. The list contains basic identity/state facts, without tool calls or answers.
+- `get_subagent_status({"subagent_ids":["id"]})` reads non-blocking details: status, duration, call/turn counts and available usage. Unavailable values are `null`.
+- `wait_subagent({"subagent_ids":["id"],"timeout_ms":30000})` waits and retrieves final results. The default timeout is 30 seconds and the advertised cap applies. Already finished children return immediately. Each call reports its end reason and actual wait time. Failed or cancelled children are finished without being successful.
+
+Use `kill_command_or_subagent(task_id)` to cancel a child. This task control can address a child without an attached Terminal resource. `kill_terminal_command(task_id)` is limited to background terminal commands and monitors; it does not cancel children.
+
+All three tools use the current source's authorization. Missing runtime entries do not prove cleanup; canonical history can retain the child's identity and verified result. Lists and status queries leave completion notifications available. Background command output uses `get_command_output` with `task_ids`. See the [observation contract](../../../../../openspec/specs/session-timeline/spec.md#requirement-subagent-tools-separate-enumeration-detail-and-completion-waiting).
+
+Continue useful independent work after delegation. When the next step requires the child's result and no independent work remains, use `wait_subagent` on the original child ID. The background-start receipt shows the current tool and parameter names. Do not create sleep commands, polling loops, or extra tasks solely to wait. Include multiple IDs only when the next step requires all their results.
 
 A timeout or steering message can end the wait while the child continues. Check the returned status and result; wait completion does not establish child completion or parent acceptance. The existing View shows the output wait without creating another Task row, and the underlying task retains its owner and identity. See the [primary coordination guidance](../../../../../openspec/specs/local-coordination/spec.md#requirement-primary-guidance-advances-independently-ready-work).
 
 ### Resume semantics
 
-`resume_from` creates a new child from a completed canonical lifecycle. It inherits the source transcript and model, while re-rendering the current Agent definition, system prompt, and tool runtime. In-memory permits and transport incarnations are never copied.
+`resume_from` creates a new child from a terminal canonical lifecycle, including a canonically cancelled child. It retains the source transcript, model and existing stable system head; the current Agent role and tool runtime are rebuilt under the current constraints. In-memory permits and transport incarnations are never copied. The original runtime must finish retiring before the new child can start.
 
 The source must belong to the current parent session and use the same Agent type.
 

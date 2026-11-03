@@ -137,7 +137,7 @@ fn dispatch_new_session_skips_modal_in_non_git_repo() {
 #[test]
 fn close_inactive_agent_drops_it() {
     let mut app = three_agent_app();
-    let effects = dispatch_sessions_confirm_close(&mut app, AgentId(2));
+    let effects = close_session_and_ack(&mut app, AgentId(2));
     assert!(
         effects
             .iter()
@@ -156,7 +156,7 @@ fn close_agent_releases_retained_memory() {
 
     // Dropping a real AgentView (scrollback + caches + child views) → purge.
     let before = test_support::calls();
-    dispatch_sessions_confirm_close(&mut app, AgentId(2));
+    close_session_and_ack(&mut app, AgentId(2));
     assert!(!app.agents.contains_key(&AgentId(2)));
     assert_eq!(
         test_support::calls(),
@@ -166,7 +166,7 @@ fn close_agent_releases_retained_memory() {
 
     // Closing an unknown agent drops nothing → no purge.
     let before = test_support::calls();
-    dispatch_sessions_confirm_close(&mut app, AgentId(999));
+    close_session_and_ack(&mut app, AgentId(999));
     assert_eq!(
         test_support::calls(),
         before,
@@ -178,7 +178,7 @@ fn close_agent_releases_retained_memory() {
 fn close_clears_forked_from_on_surviving_children() {
     let mut app = three_agent_app();
     set_forked_from(&mut app, AgentId(2), AgentId(1));
-    dispatch_sessions_confirm_close(&mut app, AgentId(1));
+    close_session_and_ack(&mut app, AgentId(1));
     assert!(
         app.agents[&AgentId(2)].session.forked_from.is_none(),
         "stale forked_from pointer must be cleared after parent close"
@@ -186,14 +186,14 @@ fn close_clears_forked_from_on_surviving_children() {
 }
 
 #[test]
-fn close_only_agent_is_refused_with_toast() {
+fn close_only_agent_waits_for_runtime_ack() {
     let mut app = test_app_with_agent();
     let agents_before = app.agents.len();
     dispatch_sessions_confirm_close(&mut app, AgentId(0));
     assert_eq!(
         app.agents.len(),
         agents_before,
-        "the only agent must NOT be closed"
+        "the only agent must remain until runtime acknowledgement"
     );
 }
 
@@ -201,17 +201,35 @@ fn close_only_agent_is_refused_with_toast() {
 fn close_unknown_agent_is_silent_noop() {
     let mut app = three_agent_app();
     let agents_before = app.agents.len();
-    dispatch_sessions_confirm_close(&mut app, AgentId(999));
+    close_session_and_ack(&mut app, AgentId(999));
     assert_eq!(app.agents.len(), agents_before);
 }
 
 #[test]
-fn close_only_agent_short_circuits_before_reaching_welcome_fallback() {
+fn close_only_agent_ack_reaches_welcome_fallback() {
     let mut app = test_app_with_agent();
-    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(0)));
-    dispatch_sessions_confirm_close(&mut app, AgentId(0));
-    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(0)));
-    assert!(app.agents.contains_key(&AgentId(0)));
+    let effects = dispatch_sessions_confirm_close(&mut app, AgentId(0));
+    let [
+        Effect::CloseSession {
+            agent_id,
+            session_id,
+            binding_epoch,
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("{effects:?}");
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCloseResolved {
+            agent_id: *agent_id,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.active_view, ActiveView::Welcome);
+    assert!(app.agents.is_empty());
 }
 
 #[test]
@@ -219,7 +237,7 @@ fn close_does_not_disturb_unrelated_forked_from_pointers() {
     let mut app = three_agent_app();
     set_forked_from(&mut app, AgentId(1), AgentId(0));
     set_forked_from(&mut app, AgentId(2), AgentId(0));
-    dispatch_sessions_confirm_close(&mut app, AgentId(1));
+    close_session_and_ack(&mut app, AgentId(1));
     assert_eq!(
         app.agents[&AgentId(2)].session.forked_from,
         Some(AgentId(0)),
@@ -353,4 +371,20 @@ fn marketplace_fetch_fires_immediately_when_idle() {
         &mut app,
     );
     assert_eq!(count_marketplace_fetches(&effects), 1);
+}
+
+#[test]
+fn close_unbound_startup_retains_owner_for_its_inflight_reply() {
+    for replaying in [false, true] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.unbind_session_id();
+        agent.session.loading_replay = replaying;
+        agent.session.prompt_history_loading = !replaying;
+        let effects = dispatch_sessions_confirm_close(&mut app, id);
+        assert!(effects.is_empty());
+        assert!(app.agents.contains_key(&id));
+        assert_eq!(app.active_view, ActiveView::Agent(id));
+    }
 }

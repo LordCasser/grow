@@ -1510,6 +1510,7 @@ pub(crate) async fn run(
 
     loop {
         app.sync_local_drafts(std::time::Instant::now());
+        app.reclaim_finished_subagent_transcripts();
         schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
         schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
         // Pending $EDITOR / $PAGER suspends first: they can be armed by ANY

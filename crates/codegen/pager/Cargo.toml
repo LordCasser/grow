@@ -230,6 +230,10 @@ path = "tests/pty_e2e_persistence.rs"
 name = "pty_e2e_clipboard"
 path = "tests/pty_e2e_clipboard.rs"
 
+[[test]]
+name = "pty_e2e_auxiliary_commands"
+path = "tests/pty_e2e_auxiliary_image_commands.rs"
+
 # Leader-mode PTY e2e — split from ordinary PTY families so multi-process
 # cluster bring-up never contends with their bounded pools.
 [[test]]

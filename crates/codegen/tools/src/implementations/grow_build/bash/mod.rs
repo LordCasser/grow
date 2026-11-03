@@ -1361,7 +1361,7 @@ impl BashTool {
             (
                 renderer
                     .tool_for_kind(ToolKind::BackgroundTaskAction)
-                    .unwrap_or("get_task_output")
+                    .unwrap_or("get_command_output")
                     .to_string(),
                 renderer
                     .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
@@ -1618,7 +1618,7 @@ impl crate::types::tool_metadata::ToolMetadata for BashTool {
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         // If our param `enabled_background` is true (the default),
-        // we need both a BackgroundTaskAction tool (get_task_output) and
+        // we need both a BackgroundTaskAction tool (get_command_output) and
         // a KillTaskAction tool (kill_task) so the agent can interact
         // with backgrounded commands.
         Expr::And(vec![
@@ -2344,7 +2344,7 @@ mod tests {
             description: None,
             is_backgrounded: true,
         };
-        let mut output = "Use get_task_output.".to_owned();
+        let mut output = "Use get_command_output.".to_owned();
         append_running_tasks_notice(&mut output, &[&task], "kill_task");
         assert!(output.contains("old-task"));
         assert!(output.contains("cargo check"));
@@ -2609,7 +2609,7 @@ mod tests {
         resources.insert(TemplateRenderer::new(
             HashMap::from([(
                 ToolKind::BackgroundTaskAction,
-                "get_task_output".to_string(),
+                "get_command_output".to_string(),
             )]),
             HashMap::from([
                 (ToolKind::Execute, execute_params),
@@ -2675,7 +2675,7 @@ mod tests {
         resources.insert(TemplateRenderer::new(
             HashMap::from([(
                 ToolKind::BackgroundTaskAction,
-                "get_task_output".to_string(),
+                "get_command_output".to_string(),
             )]),
             HashMap::from([
                 (
@@ -3176,7 +3176,7 @@ mod tests {
                 assert_eq!(bg.task_type, "bash");
                 assert_eq!(bg.status, "running");
                 assert_eq!(bg.command, "sleep 3600");
-                assert!(bg.retrieval_hint.contains("get_task_output"));
+                assert!(bg.retrieval_hint.contains("get_command_output"));
                 assert!(bg.retrieval_hint.contains("task_id"));
                 assert!(bg.retrieval_hint.contains("bg-task-42"));
             }
@@ -3425,7 +3425,7 @@ mod tests {
 
     /// The get-output tool is absent from the finalized toolset (no
     /// `BackgroundTaskAction` mapping): the retrieval hint must fall back to
-    /// the canonical `get_task_output` name instead of rendering an empty
+    /// the canonical `get_command_output` name instead of rendering an empty
     /// tool name. A missing kind renders as empty-`Ok` (lenient undefined),
     /// so the old `Result`-based fallback never fired.
     #[tokio::test]
@@ -3446,7 +3446,7 @@ mod tests {
             BashToolOutput::Background(bg) => {
                 assert!(
                     bg.retrieval_hint
-                        .contains("Use get_task_output tool with task_ids=[\"t2\"]"),
+                        .contains("Use get_command_output tool with task_ids=[\"t2\"]"),
                     "Hint should fall back to canonical names: {}",
                     bg.retrieval_hint
                 );
@@ -4153,7 +4153,7 @@ mod tests {
                 HashMap::from([
                     (
                         ToolKind::BackgroundTaskAction,
-                        "get_task_output".to_string(),
+                        "get_command_output".to_string(),
                     ),
                     (ToolKind::KillTaskAction, "kill_task".to_string()),
                 ]),
@@ -4764,7 +4764,7 @@ mod tests {
                     (ToolKind::Write, "write".to_string()),
                     (
                         ToolKind::BackgroundTaskAction,
-                        "get_task_output".to_string(),
+                        "get_command_output".to_string(),
                     ),
                 ]),
                 HashMap::from([(

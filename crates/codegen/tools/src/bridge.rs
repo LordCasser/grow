@@ -104,7 +104,7 @@ impl ToolBridge {
     /// rather than by namespaced id.
     ///
     /// Example: `tool_for_kind(ToolKind::BackgroundTaskAction)` returns
-    /// `Some("get_task_output")` for the grow_build agent and `None` for
+    /// `Some("get_command_output")` for the grow_build agent and `None` for
     /// agents that do not register a tool of that kind.
     pub async fn tool_for_kind(&self, kind: ToolKind) -> Option<String> {
         self.registry

@@ -1,0 +1,5 @@
+- [x] 核对三处修复、相邻调用方和规范
+- [x] 建立旧算法差分与测量基线
+- [x] 单次合并/retain并守住健康空计划
+- [x] sampling-types/chat-state验证及独立review
+- [x] 严格校验与归档

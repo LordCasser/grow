@@ -1,0 +1,9 @@
+# 独立对抗审查
+
+审查者 `/root/rules_recovery_review`，只读实现/契约/测试复核，未运行Cargo。先明确新契约：同validated cut的当前分支完整prepared transcript，不以active Surface生成UI；只继承消息/thinking/工具和静态UiNotice，当前Plan/Mode/Control/runtime/route/usage/子树不继承。
+
+指出源User chunk的consumedInputEcho/messageId/promptIndex/permissionEvidence会在新child造成丢行或旧输入身份串入；已逐个清除。旧message坐标无法remap时须清除并保留inline正文，不能伪指向新seed。抽共用坐标转换，不改变普通fork筛选；Assistant/Reasoning引用新seed，User保留prepared展示正文。
+
+最终确认同cut resultlink/模型/展示、staging原子发布、非active历史inline及新seed引用正确；normal launch的live Spawned发生于newchild初始化、model convergence和coordinator started ACK之后。validated在bootstrap与worktree规划后释放，没有持有整个child生命周期。
+
+测试review最初指出公共fixture缺ToolCallUpdate比较；已补全部serialized字段，Completed明确校验工具结果正文与completed状态，冷读逐条source行次数比较。最终复核通过，无新增阻断问题。fixture仍只选文本与简化ToolCall初始ID，未声称媒体全矩阵；old-inline unit不等同真实compaction/rewind测试。

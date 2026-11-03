@@ -1,0 +1,18 @@
+[
+  {
+    "session_id": "01a19ba9-e3b1-7b71-a385-8f4cb89da44a",
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "Error: failed to delete session: sampling evidence exceeded its bounded read budget: sampling evidence exceeded its bounded read budget",
+    "isolated_copy_still_exists": true,
+    "original_timeline_unchanged": true
+  },
+  {
+    "session_id": "01a17620-05df-7851-b5d9-59539cb31d9f",
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "Error: failed to delete session: session has an unfinished runtime handoff; resolve it before deleting history: session has an unfinished runtime handoff; resolve it before deleting history",
+    "isolated_copy_still_exists": true,
+    "original_timeline_unchanged": true
+  }
+]

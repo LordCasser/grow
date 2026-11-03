@@ -286,3 +286,41 @@ The session SHALL reclaim recognized published user-image batches and crash-left
 - **THEN** 保留 Loaded 的历史提交事实，明确记录后续执行未完成，并将所属输入与正文组从可执行 Surface 撤下；撤下未获确认前不启动后续采样，不自动重排队该输入。
 
 证据入口：`crates/codegen/shell/src/session/actor/interjection.rs` 的 consume_steer_inputs、`actor/turn/admission.rs` 的输入结算及既有工具批次边界。
+
+### Requirement: Delivery policy is independent of execution preemption
+Grow SHALL separate message admission and boundary eligibility from request preemption and Turn cancellation. A context-only delivery SHALL NOT itself cancel an active model request, interrupt a tool, or request an idle Turn. Existing user steer SHALL retain its explicit product composition of exact-Turn delivery and same-Turn request soft preemption; naming an operation steer SHALL NOT imply that every next-Step producer has preemption authority.
+
+#### Scenario: Passive information arrives during sampling
+- **WHEN** runtime admits context-only information while a provider request is running
+- **THEN** the request continues unchanged and the information is eligible only at a subsequent authorized sampling boundary, without setting the user-interjection or parent-interrupt signal.
+
+#### Scenario: Existing user steer remains explicit
+- **WHEN** a user steer is admitted for the current exact Turn
+- **THEN** Grow retains its existing request soft-preemption and same-Turn delivery behavior, without applying that execution policy to passive notifications.
+
+#### Scenario: Exact target expires during admission
+- **WHEN** an explicit user steer's named Turn has already closed before Allow
+- **THEN** the existing stale-target rejection applies rather than silently converting it into a new Turn; an already-allowed residual steer continues to use its existing durable FIFO reroute.
+
+### Requirement: Passive context never becomes human input authority
+Context-only delivery SHALL preserve its runtime producer identity and SHALL NOT run HumanIntent admission, acquire PermissionEvidence, change Behavior, reorder user FIFO, bypass an edit hold, or create an implicit cancellation. Provider role representation SHALL NOT change these properties.
+
+#### Scenario: Consultation contains approval wording
+- **WHEN** a passive consultation answer says an action is allowed
+- **THEN** the text is available as attributed consultation evidence without becoming human permission, a Behavior transition or an execution-control command.
+
+#### Scenario: User queue is held
+- **WHEN** passive context is pending while the head user FIFO item has a confirmed edit hold
+- **THEN** the context remains available without opening a notification Turn or overtaking the held item through idle arbitration.
+
+### Requirement: Steering consumption preserves admitted text
+
+已接纳的显式 steer 或提升为插话的 followup SHALL 在既有安全边界消费时保留用户正文，不因共享插话格式化的固定字节阈值删除中部或尾部。模型可见正文、持久消费记录与冷恢复 SHALL 保留同一文本；既有图片路径占位处理、包裹和上下文容量准入继续适用。上下文容量不足 SHALL 沿既有请求准入/压缩或明确失败边界处理，不能以无全文入口的截断冒充完整消费。
+
+#### Scenario: Long pasted followup contains instructions at the end
+- **WHEN** 已接纳的长 followup 在运行中提升为插话，正文超过 25000 UTF-8 字节且末尾有用户指导
+- **THEN** 安全消费后的模型可见正文保留完整中部和尾部指导，不追加有损截断标记。
+
+#### Scenario: Long explicit steer survives recovery
+- **WHEN** 长 UTF-8 steer 经原身份持久消费后重建 Timeline
+- **THEN** 恢复的用户正文仍包含完整文本，重复 drain 不产生第二次消费或丢掉尾部。

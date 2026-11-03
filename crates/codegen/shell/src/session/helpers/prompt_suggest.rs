@@ -26,27 +26,28 @@ use crate::session::helpers::text::floor_char_boundary;
 /// Resolve the model for one suggestion request, or `None` to skip the
 /// request entirely (controlled disable).
 ///
-/// Precedence: env pin > config.toml/remote pin > client hint. Every tier
-/// except the env pin is catalog-guarded. With no explicit model the request
-/// is skipped, keeping the background-call cost at zero. The env pin bypasses the guard so
-/// `GROW_PROMPT_SUGGESTIONS_MODEL` keeps working for models the catalog does
-/// not list (mirrors the pager, which forwards the env value unchecked).
+/// Precedence: env pin > config.toml/remote pin > client hint. Every tier is
+/// a configured catalog ID or alias; the selected value must resolve in that
+/// catalog before a sampling route can be built. With no explicit model the request
+/// is skipped, keeping the background-call cost at zero. The environment pin
+/// still has highest precedence, but a provider-facing wire model name cannot
+/// identify an endpoint or credentials without its catalog entry.
 pub(crate) fn effective_suggest_model(
     pin: &PromptSuggestModelPin,
     client_hint: Option<&str>,
     in_catalog: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let client_hint = client_hint.map(str::trim).filter(|s| !s.is_empty());
-    let (model, catalog_guarded) = match pin {
-        PromptSuggestModelPin::Env(m) => (m.as_str(), false),
-        PromptSuggestModelPin::Pinned(m) => (m.as_str(), true),
+    let model = match pin {
+        PromptSuggestModelPin::Env(m) => m.as_str(),
+        PromptSuggestModelPin::Pinned(m) => m.as_str(),
         PromptSuggestModelPin::Unpinned => {
             return client_hint
                 .filter(|model| in_catalog(model))
                 .map(str::to_owned);
         }
     };
-    if catalog_guarded && !in_catalog(model) {
+    if !in_catalog(model) {
         return None;
     }
     Some(model.to_owned())
@@ -360,14 +361,17 @@ mod tests {
     }
 
     #[test]
-    fn effective_model_env_pin_bypasses_catalog_guard() {
-        // GROW_PROMPT_SUGGESTIONS_MODEL is the explicit escape hatch: used
-        // verbatim even when the catalog does not list the model (mirrors
-        // the pager, which forwards the env value unchecked).
+    fn effective_model_env_pin_has_precedence_but_requires_catalog_identity() {
         assert_eq!(
-            effective_suggest_model(&Pin::Env("custom-model".into()), Some("hinted"), |_| false)
-                .as_deref(),
-            Some("custom-model")
+            effective_suggest_model(&Pin::Env("aux/fast".into()), Some("hinted"), |model| model
+                == "aux/fast")
+            .as_deref(),
+            Some("aux/fast")
+        );
+        assert_eq!(
+            effective_suggest_model(&Pin::Env("wire-name".into()), Some("hinted"), |_| false),
+            None,
+            "the provider wire name does not identify its endpoint or credentials"
         );
     }
 

@@ -1,0 +1,9 @@
+# 独立对抗审查
+
+审查者 `/root/rules_recovery_review`，针对S1/S3/MCP完成后的独立文件快照核对本增量，非HEAD混合diff；未运行Cargo。最初发现child普通bare selector可能退回唯一同名plugin，以及preferred模型key仍存在但改目标时错误拒绝exact alias。两者已修复并由真实cold fixture覆盖。
+
+最终复核确认：selector/plugin helper区分原生与插件；checkpoint.frontier实际provider/transport/effort在prepare仍独立核对；后追加alias observation不改变checkpoint授权；目录能力比较保留原namespace；typed原role与规则继续控制模型，显式重选才更新role。Workflow frozen source、RWX/MCP/current permit与未知Hook拒绝不被诊断hash放行替代。
+
+测试暴露Seeded子lineage缺自身路线事实后，另行复核Fresh/Seeded初始baseline在发布前持久化，Existing绝不补当前配置。exact restore不是新委派，允许出生profile被已持久选择的Agent替代，严格当前selector及出生ceiling仍保留。当前registry=None不绕过原Hook事实检查：batch的recovered_pre_tool_hook_decision及prepare的Stop gate均无条件调用，结合原Unknown负例可满足本次最低证据。没有新增snapshot或registry框架。
+
+最终两轮静态复核未发现剩余新增正确性问题；测试实际执行由主代理记录于verification。

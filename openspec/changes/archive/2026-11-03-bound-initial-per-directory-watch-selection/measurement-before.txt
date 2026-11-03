@@ -1,0 +1,42 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/fsnotify-c67b67582c2ace07)
+
+running 1 test
+T1 full-walker dirs=12000 raw_ns=[314192666, 313110458, 312444459, 329836333, 326278083, 316359083, 314599375] median_ns=314599375
+T1 pure-old-selection n=0 budget=0 retained=0 total=0 raw_ns=[42, 41, 42, 42, 0, 42, 41] median_ns=42
+T1 pure-old-selection n=0 budget=1 retained=0 total=0 raw_ns=[41, 42, 42, 42, 42, 0, 42] median_ns=42
+T1 pure-old-selection n=0 budget=8 retained=0 total=0 raw_ns=[42, 42, 41, 42, 41, 0, 41] median_ns=41
+T1 pure-old-selection n=0 budget=128 retained=0 total=0 raw_ns=[41, 0, 41, 42, 41, 42, 0] median_ns=41
+T1 pure-old-selection n=0 budget=49152 retained=0 total=0 raw_ns=[0, 42, 41, 42, 41, 42, 41] median_ns=41
+T1 pure-old-selection n=1 budget=0 retained=0 total=1 raw_ns=[83, 83, 83, 83, 83, 83, 83] median_ns=83
+T1 pure-old-selection n=1 budget=1 retained=1 total=1 raw_ns=[84, 84, 84, 125, 125, 83, 83] median_ns=84
+T1 pure-old-selection n=1 budget=8 retained=1 total=1 raw_ns=[125, 125, 84, 84, 84, 84, 125] median_ns=84
+T1 pure-old-selection n=1 budget=128 retained=1 total=1 raw_ns=[83, 125, 125, 125, 125, 84, 84] median_ns=125
+T1 pure-old-selection n=1 budget=49152 retained=1 total=1 raw_ns=[84, 84, 84, 84, 84, 84, 125] median_ns=84
+T1 pure-old-selection n=128 budget=0 retained=0 total=128 raw_ns=[131792, 134125, 117875, 128458, 128083, 127791, 118458] median_ns=128083
+T1 pure-old-selection n=128 budget=1 retained=1 total=128 raw_ns=[119916, 129042, 128416, 122000, 120291, 131625, 128666] median_ns=128416
+T1 pure-old-selection n=128 budget=8 retained=8 total=128 raw_ns=[131375, 116083, 125916, 128750, 128250, 118042, 128250] median_ns=128250
+T1 pure-old-selection n=128 budget=128 retained=128 total=128 raw_ns=[128417, 128834, 124125, 122500, 131250, 128708, 126458] median_ns=128417
+T1 pure-old-selection n=128 budget=49152 retained=128 total=128 raw_ns=[118291, 125167, 128750, 128708, 118375, 125625, 128500] median_ns=125625
+T1 pure-old-selection n=512 budget=0 retained=0 total=512 raw_ns=[380083, 392916, 382792, 384500, 381625, 386792, 389417] median_ns=384500
+T1 pure-old-selection n=512 budget=1 retained=1 total=512 raw_ns=[390750, 381625, 376750, 376875, 388458, 383250, 377458] median_ns=381625
+T1 pure-old-selection n=512 budget=8 retained=8 total=512 raw_ns=[380500, 376500, 378041, 392917, 381584, 382917, 377958] median_ns=380500
+T1 pure-old-selection n=512 budget=128 retained=128 total=512 raw_ns=[377125, 379792, 389500, 366250, 368958, 366958, 379334] median_ns=377125
+T1 pure-old-selection n=512 budget=512 retained=512 total=512 raw_ns=[375458, 375000, 369125, 365000, 376917, 367417, 368292] median_ns=369125
+T1 pure-old-selection n=512 budget=49152 retained=512 total=512 raw_ns=[366833, 384417, 375625, 373833, 370166, 366375, 375208] median_ns=373833
+T1 pure-old-selection n=2048 budget=0 retained=0 total=2048 raw_ns=[1432250, 1430416, 1432125, 1435958, 1429500, 1426125, 1416000] median_ns=1430416
+T1 pure-old-selection n=2048 budget=1 retained=1 total=2048 raw_ns=[1415166, 1413583, 1414875, 1414208, 1448833, 1490625, 1419333] median_ns=1415166
+T1 pure-old-selection n=2048 budget=8 retained=8 total=2048 raw_ns=[1267500, 1300917, 1338666, 1316667, 1352541, 1362708, 1344375] median_ns=1338666
+T1 pure-old-selection n=2048 budget=128 retained=128 total=2048 raw_ns=[1364333, 1355584, 1362209, 1406042, 1400833, 1404250, 1401250] median_ns=1400833
+T1 pure-old-selection n=2048 budget=2048 retained=2048 total=2048 raw_ns=[1404458, 1406208, 1408416, 1404292, 1416084, 1424417, 1410958] median_ns=1408416
+T1 pure-old-selection n=2048 budget=49152 retained=2048 total=2048 raw_ns=[1405833, 1420167, 1414459, 1408625, 1415375, 1408875, 1410500] median_ns=1410500
+T1 pure-old-selection n=12000 budget=0 retained=0 total=12000 raw_ns=[7874292, 7862916, 7903208, 7651917, 7900875, 7808417, 7772666] median_ns=7862916
+T1 pure-old-selection n=12000 budget=1 retained=1 total=12000 raw_ns=[8002209, 7970125, 8003792, 8088209, 8012750, 8062000, 8085083] median_ns=8012750
+T1 pure-old-selection n=12000 budget=8 retained=8 total=12000 raw_ns=[7850083, 7819667, 7814250, 7813541, 7789458, 7822708, 7804667] median_ns=7814250
+T1 pure-old-selection n=12000 budget=128 retained=128 total=12000 raw_ns=[7670875, 7705708, 7876792, 7915208, 7906958, 7935167, 7965209] median_ns=7906958
+T1 pure-old-selection n=12000 budget=12000 retained=12000 total=12000 raw_ns=[7890333, 7889417, 7857959, 7773084, 7922167, 8204958, 8277667] median_ns=7890333
+T1 pure-old-selection n=12000 budget=49152 retained=12000 total=12000 raw_ns=[8123167, 7771584, 7758917, 7774375, 7771458, 7790125, 8114667] median_ns=7774375
+test watcher::t1_before_probe::per_dir_selection_before_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 4.89s
+

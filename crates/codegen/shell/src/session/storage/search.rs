@@ -600,6 +600,7 @@ async fn run_worker(
     let debounce = std::time::Duration::from_millis(SEARCH_INDEX_DEBOUNCE_MS);
     let mut pending: HashMap<SessionSearchKey, Instant> = HashMap::new();
 
+    let mut projection = None;
     loop {
         if pending.is_empty() {
             let Some(job) = rx.recv().await else { break };
@@ -619,7 +620,7 @@ async fn run_worker(
                 handle_job(root_dir, storage, &mut pending, job, debounce).await;
             }
             _ = tokio::time::sleep_until(next_deadline) => {
-                flush_ready(root_dir, storage, &mut pending).await;
+                flush_ready(root_dir, storage, &mut pending, &mut projection).await;
             }
         }
     }
@@ -972,10 +973,15 @@ async fn has_completed_bootstrap_marker(root_dir: &Path) -> Option<bool> {
     .flatten()
 }
 
+// Only the immediately previous successful projection is retained. Alternating
+// keys rebuild normally; this is neither a per-session table nor writer state.
+type SearchProjectionCache = Option<(SessionSearchKey, super::TimelineReadProjection)>;
+
 async fn flush_ready(
     root_dir: &Path,
     storage: &dyn StorageAdapter,
     pending: &mut HashMap<SessionSearchKey, Instant>,
+    projection: &mut SearchProjectionCache,
 ) {
     let now = Instant::now();
     let ready: Vec<SessionSearchKey> = pending
@@ -985,7 +991,7 @@ async fn flush_ready(
 
     for key in ready {
         pending.remove(&key);
-        if let Err(e) = upsert_by_key(root_dir, storage, &key).await {
+        if let Err(e) = upsert_by_key(root_dir, storage, &key, projection).await {
             if is_search_index_contention(&e) {
                 pending.insert(key.clone(), Instant::now() + SEARCH_INDEX_CONTENTION_RETRY);
             }
@@ -1014,7 +1020,12 @@ async fn upsert_by_key(
     root_dir: &Path,
     storage: &dyn StorageAdapter,
     key: &SessionSearchKey,
+    projection: &mut SearchProjectionCache,
 ) -> io::Result<()> {
+    let previous = projection
+        .take()
+        .filter(|(cached_key, _)| cached_key == key)
+        .map(|(_, value)| value);
     let info = Info {
         id: acp::SessionId::new(key.session_id.clone()),
         cwd: key.cwd.clone(),
@@ -1027,9 +1038,9 @@ async fn upsert_by_key(
             if !is_index_enabled() {
                 return Ok(());
             }
-            upsert_session(root_dir, &summary, storage, &info)
-                .await
-                .map(|_| ())
+            let (_, next) = upsert_session(root_dir, &summary, storage, &info, previous).await?;
+            *projection = Some((key.clone(), next));
+            Ok(())
         }
         // A missing session is a delete, not a failure. Deletes must land
         // whether or not this process still indexes (a session deleted while
@@ -1047,18 +1058,23 @@ async fn upsert_session(
     summary: &Summary,
     storage: &dyn StorageAdapter,
     info: &Info,
-) -> io::Result<UpsertOutcome> {
+    previous: Option<super::TimelineReadProjection>,
+) -> io::Result<(UpsertOutcome, super::TimelineReadProjection)> {
     // Search is a pure projection of the canonical Timeline ledger. The UI
     // replay stream is deliberately excluded from content reconstruction.
     let reader = storage.open_timeline_reader(info)?;
-    let (content, bytes_read) =
-        tokio::task::spawn_blocking(move || collect_timeline_indexable_content(reader))
-            .await
-            .map_err(io::Error::other)??;
+    let bytes_read = reader.snapshot_len();
+    let (next, content) = tokio::task::spawn_blocking(move || {
+        let next = reader.read_timeline_projection(previous)?;
+        let content = timeline_indexable_content(&next.timeline);
+        Ok::<_, io::Error>((next, content))
+    })
+    .await
+    .map_err(io::Error::other)??;
     let doc = build_session_doc(summary, content);
     let db_path = search_db_path(root_dir);
 
-    tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         with_search_index(&db_path, |index| {
             if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
                 && existing_hash == doc.content_hash
@@ -1071,7 +1087,8 @@ async fn upsert_session(
         })
     })
     .await
-    .map_err(io::Error::other)?
+    .map_err(io::Error::other)??;
+    Ok((outcome, next))
 }
 
 async fn delete_session(root_dir: &Path, session_id: &str) -> io::Result<()> {
@@ -2440,7 +2457,9 @@ mod tests {
             session_id: "s1".to_string(),
             cwd: "/ws".to_string(),
         };
-        upsert_by_key(root, storage.as_ref(), &key).await.unwrap();
+        upsert_by_key(root, storage.as_ref(), &key, &mut None)
+            .await
+            .unwrap();
         assert!(
             !search_index_exists(root),
             "a write declined while off must not create the index"
@@ -2500,7 +2519,7 @@ mod tests {
             cwd: info.cwd.clone(),
         };
         assert_eq!(
-            upsert_by_key(root.path(), &storage, &bad)
+            upsert_by_key(root.path(), &storage, &bad, &mut None)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -2511,7 +2530,7 @@ mod tests {
             cwd: "/ws".into(),
         };
         let mut pending = HashMap::from([(bad, Instant::now()), (absent, Instant::now())]);
-        flush_ready(root.path(), &storage, &mut pending).await;
+        flush_ready(root.path(), &storage, &mut pending, &mut None).await;
         assert!(pending.is_empty());
         assert!(!search_index_exists(root.path()));
     }
@@ -2534,13 +2553,13 @@ mod tests {
             cwd: "/ws".into(),
         };
         let mut pending = HashMap::from([(key.clone(), Instant::now())]);
-        flush_ready(root.path(), &storage, &mut pending).await;
+        flush_ready(root.path(), &storage, &mut pending, &mut None).await;
         blocker.execute_batch("ROLLBACK").unwrap();
         let retry_at = *pending
             .get(&key)
             .expect("SQLite contention must retain the failed eviction");
         assert!(retry_at > Instant::now(), "retry must not spin immediately");
-        flush_ready(root.path(), &storage, &mut pending).await;
+        flush_ready(root.path(), &storage, &mut pending, &mut None).await;
         assert_eq!(pending.get(&key), Some(&retry_at));
         let before = with_search_index(&db_path, |index| {
             index.query("contendedrecord", None, 10, 0, false)
@@ -2548,7 +2567,7 @@ mod tests {
         .unwrap();
         assert_eq!(before.results.len(), 1);
         tokio::time::sleep_until(retry_at).await;
-        flush_ready(root.path(), &storage, &mut pending).await;
+        flush_ready(root.path(), &storage, &mut pending, &mut None).await;
         assert!(pending.is_empty());
         let after = with_search_index(&db_path, |index| {
             index.query("contendedrecord", None, 10, 0, false)
@@ -2630,7 +2649,9 @@ mod tests {
                 .expect("queued cleanup eviction must reach the correct root");
             } else {
                 for key in keys {
-                    upsert_by_key(root.path(), &cleaner, &key).await.unwrap();
+                    upsert_by_key(root.path(), &cleaner, &key, &mut None)
+                        .await
+                        .unwrap();
                 }
                 assert!(!search_index_exists(root.path()));
             }
@@ -2675,6 +2696,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 cwd: "/ws".to_string(),
             },
+            &mut None,
         )
         .await
         .unwrap();
@@ -2866,5 +2888,689 @@ mod tests {
             Some(format!("{now}:peer")),
             "the peer's live claim is left alone"
         );
+    }
+
+    fn reader_for(path: &Path) -> TimelineLedgerReader {
+        TimelineLedgerReader::from_file(std::fs::File::open(path).unwrap(), path.to_path_buf())
+            .unwrap()
+    }
+
+    fn full_projection(path: &Path) -> io::Result<(String, u64)> {
+        collect_timeline_indexable_content(reader_for(path))
+    }
+
+    fn cached_projection(
+        path: &Path,
+        previous: Option<super::super::TimelineReadProjection>,
+    ) -> io::Result<super::super::TimelineReadProjection> {
+        reader_for(path).read_timeline_projection(previous)
+    }
+
+    fn assert_projection_matches_full(
+        path: &Path,
+        previous: Option<super::super::TimelineReadProjection>,
+    ) -> super::super::TimelineReadProjection {
+        let expected = full_projection(path).expect("legacy full collector");
+        let actual = cached_projection(path, previous).expect("cached projection");
+        assert_eq!(timeline_indexable_content(&actual.timeline), expected.0);
+        assert_eq!(actual.complete_len, expected.1);
+        actual
+    }
+
+    fn append_timeline(path: &Path, timeline: &Timeline) -> Vec<u8> {
+        let prior = std::fs::read(path).unwrap();
+        let current = encode_timeline(timeline);
+        assert!(
+            current.starts_with(&prior),
+            "fixture must be a legal append"
+        );
+        std::fs::write(path, &current).unwrap();
+        current
+    }
+
+    fn record_search_compaction(timeline: &mut Timeline, id: &str) {
+        let source_items = timeline.surface().len();
+        timeline
+            .record(chat_state::TimelineEventKind::Compaction(
+                chat_state::CompactionEvent::Started {
+                    id: id.into(),
+                    mode: chat_state::CompactionMode::Foreground,
+                    source_items,
+                    prompt_index: source_items,
+                },
+            ))
+            .unwrap();
+        let target = chat_state::SurfaceRange {
+            start: *timeline.surface_ids().first().unwrap(),
+            end: *timeline.surface_ids().last().unwrap(),
+            shadowed: timeline.surface_ids().to_vec(),
+        };
+        let input_ref = chat_state::TimelineRangeRef {
+            timeline_id: "search-fixture".into(),
+            first_seq: 0,
+            last_seq: timeline.next_seq().get() - 1,
+        };
+        let sideband_id = uuid::Uuid::now_v7().to_string();
+        timeline
+            .record(chat_state::TimelineEventKind::Sideband(
+                chat_state::SidebandSpawnEvent {
+                    sideband_id: sideband_id.clone(),
+                    purpose: chat_state::SidebandPurpose::CompactionSummary,
+                    source_refs: vec![input_ref.clone()],
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Compaction(
+                chat_state::CompactionEvent::Summary {
+                    id: id.into(),
+                    input_ref,
+                    result_ref: chat_state::TimelineRangeRef {
+                        timeline_id: sideband_id,
+                        first_seq: 2,
+                        last_seq: 2,
+                    },
+                    target: target.clone(),
+                    source_tokens: 100,
+                    summary_chars: 7,
+                },
+            ))
+            .unwrap();
+        timeline
+            .replace_compaction_range(target.clone(), vec![ConversationItem::user_meta("summary")])
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Compaction(
+                chat_state::CompactionEvent::Completed {
+                    id: id.into(),
+                    source_items: target.shadowed.len(),
+                    result_items: 1,
+                    duration_ms: 1,
+                },
+            ))
+            .unwrap();
+    }
+
+    fn corrupt_last_checksum(bytes: &mut [u8]) {
+        let end = bytes.len() - 1;
+        let start = bytes[..end]
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |i| i + 1);
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes[start..end]).unwrap();
+        let checksum = record["checksum"].as_str().unwrap();
+        let replacement = if checksum.starts_with('0') { '1' } else { '0' };
+        let mut changed = checksum.to_string();
+        changed.replace_range(..1, &replacement.to_string());
+        record["checksum"] = serde_json::Value::String(changed);
+        let encoded = serde_json::to_vec(&record).unwrap();
+        assert_eq!(encoded.len(), end - start);
+        bytes[start..end].copy_from_slice(&encoded);
+    }
+
+    fn rewrite_last_sequence(bytes: &[u8], seq: u64) -> Vec<u8> {
+        #[derive(serde::Deserialize)]
+        struct RawRecord {
+            fact: Box<serde_json::value::RawValue>,
+        }
+        let end = bytes.len() - 1;
+        let start = bytes[..end]
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |i| i + 1);
+        let record: RawRecord = serde_json::from_slice(&bytes[start..end]).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"grow.timeline.record\0");
+        hasher.update(&[crate::session::history::RECORD_VERSION]);
+        hasher.update(&seq.to_le_bytes());
+        hasher.update(record.fact.get().as_bytes());
+        let checksum = hasher.finalize().to_hex();
+        let changed = format!(
+            "{{\"version\":{},\"seq\":{seq},\"checksum\":\"{checksum}\",\"fact\":{}}}\n",
+            crate::session::history::RECORD_VERSION,
+            record.fact.get(),
+        );
+        let mut result = bytes[..start].to_vec();
+        result.extend_from_slice(changed.as_bytes());
+        result
+    }
+
+    fn assert_projection_error_matches_full(
+        path: &Path,
+        previous: Option<super::super::TimelineReadProjection>,
+    ) {
+        let full = full_projection(path).unwrap_err();
+        let cached = match cached_projection(path, previous) {
+            Ok(_) => panic!("cached projection unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(cached.kind(), full.kind());
+        assert_eq!(cached.to_string(), full.to_string());
+    }
+
+    fn mode_presentation_line(physical_seq: u64, event_id: &str) -> Vec<u8> {
+        let fact = crate::session::history::HistoryFact {
+            meta: Some(
+                serde_json::from_value::<acp::Meta>(serde_json::json!({"eventId": event_id}))
+                    .unwrap(),
+            ),
+            content: crate::session::history::HistoryContent::Mode(acp::CurrentModeUpdate::new(
+                acp::SessionModeId::new("default"),
+            )),
+        };
+        let raw = serde_json::value::to_raw_value(&fact).unwrap();
+        crate::session::history::encode_presentation(physical_seq, 1, &raw).unwrap()
+    }
+
+    async fn create_index_fixture_session(
+        root: &Path,
+        session_id: &str,
+        timeline: &Timeline,
+    ) -> crate::session::info::Info {
+        let info = crate::session::info::Info {
+            id: acp::SessionId::new(session_id),
+            cwd: format!("/{session_id}"),
+        };
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.into());
+        storage
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
+        std::fs::write(
+            physical_session_dir(root, &info).join("timeline.jsonl"),
+            encode_timeline(timeline),
+        )
+        .unwrap();
+        info
+    }
+
+    fn indexed_content_has(root: &Path, query: &str) -> bool {
+        with_search_index(&search_db_path(root), |index| {
+            index.query(query, None, 10, 0, false)
+        })
+        .unwrap()
+        .results
+        .len()
+            == 1
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn worker_projection_cache_alternates_keys_and_drops_failures_until_retry() {
+        let _gate = IndexGateGuard::unapplied();
+        apply_search_gate(&Resolved::new(true, ConfigSource::Default));
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.into());
+
+        let mut first = Timeline::default();
+        record_search_turn(&mut first, 1, 0, "alpha oldbody", "alpha reply", vec![]);
+        let first_info = create_index_fixture_session(root, "search-cache-alpha", &first).await;
+        let first_key = SessionSearchKey {
+            session_id: first_info.id.to_string(),
+            cwd: first_info.cwd.clone(),
+        };
+
+        let mut second = Timeline::default();
+        record_search_turn(&mut second, 1, 0, "bravo body", "bravo reply", vec![]);
+        let second_info = create_index_fixture_session(root, "search-cache-bravo", &second).await;
+        let second_key = SessionSearchKey {
+            session_id: second_info.id.to_string(),
+            cwd: second_info.cwd.clone(),
+        };
+
+        let mut cache = None;
+        upsert_by_key(root, &storage, &first_key, &mut cache)
+            .await
+            .unwrap();
+        assert_eq!(cache.as_ref().map(|(key, _)| key), Some(&first_key));
+        upsert_by_key(root, &storage, &second_key, &mut cache)
+            .await
+            .unwrap();
+        assert_eq!(cache.as_ref().map(|(key, _)| key), Some(&second_key));
+        upsert_by_key(root, &storage, &first_key, &mut cache)
+            .await
+            .unwrap();
+        assert_eq!(cache.as_ref().map(|(key, _)| key), Some(&first_key));
+        assert!(indexed_content_has(root, "oldbody"));
+        assert!(indexed_content_has(root, "bravo"));
+
+        let first_path = physical_session_dir(root, &first_info).join("timeline.jsonl");
+        std::fs::write(&first_path, b"{invalid body\n").unwrap();
+        let error = upsert_by_key(root, &storage, &first_key, &mut cache)
+            .await
+            .expect_err("failed Timeline decode must fail the upsert");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            cache.is_none(),
+            "failed read must not publish its candidate"
+        );
+        assert!(
+            indexed_content_has(root, "oldbody"),
+            "failed read preserves old row"
+        );
+
+        let mut second_version = Timeline::default();
+        record_search_turn(
+            &mut second_version,
+            1,
+            0,
+            "alpha newbody",
+            "alpha next",
+            vec![],
+        );
+        std::fs::write(&first_path, encode_timeline(&second_version)).unwrap();
+        upsert_by_key(root, &storage, &first_key, &mut cache)
+            .await
+            .expect("retry must rebuild from the current entity");
+        assert!(cache.is_some());
+        assert!(indexed_content_has(root, "newbody"));
+        assert!(!indexed_content_has(root, "oldbody"));
+
+        let db_path = search_db_path(root);
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_search_update BEFORE UPDATE ON session_docs \
+                 BEGIN SELECT RAISE(FAIL, 'test rejected search update'); END;",
+            )
+            .unwrap();
+        let mut third_version = Timeline::default();
+        record_search_turn(
+            &mut third_version,
+            1,
+            0,
+            "alpha thirdbody",
+            "alpha last",
+            vec![],
+        );
+        std::fs::write(&first_path, encode_timeline(&third_version)).unwrap();
+        let error = upsert_by_key(root, &storage, &first_key, &mut cache)
+            .await
+            .expect_err("SQLite trigger must reject the changed document");
+        assert!(error.to_string().contains("test rejected search update"));
+        assert!(
+            cache.is_none(),
+            "DB failure must not publish the decoded candidate"
+        );
+        assert!(
+            indexed_content_has(root, "newbody"),
+            "DB failure preserves old row"
+        );
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_search_update;")
+            .unwrap();
+
+        upsert_by_key(root, &storage, &first_key, &mut cache)
+            .await
+            .expect("retry after DB repair must rebuild and publish");
+        assert!(indexed_content_has(root, "thirdbody"));
+        assert!(!indexed_content_has(root, "newbody"));
+    }
+
+    #[test]
+    fn timeline_projection_matches_full_across_append_rewrite_truncate_and_torn_tail() {
+        use std::io::Write as _;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("timeline.jsonl");
+        let mut timeline = Timeline::default();
+        record_search_turn(&mut timeline, 1, 0, "first prompt", "first answer", vec![]);
+        std::fs::write(&path, encode_timeline(&timeline)).unwrap();
+
+        let cached = assert_projection_matches_full(&path, None);
+        let unchanged = assert_projection_matches_full(&path, Some(cached));
+        let unchanged_again = assert_projection_matches_full(&path, Some(unchanged));
+
+        record_search_compaction(&mut timeline, "search-projection-compaction");
+        let with_compaction = append_timeline(&path, &timeline);
+        let after_compaction = assert_projection_matches_full(&path, Some(unchanged_again));
+        assert_eq!(after_compaction.timeline.surface().len(), 1);
+
+        record_search_turn(
+            &mut timeline,
+            2,
+            1,
+            "second prompt",
+            "second answer",
+            vec![],
+        );
+        let appended_bytes = append_timeline(&path, &timeline);
+        assert!(appended_bytes.starts_with(&with_compaction));
+        let appended = assert_projection_matches_full(&path, Some(after_compaction));
+        let appended_torn_checkpoint = assert_projection_matches_full(&path, None);
+        let captured = reader_for(&path);
+        let captured_expected = full_projection(&path).unwrap().0;
+        record_search_turn(&mut timeline, 3, 2, "captured tail", "later answer", vec![]);
+        let complete = encode_timeline(&timeline);
+        assert!(complete.starts_with(&appended_bytes));
+        let appended_tail = &complete[appended_bytes.len()..];
+        std::fs::write(&path, &appended_bytes).unwrap();
+        let first_record_len = appended_tail
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap()
+            + 1;
+        let split = first_record_len / 2;
+        assert!(split > 0 && split < first_record_len);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&appended_tail[..split]).unwrap();
+        file.flush().unwrap();
+        let captured_projection = captured.read_timeline_projection(Some(appended)).unwrap();
+        assert_eq!(
+            timeline_indexable_content(&captured_projection.timeline),
+            captured_expected,
+            "captured reader must not adopt bytes appended after capture"
+        );
+        let torn = cached_projection(&path, Some(appended_torn_checkpoint)).unwrap();
+        assert_eq!(torn.complete_len, appended_bytes.len() as u64);
+        assert_eq!(
+            timeline_indexable_content(&torn.timeline),
+            captured_expected,
+            "a fresh reader ignores the incomplete new record"
+        );
+
+        file.write_all(&appended_tail[split..]).unwrap();
+        file.flush().unwrap();
+        let completed = assert_projection_matches_full(&path, Some(torn));
+        assert!(timeline_indexable_content(&completed.timeline).contains("captured tail"));
+
+        // A same-length rewrite must miss even if filesystem metadata is otherwise unchanged.
+        let mut rewritten = Timeline::default();
+        record_search_turn(&mut rewritten, 1, 0, "other prompt", "other answer", vec![]);
+        record_search_compaction(&mut rewritten, "search-projection-compaction");
+        record_search_turn(
+            &mut rewritten,
+            2,
+            1,
+            "update prompt",
+            "update answer",
+            vec![],
+        );
+        record_search_turn(
+            &mut rewritten,
+            3,
+            2,
+            "newer tail!!!",
+            "later answer",
+            vec![],
+        );
+        let previous_bytes = std::fs::read(&path).unwrap();
+        let previous_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let rewritten_bytes = encode_timeline(&rewritten);
+        assert_eq!(rewritten_bytes.len(), previous_bytes.len());
+        std::fs::write(&path, rewritten_bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(previous_modified))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            previous_modified
+        );
+        let rewritten_projection = assert_projection_matches_full(&path, Some(completed));
+
+        // A legal rewind is represented in the journal, but replacing a prior byte prefix
+        // forces the same full-rebuild path while preserving the old fold semantics.
+        let mut rewound = Timeline::default();
+        record_search_turn(&mut rewound, 1, 0, "kept branch", "kept answer", vec![]);
+        record_search_turn(
+            &mut rewound,
+            2,
+            1,
+            "removed branch",
+            "removed answer",
+            vec![],
+        );
+        let replacement = rewound.rewind_surface(1).unwrap();
+        rewound
+            .replace_all(replacement, chat_state::MessageCause::Rewind)
+            .unwrap();
+        record_search_turn(
+            &mut rewound,
+            3,
+            1,
+            "replacement branch",
+            "replacement answer",
+            vec![],
+        );
+        std::fs::write(&path, encode_timeline(&rewound)).unwrap();
+        let rewound_projection = assert_projection_matches_full(&path, Some(rewritten_projection));
+        assert!(
+            timeline_indexable_content(&rewound_projection.timeline).contains("replacement branch")
+        );
+        assert!(
+            !timeline_indexable_content(&rewound_projection.timeline).contains("removed branch")
+        );
+
+        // Short truncation cannot reuse the longer checkpoint.
+        rewound = Timeline::default();
+        record_search_turn(&mut rewound, 1, 0, "short prompt", "short answer", vec![]);
+        std::fs::write(&path, encode_timeline(&rewound)).unwrap();
+        let truncated = assert_projection_matches_full(&path, Some(rewound_projection));
+        assert!(timeline_indexable_content(&truncated.timeline).contains("short prompt"));
+    }
+
+    #[test]
+    fn timeline_projection_preserves_full_reader_error_order_and_messages() {
+        use std::io::Write as _;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("timeline.jsonl");
+        let mut valid = Timeline::default();
+        record_search_turn(&mut valid, 1, 0, "base prompt", "base answer", vec![]);
+        let valid_bytes = encode_timeline(&valid);
+        std::fs::write(&path, &valid_bytes).unwrap();
+        let previous = cached_projection(&path, None).unwrap();
+
+        let mut checksum = valid_bytes.clone();
+        corrupt_last_checksum(&mut checksum);
+        std::fs::write(&path, checksum).unwrap();
+        assert_projection_error_matches_full(&path, Some(previous));
+
+        let mut version = valid_bytes.clone();
+        let first_end = version.iter().position(|byte| *byte == b'\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_slice(&version[..first_end]).unwrap();
+        header["version"] = serde_json::Value::from(9);
+        let encoded = serde_json::to_vec(&header).unwrap();
+        assert_eq!(encoded.len(), first_end);
+        version[..first_end].copy_from_slice(&encoded);
+        std::fs::write(&path, version).unwrap();
+        assert_projection_error_matches_full(&path, None);
+
+        let sequence_gap = rewrite_last_sequence(&valid_bytes, 999);
+        std::fs::write(&path, sequence_gap).unwrap();
+        assert_projection_error_matches_full(&path, None);
+
+        // Duplicate a valid lifecycle start. A later malformed physical record must
+        // still win because the full reader decodes the whole journal before folding.
+        let mut invalid_lifecycle = valid.events().to_vec();
+        let mut duplicate_turn = valid.events()[0].clone();
+        duplicate_turn.seq = valid.next_seq();
+        invalid_lifecycle.push(duplicate_turn);
+        let mut bytes =
+            super::super::JsonlStorageAdapter::encode_journal(&invalid_lifecycle, &[]).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let prefix_projection = {
+            std::fs::write(&path, &valid_bytes).unwrap();
+            cached_projection(&path, None).unwrap()
+        };
+        std::fs::write(&path, &bytes).unwrap();
+        assert_projection_error_matches_full(&path, Some(prefix_projection));
+
+        // A lifecycle-only suffix has the same old error kind and text as the
+        // projection path. This isolates lifecycle validation from physical decode.
+        std::fs::write(&path, &bytes).unwrap();
+        assert_projection_error_matches_full(&path, None);
+
+        // Physical syntax corruption after the invalid lifecycle fact must retain
+        // physical-decode precedence, even when only the suffix is scanned.
+        bytes.extend_from_slice(b"{invalid physical record}\n");
+        std::fs::write(&path, &valid_bytes).unwrap();
+        let prefix_projection = cached_projection(&path, None).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        assert_projection_error_matches_full(&path, Some(prefix_projection));
+
+        // Replay and live append deliberately validate this Control in different
+        // orders: duplicate retired layers are bad content, while a live duplicate
+        // revision is rejected by the lifecycle gate first.
+        let mut control_prefix = Timeline::default();
+        control_prefix
+            .record(chat_state::TimelineEventKind::Control(
+                chat_state::ControlEvent {
+                    revision: 7,
+                    snapshot: serde_json::json!({"control": 7}),
+                    retired_context_layers: vec![],
+                    model_contexts: vec![],
+                },
+            ))
+            .unwrap();
+        let control_prefix_bytes = encode_timeline(&control_prefix);
+        std::fs::write(&path, &control_prefix_bytes).unwrap();
+        let previous = cached_projection(&path, None).unwrap();
+        let invalid_control = chat_state::TimelineEvent {
+            version: chat_state::TIMELINE_SCHEMA_VERSION,
+            seq: control_prefix.next_seq(),
+            at_ms: control_prefix.events()[0].at_ms,
+            kind: chat_state::TimelineEventKind::Control(chat_state::ControlEvent {
+                revision: 7,
+                snapshot: serde_json::json!({"control": 7}),
+                retired_context_layers: vec![
+                    chat_state::ControlContextLayer::AgentRole,
+                    chat_state::ControlContextLayer::AgentRole,
+                ],
+                model_contexts: vec![],
+            }),
+        };
+        assert!(matches!(
+            control_prefix.clone().accept(invalid_control.clone()),
+            Err(chat_state::TimelineError::NonMonotonicControlRevision {
+                previous: 7,
+                actual: 7,
+            })
+        ));
+        let raw = serde_json::value::to_raw_value(&invalid_control).unwrap();
+        let suffix = crate::session::history::encode_domain(
+            control_prefix_bytes
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count() as u64,
+            &raw,
+            None,
+        )
+        .unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&suffix).unwrap();
+        file.flush().unwrap();
+        let replay_error = full_projection(&path).unwrap_err();
+        assert_eq!(replay_error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            replay_error.to_string(),
+            "control model context must be one non-empty synthetic text reminder after system"
+        );
+        assert_projection_error_matches_full(&path, Some(previous));
+    }
+
+    #[test]
+    fn timeline_projection_carries_presentation_append_state_across_domain_suffix() {
+        use std::io::Write as _;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("timeline.jsonl");
+        let mut timeline = Timeline::default();
+        record_search_turn(&mut timeline, 1, 0, "mixed prefix", "mixed answer", vec![]);
+        std::fs::write(&path, encode_timeline(&timeline)).unwrap();
+        let base_projection = cached_projection(&path, None).unwrap();
+
+        let before_mode = std::fs::read(&path).unwrap();
+        let mode_line = mode_presentation_line(
+            before_mode.iter().filter(|byte| **byte == b'\n').count() as u64,
+            "mode-event-1",
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&mode_line).unwrap();
+        file.flush().unwrap();
+
+        timeline
+            .record(chat_state::TimelineEventKind::SessionTitle(
+                chat_state::SessionTitleEvent {
+                    title: "suffix title".into(),
+                    source: chat_state::SessionTitleSource::User,
+                },
+            ))
+            .unwrap();
+        let event = timeline.events().last().unwrap();
+        let raw = serde_json::value::to_raw_value(event).unwrap();
+        let physical_seq = std::fs::read(&path)
+            .unwrap()
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count() as u64;
+        let domain_line = crate::session::history::encode_domain(physical_seq, &raw, None).unwrap();
+        file.write_all(&domain_line).unwrap();
+        file.flush().unwrap();
+
+        let projected = assert_projection_matches_full(&path, Some(base_projection));
+        assert_eq!(projected.timeline.events().len(), timeline.events().len());
+        assert!(timeline_indexable_content(&projected.timeline).contains("mixed prefix"));
+
+        // AppendState's presentation identity set must survive the same suffix
+        // that advanced the physical record cursor for the domain event.
+        let prefix_projection = cached_projection(&path, None).unwrap();
+        let duplicate_seq = std::fs::read(&path)
+            .unwrap()
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count() as u64;
+        file.write_all(&mode_presentation_line(duplicate_seq, "mode-event-1"))
+            .unwrap();
+        file.flush().unwrap();
+        assert_projection_error_matches_full(&path, Some(prefix_projection));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeline_projection_rebuilds_from_the_pinned_replacement_entity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("timeline.jsonl");
+        let displaced = temp.path().join("displaced.jsonl");
+        let mut original = Timeline::default();
+        record_search_turn(
+            &mut original,
+            1,
+            0,
+            "original prompt",
+            "original answer",
+            vec![],
+        );
+        std::fs::write(&path, encode_timeline(&original)).unwrap();
+        let previous = cached_projection(&path, None).unwrap();
+
+        std::fs::rename(&path, displaced).unwrap();
+        let mut replacement = Timeline::default();
+        record_search_turn(
+            &mut replacement,
+            2,
+            0,
+            "replacement prompt",
+            "replacement answer",
+            vec![],
+        );
+        std::fs::write(&path, encode_timeline(&replacement)).unwrap();
+        let current = assert_projection_matches_full(&path, Some(previous));
+        assert!(timeline_indexable_content(&current.timeline).contains("replacement prompt"));
+        assert!(!timeline_indexable_content(&current.timeline).contains("original prompt"));
     }
 }

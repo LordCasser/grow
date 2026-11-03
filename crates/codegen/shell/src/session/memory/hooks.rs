@@ -120,13 +120,17 @@ pub fn on_session_end(
     // Write to daily session log.
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     match storage.write_daily_log(&date, slug, session_id, &summary, false) {
-        Ok(path) => {
+        Ok(memory::storage::DailyLogWriteResult::Written(path)) => {
             tracing::info!(
                 path = %path.display(),
                 real_user_messages = real_queries.len(),
                 "session end: wrote memory summary"
             );
             SessionEndResult::Written(path.display().to_string())
+        }
+        Ok(memory::storage::DailyLogWriteResult::SkippedEphemeral) => {
+            tracing::debug!("session end: memory summary skipped for ephemeral workspace");
+            SessionEndResult::Skipped
         }
         Err(e) => {
             tracing::warn!(error = %e, "session end: failed to write memory summary");
@@ -315,6 +319,23 @@ mod tests {
             })
             .collect();
         assert!(!session_files.is_empty(), "session log file should exist");
+    }
+
+    #[test]
+    fn test_on_session_end_reports_ephemeral_storage_skip() {
+        let storage = MemoryStorage::new(std::path::Path::new("/tmp/grow-ephemeral"), None);
+        assert!(storage.is_ephemeral());
+        let conv = vec![
+            make_user("help me fix the auth bug"),
+            make_assistant("sure, let me look at auth.rs"),
+            make_user("also check the tests"),
+            make_assistant("found the issue"),
+            make_user("great, can you fix the login page too"),
+            make_assistant("on it"),
+        ];
+
+        let result = on_session_end(&storage, &conv, "sess-ephemeral", true);
+        assert_eq!(result, SessionEndResult::Skipped);
     }
 
     #[test]

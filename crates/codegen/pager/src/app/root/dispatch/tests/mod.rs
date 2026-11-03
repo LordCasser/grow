@@ -20,21 +20,22 @@ use super::cta::{
 };
 use super::ctx::{find_agent_by_session_id, get_active_agent, get_active_agent_mut};
 use super::dashboard::{
-    dispatch_dashboard_attach, dispatch_dashboard_begin_rename, dispatch_dashboard_commit_rename,
-    dispatch_dashboard_confirm_worktree, dispatch_dashboard_create_new_agent_with_detail,
-    dispatch_dashboard_delete, dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
-    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit,
-    dispatch_dashboard_overlay_stop, dispatch_dashboard_peek_reply,
-    dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
-    dispatch_dashboard_question_answer, dispatch_dashboard_stop, dispatch_exit_dashboard,
-    dispatch_open_dashboard, ensure_dashboard_state, resolve_location_input,
+    dispatch_close_current_session, dispatch_dashboard_attach, dispatch_dashboard_begin_rename,
+    dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
+    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_delete,
+    dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
+    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit, dispatch_dashboard_stop,
+    dispatch_exit_dashboard, dispatch_open_dashboard, dispatch_stop_session_work,
+    ensure_dashboard_state, resolve_location_input,
 };
 use super::modes::{ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST, permission_mode_toast};
 use super::permissions::drain_root_permission_queue;
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::reanchor_grouped_selection;
-use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
+use super::session::modal::{
+    dispatch_rename_session, dispatch_sessions_confirm_close, session_delete_bindings,
+};
 use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
 use super::task_result::dispatch_task_result;
@@ -90,6 +91,7 @@ fn test_app() -> AppView {
         scratch: crate::scrollback::render::ScratchBuffer::new(),
         cursor: crate::render::draw::CursorState::new(),
         pending_action: None,
+        session_deletion: None,
         exit_suspension: None,
         exit_session_pending: None,
         scroll_state: crate::input::mouse::MouseScrollState::default(),
@@ -372,6 +374,30 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
 }
 /// Build an app with three agents (ids 0, 1, 2) and `active_view` set
 /// to agent 0.
+fn close_session_and_ack(app: &mut AppView, id: AgentId) -> Vec<Effect> {
+    let effects = dispatch_sessions_confirm_close(app, id);
+    if let [
+        Effect::CloseSession {
+            agent_id,
+            session_id,
+            binding_epoch,
+        },
+    ] = effects.as_slice()
+    {
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionCloseResolved {
+                agent_id: *agent_id,
+                session_id: session_id.clone(),
+                binding_epoch: *binding_epoch,
+                result: Ok(()),
+            }),
+            app,
+        )
+    } else {
+        effects
+    }
+}
+
 pub(super) fn three_agent_app() -> AppView {
     let mut app = test_app_with_agent();
     insert_placeholder_agent(&mut app, AgentId(1));

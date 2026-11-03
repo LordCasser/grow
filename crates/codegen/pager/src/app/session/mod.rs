@@ -188,6 +188,8 @@ pub enum AgentCommand {
     /// Drives the spinner shown on the placeholder agent while the
     /// `grow/session/fork` request is in flight.
     ForkSession,
+    /// Retiring this runtime; keep its view until the close acknowledgement.
+    CloseSession,
 }
 impl AgentCommand {
     /// Human-readable label for the status line (e.g., "Compacting").
@@ -198,6 +200,7 @@ impl AgentCommand {
             Self::RestoreWorktree => "Restoring session in worktree",
             Self::RestoreCode => "Restoring code",
             Self::ForkSession => "Forking session",
+            Self::CloseSession => "Closing session",
         }
     }
     /// The raw command text (e.g., "/compact").
@@ -208,6 +211,7 @@ impl AgentCommand {
             Self::RestoreWorktree => "worktree",
             Self::RestoreCode => "restore",
             Self::ForkSession => "fork",
+            Self::CloseSession => "close",
         }
     }
 }

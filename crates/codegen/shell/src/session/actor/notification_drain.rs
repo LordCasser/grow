@@ -507,7 +507,7 @@ impl SessionActor {
             .map_err(|error| error.to_string())
     }
 
-    async fn receive_notification_detailed(
+    pub(super) async fn receive_notification_detailed(
         &self,
         source: chat_state::NotificationSource,
         source_version: chat_state::NotificationSourceVersion,
@@ -530,6 +530,7 @@ impl SessionActor {
             | chat_state::NotificationSource::PlanHandoff { .. }
             | chat_state::NotificationSource::ParentMessage { .. }
             | chat_state::NotificationSource::AgentReply { .. }
+            | chat_state::NotificationSource::InquiryAnswered { .. }
             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
         };
         let goal_owner = task_id.as_ref().and_then(|task_id| {
@@ -549,6 +550,7 @@ impl SessionActor {
                     | chat_state::NotificationSource::PlanHandoff { .. }
                     | chat_state::NotificationSource::ParentMessage { .. }
                     | chat_state::NotificationSource::AgentReply { .. }
+                    | chat_state::NotificationSource::InquiryAnswered { .. }
                     | chat_state::NotificationSource::WorkflowHandoff { .. } => return None,
                 };
                 match notification.source.owner() {
@@ -881,7 +883,7 @@ impl SessionActor {
     /// boundary. A completion that arrives while
     /// the Agent is already working augments that turn instead of scheduling a
     /// redundant follow-up turn.
-    pub(super) async fn drain_active_notifications(&self) -> bool {
+    pub(super) async fn drain_active_notifications(&self) -> Result<bool, acp::Error> {
         self.drain_active_notifications_excluding(&[]).await
     }
 
@@ -892,20 +894,44 @@ impl SessionActor {
     pub(super) async fn drain_active_notifications_excluding(
         &self,
         excluded_notification_ids: &[String],
-    ) -> bool {
+    ) -> Result<bool, acp::Error> {
+        self.reconcile_coordination_answers()
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "consultation synchronization",
+                    error,
+                )
+            })?;
+        self.drain_active_notifications_selected(excluded_notification_ids, None)
+            .await
+    }
+
+    pub(super) async fn drain_active_notifications_selected(
+        &self,
+        excluded_notification_ids: &[String],
+        selected_notification_ids: Option<&[String]>,
+    ) -> Result<bool, acp::Error> {
+        if self.goal_provider_admission_closed() {
+            return Ok(false);
+        }
         self.parent_message_interrupt.send_replace(false);
         let Some(turn) = self.events.current_turn() else {
-            return false;
+            return Ok(false);
         };
-        let Some(origin) = self
-            .state
-            .lock()
-            .await
-            .foreground
-            .regular()
-            .map(|task| task.origin.clone())
-        else {
-            return false;
+        let (origin, prompt_id) = {
+            let state = self.state.lock().await;
+            if !state.execution_open() {
+                return Ok(false);
+            }
+            let Some(task) = state
+                .foreground
+                .regular()
+                .filter(|task| !task.is_finished())
+            else {
+                return Ok(false);
+            };
+            (task.origin.clone(), task.prompt_id.clone())
         };
         let active_plan_handoff = (*self.turn_behavior.lock() == tool_types::BehaviorId::Plan)
             .then(|| self.behavior.lock().snapshot().last_plan_handoff)
@@ -914,8 +940,16 @@ impl SessionActor {
             .chat_state_handle
             .pending_notifications()
             .await
-            .unwrap_or_default()
+            .ok_or_else(|| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "notification query",
+                    "Timeline actor unavailable",
+                )
+            })?
             .into_iter()
+            .filter(|notification| {
+                selected_notification_ids.is_none_or(|ids| ids.contains(&notification.id))
+            })
             .filter(|notification| !excluded_notification_ids.contains(&notification.id))
             .filter(|notification| {
                 Self::notification_consumable_by(
@@ -926,7 +960,7 @@ impl SessionActor {
             })
             .collect::<Vec<_>>();
         if notifications.is_empty() {
-            return false;
+            return Ok(false);
         }
         let notification_ids = notifications
             .iter()
@@ -937,7 +971,10 @@ impl SessionActor {
             .read_notification_payloads(&displayed_notifications, "active turn")
             .await
         else {
-            return false;
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "notification payload",
+                "notification payload unavailable",
+            ));
         };
         let blocks = Self::notification_blocks(
             &displayed_notifications,
@@ -957,22 +994,38 @@ impl SessionActor {
                 .iter()
                 .any(|receipt| receipt.source.agent_message().is_some())
         {
-            return false;
+            return Ok(false);
         }
         let mut input = sampling_types::ConversationItem::notification_drain(body);
         input.set_prompt_index(self.chat_state_handle.get_prompt_index().await);
+        // Payload I/O is outside execution admission. Recheck the exact owner
+        // after it, then admit consumption under the existing control fence.
+        let _control_gate = self.step_control_gate.lock().await;
+        if !self
+            .state
+            .lock()
+            .await
+            .can_continue_regular_turn(&prompt_id)
+            || self.events.current_turn() != Some(turn)
+            || self.goal_provider_admission_closed()
+            || self.behavior.lock().behavior() != *self.turn_behavior.lock()
+        {
+            return Ok(false);
+        }
         if let Err(error) = self
             .consume_notifications_durably(notification_ids, turn, Some(input))
             .await
         {
-            tracing::error!(%error, "failed to consume active notifications");
-            return false;
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "notification consumption",
+                error.to_string(),
+            ));
         }
         tracing::info!(
             count = notifications.len(),
             "delivered durable notifications to the active turn"
         );
-        true
+        Ok(true)
     }
 
     /// Promote the durable inbox into one model turn. User FIFO admission is
@@ -1118,7 +1171,8 @@ impl SessionActor {
             let priority = match notification.source {
                 chat_state::NotificationSource::MonitorProgress { .. } => 1u8,
                 chat_state::NotificationSource::TaskStillRunning { .. } => 2u8,
-                chat_state::NotificationSource::TaskCompleted { .. }
+                chat_state::NotificationSource::InquiryAnswered { .. }
+                | chat_state::NotificationSource::TaskCompleted { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
                 | chat_state::NotificationSource::ParentMessage { .. }
@@ -1340,6 +1394,7 @@ impl SessionActor {
         !matches!(
             notification.source,
             chat_state::NotificationSource::TaskStillRunning { .. }
+                | chat_state::NotificationSource::InquiryAnswered { .. }
         )
     }
 
@@ -1396,7 +1451,8 @@ impl SessionActor {
                 | chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
-                | chat_state::NotificationSource::WorkflowHandoff { .. } => {
+                | chat_state::NotificationSource::WorkflowHandoff { .. }
+                | chat_state::NotificationSource::InquiryAnswered { .. } => {
                     sections.push(vec![acp::ContentBlock::Text(acp::TextContent::new(
                         payload.clone(),
                     ))]);
@@ -1477,7 +1533,8 @@ impl SessionActor {
                 chat_state::NotificationSource::MonitorProgress { .. } => {}
                 chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::ParentMessage { .. }
-                | chat_state::NotificationSource::AgentReply { .. } => {}
+                | chat_state::NotificationSource::AgentReply { .. }
+                | chat_state::NotificationSource::InquiryAnswered { .. } => {}
             }
         }
         (
@@ -1733,13 +1790,13 @@ mod tests {
             parent.chat_state_handle.push_tool_result_durably(ConversationItem::tool_result("m1", serde_json::json!({"status":"received", "receipt_id":m1}).to_string())).await.unwrap();
             let before = child.chat_state_handle.build_request("child", vec![], None, None, None).await.unwrap();
             assert!(!before.items.iter().any(|item| item.text_content().contains("Thoughts?")), "Received does not claim context visibility");
-            assert!(child.drain_active_notifications().await);
+            assert!(child.drain_active_notifications().await.unwrap());
             let reference = AgentMessageRef { source_session_id: "parent".into(), message_id: "m1".into() };
             child.chat_state_handle.push_assistant_response(call("m2", serde_json::json!({"reply_to":reference, "message":reply})));
             let m2 = parent.receive_agent_message("child".into(), "m2".into(), reply.into(), false, Some(reference.clone())).await.unwrap();
             child.chat_state_handle.push_tool_result_durably(ConversationItem::tool_result("m2", serde_json::json!({"status":"received", "receipt_id":m2}).to_string())).await.unwrap();
             assert!(!*parent.parent_message_interrupt.borrow(), "a reply never requests upward interruption");
-            assert!(parent.drain_active_notifications().await);
+            assert!(parent.drain_active_notifications().await.unwrap());
             for (actor, incoming, outbound, receipt) in [(&parent, reply, opinion, &m2), (&child, opinion, reply, &m1)] {
                 let request = actor.chat_state_handle.build_request(actor.session_info.id.0.as_ref(), vec![], None, None, None).await.unwrap();
                 let messages = request.items.iter().filter_map(|item| match item { ConversationItem::AgentMessage(batch) => Some(batch), _ => None }).flat_map(|batch| &batch.messages).collect::<Vec<_>>();
@@ -1751,11 +1808,11 @@ mod tests {
                 let value = serde_json::to_value(wire).unwrap();
                 let runtime_calls = value.as_array().unwrap().iter().filter(|item| item["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|call| call["function"]["name"] == "receive_agent_message"))).count();
                 assert_eq!(runtime_calls, 1);
-                assert!(!actor.drain_active_notifications().await, "consumed opinions cannot create another delivery or ACK");
+                assert!(!actor.drain_active_notifications().await.unwrap(), "consumed opinions cannot create another delivery or ACK");
                 assert_eq!(actor.chat_state_handle.parent_message_receipts().await.unwrap().len(), 1);
             }
             assert_eq!(parent.receive_agent_message("child".into(), "m2".into(), reply.into(), false, Some(reference)).await.unwrap(), m2);
-            assert!(!parent.drain_active_notifications().await);
+            assert!(!parent.drain_active_notifications().await.unwrap());
         }).await;
     }
 
@@ -1765,7 +1822,7 @@ mod tests {
             let (actor, _) = crate::session::actor::tests::support::build_actor().await;
             crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
             let id = actor.receive_agent_message("parent".into(), "m1".into(), "opinion".into(), true, None).await.unwrap();
-            assert!(actor.drain_active_notifications().await);
+            assert!(actor.drain_active_notifications().await.unwrap());
             actor.state.lock().await.termination = TerminationState::Graceful;
             assert_eq!(actor.receive_agent_message("parent".into(), "m1".into(), "opinion".into(), true, None).await.unwrap(), id);
             assert!(!*actor.parent_message_interrupt.borrow(), "receipt confirmation cannot repeat interruption");
@@ -1854,7 +1911,7 @@ mod tests {
                 assert_eq!(notice.correlation_id, id);
                 assert_eq!(live[0].meta.as_ref().unwrap()["transient"], true);
                 assert!(live[0].meta.as_ref().unwrap().get("eventId").is_none());
-                assert!(actor.drain_active_notifications().await);
+                assert!(actor.drain_active_notifications().await.unwrap());
                 let before = actor.chat_state_handle.timeline_events().await.unwrap();
                 let _ = notices(&mut gateway);
                 let timeline = chat_state::Timeline::from_events(before.clone()).unwrap();
@@ -2044,7 +2101,7 @@ mod tests {
                 );
                 let restored = chat_state::Timeline::from_events(events).unwrap();
                 assert_eq!(restored.pending_notifications().len(), 1);
-                assert!(actor.drain_active_notifications().await);
+                assert!(actor.drain_active_notifications().await.unwrap());
                 let text = actor
                     .chat_state_handle
                     .get_conversation()
@@ -2149,7 +2206,12 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(*actor.parent_message_interrupt.borrow());
-                assert!(actor.close_steering_and_drain("test-active-turn").await);
+                assert!(
+                    actor
+                        .close_steering_and_drain("test-active-turn")
+                        .await
+                        .unwrap()
+                );
                 assert!(!*actor.parent_message_interrupt.borrow());
                 assert!(
                     actor
@@ -2724,7 +2786,7 @@ mod tests {
                         std::time::Duration::from_secs(2),
                         actor.drain_active_notifications(),
                     )
-                    .await
+                    .await.unwrap()
                     .expect("resolution cleanup must not re-enter the artifact gate")
                 );
                 assert!(
@@ -2856,7 +2918,7 @@ mod tests {
                             .unwrap()
                             .is_empty()
                     );
-                    assert!(!actor.drain_active_notifications().await);
+                    assert!(!actor.drain_active_notifications().await.unwrap());
                     assert!(
                         chat_state::Timeline::from_events(
                             actor.chat_state_handle.timeline_events().await.unwrap()
@@ -2890,7 +2952,7 @@ mod tests {
                     .await
                     .expect("receive task completion");
 
-                assert!(actor.drain_active_notifications().await);
+                assert!(actor.drain_active_notifications().await.unwrap());
                 let conversation = actor.chat_state_handle.get_conversation().await;
                 let delivered = conversation.last().expect("completion input materialized");
                 assert!(
@@ -3523,7 +3585,7 @@ mod tests {
                 ));
 
                 crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
-                assert!(actor.drain_active_notifications().await);
+                assert!(actor.drain_active_notifications().await.unwrap());
                 assert!(
                     actor
                         .chat_state_handle
@@ -3584,6 +3646,7 @@ mod tests {
                     actor
                         .drain_active_notifications_excluding(std::slice::from_ref(&completion_id))
                         .await
+                        .unwrap()
                 );
 
                 let pending = actor
@@ -3634,7 +3697,7 @@ mod tests {
                         .expect("receive checkpoint");
                 }
 
-                assert!(actor.drain_active_notifications().await);
+                assert!(actor.drain_active_notifications().await.unwrap());
 
                 assert!(
                     actor
@@ -3655,5 +3718,165 @@ mod tests {
                 assert!(!delivered.contains("stale checkpoint body"));
             })
             .await;
+    }
+    async fn passive_receipt(actor: &SessionActor, id: &str) -> String {
+        actor
+            .receive_notification(
+                chat_state::NotificationSource::InquiryAnswered {
+                    source_session_id: "asking-session".into(),
+                    inquiry_id: id.into(),
+                },
+                chat_state::NotificationSourceVersion::Opaque {
+                    value: format!("terminal-{id}"),
+                },
+                format!("Consultation {id}: question and complete answer; not human permission."),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn passive_inquiry_receipt_does_not_autostart_and_selection_is_exact() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _) = crate::session::actor::tests::support::build_actor().await;
+                let first = passive_receipt(&actor, "first").await;
+                let before = actor.chat_state_handle.timeline_events().await.unwrap();
+                let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+                actor.clone().maybe_drain_notifications(completion_tx).await;
+                assert!(actor.state.lock().await.foreground.is_idle());
+                assert!(completion_rx.try_recv().is_err());
+                assert_eq!(
+                    serde_json::to_value(actor.chat_state_handle.timeline_events().await.unwrap())
+                        .unwrap(),
+                    serde_json::to_value(before).unwrap()
+                );
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+                let second = passive_receipt(&actor, "second").await;
+                assert!(!*actor.parent_message_interrupt.borrow());
+                assert!(actor.pending_interjections.is_empty());
+                assert!(
+                    actor
+                        .drain_active_notifications_selected(&[], Some(&[first.clone()]))
+                        .await
+                        .unwrap()
+                );
+                let pending = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    pending
+                        .iter()
+                        .map(|receipt| &receipt.id)
+                        .collect::<Vec<_>>(),
+                    vec![&second]
+                );
+                assert!(actor.drain_active_notifications().await.unwrap());
+                assert!(!actor.drain_active_notifications().await.unwrap());
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let consumed = events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Consumed {
+                                notification_ids, ..
+                            },
+                        ) => Some(notification_ids),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                assert_eq!(consumed, vec![&first, &second]);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn passive_inquiry_after_final_close_stays_pending_and_preemption_gate_wins() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _) = crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
+                crate::session::actor::tests::support::install_test_foreground(
+                    &actor,
+                    "final-turn",
+                )
+                .await;
+                assert!(!actor.close_steering_and_drain("final-turn").await.unwrap());
+                let id = passive_receipt(&actor, "after-close").await;
+                assert!(
+                    !actor
+                        .state
+                        .lock()
+                        .await
+                        .foreground
+                        .regular()
+                        .unwrap()
+                        .steering_open
+                );
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()[0]
+                        .id,
+                    id
+                );
+                actor.state.lock().await.terminal_preemption_pending = true;
+                assert!(!actor.drain_active_notifications().await.unwrap());
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()[0]
+                        .id,
+                    id
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn passive_missing_payload_blocks_real_prompt_before_provider_dispatch() {
+        tokio::task::LocalSet::new().run_until(async {
+            use axum::{Json, Router, routing::post};
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let hits = Arc::clone(&calls);
+            let app = Router::new().route("/v1/chat/completions", post(move || {
+                let hits = Arc::clone(&hits);
+                async move { hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Json(serde_json::json!({"choices": [{"message": {"role":"assistant","content":"unexpected"},"finish_reason":"stop"}]})) }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (actor, _) = crate::session::actor::tests::support::build_actor().await;
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = base_url.clone(); config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+            actor.chat_state_handle.replace_sampling_route(config.clone());
+            let mut route = actor.model_route.snapshot();
+            route.sampling_config.base_url = base_url;
+            route.sampling_config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+            actor.model_route.replace(route.model_id, route.sampling_config);
+            passive_receipt(&actor, "missing-body").await;
+            let receipt = actor.chat_state_handle.pending_notifications().await.unwrap().remove(0);
+            crate::session::notification_inbox::remove_payload(&actor.session_directory, &receipt.payload_ref).unwrap();
+            crate::session::actor::tests::support::install_test_foreground(&actor, "payload-failure").await;
+            let input_ids = crate::session::actor::tests::support::admit_test_human_input(&actor, "payload-failure").await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), actor.handle_prompt(
+                "payload-failure", input_ids, crate::session::PromptOrigin::User, vec![], crate::session::TurnKind::User,
+                vec![acp::ContentBlock::Text(acp::TextContent::new("read the consultation"))],
+                tool_types::BehaviorId::Normal, None, None, false, None, None,
+            )).await.unwrap();
+            let error = result.unwrap_err();
+            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error), "{error:?}");
+            assert!(format!("{error:?}").contains("notification payload"), "{error:?}");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(actor.chat_state_handle.pending_notifications().await.unwrap().len(), 1);
+            server.abort();
+        }).await;
     }
 }

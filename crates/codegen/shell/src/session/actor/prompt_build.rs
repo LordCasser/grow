@@ -19,14 +19,21 @@ pub(super) fn pick_user_image_url(
     format!("data:{};base64,{}", image.mime_type, image.data)
 }
 /// True iff `conversation` already contains a tagged project-instructions reminder.
-/// Read-only; used by `spawn_session_actor` for idempotent AGENTS.md injection
-/// so resumed sessions and forks don't duplicate the message.
+/// Used by fresh-prefix injection and compaction to avoid duplicate blocks.
 pub(super) fn conversation_has_project_instructions(conversation: &[ConversationItem]) -> bool {
     conversation.iter().any(is_project_instructions)
 }
-/// A project-instructions (AGENTS.md) reminder is a `User` item explicitly tagged
-/// [`SyntheticReason::ProjectInstructions`]. Single source of truth for both
-/// spawn-time idempotent injection and compaction de-duplication.
+/// Rules follow the model's effective branch, never today's disk configuration.
+/// Preserve a single block byte-for-byte so existing checkpoints keep their identity.
+pub(super) fn effective_project_instructions(conversation: &[ConversationItem]) -> Option<String> {
+    let sections: Vec<_> = conversation
+        .iter()
+        .filter(|item| is_project_instructions(item))
+        .map(ConversationItem::text_content)
+        .collect();
+    (!sections.is_empty()).then(|| sections.join("\n"))
+}
+
 pub(super) fn is_project_instructions(item: &ConversationItem) -> bool {
     matches!(
         item,

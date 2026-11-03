@@ -104,6 +104,10 @@ ACP 的 stdio 与 WebSocket 服务见 [Agent Mode](crates/codegen/pager/docs/use
 | `Ctrl+X`，`E` | 选择 reasoning effort | `/effort` |
 | `Ctrl+X`，`P` | 选择 Permission | `/permission` |
 | `Ctrl+X`，`B` | 选择 Behavior | `/behavior` |
+| `Ctrl+X`，`C` | 关闭当前 session，等待 runtime 确认并保留历史 | — |
+| `Ctrl+X`，`D` | 永久删除当前 session 历史，打开独立确认 | — |
+
+重复按 `Ctrl+X` 只停止 session 工作；空闲时会话保持打开。删除确认按 `Y` 执行，按 `N` 或 `Esc` 取消。
 
 Agent 是角色与任务边界，Behavior 是主会话的推进方式，Permission 是工具调用的授权策略。
 三者独立：切换其中一个不会暗中改动另外两个。完整按键与命令见

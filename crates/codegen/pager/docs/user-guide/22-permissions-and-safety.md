@@ -171,7 +171,7 @@ The operations below are treated as read-only and run without prompting, in ever
 - `list_dir`
 - `grep` (content search)
 - `todo_write`
-- `get_command_or_subagent_output` / `kill_command_or_subagent` (background task and subagent control)
+- `get_command_output` (background command output), `list_subagent` / `get_subagent_status` / `wait_subagent` (subagent observation), and `kill_command_or_subagent` (cancellation)
 - Invoking skills
 
 ### Read-Only Shell Commands

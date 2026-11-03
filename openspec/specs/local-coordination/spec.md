@@ -38,23 +38,39 @@
 - **THEN** 响应保留 inquiry_id 和 accepted 状态，不将取消回执伪装成询问答案。
 
 ### Requirement: Parent-child inquiries use isolated Sideband execution
-A running child SHALL be able to ask its immediate parent a question, and a primary agent SHALL be able to ask a directly-owned running child. Runtime-derived identities SHALL authorize the relationship. Questions SHALL use asynchronous tool-free Sideband execution without entering or interrupting the target foreground context. Children SHALL NOT gain cross-session discovery/inquiry or upward intervention; an explicitly authorized reply to a durably received message SHALL be treated as an attributed opinion, not upward intervention or human permission.
+A running child SHALL be able to ask its immediate parent a question, and a primary agent SHALL be able to ask a directly-owned running child. Runtime-derived identities SHALL authorize the relationship. Questions SHALL execute asynchronously in a tool-free Sideband from frozen context without interrupting target foreground execution. After a successful answer, the target SHALL retain attributed consultation evidence for passive delivery at an authorized context boundary. Children SHALL NOT gain cross-session discovery/inquiry or upward intervention; neither consultation evidence nor an explicitly authorized message reply SHALL become human permission.
 
 #### Scenario: Child clarification during parent work
 - **WHEN** a child asks its parent while the parent foreground is busy or waiting for that child
-- **THEN** a Sideband answers from frozen parent context, returns the answer to the child, and the main view shows one correlated inquiry row through receipt and completion.
+- **THEN** a Sideband answers from frozen parent context, returns the answer to the child and updates one correlated inquiry row, while its completed question and answer become passive evidence for the parent's next authorized context boundary.
 
 #### Scenario: Parent asks child
-- **WHEN** the parent asks its running child a question
-- **THEN** the child answers via Sideband without changing its foreground task or requiring cross-workspace approval for its delegated worktree.
+- **WHEN** a parent asks its directly-owned running child a question
+- **THEN** the child answers via Sideband without interrupting its foreground task or requiring cross-workspace approval for its delegated worktree; successful consultation evidence is passively synchronized to the child.
 
 #### Scenario: Invalid route or cancellation
-- **WHEN** a caller targets an unrelated, sibling, terminated or Workflow-owned hidden child, or cancels an in-flight inquiry
-- **THEN** a typed local failure/cancellation is returned without injecting user input, leaking another session's context or pausing the Goal.
+- **WHEN** a caller targets an unrelated, sibling, terminated or Workflow-owned hidden child, or inquiry-specific cancellation wins before successful-terminal admission
+- **THEN** a typed local failure/cancellation is returned without injecting a successful consultation, leaking another Session's context or pausing the Goal.
+
+#### Scenario: Cancellation wins while completed answer preparation is awaiting
+- **WHEN** the provider has returned but inquiry-specific cancellation wins before the target admits its successful canonical terminal, including while usage or Sideband persistence is awaiting
+- **THEN** the target records a typed cancellation without a success proof or consultation receipt; already committed Sideband evidence and usage are retained.
+
+#### Scenario: Successful-terminal admission wins before its durable acknowledgement
+- **WHEN** the target admits a successful canonical terminal under its existing serialized boundary before inquiry-specific cancellation, and persistence acknowledgement is still pending
+- **THEN** cancellation cannot reverse that admitted outcome; the original response reports its actual persistence-confirmed outcome or failure, and only durable success creates the passive synchronization obligation.
+
+#### Scenario: Peer cancellation preserves the original dispatched inquiry exchange
+- **WHEN** a peer inquiry is already dispatched and the source accepts a cancellation intent
+- **THEN** after matching target progress confirms registration the source requests cancellation once on the pinned target while preserving the original inquiry read exchange, and derives the final inquiry outcome from that exchange or its actual transport/deadline failure; local intent acceptance is not proof that target cancellation won.
+
+#### Scenario: Target shutdown settles already owned completed Sideband work
+- **WHEN** target shutdown starts after the Sideband Completed End is durable and the inquiry still owns its existing queue activity
+- **THEN** that owner may settle its canonical terminal before the shutdown writer barrier; this does not reopen execution admission or allow a new receipt while execution is closed.
 
 #### Scenario: Reply does not grant intervention authority
-- **WHEN** child replies along an authorized message relationship
-- **THEN** the parent receives an attributed opinion without granting the child interrupt authority, changing the inquiry route, or treating the opinion as a new user instruction.
+- **WHEN** a child replies along an authorized message relationship or a parent consultation answer is synchronized
+- **THEN** the target receives attributed opinion/evidence without granting the child interrupt authority, changing the inquiry route or creating a new user instruction.
 
 ### Requirement: Parent intervention has explicit delivery timing
 A primary agent SHALL be able to send a message to a directly-owned running child with an explicit immediate-interrupt or queued-next-step option. The message SHALL be attributed to the parent and durably received before acknowledgement. Retries and restoration SHALL preserve exactly-once inbox consumption.
@@ -103,8 +119,7 @@ Receiving-side inquiry audits SHALL retain whether the inquiry came through peer
 - **THEN** the inquiry row continues until its own terminal outcome and is not completed by foreground tool cleanup.
 
 ### Requirement: Inquiry snapshots retain completed tool evidence
-
-协调询问 SHALL 在冻结上下文中保留已经提交且可正确配对的工具调用身份、参数、结果、附件和 Assistant 正文，包括连续工具交换的尾部。未返回的调用 SHALL NOT 形成悬空工具协议或被伪造成已完成；同批已完成的交换 SHALL 保留。询问 SHALL 继续无工具执行，不修改目标主 Surface，也不将询问回答视为权限授予。
+协调询问 SHALL 在冻结上下文中保留已经提交且可正确配对的工具调用身份、参数、结果、附件和 Assistant 正文，包括连续工具交换的尾部。未返回的调用 SHALL NOT 形成悬空工具协议或被伪造成已完成；同批已完成的交换 SHALL 保留。询问 SHALL 继续无工具执行，生成期间不修改目标主 Surface；成功问答随后按被动通知消费进入目标上下文，不构成权限授予。
 
 #### Scenario: Parent asks about a completed child inquiry
 - **WHEN** 子 Agent 的冻结上下文包含已完成的 ask_parent，后面紧接其他完成的工具交换，parent 发起 ask_subagent
@@ -112,9 +127,7 @@ Receiving-side inquiry audits SHALL retain whether the inquiry came through peer
 
 #### Scenario: Inquiry arrives during a partial tool batch
 - **WHEN** 父子或 peer 询问冻结时，同一批工具仅部分返回或全部尚未返回
-- **THEN** 回答请求保留已完成交换及 Assistant 正文，省略未完成的结构化调用，不产生虚构结果，主 Surface 保持原样。
-
-证据入口：`crates/codegen/shell/src/session/actor/coordination.rs` — `handle_coordination_inquiry` 与真实 provider 请求回归。
+- **THEN** 回答请求保留已完成交换及 Assistant 正文，省略未完成的结构化调用，不产生虚构结果；冻结和生成不修改目标主 Surface，后续被动同步不拆开主任务的工具批次。
 
 ### Requirement: Valid prior Sidebands do not disable later inquiries
 
@@ -126,26 +139,31 @@ A session whose prior Sideband selected valid canonical Surface coordinates SHAL
 - **THEN** a peer or directly related agent can durably record the receipt, obtain the tool-free Sideband answer and record the terminal audit without a Surface-selection `audit_failure`.
 
 ### Requirement: Inquiry context visibility is scoped to each participant
-
-通过 agent 工具发起的 peer 或直接父子询问 SHALL 将问题保留为调用方的工具调用，将回答或失败保留为调用方的工具结果。目标 SHALL 仅在独立、无工具的冻结上下文询问中使用该问题，并 SHALL NOT 因接收、回答、审批、取消、重连或 UI 回放向目标 foreground 上下文追加问题、答案或通知。协调 API 的响应 SHALL 交付其调用者，不自动构造来源 Session 的模型输入。
+通过 agent 工具发起的 peer 或直接父子询问 SHALL 将问题保留为调用方的工具调用，将回答或失败保留为调用方的工具结果。目标 SHALL 在独立、无工具的冻结上下文询问中生成回答，并在成功 terminal 持久化后通过 context-only 通知将完整问答与真实来源纳入自己的后续获准采样。此同步 SHALL NOT 抢占执行、主动开启空闲 Turn、伪装成前台 Assistant 发言或人类授权。协调 API 的响应 SHALL 交付其调用者，不自动构造来源 Session 的模型输入。
 
 #### Scenario: Answer reaches the asking agent
-- **WHEN** agent 调用 `ask_session`、`ask_parent` 或 `ask_subagent` 并获得回答
-- **THEN** 调用方后续采样可见对应工具结果，目标询问前后主 Surface 不因该交互改变，目标接收视图仍可展示该问答。
+- **WHEN** agent 调用 ask_session、ask_parent 或 ask_subagent 并成功获得回答
+- **THEN** 调用方后续采样通过原工具结果看到回答，目标通过恰好一次的被动消费看到完整问答、Sideband 来源和快照依据；两端不重复追加来源工具结果。
 
 #### Scenario: Query and passive progress have different visibility
-- **WHEN** 调用方收到被动 inquiry phase 更新，随后显式调用 `get_inquiry`
-- **THEN** phase 更新本身不新增模型消息，显式查询结果按普通工具结果进入调用方上下文，并且不触发目标重新采样。
+- **WHEN** 调用方收到被动 inquiry phase 更新，随后显式调用 get_inquiry
+- **THEN** phase 更新本身不新增模型消息，显式查询结果按普通工具结果进入调用方上下文，不触发目标重新执行询问或重复接纳问答。
 
 #### Scenario: Replay does not inject inquiry content
-- **WHEN** 已完成询问在任一端重连或冷恢复时重建显示
-- **THEN** 显示恢复不重新发起询问，不向目标 foreground 注入问答，也不向来源重复追加工具结果。
+- **WHEN** 已完成询问在任一端重连或 UI 回放时重建显示
+- **THEN** 显示恢复不重新发起询问或派发模型输入；runtime 冷恢复仅按 canonical 成功事实与消费状态恢复尚未完成的被动同步，不重复已消费问答或来源工具结果。
 
 #### Scenario: External coordination API caller
-- **WHEN** 外部调用方通过协调 API 发起询问并取得响应
-- **THEN** 响应返回该 API 调用方，来源 Session 不因此自动获得合成工具结果或用户消息。
+- **WHEN** 外部调用方通过协调 API 发起询问并取得成功响应
+- **THEN** 响应返回 API 调用方，来源 Session 不自动获得合成工具结果或用户消息；回答方仍按相同成功事实生成被动咨询证据。
 
-现有证据入口：`crates/codegen/shell/src/session/actor/coordination.rs` — `handle_coordination_inquiry`、`delegated_inquiry_during_foreground_bypasses_peer_approval_without_injecting_input`；`crates/codegen/shell/src/session/actor/tool/result.rs` — `handle_bridge_tool_success`；`crates/codegen/shell/src/extensions/coordination.rs`。本要求明确现有边界。
+#### Scenario: Inquiry does not succeed
+- **WHEN** 询问被拒绝、失败、超时或取消且没有成功 terminal
+- **THEN** 保留原审计和工具错误，但不生成包含成功问答的上下文通知。
+
+#### Scenario: Complete consultation cannot fit its existing delivery limit
+- **WHEN** a valid Sideband produces an answer whose fully rendered attributed question/answer exceeds the existing notification payload byte limit
+- **THEN** the inquiry returns a typed failure before publishing its successful incoming terminal/proof, retains the completed Sideband evidence and usage, and creates no impossible synchronization obligation; it does not truncate the answer or automatically retry.
 
 ### Requirement: Message acknowledgements retain durable receipt identity
 
@@ -168,8 +186,7 @@ A session whose prior Sideband selected valid canonical Surface coordinates SHAL
 - **THEN** 同正文和投递参数返回原 receipt 且不重复消费或 interrupt，冲突正文/模式/目标拒绝；新的 tool call 不按正文相同自动去重。
 
 ### Requirement: Opinion replies use explicit message delivery
-
-agent 的正式意见交换 SHALL 使用消息接纳和安全步骤消费。每一端 SHALL 保留自己的发送调用与回执，以及对方的入站意见。沿已收到消息的 reply SHALL 由 runtime 解析并校验原参与方、关系与权限；reply SHALL NOT 被视为人类授权。Sideband 咨询答案 SHALL NOT 自动写入目标主上下文或成为其正式承诺。
+agent 的正式意见交换 SHALL 使用消息接纳和安全步骤消费。每一端 SHALL 保留自己的发送调用与回执，以及对方的入站意见。沿已收到消息的 reply SHALL 由 runtime 解析并校验原参与方、关系与权限；reply SHALL NOT 被视为人类授权。成功 Sideband 咨询可自动作为有归属的事实进入回答方上下文，但 SHALL NOT 因此成为前台正式承诺、显式发送的回复或新的执行授权。
 
 #### Scenario: Reply to received guidance
 - **WHEN** child 根据实际持久收到的父消息发出 reply
@@ -184,8 +201,8 @@ agent 的正式意见交换 SHALL 使用消息接纳和安全步骤消费。每�
 - **THEN** 各自收到独立接收回执，按各自 durable receive order 消费；发送不等待对方生成回复，也不触发自动 ACK 循环。
 
 #### Scenario: Sideband consultation remains separate
-- **WHEN** ask 返回意见而调用方尚未显式发送该内容
-- **THEN** 答案只作为调用方工具结果，目标主对话不追加该问答；调用方以后显式 send 引用时保留引用来源。
+- **WHEN** ask 返回意见且调用方尚未显式发送该内容
+- **THEN** 原回答保留为调用方工具结果和回答方被动咨询事实，不冒充一次显式 send/reply；以后显式 send 仍是带有自身身份和来源引用的独立操作。
 
 ### Requirement: Coordination guidance preserves audience ownership
 
@@ -241,7 +258,9 @@ Grow SHALL 指导 Agent 区分已确认事实、工作假设、候选产物和�
 
 ### Requirement: Primary guidance advances independently ready work
 
-Grow SHALL 指导 primary 在任务启动、结果返回、出现阻塞或关键前提改变后的自然检查点重新选择工作，优先处理交付瓶颈和能解锁后续工作的成果。等待 SHALL 基于实际依赖和现有工具语义；指引不得要求忙轮询、重复已委派工作或通过扩大范围保持忙碌。独立工作结束且下一步依赖已派发子任务时，指引 SHALL 明确使用任务输出工具对原 task ID 发起正超时的阻塞等待，不通过另起 sleep 命令、轮询循环或额外任务制造等待。等待返回 SHALL NOT 被指引视为子任务完成或成果验收。
+Grow SHALL 指导 primary 在任务启动、结果返回、出现阻塞或关键前提改变后的自然检查点重新选择工作，优先处理交付瓶颈和能解锁后续工作的成果。等待 SHALL 基于实际依赖和现有工具语义；指引不得要求忙轮询、重复已委派工作或通过扩大范围保持忙碌。独立工作结束且下一步依赖已派发子任务时，指引 SHALL 明确使用专用 wait_subagent 对原 subagent ID 发起有界阻塞等待，不通过另起 sleep 命令、轮询循环或额外任务制造等待。等待返回 SHALL NOT 被指引视为子任务完成或成果验收。
+
+具名工具的枚举、详情和等待指引 SHALL 在既有动态 Agent 层按 finalized 工具名渲染；稳定 system head SHALL 与工具集合无关。缺失能力 SHALL 不生成不存在的工具指令；Full 与 Extend SHALL 保留适用的 session extensions。
 
 #### Scenario: One result arrives before an unrelated task
 - **WHEN** A 的结果已返回且可以解锁下一项工作，B 仍运行但与该工作无关
@@ -253,17 +272,25 @@ Grow SHALL 指导 primary 在任务启动、结果返回、出现阻塞或关键
 
 #### Scenario: No useful independent work remains
 - **WHEN** 下一步所需结果尚未到达且没有值得执行的独立工作
-- **THEN** 指引要求通过任务输出工具对所需的原子任务 ID 发起正超时的阻塞等待，不另起 sleep 命令、轮询循环或额外任务，也不反复请求无变化快照。
+- **THEN** 指引要求通过专用 wait_subagent 对所需的原 subagent ID 发起有界阻塞等待，不另起 sleep 命令、轮询循环或额外任务，也不反复请求无变化快照。
 
 #### Scenario: Multiple task wait is selected
-- **WHEN** 工具说明介绍多 task ID 配合正超时的等待
+- **WHEN** 工具说明介绍多 subagent ID 配合等待预算
 - **THEN** 保持 wait-all 说明，并指导仅在下一步需要全部结果时使用该方式，不把它描述成 wait-any。
 
 #### Scenario: Wait returns without a successful child result
 - **WHEN** 等待到期、被用户消息打断，或返回失败、取消、仍运行或观察未知
 - **THEN** 指引要求按真实状态决定下一步，不将本次等待结束等同于 child 完成或结果已验收，不另起占位任务替代等待。
 
-证据与实施入口：`crates/codegen/agent/prompts/audience/primary.md`；`crates/common/tool-types/src/task.rs::{build_task_description,build_task_output_description}`；既有运行时 `crates/codegen/tools/src/implementations/grow_build/task_output/mod.rs::wait_all_event_driven` 不修改。模型遵循效果需实际模型场景验证，静态文案核对不构成遵循保证。
+#### Scenario: Production prompt assembly uses resolved observation capabilities
+- **WHEN** AgentBuilder 生成 primary 或可委派 child 的实际 prompt，工具名称被重命名或部分观察能力不可用
+- **THEN** 动态 Agent 层只引用实际可用名称，稳定 head 保持不变，默认具备 list/status/wait 时三类指引均到达模型上下文。
+
+#### Scenario: Full role composition retains observation guidance
+- **WHEN** Agent 使用 Full 而非 Extend 组合
+- **THEN** 适用的观察与等待指引继续在 session extensions 中渲染，不被 authored role 替代，audience 与 child 能力边界保持。
+
+证据与实施入口：`crates/codegen/agent/prompts/audience/primary.md`、`crates/codegen/agent/prompts/extensions/session.md`；`crates/codegen/agent/src/prompt/context.rs::{render,render_role_with_renderer}`；`crates/common/tool-types/src/task.rs::build_task_description`；既有等待入口为 `crates/codegen/tools/src/implementations/grow_build/subagent/wait.rs`。模型遵循效果需实际模型场景验证，静态文案和渲染测试不构成遵循保证。
 
 ### Requirement: Coordination guidance bounds concurrency and write ownership
 
@@ -418,3 +445,38 @@ Grow SHALL 在后台子任务启动回执中指引 parent 继续有价值的独�
 #### Scenario: Restored background receipt
 - **WHEN** 树恢复需要补交原后台子任务的启动回执
 - **THEN** 回执使用原 child ID 和恢复后当前输出工具映射生成指引与示例，不把恢复当成完成或新派发。
+
+### Requirement: Inquiry snapshots reuse durable image descriptions
+
+Parent-child and peer inquiries SHALL bind client, request model and image capability to one prepared receiver route. They SHALL freeze acknowledged context after cancellably waiting for primary image conversion, prefer all available descriptions and release the projection gate before answer sampling. Known rejecting routes SHALL recover selected unresolved images before provider admission. Explicit image rejection on an unknown route SHALL record that actual route's negative capability and permit one neutral text recovery attempt. Recovery SHALL use only the original frozen source, SHALL NOT mutate the primary Surface, and SHALL fail if descriptions are unavailable or the admitted budget is exceeded. Ordinary errors SHALL NOT trigger image recovery. Inquiry and session cancellation SHALL cover recovery and retry.
+
+#### Scenario: Switch from a multimodal model to a text model
+- **WHEN** a child or peer inquires after the receiver switches to text with unresolved historical images
+- **THEN** the inquiry recovers neutral descriptions before admission on a known route or once after explicit rejection on an unknown route, then answers without raw images.
+
+#### Scenario: Inquiry is cancelled while waiting
+- **WHEN** inquiry or session cancellation occurs during projection waiting or recovery
+- **THEN** no further answer request is emitted and the inquiry terminates as cancelled.
+
+#### Scenario: Context advances during recovery
+- **WHEN** new input reaches the receiver while its frozen inquiry recovers images
+- **THEN** its answer excludes the new input and recovery leaves the primary Surface intact.
+
+#### Scenario: Conversion awaits durable acknowledgement
+- **WHEN** the primary image projection awaits its durable acknowledgement
+- **THEN** inquiry capture waits and uses the acknowledged descriptions without holding the gate during answer sampling.
+
+#### Scenario: Text-only route lacks a committed description
+- **WHEN** the prepared receiver route is known text-only and selected images are unresolved
+- **THEN** neutral recovery precedes answer admission and missing descriptions fail without primary Surface mutation.
+
+#### Scenario: Unknown transport rejects unresolved images
+- **WHEN** an unknown route explicitly rejects the image-bearing inquiry
+- **THEN** that actual route is learned and one text recovery retry uses the original frozen sources.
+
+### Requirement: Peer success fits its existing result transport
+Peer inquiry success SHALL be admitted only when its actual serialized Inquiry response fits the existing local IPC frame limit, in addition to the rendered consultation payload limit. This check SHALL occur before successful terminal admission/proof and use the same encoder as the wire writer. An oversized response SHALL produce a typed failure retaining completed Sideband evidence and usage, without truncation, a new cap or automatic retry. Cold proof validation SHALL reject an impossible Peer success even if a receipt is already present. Direct delegation does not acquire the Peer transport constraint.
+
+#### Scenario: JSON escaping exceeds the Peer result frame
+- **WHEN** a completed answer fits the notification byte limit but its actual JSON Inquiry response exceeds the IPC frame limit due to escaping or response overhead
+- **THEN** the Peer inquiry fails before success admission and creates no success proof or context receipt; the same answer may succeed through direct delegation when its own delivery limit fits.

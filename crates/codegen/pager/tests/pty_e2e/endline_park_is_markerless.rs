@@ -1,6 +1,6 @@
 //! PTY, fully flag-file driven: the model backgrounds a flag-gated command,
 //! the test extracts the runtime task id and enqueues a blocking
-//! `get_command_or_subagent_output` on it (park), then types mid-park.
+//! `get_command_output` on it (park), then types mid-park.
 //! Plain Enter must keep that message in FIFO until the wait finishes; the
 //! park itself writes no transcript marker.
 #[allow(unused_imports)]
@@ -93,7 +93,7 @@ async fn parked_enter_queues_until_wait_finishes() {
     let _wait_turn = expect_tool_turn(
         &content,
         "call_endline_wait",
-        "get_command_or_subagent_output",
+        "get_command_output",
         wait_args,
     );
 

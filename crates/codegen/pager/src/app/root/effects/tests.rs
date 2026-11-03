@@ -1461,3 +1461,65 @@ async fn subagent_permission_setting_rejects_invalid_effect_values() {
     assert!(persist_setting("subagents.permission_mode", SettingValue::String("ask".into())).await.is_err());
     assert!(persist_setting("subagents.permission_mode", SettingValue::Enum("invalid")).await.is_err());
 }
+
+#[tokio::test]
+async fn session_close_effect_requires_runtime_ack_and_keeps_original_binding() {
+    use acp_transport::AcpAgentMessage;
+    for raw in [r#"{"result":{"success":true}}"#, r#"{"result":{"success":false}}"#,
+        r#"{"error":"writer still draining"}"#, r#"{}"#, "transport closed"] {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        let sid = acp::SessionId::new("close-effect");
+        execute(Effect::CloseSession { agent_id: AgentId(7), session_id: sid.clone(), binding_epoch: 19 },
+            &mut tasks, &tx, Path::new("."), &SessionFlags::default());
+        let AcpAgentMessage::ExtMethod(args) = rx.recv().await.unwrap() else { panic!("expected close RPC"); };
+        assert_eq!(args.request.method.as_ref(), "grow/session/close");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap(),
+            serde_json::json!({"sessionId":"close-effect"}));
+        assert!(tasks.try_join_next().is_none(), "view cannot retire before acknowledgement");
+        if raw == "transport closed" { drop(args.response_tx); }
+        else { args.response_tx.send(Ok(acp::ExtResponse::new(
+            serde_json::value::RawValue::from_string(raw.into()).unwrap().into()))).unwrap(); }
+        let TaskResult::SessionCloseResolved { agent_id, session_id, binding_epoch, result } =
+            tasks.join_next().await.unwrap().unwrap() else { panic!("expected bound close result"); };
+        assert_eq!((agent_id, session_id, binding_epoch), (AgentId(7), sid, 19));
+        assert_eq!(result.is_ok(), raw.contains("true"));
+    }
+}
+
+#[tokio::test]
+async fn session_delete_effect_requires_ack_and_preserves_runtime_failure_receipts() {
+    use acp_transport::AcpAgentMessage;
+    use shell::extensions::session_admin::SESSION_DELETE_RUNTIME_INVALIDATED_KEY as KEY;
+    for case in 0..6 {
+        let (tx,mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        execute(Effect::DeleteSession {bindings:vec![(AgentId(7),19)],session_id:"delete-effect".into(),cwd:"/tmp".into(),after:actions::AfterSessionDelete::Stay},
+            &mut tasks,&tx,Path::new("."),&SessionFlags::default());
+        let AcpAgentMessage::ExtMethod(args) = rx.recv().await.unwrap() else {panic!("delete request");};
+        assert_eq!(args.request.method.as_ref(),"grow/session/delete");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap(),
+            serde_json::json!({"sessionId":"delete-effect","cwd":"/tmp"}));
+        assert!(tasks.try_join_next().is_none());
+        match case {
+            0|1|5 => { let value = match case {0=>serde_json::json!({"success":true}),
+                1=>serde_json::json!({"success":false}),_=>serde_json::json!({})};
+                args.response_tx.send(Ok(acp::ExtResponse::new(serde_json::value::to_raw_value(&value).unwrap().into()))).unwrap(); },
+            2 => drop(args.response_tx),
+            _ => { args.response_tx.send(Err(acp::Error::internal_error().data(serde_json::json!({"detail":"refused",(KEY):case==4})))).unwrap(); },
+        }
+        let result = tasks.join_next().await.unwrap().unwrap();
+        match result {
+            TaskResult::DeleteSessionComplete {session_id,after,bindings} => {
+                assert_eq!(bindings,vec![(AgentId(7),19)]);
+                assert_eq!(case,0); assert_eq!(session_id,"delete-effect"); assert_eq!(after,actions::AfterSessionDelete::Stay);
+            }
+            TaskResult::DeleteSessionFailed {session_id,runtime_invalidated,bindings,..} => {
+                assert_eq!(bindings,vec![(AgentId(7),19)]);
+                assert_ne!(case,0); assert_eq!(session_id,"delete-effect");
+                assert_eq!(runtime_invalidated,match case {3=>Some(false),4=>Some(true),_=>None});
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}

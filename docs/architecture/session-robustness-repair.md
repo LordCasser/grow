@@ -344,3 +344,13 @@ TTL 候选处理从 `jsonl/mod.rs::cleanup_stale_sessions_sync` 阅读：发现�
 回退确认页的返回逻辑由 `pager/app/root/dispatch/rewind.rs::dispatch_rewind_back_to_mode_select` 从当前 phase 读取目标；契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-rewind-back-navigation-preserves-the-active-target)。
 
 回退检查点与预览读取由 `AgentView::rewind_read` 保存请求及会话绑定代次，任务返回时由 `accept_rewind_read` 校验并消费；执行结果继续走原有状态同步。见 [读取生命周期契约](../../openspec/specs/client-surfaces/spec.md#requirement-rewind-reads-belong-to-the-requesting-interaction)。
+
+恢复项目规则的源码入口为 Shell `actor/prompt_build.rs::effective_project_instructions`、`actor/runtime_source.rs` 与 `actor/spawn.rs`。规则投影来自当前已验证 Surface 的 typed ProjectInstructions；新 child 的 Seeded bootstrap 与旧任务 Existing restore 分开，避免恢复时读入新磁盘规则，也避免新 child 漏掉初始化。行为契约见 [session-timeline](../../openspec/specs/session-timeline/spec.md#requirement-restored-project-instructions-use-the-effective-durable-branch)。
+
+失败执行型 load 的物理退休由 `mvp_agent/session_lifecycle.rs::retire_failed_restore_candidate` 处理：仅本次新建、未准备的 Suspended candidate 可退休；原 thread 与退休原因保留到 writer 回收。排查 Retry 时区分这些临时 owner 与已准备/已释放 owner，不用普通 Shutdown 或 logical Teardown 代替物理退役。契约见 [显式恢复重试](../../openspec/specs/session-timeline/spec.md#requirement-explicit-restore-retry-reloads-an-unprepared-temporary-owner)。
+
+执行型挂起恢复按独立依赖准入：原 operation/writer、正式 selector/plugin、同实体 workspace、checkpoint frontier 的实际模型路线、Workflow 冻结来源与 child 出生上限。`runtime_source_hash` 保留诊断和格式校验，不再要求整份配置相等。目录别名通过目录 capability 的 entity identity 证明，持久存储仍使用原 Info；catalog 别名必须保留精确 backend/model/endpoint/query 和 effort，旧 key 改指向也不能替换原目标。普通非挂起 cold load 仍沿既有 route transition 契约。见 [恢复依赖准入](../../openspec/specs/session-timeline/spec.md#requirement-suspended-restore-admission-follows-execution-dependencies)。
+
+Task `resume_from` 新child的模型与展示来自同一个canonical source校验cut：模型使用active Surface，用户历史使用已选择分支的完整prepared transcript。`history/seed.rs` 将可复用的Assistant/Reasoning正文重绑定到新Seed；源已不在Surface的历史保留有限展示事实，源输入/响应/cursor和当前状态不授予新child权力。Seed与继承展示在同一staging发布，live Spawned后Pager可立即读取；普通new/normalized/mirror fork的context选择保持原语义。契约见 [派生Task历史展示](../../openspec/specs/session-timeline/spec.md#requirement-derived-task-resumes-retain-inherited-transcript-presentation)。
+
+Plan审批恢复从同一BehaviorSnapshot读取原artifact并复用正文；缺失/损坏归一化及stale transport bit清理只在现有事务边界内作用于该snapshot，Control确认后发布。reverse request显式携带该snapshot，正文hash与submission/revision/hash身份同源，不重新采样当前候选。外部malformed响应只结束当次interaction，候选保留；显式再次load/RestorePlanApproval可在同连接挂起新attempt，无自动重试。见 [Plan恢复snapshot契约](../../openspec/specs/session-timeline/spec.md#requirement-plan-approval-restoration-retains-one-exact-candidate-snapshot)。

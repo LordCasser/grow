@@ -543,7 +543,7 @@ fn dispatch_fork_pushes_parent_marker_with_directive() {
     // Last system block on parent is the fork marker.
     let parent_text = last_system_text(&app, AgentId(0));
     assert!(
-        parent_text.contains("Forked: investigate races"),
+        parent_text.contains("Fork requested: investigate races"),
         "parent marker missing or malformed: {parent_text}"
     );
     assert!(
@@ -558,7 +558,7 @@ fn dispatch_fork_pushes_parent_marker_without_directive() {
     dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
     // Last system block on parent is the fork marker.
     let parent_text = last_system_text(&app, AgentId(0));
-    assert_eq!(parent_text, "Forked", "got: {parent_text}");
+    assert_eq!(parent_text, "Fork requested", "got: {parent_text}");
 }
 
 #[test]
@@ -1222,5 +1222,258 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         app.agents[&id].scrollback.len(),
         scrollback_len_before + 1,
         "exactly one system block pushed"
+    );
+}
+
+fn failed_fork_test_app() -> (AppView, tempfile::TempDir) {
+    let drafts = tempfile::tempdir().expect("isolated draft store");
+    let mut app = fork_test_app();
+    app.local_drafts = crate::local_drafts::LocalDraftRuntime::with_test_root(drafts.path().into());
+    (app, drafts)
+}
+
+fn failed_fork_request(app: &mut AppView, worktree: bool, directive: Option<&str>) -> AgentId {
+    let effects = dispatch(Action::Fork(fork_args(Some(worktree), directive)), app);
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ForkSession { agent_id, .. }
+            | Effect::CreateWorktreeSession { agent_id, .. } => Some(*agent_id),
+            _ => None,
+        })
+        .expect("fork must allocate its actual placeholder")
+}
+
+#[test]
+fn failed_fork_empty_placeholder_returns_to_source_with_original_attachment() {
+    for worktree in [false, true] {
+        for attached in [false, true] {
+            let (mut app, _drafts) = failed_fork_test_app();
+            let source = AgentId(0);
+            if attached {
+                dispatch_open_dashboard(&mut app);
+                dispatch_dashboard_attach(
+                    &mut app,
+                    crate::views::dashboard::DashboardRowId::TopLevel(source),
+                );
+            }
+            let failed = failed_fork_request(&mut app, worktree, None);
+            let result = if worktree {
+                TaskResult::WorktreeSessionFailed {
+                    agent_id: failed,
+                    error: "no worktree".into(),
+                }
+            } else {
+                TaskResult::ForkSessionFailed {
+                    agent_id: failed,
+                    error: "copy failed".into(),
+                }
+            };
+            let effects = dispatch(Action::TaskComplete(result), &mut app);
+            assert!(effects.is_empty());
+            assert!(!app.agents.contains_key(&failed));
+            assert_eq!(app.active_view, ActiveView::Agent(source));
+            assert_eq!(
+                app.agents[&source]
+                    .session
+                    .session_id
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .as_ref(),
+                "test-session"
+            );
+            if attached {
+                assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(source));
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_fork_directive_is_a_closable_draft_without_a_startup_spinner() {
+    for worktree in [false, true] {
+        let (mut app, _drafts) = failed_fork_test_app();
+        let failed = failed_fork_request(&mut app, worktree, Some("keep this fork directive"));
+        let agent = app.agents.get_mut(&failed).unwrap();
+        agent.session.prompt_history_loading = true;
+        agent.session.update_mcp_init_progress(0, 0);
+        let result = if worktree {
+            TaskResult::WorktreeSessionFailed {
+                agent_id: failed,
+                error: "no worktree".into(),
+            }
+        } else {
+            TaskResult::ForkSessionFailed {
+                agent_id: failed,
+                error: "copy failed".into(),
+            }
+        };
+        dispatch(Action::TaskComplete(result), &mut app);
+        let agent = &app.agents[&failed];
+        assert_eq!(agent.prompt.text(), "keep this fork directive");
+        assert!(agent.pending_first_prompt.is_none());
+        assert!(agent.session.state.is_idle());
+        assert!(!agent.session.loading_replay);
+        assert!(!agent.session.prompt_history_loading);
+        assert!(agent.session.mcp_init_progress().is_none());
+        assert_eq!(
+            agent.generated_session_title.as_deref(),
+            Some("Fork failed")
+        );
+        assert!(dispatch_sessions_confirm_close(&mut app, failed).is_empty());
+        assert!(!app.agents.contains_key(&failed));
+        assert!(app.agents.contains_key(&AgentId(0)));
+    }
+}
+
+#[test]
+fn failed_fork_background_cleanup_and_bound_replacement_keep_current_ownership() {
+    let (mut app, _drafts) = failed_fork_test_app();
+    let failed = failed_fork_request(&mut app, false, None);
+    let peer = AgentId(2);
+    insert_placeholder_agent(&mut app, peer);
+    switch_to_agent(&mut app, peer, SwitchCause::Picker);
+    dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionFailed {
+            agent_id: failed,
+            error: "late".into(),
+        }),
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&failed));
+    assert_eq!(app.active_view, ActiveView::Agent(peer));
+
+    let (mut app, _drafts) = failed_fork_test_app();
+    let id = failed_fork_request(&mut app, false, None);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.bind_session_id(acp::SessionId::new("replacement"));
+    agent.session.state = AgentState::TurnRunning;
+    dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionFailed {
+            agent_id: id,
+            error: "stale failure".into(),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].session.state.is_turn_running());
+    assert_eq!(
+        app.agents[&id]
+            .session
+            .session_id
+            .as_ref()
+            .unwrap()
+            .0
+            .as_ref(),
+        "replacement"
+    );
+}
+
+#[test]
+fn failed_fork_keeps_both_directive_and_later_composer_input_without_execution() {
+    let (mut app, _drafts) = failed_fork_test_app();
+    let id = failed_fork_request(&mut app, false, Some("original directive"));
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_text("later draft");
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionFailed {
+            agent_id: id,
+            error: "copy failed".into(),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert_eq!(agent.prompt.text(), "later draft");
+    assert_eq!(
+        agent.session.pending_prompts.front().unwrap().text,
+        "original directive"
+    );
+    assert!(agent.pending_first_prompt.is_none());
+    assert!(agent.session.state.is_idle());
+}
+
+#[test]
+fn failed_worktree_fork_keeps_directive_after_source_close_ack() {
+    let (mut app, _drafts) = failed_fork_test_app();
+    let source = AgentId(0);
+    let failed = failed_fork_request(&mut app, true, Some("keep after source closes"));
+    let effects = dispatch_sessions_confirm_close(&mut app, source);
+    let Effect::CloseSession {
+        agent_id,
+        session_id,
+        binding_epoch,
+    } = effects.into_iter().next().unwrap()
+    else {
+        panic!("source close must reach runtime")
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCloseResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&source));
+    assert!(app.agents[&failed].session.forked_from.is_none());
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeSessionFailed {
+            agent_id: failed,
+            error: "worktree failed after source close".into(),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.active_view, ActiveView::Agent(failed));
+    assert_eq!(
+        app.agents[&failed].prompt.text(),
+        "keep after source closes"
+    );
+    assert!(app.agents[&failed].pending_first_prompt.is_none());
+    assert_eq!(
+        app.agents[&failed].generated_session_title.as_deref(),
+        Some("Fork failed")
+    );
+    assert!(dispatch_sessions_confirm_close(&mut app, failed).is_empty());
+    assert!(app.agents.is_empty());
+    assert_eq!(app.active_view, ActiveView::Welcome);
+}
+
+#[test]
+fn failed_fork_initial_replay_keeps_unsubmitted_directive_without_deleting_copy() {
+    let (mut app, _drafts) = failed_fork_test_app();
+    let id = failed_fork_request(&mut app, false, Some("directive before replay"));
+    dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionReady {
+            agent_id: id,
+            new_session_id: acp::SessionId::new("copied-before-load-failure"),
+            cwd: PathBuf::from("/tmp"),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].session.loading_replay);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: id,
+            session_id: acp::SessionId::new("copied-before-load-failure"),
+            error: "initial replay failed".into(),
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "failed replay cannot delete a committed copy"
+    );
+    assert_eq!(app.agents[&id].prompt.text(), "directive before replay");
+    assert!(app.agents[&id].session.session_id.is_none());
+    assert!(!app.agents[&id].session.loading_replay);
+    assert!(app.agents[&id].pending_first_prompt.is_none());
+    assert_eq!(
+        app.agents[&id].generated_session_title.as_deref(),
+        Some("Fork failed")
     );
 }

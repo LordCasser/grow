@@ -452,6 +452,51 @@ impl AgentView {
         child_view.mark_as_subagent_view();
         self.subagent_views.insert(child_sid, child_view);
     }
+
+    /// Keep child identity and interaction owners while releasing history that
+    /// the canonical projector can reconstruct on the next open.
+    pub(crate) fn reclaim_finished_subagent_transcripts(&mut self) -> bool {
+        if self.session.loading_replay || self.session_reload.is_some() {
+            return false;
+        }
+        let mut reclaimed = false;
+        for (sid, child) in &mut self.subagent_views {
+            let Some(info) = self.session.subagent_sessions.get_mut(sid) else {
+                continue;
+            };
+            if !info.finished
+                || !info.child_updates_replayed
+                || self.active_subagent.as_deref() == Some(sid.as_str())
+                || !child.session.state.is_idle()
+                || child.session.loading_replay
+                || child.session_reload.is_some()
+                || child.session.tracker.has_unconfirmed_sampling_preview()
+                || child.block_viewer.is_some()
+                || child.line_viewer.is_some()
+                || child.image_viewer.is_some()
+                || child.question_view.is_some()
+                || child.plan_approval_view.is_some()
+                || !child.permission_queue.is_empty()
+            {
+                continue;
+            }
+            child.reset_inline_media_loader();
+            child.reset_edit_hl_runtime();
+            child.scrollback = child.scrollback.fresh_continuation();
+            child.session.tracker = child.session.tracker.fresh_transcript();
+            child.workflow_blocks.clear();
+            child.scrollback_search = None;
+            child.visible_link_map = Default::default();
+            child.timeline_rail = None;
+            child.timeline_hover = None;
+            child.timeline_hover_preview = None;
+            child.update_scrollback_selection_state(Default::default(), Default::default());
+            child.persistent_text_selection = None;
+            info.child_updates_replayed = false;
+            reclaimed = true;
+        }
+        reclaimed
+    }
     /// Clear the turn-timing fields and stamp `last_active_at` to "now".
     ///
     /// Call this from every site that ends a turn (success, failure,
@@ -1614,7 +1659,7 @@ mod resolve_turn_activity_tests {
             acp::SessionUpdate::ToolCall(
                 acp::ToolCall::new(
                     acp::ToolCallId::new(Arc::from("wait-1")),
-                    "get_command_or_subagent_output",
+                    "get_command_output",
                 )
                 .kind(acp::ToolKind::Other)
                 .status(acp::ToolCallStatus::Pending)
@@ -1686,15 +1731,18 @@ mod resolve_turn_activity_tests {
         let meta = NotificationMeta::default();
         view.session.handle_update(
             acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("wait-2")), "get_task_output")
-                    .kind(acp::ToolKind::Other)
-                    .status(acp::ToolCallStatus::Pending)
-                    .content(vec![])
-                    .raw_input(Some(serde_json::json!({
-                        "task_ids": ["bg-2"],
-                        "timeout_ms": 5_000,
-                    })))
-                    .locations(vec![]),
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-2")),
+                    "get_command_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({
+                    "task_ids": ["bg-2"],
+                    "timeout_ms": 5_000,
+                })))
+                .locations(vec![]),
             ),
             &meta,
             &mut view.scrollback,
@@ -1743,7 +1791,7 @@ mod resolve_turn_activity_tests {
             acp::SessionUpdate::ToolCall(
                 acp::ToolCall::new(
                     acp::ToolCallId::new(Arc::from("wait-multi")),
-                    "get_task_output",
+                    "get_command_output",
                 )
                 .kind(acp::ToolKind::Other)
                 .status(acp::ToolCallStatus::Pending)
@@ -1807,7 +1855,7 @@ mod resolve_turn_activity_tests {
             acp::SessionUpdate::ToolCall(
                 acp::ToolCall::new(
                     acp::ToolCallId::new(Arc::from("wait-long-multi")),
-                    "get_task_output",
+                    "get_command_output",
                 )
                 .kind(acp::ToolKind::Other)
                 .status(acp::ToolCallStatus::Pending)
@@ -1837,7 +1885,7 @@ mod resolve_turn_activity_tests {
             "unexpectedly long body: {body}"
         );
     }
-    /// get_task_output often passes subagent_id, not the child_session_id map key.
+    /// wait_subagent passes its own id, not the child_session_id map key.
     #[test]
     fn task_output_wait_resolves_subagent_by_subagent_id() {
         use crate::acp::meta::NotificationMeta;
@@ -1893,18 +1941,14 @@ mod resolve_turn_activity_tests {
         let meta = NotificationMeta::default();
         view.session.handle_update(
             acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(
-                    acp::ToolCallId::new(Arc::from("wait-sub")),
-                    "get_command_or_subagent_output",
-                )
-                .kind(acp::ToolKind::Other)
-                .status(acp::ToolCallStatus::Pending)
-                .content(vec![])
-                .raw_input(Some(serde_json::json!({
-                    "task_ids": ["sub-id-42"],
-                    "timeout_ms": 10_000,
-                })))
-                .locations(vec![]),
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("wait-sub")), "wait_subagent")
+                    .kind(acp::ToolKind::Other)
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(vec![])
+                    .raw_input(Some(serde_json::json!({
+                        "subagent_ids": ["sub-id-42"],
+                    })))
+                    .locations(vec![]),
             ),
             &meta,
             &mut view.scrollback,
@@ -1956,15 +2000,18 @@ mod resolve_turn_activity_tests {
         let meta = NotificationMeta::default();
         view.session.handle_update(
             acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("wait-3")), "get_task_output")
-                    .kind(acp::ToolKind::Other)
-                    .status(acp::ToolCallStatus::Pending)
-                    .content(vec![])
-                    .raw_input(Some(serde_json::json!({
-                        "task_ids": ["bg-3"],
-                        "timeout_ms": 5_000,
-                    })))
-                    .locations(vec![]),
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-3")),
+                    "get_command_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({
+                    "task_ids": ["bg-3"],
+                    "timeout_ms": 5_000,
+                })))
+                .locations(vec![]),
             ),
             &meta,
             &mut view.scrollback,

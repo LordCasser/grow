@@ -1,0 +1,5 @@
+# Design
+
+Add an actor-level test module separate from the existing joint message and image auxiliary tests, plus a dedicated coordinator test module. Each test will drive a public tool/backend/actor boundary and hold the real response or acknowledgement owner at a named fault point. Assertions will inspect exact child IDs and terminal outcomes, bounded return, and release/reuse of the owned worker or permit. Avoid fabricated intermediate state and assertions based only on nonzero counts.
+
+The coverage is split into independent groups: (1) SessionActor wait handoff under both completion/intervention orders; (2) a held source ChatState query crossing the caller deadline, then release and observe convergence; (3) eight occupied persisted-output readers plus a ninth request, panic settlement, and public discovery with omitted versus retired IDs. Production code is read-only in this change. Any failure that points to a behavioral defect requires a separate delta change before implementation.

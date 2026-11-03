@@ -1,0 +1,4 @@
+- [x] 在 Dashboard 按键/dispatch 入口固化仅 child、Goal、Workflow 活动时 stop 无操作的回归。
+- [x] 按相同活动投影复用现有控制，保留目标身份、草稿和确认边界。
+- [x] 完成对应控制链及 Dashboard 回归，同步说明和验证记录。
+- [x] 完成 strict 校验、归档和归档后检查。

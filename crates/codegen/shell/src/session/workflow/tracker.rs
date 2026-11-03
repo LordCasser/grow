@@ -790,6 +790,10 @@ impl WorkflowRuntimeRoute {
         &self.subagent_filter
     }
 
+    pub(crate) fn image_description_model(&self) -> Option<&str> {
+        self.image_description_model.as_deref()
+    }
+
     pub(crate) fn set_subagent_filter(&mut self, filter: agent::config::SubagentFilter) {
         self.subagent_filter = filter;
     }

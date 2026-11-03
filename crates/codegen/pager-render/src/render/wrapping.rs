@@ -6,8 +6,10 @@
 use ratatui::text::{Line, Span};
 use std::borrow::Cow;
 use std::ops::Range;
-use textwrap::Options;
-use unicode_width::UnicodeWidthChar;
+use textwrap::core::{Fragment, Word};
+use textwrap::{Options, WrapAlgorithm};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::line_utils::{fit_line_to_width, push_owned_lines};
 
@@ -17,18 +19,95 @@ where
     O: Into<Options<'a>>,
 {
     let opts = width_or_options.into();
-    let mut lines: Vec<Range<usize>> = Vec::new();
-    for line in textwrap::wrap(text, opts).iter() {
-        match line {
-            Cow::Borrowed(slice) => {
-                let start = unsafe { slice.as_ptr().offset_from(text.as_ptr()) as usize };
-                let end = start + slice.len();
-                lines.push(start..end);
+    let mut ranges = Vec::new();
+    let mut base = 0;
+    for line in text.split(opts.line_ending.as_str()) {
+        let words = display_words(line, &opts);
+        let widths = [opts.width as f64];
+        let counts: Vec<usize> = match opts.wrap_algorithm {
+            WrapAlgorithm::FirstFit => textwrap::wrap_algorithms::wrap_first_fit(&words, &widths)
+                .iter()
+                .map(|row| row.len())
+                .collect(),
+            WrapAlgorithm::OptimalFit(penalties) => {
+                textwrap::wrap_algorithms::wrap_optimal_fit(&words, &widths, &penalties)
+                    .expect("text width fits in f64")
+                    .iter()
+                    .map(|row| row.len())
+                    .collect()
             }
-            Cow::Owned(_) => panic!("wrap_ranges_trim: unexpected owned string"),
+            WrapAlgorithm::Custom(wrap) => {
+                let source: Vec<_> = words.iter().map(|word| word.source).collect();
+                wrap(&source, &[opts.width])
+                    .iter()
+                    .map(|row| row.len())
+                    .collect()
+            }
+        };
+        let mut word_index = 0;
+        let mut start = base;
+        for count in counts {
+            let row = &words[word_index..word_index + count];
+            let len: usize = row
+                .iter()
+                .map(|word| word.source.word.len() + word.source.whitespace.len())
+                .sum();
+            let trailing = row.last().map_or(0, |word| word.source.whitespace.len());
+            ranges.push(start..start + len - trailing);
+            start += len;
+            word_index += count;
         }
+        base += line.len() + opts.line_ending.as_str().len();
     }
-    lines
+    ranges
+}
+
+// textwrap's Word caches scalar widths and break_apart splits scalar values.
+// Keep its word boundaries/algorithms, but measure and split like Ratatui.
+#[derive(Debug)]
+struct DisplayWord<'a> {
+    source: Word<'a>,
+    width: usize,
+}
+
+impl Fragment for DisplayWord<'_> {
+    fn width(&self) -> f64 {
+        self.width as f64
+    }
+
+    fn whitespace_width(&self) -> f64 {
+        self.source.whitespace_width()
+    }
+
+    fn penalty_width(&self) -> f64 {
+        self.source.penalty_width()
+    }
+}
+
+fn display_words<'a>(text: &'a str, opts: &'a Options<'_>) -> Vec<DisplayWord<'a>> {
+    let words = opts.word_separator.find_words(text);
+    let mut out = Vec::new();
+    for word in textwrap::word_splitters::split_words(words, &opts.word_splitter) {
+        let mut start = 0;
+        let mut width = 0;
+        for (end, grapheme) in word.word.grapheme_indices(true) {
+            let next = grapheme.width();
+            if opts.break_words && width > 0 && width + next > opts.width {
+                out.push(DisplayWord {
+                    source: Word::from(&word.word[start..end]),
+                    width,
+                });
+                start = end;
+                width = 0;
+            }
+            width += next;
+        }
+        let mut source = Word::from(&word.word[start..]);
+        source.whitespace = word.whitespace;
+        source.penalty = word.penalty;
+        out.push(DisplayWord { source, width });
+    }
+    out
 }
 
 /// A segment of a match highlight on a single wrapped row.
@@ -82,17 +161,15 @@ pub fn byte_range_to_row_cols(
 
 /// Convert a byte offset within `text` to the corresponding display column.
 ///
-/// Iterates characters from the start, summing their `UnicodeWidthChar` display
+/// Iterates graphemes from the start, summing their display
 /// widths until the cumulative byte count reaches `byte_offset`.
 pub(crate) fn byte_offset_to_display_col(text: &str, byte_offset: usize) -> usize {
     let mut col = 0usize;
-    let mut bytes = 0usize;
-    for ch in text.chars() {
-        if bytes >= byte_offset {
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        if offset >= byte_offset {
             break;
         }
-        bytes += ch.len_utf8();
-        col += ch.width().unwrap_or(0);
+        col += grapheme.width();
     }
     col
 }
@@ -1035,6 +1112,97 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(concat_line(&out[0]), "😀😀");
         assert_eq!(concat_line(&out[1]), "😀");
+    }
+
+    #[test]
+    fn grapheme_layout_wraps_mixed_chinese_without_losing_text() {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+
+        for text in ["中⚠️文", "a👩🏽‍💻bc", "中文e\u{301}长词abcdef", "①归属②Sources"]
+        {
+            let boundaries: Vec<_> = text
+                .grapheme_indices(true)
+                .map(|(offset, _)| offset)
+                .chain(std::iter::once(text.len()))
+                .collect();
+            let widest = text.graphemes(true).map(str::width).max().unwrap();
+            for width in 1..=12 {
+                let line = Line::from(text);
+                let (rows, joiners) = word_wrap_line_with_joiners(&line, width);
+                let ranges = wrap_byte_ranges_matching(text, width);
+                assert_eq!(rows.len(), ranges.len(), "{text:?}, width={width}");
+                let mut reconstructed = String::new();
+                for ((row, joiner), range) in rows.iter().zip(joiners).zip(ranges) {
+                    let rendered = concat_line(row);
+                    assert!(
+                        row.width() <= width.max(widest),
+                        "{text:?}, width={width}, row={rendered:?}"
+                    );
+                    assert!(boundaries.contains(&range.start));
+                    assert!(boundaries.contains(&range.end));
+                    assert_eq!(rendered, text[range]);
+                    reconstructed.push_str(joiner.as_deref().unwrap_or(""));
+                    reconstructed.push_str(&rendered);
+                }
+                assert_eq!(reconstructed, text);
+            }
+        }
+    }
+
+    #[test]
+    fn grapheme_layout_highlight_after_composed_symbols() {
+        let text = "中⚠️👨‍💻e\u{301}尾";
+        let start = text.find('尾').unwrap();
+        let segments = byte_range_to_row_cols(text, &[0..text.len()], start..text.len());
+        assert_eq!(segments[0].col_start, 7);
+        assert_eq!(segments[0].col_end, 9);
+    }
+
+    #[test]
+    fn grapheme_layout_preserves_styles_and_paints_complete_cells() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let line = Line::from("中⚠️文".red());
+        let rows = word_wrap_line(&line, 3);
+        assert_eq!(
+            rows.iter().map(concat_line).collect::<Vec<_>>(),
+            ["中", "⚠️", "文"]
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 3));
+        for (y, row) in rows.iter().enumerate() {
+            buffer.set_line(0, y as u16, row, 3);
+        }
+        for (y, symbol) in ["中", "⚠️", "文"].into_iter().enumerate() {
+            assert_eq!(buffer[(0, y as u16)].symbol(), symbol);
+            assert_eq!(buffer[(0, y as u16)].fg, Color::Red);
+            assert_eq!(buffer[(2, y as u16)].symbol(), " ");
+        }
+    }
+
+    #[test]
+    fn grapheme_layout_retains_plain_textwrap_breakpoints() {
+        for text in [
+            "",
+            "   ",
+            "  hello   world  ",
+            "foo-bar baz",
+            "中文标点，混合 English。",
+            "a\n\nb\n",
+        ] {
+            for width in 0..=16 {
+                for algorithm in [WrapAlgorithm::FirstFit, WrapAlgorithm::new_optimal_fit()] {
+                    let opts = Options::new(width).wrap_algorithm(algorithm);
+                    let actual: Vec<_> = wrap_ranges_trim(text, opts.clone())
+                        .into_iter()
+                        .map(|range| &text[range])
+                        .collect();
+                    let expected = textwrap::wrap(text, opts);
+                    assert_eq!(actual, expected, "{text:?}, width={width}, {algorithm:?}");
+                }
+            }
+        }
     }
 
     #[test]

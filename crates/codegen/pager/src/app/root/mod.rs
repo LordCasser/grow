@@ -362,9 +362,7 @@ impl PendingAction {
         Self::with_ttl(action, shortcut, Some(label), Self::TTL)
     }
     /// Like [`Self::new`] but with an explicit confirm window. Used by
-    /// the dashboard-overlay stop (Ctrl+X), which mirrors the
-    /// dashboard's [`crate::views::dashboard::state::CONFIRM_WINDOW`]
-    /// rather than the default double-press TTL.
+    /// local idle-prompt actions that specify their own TTL.
     pub fn with_ttl(
         action: Action,
         shortcut: KeyShortcut,
@@ -475,6 +473,7 @@ pub struct AppView {
     pub cursor: CursorState,
     /// Pending double-press confirmation (quit, etc.).
     pub pending_action: Option<PendingAction>,
+    pub(crate) session_deletion: Option<dispatch::session::deletion::SessionDeletion>,
     /// The sole in-flight exit suspension. Repeated quit input coalesces onto
     /// this identity until its result is confirmed or the user retries.
     pub exit_suspension: Option<ExitSuspension>,
@@ -1049,6 +1048,7 @@ impl AppView {
             scratch: ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            session_deletion: None,
             exit_suspension: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
@@ -1242,16 +1242,7 @@ impl AppView {
     /// this list in lockstep with those intercepts when adding a top-level
     /// Esc owner.
     pub(crate) fn esc_owned_before_agent(&self) -> bool {
-        if matches!(self.active_view, ActiveView::AgentDashboard)
-            && self
-                .dashboard
-                .as_ref()
-                .and_then(|d| d.attached_agent)
-                .is_some_and(|id| self.agents.contains_key(&id))
-        {
-            return true;
-        }
-        false
+        self.tutorial.is_some() || self.exit_suspension.is_some()
     }
     /// The active agent's view, when an agent tab is focused.
     ///
@@ -1552,28 +1543,6 @@ impl AppView {
             }
             ActiveView::Welcome => {}
             ActiveView::AgentDashboard => {
-                let popup_target = self.dashboard.as_ref().and_then(|d| {
-                    d.attached_agent
-                        .zip(d.popup_outer_rect)
-                        .filter(|(_, outer)| {
-                            column >= outer.x
-                                && column < outer.x + outer.width
-                                && row >= outer.y
-                                && row < outer.y + outer.height
-                        })
-                });
-                if let Some((agent_id, _outer)) = popup_target {
-                    if let Some(agent) = self.agents.get_mut(&agent_id) {
-                        if let Some(child_sid) = agent.active_subagent.clone()
-                            && let Some(child) = agent.subagent_views.get_mut(&child_sid)
-                        {
-                            child.handle_scroll(lines, column, row);
-                            return;
-                        }
-                        agent.handle_scroll(lines, column, row);
-                    }
-                    return;
-                }
                 let in_file_search_dropdown = self
                     .dashboard
                     .as_ref()
@@ -1647,6 +1616,11 @@ impl AppView {
         if let Some(key) = key_event
             && self.registry.lookup(key, When::Always) == Some(ActionId::Quit)
         {
+            if let ActiveView::Agent(id) = self.active_view
+                && let Some(agent) = self.agents.get_mut(&id)
+            {
+                agent.clear_session_commands();
+            }
             if let Some(exit) = self.exit_suspension.as_ref() {
                 if matches!(&exit.phase, ExitSuspensionPhase::Pending) {
                     return InputOutcome::Changed;
@@ -1671,9 +1645,39 @@ impl AppView {
             }
             return self.handle_global_action(ActionId::Quit, key);
         }
-        // History is the progress display during restoration. Keep the global
-        // Quit path above available, but do not edit drafts or leave follow
-        // mode while that visible session is still loading.
+        if let Some(key) = key_event
+            && let Some(exit) = self.exit_suspension.as_ref()
+            && matches!(&exit.phase, ExitSuspensionPhase::Unconfirmed { .. })
+        {
+            if key!('r').matches(key) {
+                self.pending_action = None;
+                return InputOutcome::Action(Action::RetryExitSuspension);
+            }
+            if key!('f').matches(key) {
+                self.pending_action = None;
+                return InputOutcome::Action(Action::ForceQuit);
+            }
+        }
+        if self.exit_suspension.is_some()
+            && matches!(ev, Event::Key(_) | Event::Paste(_) | Event::Mouse(_))
+        {
+            return InputOutcome::Changed;
+        }
+        if let Event::Resize(_, rows) = ev {
+            for agent in self.agents.values_mut() {
+                agent.note_terminal_resize();
+                for child in agent.subagent_views.values_mut() {
+                    child.note_terminal_resize();
+                }
+            }
+            self.last_known_terminal_rows = *rows;
+            self.apply_effective_compact();
+        }
+        if let Some(deletion) = self.session_deletion.as_mut() {
+            return deletion.handle_input(ev);
+        }
+        // History is the progress display during restoration. Keep navigation
+        // available without editing the loading draft or leaving follow mode.
         let visible_agent = match self.active_view {
             ActiveView::Agent(id) => self.agents.get(&id),
             ActiveView::AgentDashboard => self
@@ -1692,6 +1696,50 @@ impl AppView {
                     .is_some_and(|child| child.session.loading_replay)
         });
         if loading && matches!(ev, Event::Key(_) | Event::Paste(_) | Event::Mouse(_)) {
+            let attached = visible_agent.is_some_and(|agent| {
+                self.dashboard.as_ref().and_then(|d| d.attached_agent) == Some(agent.session.id)
+            });
+            let navigation = if let Some(key) = key_event {
+                match self
+                    .registry
+                    .lookup(key, crate::actions::When::DashboardOverlay)
+                    .or_else(|| self.registry.lookup(key, crate::actions::When::Always))
+                {
+                    Some(ActionId::DashboardOverlayPrev) => Some(Action::DashboardOverlayPrev),
+                    Some(ActionId::DashboardOverlayNext) => Some(Action::DashboardOverlayNext),
+                    Some(ActionId::OpenDashboard | ActionId::DashboardOverlayExit) => {
+                        Some(if attached {
+                            Action::DashboardOverlayExit
+                        } else {
+                            Action::OpenDashboard
+                        })
+                    }
+                    _ => None,
+                }
+            } else if let Event::Mouse(mouse) = ev
+                && attached
+                && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some(dashboard) = self.dashboard.as_ref()
+            {
+                if dashboard
+                    .overlay_close_hit
+                    .contains(mouse.column, mouse.row)
+                {
+                    Some(Action::DashboardOverlayExit)
+                } else if dashboard.overlay_prev_hit.contains(mouse.column, mouse.row) {
+                    Some(Action::DashboardOverlayPrev)
+                } else if dashboard.overlay_next_hit.contains(mouse.column, mouse.row) {
+                    Some(Action::DashboardOverlayNext)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(action) = navigation {
+                self.pending_action = None;
+                return InputOutcome::Action(action);
+            }
             if key_event.is_some() && self.pending_action.take().is_some() {
                 return InputOutcome::Changed;
             }
@@ -1720,6 +1768,7 @@ impl AppView {
                         .get(child_id)
                         .is_some_and(|child| !child.session.state.is_idle());
                     if agent.session.state.is_idle() && !child_is_busy {
+                        agent.clear_session_commands();
                         agent.active_subagent = None;
                         if self.active_view == ActiveView::AgentDashboard
                             && let Some(dashboard) = self.dashboard.as_mut()
@@ -1734,19 +1783,6 @@ impl AppView {
                 }
             }
         }
-        if let Some(key) = key_event
-            && let Some(exit) = self.exit_suspension.as_ref()
-            && matches!(&exit.phase, ExitSuspensionPhase::Unconfirmed { .. })
-        {
-            if key!('r').matches(key) {
-                self.pending_action = None;
-                return InputOutcome::Action(Action::RetryExitSuspension);
-            }
-            if key!('f').matches(key) {
-                self.pending_action = None;
-                return InputOutcome::Action(Action::ForceQuit);
-            }
-        }
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
             && agent.active_subagent.is_none()
@@ -1754,16 +1790,6 @@ impl AppView {
         {
             self.pending_action = None;
             return outcome;
-        }
-        if let Event::Resize(_, rows) = ev {
-            for agent in self.agents.values_mut() {
-                agent.note_terminal_resize();
-                for child in agent.subagent_views.values_mut() {
-                    child.note_terminal_resize();
-                }
-            }
-            self.last_known_terminal_rows = *rows;
-            self.apply_effective_compact();
         }
         if let Some(key) = key_event
             && let Some(pending) = &self.pending_action
@@ -1903,67 +1929,7 @@ impl AppView {
                             Some(crate::actions::ActionId::DashboardOverlayNext) => {
                                 return InputOutcome::Action(Action::DashboardOverlayNext);
                             }
-                            Some(crate::actions::ActionId::DashboardOverlayStop) => {
-                                if self
-                                    .agents
-                                    .get(&id)
-                                    .is_some_and(|a| a.session.state.is_turn_running())
-                                {
-                                    return InputOutcome::Action(Action::CancelTurn);
-                                }
-                                self.pending_action = Some(PendingAction::with_ttl(
-                                    Action::DashboardOverlayStop,
-                                    KeyShortcut::from(*key),
-                                    Some("close this session"),
-                                    crate::views::dashboard::state::CONFIRM_WINDOW,
-                                ));
-                                return InputOutcome::Changed;
-                            }
                             _ => {}
-                        }
-                        if key.code == KeyCode::Left
-                            && key.modifiers.is_empty()
-                            && self
-                                .agents
-                                .get(&id)
-                                .is_some_and(|a| a.is_empty_focused_prompt())
-                        {
-                            return InputOutcome::Action(Action::DashboardOverlayExit);
-                        }
-                        if key.code == KeyCode::Esc
-                            && key.modifiers.is_empty()
-                            && self
-                                .agents
-                                .get(&id)
-                                .is_some_and(|a| a.overlay_esc_backs_out_from_prompt())
-                        {
-                            return InputOutcome::Action(Action::DashboardOverlayExit);
-                        }
-                        if key.modifiers.is_empty()
-                            && self.agents.get(&id).is_some_and(|a| match key.code {
-                                KeyCode::Esc => a.overlay_esc_backs_out(),
-                                KeyCode::Left => a.overlay_left_backs_out(),
-                                _ => false,
-                            })
-                        {
-                            return InputOutcome::Action(Action::DashboardOverlayExit);
-                        }
-                        let neutral = self.agents.get(&id).is_some_and(|a| {
-                            a.is_bare_scrollback() && a.no_input_overlay_pending()
-                        });
-                        if key.code == KeyCode::Char('q') && key.modifiers.is_empty() && neutral {
-                            return InputOutcome::Action(Action::DashboardOverlayExit);
-                        }
-                        if key.code == KeyCode::Esc
-                            && key.modifiers.is_empty()
-                            && neutral
-                            && self.agents.get(&id).is_some_and(|a| {
-                                a.no_esc_consumer_pending()
-                                    && !a.session.state.is_turn_running()
-                                    && !a.session.state.is_cancelling()
-                            })
-                        {
-                            return InputOutcome::Action(Action::DashboardOverlayExit);
                         }
                     }
                     if let Event::Mouse(mouse) = ev {
@@ -2007,7 +1973,7 @@ impl AppView {
                 {
                     return outcome;
                 }
-                let prompt_paging = !overlay_active && !self.screen_mode.is_minimal();
+                let prompt_paging = !self.screen_mode.is_minimal();
                 let outcome = match self.agents.get_mut(&id) {
                     Some(agent) => {
                         let mut child_effects = Vec::new();
@@ -2045,121 +2011,7 @@ impl AppView {
                 }
             }
             ActiveView::AgentDashboard => {
-                let attached_raw = self.dashboard.as_ref().and_then(|d| d.attached_agent);
-                let attached = attached_raw.filter(|id| self.agents.contains_key(id));
-                if attached_raw.is_some()
-                    && attached.is_none()
-                    && let Some(d) = self.dashboard.as_mut()
-                {
-                    d.close_popup();
-                }
-                if let Some(agent_id) = attached {
-                    if let Event::Key(key) = ev
-                        && key.kind != KeyEventKind::Release
-                    {
-                        let close_via_esc = key.code == KeyCode::Esc;
-                        let close_via_action = self
-                            .registry
-                            .lookup(key, crate::actions::When::Always)
-                            .is_some_and(|id| {
-                                matches!(
-                                    id,
-                                    crate::actions::ActionId::OpenDashboard
-                                        | crate::actions::ActionId::DashboardExit
-                                )
-                            });
-                        if close_via_action || close_via_esc {
-                            if let Some(d) = self.dashboard.as_mut() {
-                                d.close_popup();
-                            }
-                            if let Some(agent) = self.agents.get_mut(&agent_id) {
-                                agent.active_subagent = None;
-                            }
-                            return InputOutcome::Changed;
-                        }
-                    }
-                    if let Event::Mouse(mouse) = ev
-                        && matches!(
-                            mouse.kind,
-                            crossterm::event::MouseEventKind::Down(
-                                crossterm::event::MouseButton::Left
-                            )
-                        )
-                    {
-                        let (close_rect, outer_rect, row_target) = {
-                            let dash = self.dashboard.as_ref();
-                            let close_rect = dash.and_then(|d| d.popup_close_rect);
-                            let outer_rect = dash.and_then(|d| d.popup_outer_rect);
-                            let row_target = dash.and_then(|d| {
-                                d.row_rects
-                                    .iter()
-                                    .find(|(_, r)| {
-                                        mouse.column >= r.x
-                                            && mouse.column < r.x + r.width
-                                            && mouse.row >= r.y
-                                            && mouse.row < r.y + r.height
-                                    })
-                                    .map(|(id, _)| id.clone())
-                            });
-                            (close_rect, outer_rect, row_target)
-                        };
-                        let in_close = close_rect.is_some_and(|r| {
-                            mouse.column >= r.x
-                                && mouse.column < r.x + r.width
-                                && mouse.row >= r.y
-                                && mouse.row < r.y + r.height
-                        });
-                        let in_outer = outer_rect.is_some_and(|r| {
-                            mouse.column >= r.x
-                                && mouse.column < r.x + r.width
-                                && mouse.row >= r.y
-                                && mouse.row < r.y + r.height
-                        });
-                        if in_close {
-                            if let Some(d) = self.dashboard.as_mut() {
-                                d.close_popup();
-                            }
-                            if let Some(agent) = self.agents.get_mut(&agent_id) {
-                                agent.active_subagent = None;
-                            }
-                            return InputOutcome::Changed;
-                        }
-                        if !in_outer && let Some(target) = row_target {
-                            return InputOutcome::Action(Action::DashboardAttach(target));
-                        }
-                        if !in_outer {
-                            return InputOutcome::Unchanged;
-                        }
-                    }
-                    match self.agents.get_mut(&agent_id) {
-                        Some(agent) => {
-                            let mut child_effects = Vec::new();
-                            let transcript_before = agent.active_subagent.clone();
-                            let workflows_before = agent.show_workflows;
-                            let outcome =
-                                agent.handle_input(ev, &self.registry, &mut child_effects);
-                            let transcript_opened =
-                                transcript_before.is_none() && agent.active_subagent.is_some();
-                            let workflows_opened = !workflows_before && agent.show_workflows;
-                            if transcript_opened || workflows_opened {
-                                self.scroll_state.cancel_stream();
-                                self.last_scroll_pos = None;
-                            }
-                            self.pending_effects.append(&mut child_effects);
-                            if matches!(outcome, InputOutcome::Action(Action::ExitSession)) {
-                                if let Some(d) = self.dashboard.as_mut() {
-                                    d.close_popup();
-                                }
-                                if let Some(agent) = self.agents.get_mut(&agent_id) {
-                                    agent.active_subagent = None;
-                                }
-                                return InputOutcome::Changed;
-                            }
-                            outcome
-                        }
-                        None => InputOutcome::Unchanged,
-                    }
-                } else if let Some(ref mut dashboard) = self.dashboard {
+                if let Some(ref mut dashboard) = self.dashboard {
                     let mut child_effects = Vec::new();
                     let outcome = dashboard.handle_input_with_paste_provenance(
                         ev,
@@ -2277,6 +2129,10 @@ impl AppView {
                 git_ref: None,
             },
             ActionId::OpenDashboard => Action::OpenDashboard,
+            ActionId::SessionCommands => {
+                self.show_toast("Open a session to use session commands");
+                return InputOutcome::Changed;
+            }
             _ => return InputOutcome::Unchanged,
         };
         if def.requires_confirmation {
@@ -2985,6 +2841,7 @@ impl AppView {
         let dev_fps_rows = self.dev_fps_rows();
         let fps_overlay = self.fps_hud.overlay(dev_fps_rows);
         let exit_suspension = self.exit_suspension.clone();
+        let mut session_deletion = self.session_deletion.take();
         let Self {
             active_view,
             agents,
@@ -3149,16 +3006,15 @@ impl AppView {
                             .dashboard
                             .as_ref()
                             .is_some_and(|d| d.attached_agent == Some(id));
-                        let position: Option<(usize, usize)> =
-                            if overlay_active && let Some(d) = self.dashboard.as_ref() {
-                                let order = crate::views::dashboard::overlay_cycle_order(d, agents);
-                                order
-                                    .iter()
-                                    .position(|i| *i == id)
-                                    .map(|idx| (idx + 1, order.len()))
-                            } else {
-                                None
-                            };
+                        let position: Option<(usize, usize)> = if overlay_active {
+                            let order = crate::views::dashboard::overlay_cycle_order(agents);
+                            order
+                                .iter()
+                                .position(|i| *i == id)
+                                .map(|idx| (idx + 1, order.len()))
+                        } else {
+                            None
+                        };
                         let (agent_area, header) = if overlay_active {
                             let theme = crate::theme::Theme::current();
                             let title = agents
@@ -3314,62 +3170,13 @@ impl AppView {
                                 dashboard_roster,
                                 self.dashboard_sessions_loading,
                                 dash_promo_cta,
+                                self.dashboard_return.map(|target| target.agent_id()),
                             );
-                            let (popup_cursor, popup_post_flush, drawn_popup_agent) =
-                                if let Some(agent_id) = dashboard.attached_agent {
-                                    let theme = crate::theme::Theme::current();
-                                    let popup_area = crate::views::dashboard::popup_rect(view_area);
-                                    let title = agents
-                                        .get(&agent_id)
-                                        .map(crate::views::session_title::entry_title)
-                                        .unwrap_or_else(|| "(session)".to_string());
-                                    let bundle_state = &self.bundle_state;
-                                    let (cursor, post_flush, drawn) =
-                                        crate::views::dashboard::render_popup_overlay(
-                                            f.buffer_mut(),
-                                            popup_area,
-                                            &theme,
-                                            &title,
-                                            dashboard,
-                                            |inner, buf| {
-                                                if let Some(agent) = agents.get_mut(&agent_id) {
-                                                    agent.draw(
-                                                    inner,
-                                                    buf,
-                                                    registry,
-                                                    scratch,
-                                                    None,
-                                                    false,
-                                                    crate::app::agent_view::BannerSlotParams::none(
-                                                    ),
-                                                    bundle_state,
-                                                    false,
-                                                    link_spans,
-                                                    AppRenderParams {
-                                                        esc_owned_before_agent,
-                                                        frame: frame_stamp,
-                                                    },
-                                                )
-                                                } else {
-                                                    (None, None)
-                                                }
-                                            },
-                                        );
-                                    (cursor, post_flush, drawn.then_some(agent_id))
-                                } else {
-                                    (None, None, None)
-                                };
-                            let popup_bytes = popup_post_flush
-                                .as_ref()
-                                .map_or(0, |post_flush| post_flush.as_str().len());
-                            let stale_clears = Self::dashboard_stale_image_clears(
+                            let overview_post_flush = Self::dashboard_stale_image_clears(
                                 agents,
-                                drawn_popup_agent,
-                                crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES
-                                    .saturating_sub(popup_bytes),
+                                None,
+                                crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
                             );
-                            let popup_post_flush =
-                                Self::merge_post_flush(stale_clears, popup_post_flush);
                             let tutorial_open = self.tutorial.is_some();
                             if let Some(tutorial) = self.tutorial.as_mut() {
                                 crate::views::tutorial::render_tutorial(
@@ -3386,14 +3193,11 @@ impl AppView {
                             if let Some(panel) = &scroll_debug_panel {
                                 panel.render(full_area, f.buffer_mut());
                             }
-                            let cursor = if tutorial_open {
-                                None
-                            } else if dashboard.attached_agent.is_some() {
-                                popup_cursor
-                            } else {
-                                dash_cursor
-                            };
-                            return (cursor, Self::merge_escapes(notif_escapes, popup_post_flush));
+                            let cursor = if tutorial_open { None } else { dash_cursor };
+                            return (
+                                cursor,
+                                Self::merge_escapes(notif_escapes, overview_post_flush),
+                            );
                         }
                     }
                 }
@@ -3408,6 +3212,10 @@ impl AppView {
         };
         crate::render::draw::draw_frame(terminal, cursor, |frame, links| {
             let (cursor, post_flush) = render_content(frame, links);
+            if let Some(deletion) = session_deletion.as_mut() {
+                let area = frame.area();
+                deletion.render(frame.buffer_mut(), area);
+            }
             // Every content branch may return early. Apply this process-wide
             // exit state only after that callback, including the Agent page.
             if let Some(suspension) = exit_suspension.as_ref() {
@@ -3415,9 +3223,17 @@ impl AppView {
                 paint_exit_suspension_notice(frame.buffer_mut(), area, suspension);
                 (None, post_flush)
             } else {
-                (cursor, post_flush)
+                (
+                    if session_deletion.is_some() {
+                        None
+                    } else {
+                        cursor
+                    },
+                    post_flush,
+                )
             }
         });
+        self.session_deletion = session_deletion;
         if let Some(started) = fps_frame_started {
             self.fps_hud.record(started.elapsed());
         }
@@ -3425,6 +3241,17 @@ impl AppView {
     }
     /// Interval between off-screen render-cache eviction sweeps.
     const CACHE_EVICT_INTERVAL: Duration = Duration::from_secs(5);
+
+    pub(crate) fn reclaim_finished_subagent_transcripts(&mut self) {
+        let mut reclaimed = false;
+        for agent in self.agents.values_mut() {
+            reclaimed |= agent.reclaim_finished_subagent_transcripts();
+        }
+        if reclaimed {
+            crate::memory_release::release_retained_memory_with("completed-subagent-transcripts");
+        }
+    }
+
     /// Throttled sweep of off-screen render caches for the active view's
     /// scrollback (parent agent, or the open fullscreen subagent child).
     /// A sweep is an O(entries) walk of pointer-sized cache slots — trivial
@@ -3462,6 +3289,7 @@ impl AppView {
     fn is_scroll_blocking_modal_open(&self) -> bool {
         let cloud_modal_open = false;
         matches!(self.active_view, ActiveView::Agent(id) if self.agents.get(&id).is_some_and(|a| a.extensions_modal.is_some() || a.active_modal.is_some()))
+            || self.session_deletion.is_some()
             || self.new_worktree_dialog.is_some()
             || self.tutorial.is_some()
             || matches!(self.active_view, ActiveView::AgentDashboard
@@ -3702,15 +3530,6 @@ impl AppView {
             self.welcome_toast = None;
             needs_redraw = true;
         }
-        // The agent empty-state logo (bare centered wordmark over an empty
-        // scrollback) uses the same wall-clock shimmer as the welcome screen,
-        // so keep advancing the shared throttle while it is on screen. Minimal
-        // mode never draws it — pager-minimal renders its own card.
-        if matches!(self.active_view, ActiveView::AgentDashboard)
-            && let Some(d) = self.dashboard.as_mut()
-        {
-            needs_redraw |= d.maintain_delete_confirm(now);
-        }
         if let Some(pending) = &self.pending_action
             && pending.expired()
         {
@@ -3795,7 +3614,6 @@ impl AppView {
         let mut changed = false;
         if let Some(dashboard) = self.dashboard.as_mut() {
             changed |= dashboard.dispatch.poll_file_search();
-            changed |= dashboard.peek_reply.poll_file_search();
         }
         for agent in self.agents.values_mut() {
             changed |= agent.apply_inline_media_completions();
@@ -3837,11 +3655,6 @@ impl AppView {
         include(self.deferred_notification.as_ref().map(|(_, at)| *at));
 
         if matches!(self.active_view, ActiveView::AgentDashboard) {
-            include(
-                self.dashboard
-                    .as_ref()
-                    .and_then(|dashboard| dashboard.delete_confirm_deadline()),
-            );
             include(self.dashboard.as_ref().and_then(|dashboard| {
                 crate::views::dashboard::render::next_wall_clock_deadline(
                     dashboard,
@@ -4277,6 +4090,7 @@ pub(crate) mod tests {
             scratch: crate::scrollback::render::ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            session_deletion: None,
             exit_suspension: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
@@ -5402,34 +5216,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn dashboard_wall_clock_and_delete_confirmation_have_deadlines() {
+    fn dashboard_wall_clock_has_a_deadline() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         idle_agent_with_content(&mut app, id);
+        app.agents.get_mut(&id).unwrap().session.last_active_at =
+            Some(Instant::now() - Duration::from_secs(1));
         app.agents.get_mut(&id).unwrap().display_name = Some("visible session".into());
         app.active_view = ActiveView::AgentDashboard;
-        let mut dashboard = crate::views::dashboard::DashboardState::new();
-        dashboard.arm_delete(crate::views::dashboard::DashboardRowId::TopLevel(id));
-        let delete_deadline = dashboard.delete_confirm_deadline().unwrap();
-        app.dashboard = Some(dashboard);
-
-        let now = Instant::now();
-        let deadline = app
-            .next_ui_deadline(now, TEST_FRAME_INTERVAL)
-            .expect("dashboard age and confirmation deadline");
-        assert!(deadline <= delete_deadline);
-        assert!(app.maintain_ui(delete_deadline));
+        app.dashboard = Some(crate::views::dashboard::DashboardState::new());
         assert!(
-            app.dashboard
-                .as_ref()
-                .unwrap()
-                .armed_delete_row_ref()
-                .is_none()
-        );
-        assert!(
-            app.next_ui_deadline(delete_deadline, TEST_FRAME_INTERVAL)
-                .is_some(),
-            "relative row ages retain an exact wall-clock deadline"
+            app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
+                .is_some()
         );
     }
     /// An idle agent view demands no ticks at all; the macOS Cmd link-hover
@@ -5938,23 +5736,6 @@ pub(crate) mod tests {
             !app.needs_animation(),
             "clearing dispatch @-context stops ticks when agents stay idle"
         );
-        app.dashboard
-            .as_mut()
-            .unwrap()
-            .peek_reply
-            .file_search
-            .update_context("@b", 2);
-        assert!(
-            !app.needs_animation(),
-            "peek reply search also waits on the shared completion edge"
-        );
-        app.dashboard
-            .as_mut()
-            .unwrap()
-            .peek_reply
-            .file_search
-            .update_context("", 0);
-        assert!(!app.needs_animation());
     }
     #[test]
     fn needs_animation_gates_btw_loading_spinner() {
@@ -6724,6 +6505,59 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    fn attached_session_editing_matches_direct_entry() {
+        for vim in [false, true] {
+            for prompt in ["", "a draft"] {
+                for pane in [
+                    crate::app::agent_view::AgentPane::Prompt,
+                    crate::app::agent_view::AgentPane::Scrollback,
+                ] {
+                    for code in [
+                        KeyCode::Esc,
+                        KeyCode::Left,
+                        KeyCode::Right,
+                        KeyCode::Tab,
+                        KeyCode::PageUp,
+                        KeyCode::PageDown,
+                        KeyCode::Char('z'),
+                    ] {
+                        let mut direct = test_app_with_agent();
+                        let mut attached = test_app_with_agent();
+                        attach_dashboard_session(&mut attached);
+                        let id = super::super::session::AgentId(0);
+                        for app in [&mut direct, &mut attached] {
+                            let agent = app.agents.get_mut(&id).unwrap();
+                            agent.vim_mode = vim;
+                            agent.force_active_pane(pane);
+                            agent.prompt.set_text(prompt);
+                        }
+                        let key = key_event(code, KeyModifiers::NONE);
+                        let expected = direct.handle_input(&key);
+                        let actual = attached.handle_input(&key);
+                        assert_eq!(
+                            format!("{actual:?}"),
+                            format!("{expected:?}"),
+                            "vim={vim}, pane={pane:?}, draft={prompt:?}, key={code:?}"
+                        );
+                        assert_eq!(
+                            attached.agents[&id].prompt.text(),
+                            direct.agents[&id].prompt.text()
+                        );
+                        assert_eq!(
+                            attached.agents[&id].prompt.cursor(),
+                            direct.agents[&id].prompt.cursor()
+                        );
+                        assert_eq!(
+                            attached.agents[&id].active_pane,
+                            direct.agents[&id].active_pane
+                        );
+                        assert_eq!(attached.active_view, ActiveView::Agent(id));
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn prompt_paging_scope_matches_agent_surface() {
         fn focused_app(screen_mode: ScreenMode) -> (AppView, super::super::session::AgentId) {
             let mut app = test_app_with_agent();
@@ -6741,7 +6575,6 @@ pub(crate) mod tests {
         enum Surface {
             Agent(ScreenMode),
             DashboardOverlay,
-            DashboardPopup,
         }
         for (label, surface, paging_enabled) in [
             ("inline agent", Surface::Agent(ScreenMode::Inline), true),
@@ -6751,16 +6584,11 @@ pub(crate) mod tests {
                 true,
             ),
             ("minimal agent", Surface::Agent(ScreenMode::Minimal), false),
-            (
-                "dashboard session overlay",
-                Surface::DashboardOverlay,
-                false,
-            ),
-            ("dashboard attached popup", Surface::DashboardPopup, false),
+            ("dashboard session overlay", Surface::DashboardOverlay, true),
         ] {
             let screen_mode = match surface {
                 Surface::Agent(mode) => mode,
-                Surface::DashboardOverlay | Surface::DashboardPopup => ScreenMode::Inline,
+                Surface::DashboardOverlay => ScreenMode::Inline,
             };
             let (mut app, id) = focused_app(screen_mode);
             match surface {
@@ -6768,7 +6596,6 @@ pub(crate) mod tests {
                     app.dashboard = Some(crate::views::dashboard::DashboardState::new());
                     app.dashboard.as_mut().unwrap().attached_agent = Some(id);
                 }
-                Surface::DashboardPopup => assert_eq!(attach_popup(&mut app), id),
                 Surface::Agent(_) => {}
             }
             let outcome = app.handle_input(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
@@ -7555,7 +7382,10 @@ pub(crate) mod tests {
         if let Some(d) = app.dashboard.as_mut() {
             d.attached_agent = Some(super::super::session::AgentId(0));
         }
-        assert!(app.esc_owned_before_agent(), "dashboard popup owns Esc");
+        assert!(
+            !app.esc_owned_before_agent(),
+            "Dashboard metadata does not own session Esc"
+        );
         if let Some(d) = app.dashboard.as_mut() {
             d.attached_agent = Some(super::super::session::AgentId(99));
         }
@@ -8874,49 +8704,6 @@ pub(crate) mod tests {
         assert_eq!(agent.inline_media_ids.len(), 1);
     }
     #[test]
-    fn dashboard_too_small_popup_clears_shared_overlay_slot() {
-        use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
-        let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
-        crate::terminal::overlay::reset_owner();
-        let png = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
-        let _ = crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)
-            .unwrap()
-            .commit();
-        let mut app = test_app_with_agent();
-        let id = super::super::session::AgentId(0);
-        let mut dashboard = crate::views::dashboard::DashboardState::new();
-        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 4));
-        let (_, _, drawn) = crate::views::dashboard::render_popup_overlay(
-            &mut buf,
-            ratatui::layout::Rect::new(0, 0, 40, 4),
-            &crate::theme::Theme::current(),
-            "Tiny",
-            &mut dashboard,
-            |_inner, _buf| panic!("tiny popup must not draw the agent"),
-        );
-        assert!(!drawn);
-        let clear = AppView::dashboard_stale_image_clears(
-            &mut app.agents,
-            drawn.then_some(id),
-            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
-        )
-        .unwrap();
-        assert!(clear.as_str().contains("a=d"));
-        assert!(
-            !crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)
-                .unwrap()
-                .as_str()
-                .contains("a=t")
-        );
-        clear.write_to(&mut Vec::new()).unwrap();
-        assert!(
-            crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)
-                .unwrap()
-                .as_str()
-                .contains("a=t")
-        );
-    }
-    #[test]
     fn worktree_mode_round_trip_ask() {
         let mode = WorktreeMode::from_config_str("ask");
         assert_eq!(mode, WorktreeMode::Ask);
@@ -9127,39 +8914,27 @@ pub(crate) mod tests {
             "Ctrl+Q on the dashboard must arm a pending quit confirmation"
         );
     }
-    /// Attach a popup overlay onto a freshly-built `test_app_with_agent`
-    /// and return the attached agent id. Convenience for the
-    /// popup-handle-input tests.
-    /// NOTE: this helper bypasses
-    /// `dispatch_dashboard_attach`. The action-dispatcher path
-    /// (which sets `attached_agent` via `Action::DashboardAttach(...)`)
-    /// is pinned by tests in `dispatch.rs`
-    /// (`dashboard_attach_top_level_opens_popup_overlay`,
-    /// `dashboard_attach_subagent_opens_popup_with_subagent`).
-    /// `attach_popup` exists so the `handle_input`/`dispatch_scroll`
-    /// tests in this file can stand up a popup'd state in two lines
-    /// without re-exercising the dispatcher each time.
-    fn attach_popup(app: &mut AppView) -> super::super::session::AgentId {
-        app.active_view = ActiveView::AgentDashboard;
+    /// Exercise the real Dashboard attachment entry rather than an obsolete popup state.
+    fn attach_dashboard_session(app: &mut AppView) -> super::super::session::AgentId {
         let id = super::super::session::AgentId(0);
-        app.dashboard = Some(crate::views::dashboard::DashboardState::new());
-        if let Some(d) = app.dashboard.as_mut() {
-            d.attached_agent = Some(id);
-            d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(id));
-        }
+        super::dispatch::dispatch(Action::OpenDashboard, app);
+        super::dispatch::dispatch(
+            Action::DashboardAttach(crate::views::dashboard::DashboardRowId::TopLevel(id)),
+            app,
+        );
         id
     }
     /// Esc keystroke closes the popup at the
     /// `AppView::handle_input` layer (not the dispatch layer the
     /// other tests exercise).
     #[test]
-    fn handle_input_esc_closes_popup_overlay() {
+    fn handle_input_esc_preserves_attached_session() {
         let mut app = test_app_with_agent();
-        let id = attach_popup(&mut app);
+        let id = attach_dashboard_session(&mut app);
         assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id));
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
+        assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id));
     }
     /// Esc on a neutral overlay (scrollback focused, no modals
     /// or viewers, no text selection or link highlight, no
@@ -9169,7 +8944,7 @@ pub(crate) mod tests {
     /// the dashboard. The Esc cascade is preserved for non-
     /// neutral states: see `overlay_esc_passes_through_when_*`.
     #[test]
-    fn overlay_esc_exits_when_agent_is_neutral() {
+    fn overlay_esc_stays_when_agent_is_neutral() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         app.active_view = ActiveView::Agent(id);
@@ -9179,8 +8954,8 @@ pub(crate) mod tests {
         }
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Esc on a neutral overlay must request DashboardOverlayExit, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
     }
     /// In a dashboard overlay an empty, Normal-mode prompt-focused Esc backs
@@ -9188,7 +8963,7 @@ pub(crate) mod tests {
     /// focus, so without this Esc would silently arm the agent's rewind policy
     /// instead of returning to the list).
     #[test]
-    fn overlay_esc_backs_out_when_empty_normal_prompt() {
+    fn overlay_esc_stays_when_empty_normal_prompt() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         app.active_view = ActiveView::Agent(id);
@@ -9201,15 +8976,15 @@ pub(crate) mod tests {
         assert!(agent.prompt.text().is_empty());
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "empty prompt Esc in an overlay must back out to the dashboard, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
-        assert!(app.pending_action.is_none());
+        assert_eq!(app.active_view, ActiveView::Agent(id));
     }
     /// Overlay + open `/btw` + empty Normal prompt: Esc dismisses `/btw`, not
     /// dashboard back-out; a follow-up Esc still exits when the guard holds.
     #[test]
-    fn overlay_esc_dismisses_btw_before_dashboard_backout() {
+    fn overlay_esc_dismisses_btw_before_dashboard_session_policy() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         app.active_view = ActiveView::Agent(id);
@@ -9231,8 +9006,8 @@ pub(crate) mod tests {
         assert!(app.agents.get(&id).unwrap().btw_state.is_none());
         let second = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(second, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "second Esc with no /btw must back out to the dashboard, got {second:?}",
+            !matches!(second, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {second:?}",
         );
     }
     /// Regression: in an overlay, a bare Esc while a turn is
@@ -9477,8 +9252,8 @@ pub(crate) mod tests {
             );
             let bare = app.handle_input(&key_event(key, KeyModifiers::NONE));
             assert!(
-                matches!(bare, InputOutcome::Action(Action::DashboardOverlayExit)),
-                "neutral {key:?} must exit, got {bare:?}",
+                !matches!(bare, InputOutcome::Action(Action::DashboardOverlayExit)),
+                "local {key:?} must retain session policy, got {bare:?}",
             );
             for &install in &installers {
                 let (mut app, id) = neutral_overlay_app();
@@ -9491,17 +9266,15 @@ pub(crate) mod tests {
             }
         }
     }
-    /// Left arrow on an empty, prompt-focused overlay backs out to the
-    /// dashboard — the mirror of the dashboard's Right-arrow "open
-    /// detail". Requires the prompt to be focused with an empty buffer.
+    /// Left on an empty attached composer retains the session editing policy.
     #[test]
-    fn overlay_left_arrow_empty_prompt_exits_to_dashboard() {
+    fn overlay_left_arrow_empty_prompt_stays_in_session() {
         let (mut app, id) = neutral_overlay_app();
         app.agents.get_mut(&id).unwrap().active_pane = crate::app::agent_view::AgentPane::Prompt;
         let outcome = app.handle_input(&key_event(KeyCode::Left, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Left on an empty focused prompt must exit the overlay, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
     }
     /// Left arrow with an active prompt history search (empty draft) is NOT
@@ -9556,10 +9329,6 @@ pub(crate) mod tests {
                 agent.prompt.text().is_empty(),
                 "fixture keeps the draft empty to isolate the file-search guard",
             );
-            assert!(
-                !agent.is_empty_focused_prompt(),
-                "an open @ dropdown must fail the empty-focused-prompt guard",
-            );
         }
         let outcome = app.handle_input(&key_event(KeyCode::Left, KeyModifiers::NONE));
         assert!(
@@ -9594,41 +9363,6 @@ pub(crate) mod tests {
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
             "Left in scrollback must reach the agent, got {outcome:?}",
-        );
-    }
-    /// An open modal (extensions modal or `active_modal`) makes
-    /// `is_empty_focused_prompt` false even on an empty, prompt-focused
-    /// composer, so the modal — not the overlay back-out — owns Esc/Left.
-    #[test]
-    fn overlay_open_modal_fails_empty_focused_prompt_guard() {
-        let (mut app, id) = neutral_overlay_app();
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.active_pane = crate::app::agent_view::AgentPane::Prompt;
-        assert!(
-            agent.is_empty_focused_prompt(),
-            "bare empty prompt must satisfy the guard",
-        );
-        agent.extensions_modal = Some(crate::views::extensions_modal::ExtensionsModalState::new(
-            crate::views::extensions_modal::ExtensionsTab::Plugins,
-        ));
-        assert!(
-            !agent.is_empty_focused_prompt(),
-            "an open extensions modal must fail the guard",
-        );
-        agent.extensions_modal = None;
-        agent.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
-            entries: Vec::new(),
-            state: crate::views::picker::PickerState::default(),
-            window: crate::views::modal_window::ModalWindowState::new(),
-        });
-        assert!(
-            !agent.is_empty_focused_prompt(),
-            "an open active_modal must fail the guard",
-        );
-        agent.active_modal = None;
-        assert!(
-            agent.is_empty_focused_prompt(),
-            "clearing the modals restores the guard",
         );
     }
     /// With an agent attached (dashboard overlay) and the extensions modal
@@ -9688,48 +9422,6 @@ pub(crate) mod tests {
             assert!(
                 !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
                 "{code:?} with active_modal open must not back out, got {outcome:?}",
-            );
-        }
-    }
-    /// The graduated plan/Q&A back-out also defers to an open modal: with a
-    /// single-question Q&A overlay at its back-out top AND a modal open, both
-    /// `overlay_esc_backs_out` and `overlay_left_backs_out` return false (a modal
-    /// and a question view can coexist when the ACP handler installs the overlay
-    /// without closing the modal).
-    #[test]
-    fn graduated_back_out_defers_to_open_modal() {
-        let (mut app, id) = neutral_overlay_app();
-        install_question_overlay(&mut app, id, 1);
-        {
-            let a = app.agents.get(&id).unwrap();
-            assert!(
-                a.overlay_esc_backs_out() && a.overlay_left_backs_out(),
-                "fixture must be a back-out-top state without a modal",
-            );
-        }
-        app.agents.get_mut(&id).unwrap().extensions_modal =
-            Some(crate::views::extensions_modal::ExtensionsModalState::new(
-                crate::views::extensions_modal::ExtensionsTab::Plugins,
-            ));
-        {
-            let a = app.agents.get(&id).unwrap();
-            assert!(
-                !a.overlay_esc_backs_out() && !a.overlay_left_backs_out(),
-                "an open extensions modal must suppress the graduated back-out",
-            );
-        }
-        app.agents.get_mut(&id).unwrap().extensions_modal = None;
-        app.agents.get_mut(&id).unwrap().active_modal =
-            Some(crate::views::modal::ActiveModal::CommandPalette {
-                entries: Vec::new(),
-                state: crate::views::picker::PickerState::default(),
-                window: crate::views::modal_window::ModalWindowState::new(),
-            });
-        {
-            let a = app.agents.get(&id).unwrap();
-            assert!(
-                !a.overlay_esc_backs_out() && !a.overlay_left_backs_out(),
-                "an open active_modal must suppress the graduated back-out",
             );
         }
     }
@@ -9799,13 +9491,13 @@ pub(crate) mod tests {
     /// no pending comment) a bare Esc returns to the dashboard, leaving
     /// the plan overlay pending (no approve / reject is sent).
     #[test]
-    fn overlay_esc_exits_at_plan_top_state() {
+    fn overlay_esc_stays_at_plan_top_state() {
         let (mut app, id) = neutral_overlay_app();
         install_plan_overlay(&mut app, id);
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Esc at the plan top state must back out, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
         assert!(
             app.agents.get(&id).unwrap().plan_approval_view.is_some(),
@@ -9829,13 +9521,13 @@ pub(crate) mod tests {
     /// selected, a bare Esc (whose only job there is to unselect) backs
     /// out to the dashboard instead of dead-ending.
     #[test]
-    fn overlay_esc_exits_when_question_nav_unselected() {
+    fn overlay_esc_stays_when_question_nav_unselected() {
         let (mut app, id) = neutral_overlay_app();
         install_question_overlay(&mut app, id, 1);
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Esc with nothing selected must back out, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
         assert!(
             app.agents.get(&id).unwrap().question_view.is_some(),
@@ -9877,13 +9569,13 @@ pub(crate) mod tests {
     /// ...but from question 1 (the top of a multi-question flow) with nothing
     /// selected, a bare `Esc` still backs out, leaving the Q&A pending.
     #[test]
-    fn overlay_esc_exits_at_first_multi_question() {
+    fn overlay_esc_stays_at_first_multi_question() {
         let (mut app, id) = neutral_overlay_app();
         install_question_overlay(&mut app, id, 2);
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Esc at question 1 of a multi-question Q&A must back out, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
         assert!(
             app.agents.get(&id).unwrap().question_view.is_some(),
@@ -9914,13 +9606,13 @@ pub(crate) mod tests {
     /// to step to), but with multiple questions Left switches question
     /// and must NOT exit.
     #[test]
-    fn overlay_left_exits_single_question_only() {
+    fn overlay_left_stays_single_question_only() {
         let (mut app, id) = neutral_overlay_app();
         install_question_overlay(&mut app, id, 1);
         let single = app.handle_input(&key_event(KeyCode::Left, KeyModifiers::NONE));
         assert!(
-            matches!(single, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Left in a single-question Q&A must back out, got {single:?}",
+            !matches!(single, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {single:?}",
         );
         let (mut app, id) = neutral_overlay_app();
         install_question_overlay(&mut app, id, 2);
@@ -9937,7 +9629,7 @@ pub(crate) mod tests {
     /// nothing is lost. (Esc stays graduated, clearing the selection first: see
     /// `overlay_esc_does_not_exit_when_question_option_selected`.)
     #[test]
-    fn overlay_left_exits_single_question_with_selection() {
+    fn overlay_left_stays_single_question_with_selection() {
         let (mut app, id) = neutral_overlay_app();
         install_question_overlay(&mut app, id, 1);
         app.agents
@@ -9958,12 +9650,11 @@ pub(crate) mod tests {
             "fixture must start with a live selection",
         );
         let outcome = app.handle_input(&key_event(KeyCode::Left, KeyModifiers::NONE));
-        let InputOutcome::Action(action @ Action::DashboardOverlayExit) = outcome else {
-            panic!(
-                "Left in a single-question Q&A must back out even with a selection, got {outcome:?}",
-            );
-        };
-        let _ = super::dispatch::dispatch(action, &mut app);
+        assert!(!matches!(
+            outcome,
+            InputOutcome::Action(Action::DashboardOverlayExit)
+        ));
+        assert_eq!(app.active_view, ActiveView::Agent(id));
         let agent = app.agents.get(&id).unwrap();
         assert!(
             agent
@@ -10005,13 +9696,13 @@ pub(crate) mod tests {
     /// line viewer (the common case), Esc was a dead no-op. It must now
     /// back out to the dashboard, leaving the plan pending (unanswered).
     #[test]
-    fn overlay_esc_exits_at_plan_preview() {
+    fn overlay_esc_stays_at_plan_preview() {
         let (mut app, id) = neutral_overlay_app();
         install_plan_preview_overlay(&mut app, id);
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Esc in the plan line-viewer preview must back out, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
         assert!(
             app.agents.get(&id).unwrap().plan_approval_view.is_some(),
@@ -10021,13 +9712,13 @@ pub(crate) mod tests {
     /// Left is likewise a no-op in the plan line viewer (the list pane
     /// ignores it), so it backs out too.
     #[test]
-    fn overlay_left_exits_at_plan_preview() {
+    fn overlay_left_stays_at_plan_preview() {
         let (mut app, id) = neutral_overlay_app();
         install_plan_preview_overlay(&mut app, id);
         let outcome = app.handle_input(&key_event(KeyCode::Left, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Left in the plan line-viewer preview must back out, got {outcome:?}",
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "attached detail must keep normal session input policy: {outcome:?}",
         );
     }
     /// Backing out of the plan preview is non-destructive: dispatching the
@@ -10035,10 +9726,10 @@ pub(crate) mod tests {
     /// leaves BOTH the plan-approval view and its line-viewer preview
     /// intact, so re-opening the agent shows the plan exactly as before.
     #[test]
-    fn overlay_exit_from_plan_preview_keeps_preview_intact() {
+    fn explicit_dashboard_return_keeps_plan_preview_intact() {
         let (mut app, id) = neutral_overlay_app();
         install_plan_preview_overlay(&mut app, id);
-        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        let outcome = app.handle_input(&key_event(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         let InputOutcome::Action(action @ Action::DashboardOverlayExit) = outcome else {
             panic!("Esc must yield DashboardOverlayExit, got {outcome:?}");
         };
@@ -10117,132 +9808,209 @@ pub(crate) mod tests {
         );
         let outcome2 = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome2, InputOutcome::Action(Action::DashboardOverlayExit)),
+            !matches!(outcome2, InputOutcome::Action(Action::DashboardOverlayExit)),
             "once the matcher is cleared, Esc must back out, got {outcome2:?}",
         );
     }
-    /// Overlay Ctrl+X on an agent with a RUNNING turn — routes to the
-    /// agent view's existing cancel behaviour (`Action::CancelTurn`,
-    /// same as Ctrl+C) and never arms the close confirm: mashing
-    /// Ctrl+X to stop a turn must not be able to close the session.
     #[test]
-    fn overlay_ctrl_x_busy_agent_cancels_turn_without_arming() {
+    fn attached_ctrl_x_configuration_prefix_reaches_current_agent() {
+        use crate::app::agent_view::ActivePane;
+        use crate::app::session::AgentState;
+        for state in [AgentState::Idle, AgentState::TurnRunning] {
+            for pane in [ActivePane::Prompt, ActivePane::Scrollback] {
+                for (letter, command) in [
+                    ('m', "model"),
+                    ('a', "agent"),
+                    ('e', "effort"),
+                    ('p', "permission"),
+                    ('b', "behavior"),
+                ] {
+                    let (mut app, id) = neutral_overlay_app();
+                    let agent = app.agents.get_mut(&id).unwrap();
+                    agent.active_pane = pane;
+                    agent.session.state = state.clone();
+                    agent.prompt.set_text("preserved draft");
+                    let first =
+                        app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+                    assert!(
+                        matches!(first, InputOutcome::Changed),
+                        "{state:?}: {first:?}"
+                    );
+                    assert!(
+                        app.agents[&id].leader_key_started_at.is_some(),
+                        "attached root must receive its command prefix"
+                    );
+                    assert!(
+                        app.pending_action.is_none(),
+                        "prefix must not arm a second close timer"
+                    );
+                    let next =
+                        app.handle_input(&key_event(KeyCode::Char(letter), KeyModifiers::NONE));
+                    assert!(
+                        matches!(next, InputOutcome::Action(Action::OpenCommandPicker { command: ref actual, .. }) if actual == command),
+                        "{letter}: {next:?}"
+                    );
+                    assert_eq!(app.agents[&id].prompt.text(), "preserved draft");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_ctrl_x_busy_agent_prefix_then_cancel_without_closing() {
         let (mut app, id) = neutral_overlay_app();
         app.agents.get_mut(&id).unwrap().session.state =
             crate::app::session::AgentState::TurnRunning;
         for _ in 0..2 {
-            let outcome = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
-            assert!(
-                matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-                "Ctrl+X on a busy agent must cancel the turn, got {outcome:?}",
-            );
-            assert!(
-                app.pending_action.is_none(),
-                "Ctrl+X on a busy agent must not arm the close confirm",
-            );
+            let first = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            assert!(matches!(first, InputOutcome::Changed));
+            assert!(app.agents[&id].leader_key_started_at.is_some());
+            let second = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            assert!(matches!(
+                second,
+                InputOutcome::Action(Action::StopSessionWork)
+            ));
+            assert!(app.agents[&id].leader_key_started_at.is_none());
+            assert!(app.pending_action.is_none());
         }
-        assert!(
-            app.agents.get(&id).unwrap().active_modal.is_none(),
-            "Ctrl+X must be intercepted before the agent sees it",
-        );
+        assert!(app.agents.contains_key(&id));
     }
-    /// Overlay Ctrl+X on a non-turn busy agent (command in flight,
-    /// cancel pending) — `Action::CancelTurn` would no-op for these
-    /// states, so the press arms the two-press close instead of
-    /// being a dead key.
+
     #[test]
-    fn overlay_ctrl_x_command_or_cancelling_agent_arms_close_confirm() {
+    fn overlay_ctrl_x_command_or_cancelling_agent_opens_prefix() {
         use crate::app::session::{AgentCommand, AgentState};
-        let states = [
+        for state in [
             AgentState::CommandRunning {
                 command: AgentCommand::Compact,
-                started_at: std::time::Instant::now(),
+                started_at: Instant::now(),
             },
             AgentState::TurnCancelling,
             AgentState::CommandCancelling {
                 command: AgentCommand::Compact,
             },
-        ];
-        for state in states {
+        ] {
             let (mut app, id) = neutral_overlay_app();
-            app.agents.get_mut(&id).unwrap().session.state = state.clone();
-            let outcome = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
-            assert!(
-                matches!(outcome, InputOutcome::Changed),
-                "Ctrl+X on a {state:?} agent must arm (not cancel / fire), got {outcome:?}",
-            );
-            assert!(
-                app.pending_action
-                    .as_ref()
-                    .is_some_and(|p| matches!(p.action, Action::DashboardOverlayStop)),
-                "Ctrl+X on a {state:?} agent must arm the close confirm",
-            );
+            app.agents.get_mut(&id).unwrap().session.state = state;
+            let first = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            assert!(matches!(first, InputOutcome::Changed));
+            assert!(app.agents[&id].leader_key_started_at.is_some());
+            assert!(app.pending_action.is_none());
         }
     }
-    /// Overlay Ctrl+X on an IDLE agent — arms the two-press close
-    /// confirm (`pending_action` = `DashboardOverlayStop` so the
-    /// shortcuts bar paints "press again to close this session");
-    /// there is no turn to cancel.
+
     #[test]
-    fn overlay_ctrl_x_idle_agent_arms_close_confirm() {
-        let (mut app, _id) = neutral_overlay_app();
-        let outcome = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "first Ctrl+X on an idle agent must arm (not fire), got {outcome:?}",
-        );
-        let pending = app.pending_action.as_ref().expect("confirm must be armed");
-        assert!(
-            matches!(pending.action, Action::DashboardOverlayStop),
-            "pending action must be the overlay stop",
-        );
-        assert_eq!(pending.label, Some("close this session"));
-        assert!(
-            !pending.expired(),
-            "the confirm window must still be live right after arming",
-        );
-        assert!(
-            app.pending_effects.is_empty(),
-            "no CancelTurn for an idle agent",
-        );
+    fn overlay_ctrl_x_idle_agent_opens_commands_without_close_timer() {
+        let (mut app, id) = neutral_overlay_app();
+        let first = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(first, InputOutcome::Changed));
+        assert!(app.agents[&id].leader_key_started_at.is_some());
+        assert!(app.pending_action.is_none());
+        assert!(app.pending_effects.is_empty());
     }
-    /// Overlay Ctrl+X, second press inside the confirm window — the
-    /// pending-action fast path consumes the key and fires
-    /// `Action::DashboardOverlayStop` (close + back to dashboard).
+
     #[test]
     fn overlay_ctrl_x_second_press_fires_overlay_stop() {
-        let (mut app, _id) = neutral_overlay_app();
+        let (mut app, id) = neutral_overlay_app();
         let _ = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
-        assert!(app.pending_action.is_some(), "first press must arm");
+        assert!(app.agents[&id].leader_key_started_at.is_some());
         let outcome = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::StopSessionWork)
+        ));
+        assert!(app.agents[&id].leader_key_started_at.is_none());
+        assert!(app.pending_action.is_none());
+    }
+
+    #[test]
+    fn overlay_ctrl_x_configuration_consumes_close_window() {
+        let (mut app, id) = neutral_overlay_app();
+        let _ = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        let next = app.handle_input(&key_event(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayStop)),
-            "second Ctrl+X must fire the confirmed stop, got {outcome:?}",
+            matches!(next, InputOutcome::Action(Action::OpenCommandPicker { ref command, .. }) if command == "agent")
         );
+        assert!(app.agents[&id].leader_key_started_at.is_none());
+        let fresh = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(fresh, InputOutcome::Changed));
+        assert!(app.agents[&id].leader_key_started_at.is_some());
+        assert!(app.pending_action.is_none());
+    }
+
+    #[test]
+    fn overlay_ctrl_x_expired_prefix_starts_fresh_without_closing() {
+        let (mut app, id) = neutral_overlay_app();
+        app.agents.get_mut(&id).unwrap().leader_key_started_at =
+            Some(Instant::now() - std::time::Duration::from_secs(3));
+        let next = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(next, InputOutcome::Changed));
+        assert!(app.agents[&id].leader_key_deadline().unwrap() > Instant::now());
+        assert!(app.pending_action.is_none());
+    }
+
+    #[test]
+    fn overlay_ctrl_x_repeat_does_not_confirm_stop() {
+        let (mut app, id) = neutral_overlay_app();
+        let _ = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        let mut repeat = crossterm::event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        repeat.kind = KeyEventKind::Repeat;
+        assert!(matches!(
+            app.handle_input(&Event::Key(repeat)),
+            InputOutcome::Changed
+        ));
+        assert!(app.agents[&id].leader_key_started_at.is_some());
+        assert!(app.pending_action.is_none());
+    }
+
+    #[test]
+    fn overlay_rebound_stop_keeps_its_confirmation_and_ctrl_x_menu() {
+        let (mut app, id) = neutral_overlay_app();
+        let mut actions = app.registry.all().to_vec();
+        let stop = actions
+            .iter_mut()
+            .find(|def| def.id == ActionId::SessionCommands)
+            .unwrap();
+        stop.default_key = crate::key!(F(4));
+        app.registry = ActionRegistry::new(actions);
+        let first = app.handle_input(&key_event(KeyCode::F(4), KeyModifiers::NONE));
+        assert!(matches!(first, InputOutcome::Changed));
+        assert!(app.agents[&id].leader_key_started_at.is_some());
+        let second = app.handle_input(&key_event(KeyCode::F(4), KeyModifiers::NONE));
+        assert!(matches!(
+            second,
+            InputOutcome::Action(Action::StopSessionWork)
+        ));
+        let _ = app.handle_input(&key_event(KeyCode::F(4), KeyModifiers::NONE));
+        assert!(app.agents[&id].leader_key_started_at.is_some());
+        let next = app.handle_input(&key_event(KeyCode::Char('p'), KeyModifiers::NONE));
         assert!(
-            app.pending_action.is_none(),
-            "firing must consume the pending confirm",
+            matches!(next, InputOutcome::Action(Action::OpenCommandPicker { ref command, .. }) if command == "permission")
         );
     }
-    /// Overlay Ctrl+X then ANY other key — the pending-action fast
-    /// path disarms the confirm (the dashboard's stop-confirm
-    /// semantics: any other press cancels), and the other key is
-    /// still processed normally.
+
     #[test]
-    fn overlay_ctrl_x_other_key_disarms_confirm() {
-        let (mut app, _id) = neutral_overlay_app();
-        let _ = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
-        assert!(app.pending_action.is_some(), "first press must arm");
-        let _ = app.handle_input(&key_event(KeyCode::Char('a'), KeyModifiers::NONE));
+    fn overlay_child_ctrl_x_uses_child_prefix_without_stopping_parent() {
+        let (mut app, id) = neutral_overlay_app();
+        let mut other = test_app_with_agent();
+        let mut child = other.agents.shift_remove(&id).unwrap();
+        child.mark_as_subagent_view();
+        child.bind_session_id(acp_transport::protocol::SessionId::new("prefix-child"));
+        let root = app.agents.get_mut(&id).unwrap();
+        root.subagent_views
+            .insert("prefix-child".into(), Box::new(child));
+        root.active_subagent = Some("prefix-child".into());
+        let first = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(first, InputOutcome::Changed));
         assert!(
-            app.pending_action.is_none(),
-            "any other key must disarm the pending stop confirm",
+            app.agents[&id].subagent_views["prefix-child"]
+                .leader_key_started_at
+                .is_some()
         );
-        let outcome = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        let next = app.handle_input(&key_event(KeyCode::Char('p'), KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "Ctrl+X after a disarm must re-arm, not fire, got {outcome:?}",
+            matches!(next, InputOutcome::Action(Action::OpenCommandPicker { ref command, .. }) if command == "permission")
         );
+        assert!(app.pending_action.is_none());
     }
     /// OUTSIDE the overlay (a plain agent view, no dashboard attach),
     /// Ctrl+X must keep its existing agent-screen behaviour — the
@@ -10256,7 +10024,7 @@ pub(crate) mod tests {
         assert!(
             !app.pending_action
                 .as_ref()
-                .is_some_and(|p| matches!(p.action, Action::DashboardOverlayStop)),
+                .is_some_and(|p| matches!(p.action, Action::StopSessionWork)),
             "overlay stop must not arm outside the dashboard overlay",
         );
     }
@@ -10304,137 +10072,6 @@ pub(crate) mod tests {
             .as_ref()
             .expect("first Ctrl+Q on the agent view must arm quit pending");
         assert!(matches!(pending.action, Action::Quit));
-    }
-    #[test]
-    fn handle_input_clears_stale_attached_agent_on_input() {
-        let mut app = test_app_with_agent();
-        let id = attach_popup(&mut app);
-        app.agents.shift_remove(&id);
-        let _ = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert_eq!(
-            app.dashboard.as_ref().unwrap().attached_agent,
-            None,
-            "stale attached_agent must be cleared on input",
-        );
-    }
-    /// Click on the popup's `[✗]` close affordance
-    /// closes the popup. The close-rect is registered into
-    /// `state.popup_close_rect` by the renderer; we set it
-    /// directly here since this test doesn't run a render pass.
-    #[test]
-    fn handle_input_mouse_click_on_close_affordance_closes_popup() {
-        let mut app = test_app_with_agent();
-        let _ = attach_popup(&mut app);
-        if let Some(d) = app.dashboard.as_mut() {
-            d.popup_close_rect = Some(ratatui::layout::Rect::new(50, 1, 3, 1));
-            d.popup_outer_rect = Some(ratatui::layout::Rect::new(0, 0, 60, 20));
-        }
-        let click = Event::Mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 51,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        });
-        let outcome = app.handle_input(&click);
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
-    }
-    /// A click on a dashboard row outside the popup's
-    /// outer rect dispatches `DashboardAttach(clicked_row)` so the
-    /// popup target switches.
-    #[test]
-    fn handle_input_mouse_click_outside_popup_on_row_switches_target() {
-        let mut app = test_app_with_agent();
-        let _ = attach_popup(&mut app);
-        let row_id =
-            crate::views::dashboard::DashboardRowId::TopLevel(super::super::session::AgentId(42));
-        if let Some(d) = app.dashboard.as_mut() {
-            d.popup_outer_rect = Some(ratatui::layout::Rect::new(20, 5, 40, 10));
-            d.row_rects
-                .push((row_id.clone(), ratatui::layout::Rect::new(0, 1, 10, 1)));
-        }
-        let click = Event::Mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 5,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        });
-        let outcome = app.handle_input(&click);
-        match outcome {
-            InputOutcome::Action(Action::DashboardAttach(target)) => {
-                assert_eq!(target, row_id);
-            }
-            other => panic!("expected DashboardAttach, got {other:?}"),
-        }
-    }
-    /// Scroll routing through the popup
-    /// overlay. A scroll inside `popup_outer_rect` must NOT advance
-    /// the dashboard's `viewport_offset` (it forwards to the
-    /// attached agent). A scroll outside the popup falls through to
-    /// the dashboard list pane and DOES advance `viewport_offset`.
-    #[test]
-    fn handle_input_scroll_inside_popup_forwards_to_agent() {
-        let mut app = test_app_with_agent();
-        let _ = attach_popup(&mut app);
-        let popup_outer = ratatui::layout::Rect::new(20, 5, 40, 10);
-        if let Some(d) = app.dashboard.as_mut() {
-            d.popup_outer_rect = Some(popup_outer);
-            d.viewport_offset = 0;
-        }
-        let inside_x = popup_outer.x + 5;
-        let inside_y = popup_outer.y + 3;
-        app.dispatch_scroll(3, inside_x, inside_y);
-        assert_eq!(
-            app.dashboard.as_ref().unwrap().viewport_offset,
-            0,
-            "scroll inside popup must not advance the dashboard viewport",
-        );
-        let outside_x = 0;
-        let outside_y = 0;
-        app.dispatch_scroll(3, outside_x, outside_y);
-        assert_eq!(
-            app.dashboard.as_ref().unwrap().viewport_offset,
-            3,
-            "scroll outside popup must advance the dashboard viewport",
-        );
-    }
-    /// When the attached agent emits
-    /// `Action::ExitSession` (via the synchronous outcome path,
-    /// e.g. user presses the keybind for ExitSession inside the
-    /// popup), the popup is closed but the agent stays in
-    /// `app.agents`. The `/quit` slash command takes a different
-    /// path (emits an effect) — see the user-guide for the
-    /// asymmetry; this test pins only the synchronous-outcome
-    /// branch.
-    ///
-    /// We can't easily synthesize an `ExitSession` from
-    /// `agent.handle_input` without a real prompt event sequence,
-    /// so the test exercises the popup-close intercept by feeding a
-    /// key that lands in the agent's prompt and observing the popup
-    /// state after the intercept runs. Concretely: we drive an Esc
-    /// key (which the popup-close fast-path catches BEFORE the
-    /// agent intercept). To prove the `ExitSession` branch
-    /// independently, we directly invoke the intercepted-outcome
-    /// path with a stub: set `attached_agent`, then call the same
-    /// close routine the intercept would call. This is the smallest
-    /// behavioural pin available without a full prompt-mode setup.
-    #[test]
-    fn handle_input_exit_session_action_closes_popup() {
-        let mut app = test_app_with_agent();
-        let id = attach_popup(&mut app);
-        assert!(app.agents.contains_key(&id));
-        assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id));
-        if let Some(d) = app.dashboard.as_mut() {
-            d.close_popup();
-        }
-        if let Some(agent) = app.agents.get_mut(&id) {
-            agent.active_subagent = None;
-        }
-        assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
-        assert!(
-            app.agents.contains_key(&id),
-            "ExitSession intercept must NOT remove the agent (it only closes the popup)",
-        );
     }
     #[test]
     fn needs_project_picker_false_when_disabled() {

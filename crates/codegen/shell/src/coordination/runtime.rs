@@ -468,6 +468,7 @@ impl CoordinationHandle {
             }
             Arc::clone(record)
         } else {
+            let mut may_have_dispatched = false;
             if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id).await? {
                 let (target, original_question, outcome) = match fact {
                     super::InquiryEvent::OutgoingStarted {
@@ -489,6 +490,9 @@ impl CoordinationHandle {
                 if let Some(outcome) = outcome {
                     return Ok(outcome);
                 }
+                // A prior durable start can precede an already accepted target
+                // operation. Only the original target can settle a retry.
+                may_have_dispatched = true;
             }
             let record = Arc::new(InquiryRecord::new(payload, InquiryPhase::Discovering));
             if cancellation.is_cancelled() {
@@ -510,7 +514,9 @@ impl CoordinationHandle {
                     task_record.progress.send_replace(InquiryPhase::Finished);
                     return;
                 }
-                sender.run_outgoing(task_id, task_record).await;
+                sender
+                    .run_outgoing(task_id, task_record, may_have_dispatched)
+                    .await;
             });
             record
         };
@@ -537,7 +543,12 @@ impl CoordinationHandle {
         }
     }
 
-    async fn run_outgoing(&self, id: String, record: Arc<InquiryRecord>) {
+    async fn run_outgoing(
+        &self,
+        id: String,
+        record: Arc<InquiryRecord>,
+        may_have_dispatched: bool,
+    ) {
         let (progress, mut phases) = mpsc::unbounded_channel();
         let observed = Arc::clone(&record);
         let relay = tokio::spawn(async move {
@@ -549,8 +560,7 @@ impl CoordinationHandle {
             biased;
             _ = self.shared.cancel.cancelled() => Err(CoordinationError::new(
                 CoordinationErrorCode::SourceUnavailable, "source runtime stopped")),
-            _ = record.cancellation.cancelled() => Ok(record.cancellation.outcome(&id)),
-            result = timeout(INQUIRY_DEADLINE, self.deliver_inquiry(&id, &record, progress)) => {
+            result = timeout(INQUIRY_DEADLINE, self.deliver_inquiry(&id, &record, progress, may_have_dispatched)) => {
                 result.unwrap_or_else(|_| Err(CoordinationError::new(
                     CoordinationErrorCode::TimedOut, "coordination inquiry deadline exceeded")))
             }
@@ -569,10 +579,7 @@ impl CoordinationHandle {
             };
             InquiryOutcome::terminal(&id, status, error)
         });
-        if matches!(
-            outcome.status,
-            InquiryStatus::Cancelled | InquiryStatus::TimedOut
-        ) {
+        if outcome.status == InquiryStatus::TimedOut {
             let target = record
                 .target
                 .lock()
@@ -600,9 +607,13 @@ impl CoordinationHandle {
         id: &str,
         record: &InquiryRecord,
         progress: mpsc::UnboundedSender<InquiryPhase>,
+        may_have_dispatched: bool,
     ) -> Result<InquiryOutcome, CoordinationError> {
         self.require_ready()?;
         let payload = &record.payload;
+        if !may_have_dispatched && record.cancellation.is_cancelled() {
+            return Ok(record.cancellation.outcome(id));
+        }
         let mut target = self
             .resolve_target(&payload.source_session_id, &payload.target_session_id)
             .await?;
@@ -613,6 +624,7 @@ impl CoordinationHandle {
             question: payload.question.clone(),
         };
         let mut delay = RECONNECT_MIN_DELAY;
+        let mut dispatched = may_have_dispatched;
         loop {
             match request_inquiry(
                 &self.shared,
@@ -620,6 +632,8 @@ impl CoordinationHandle {
                 &payload.source_session_id,
                 &request,
                 Some(&progress),
+                &record.cancellation,
+                &mut dispatched,
             )
             .await
             {
@@ -1360,8 +1374,7 @@ async fn cancel_inquiry(
     }
     record
         .cancellation
-        .cancel(InquiryCancellationReason::Explicit);
-    true
+        .cancel(InquiryCancellationReason::Explicit)
 }
 
 fn validate_inquiry_id(inquiry_id: &str) -> Result<(), String> {
@@ -1433,26 +1446,59 @@ async fn request_inquiry(
     source_session_id: &str,
     request: &Request,
     progress: Option<&mpsc::UnboundedSender<InquiryPhase>>,
+    cancellation: &InquiryCancellation,
+    dispatched: &mut bool,
 ) -> Result<InquiryOutcome, InquiryRequestError> {
-    let Request::Ask { inquiry_id, .. } = request else {
+    let Request::Ask {
+        inquiry_id,
+        target_session_id,
+        ..
+    } = request
+    else {
         unreachable!("inquiry RPC requires an Ask request");
     };
     let mut stream = connect_peer(source, target, source_session_id)
         .await
         .map_err(InquiryRequestError::Transport)?;
+    if !*dispatched && cancellation.is_cancelled() {
+        return Ok(cancellation.outcome(inquiry_id));
+    }
+    // A failed/partial write can already have registered remotely. Reconnects
+    // must recover this identity instead of manufacturing a local cancellation.
+    *dispatched = true;
     timeout(SETUP_TIMEOUT, write_json(&mut stream, request))
         .await
         .map_err(|_| InquiryRequestError::Transport(transport_error("inquiry send timed out")))?
         .map_err(|error| InquiryRequestError::Transport(transport_error(error)))?;
+    let mut registered = false;
+    let mut cancel_requested = false;
     loop {
-        let response: Response = read_json(&mut stream)
-            .await
+        let read = read_json::<_, Response>(&mut stream);
+        tokio::pin!(read);
+        let response = if registered && !cancel_requested {
+            tokio::select! {
+                biased;
+                response = &mut read => response,
+                _ = cancellation.cancelled() => {
+                    cancel_requested = true;
+                    let _ = request_peer(source, target, source_session_id, Request::Cancel {
+                        inquiry_id: inquiry_id.clone(), target_session_id: target_session_id.clone(),
+                    }).await;
+                    // read_json uses read_exact and is not cancellation-safe:
+                    // retain this exact frame future across the separate RPC.
+                    read.await
+                }
+            }
+        } else {
+            read.await
+        }
             .map_err(|error| InquiryRequestError::Transport(transport_error(error)))?;
         match response {
             Response::Progress {
                 inquiry_id: response_id,
                 phase,
             } if &response_id == inquiry_id => {
+                registered = true;
                 if let Some(progress) = progress {
                     let _ = progress.send(phase);
                 }

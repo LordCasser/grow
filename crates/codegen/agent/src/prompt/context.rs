@@ -377,7 +377,7 @@ mod tests {
                     edit => "hashline_edit",
                     search => "hashline_grep",
                     execute => "run_terminal_cmd",
-                    background_task_action => "get_task_output",
+                    background_task_action => "get_command_output",
                     memory_search => "memory_search",
                     memory_get => "memory_get",
                 }
@@ -497,7 +497,7 @@ mod tests {
                     read => "hashline_read",
                     search => "hashline_grep",
                     execute => "run_terminal_cmd",
-                    background_task_action => "get_task_output",
+                    background_task_action => "get_command_output",
                 }
             },
 
@@ -526,7 +526,7 @@ mod tests {
                     read => "hashline_read",
                     search => "hashline_grep",
                     execute => "run_terminal_cmd",
-                    background_task_action => "get_task_output",
+                    background_task_action => "get_command_output",
                 }
             },
 
@@ -554,7 +554,7 @@ mod tests {
                     read => "read_file",
                     search => "grep",
                     execute => "run_terminal_cmd",
-                    background_task_action => "get_task_output",
+                    background_task_action => "get_command_output",
                 }
             },
 
@@ -629,6 +629,59 @@ mod tests {
         let role = ctx.render_role_with_renderer(&renderer).unwrap();
         assert!(role.contains("Work with the user"), "{role}");
         assert!(role.contains("ROLE_LAYER_SENTINEL"), "{role}");
+    }
+
+    #[test]
+    fn observation_guidance_reaches_the_production_role_without_changing_the_head() {
+        use tools::types::tool::ToolKind;
+
+        for audience in [PromptAudience::Primary, PromptAudience::Subagent] {
+            for prompt_composition in [PromptComposition::Extend, PromptComposition::Full] {
+                let ctx = PromptContext {
+                    audience,
+                    prompt_composition,
+                    ..test_context()
+                };
+                let head = ctx.render().unwrap();
+                for names in [
+                    ["list_subagent", "get_subagent_status", "wait_subagent"],
+                    ["children", "child_details", "await_children"],
+                ] {
+                    let renderer = TemplateRenderer::new(
+                        [
+                            ToolKind::SubagentList,
+                            ToolKind::SubagentStatus,
+                            ToolKind::SubagentWait,
+                        ]
+                        .into_iter()
+                        .zip(names.map(str::to_owned))
+                        .collect(),
+                        Default::default(),
+                    );
+                    let role = ctx.render_role_with_renderer(&renderer).unwrap();
+                    for name in names {
+                        assert!(role.contains(&format!("`{name}`")), "{role}");
+                        assert!(!head.contains(&format!("`{name}`")), "{head}");
+                    }
+                    assert!(role.contains("A wait ending is not proof"), "{role}");
+                    assert_eq!(ctx.render_with_renderer(&renderer).unwrap(), head);
+                }
+
+                let status_only = TemplateRenderer::new(
+                    [(ToolKind::SubagentStatus, "child_details".to_owned())].into(),
+                    Default::default(),
+                );
+                let role = ctx.render_role_with_renderer(&status_only).unwrap();
+                assert!(role.contains("`child_details`"));
+                assert!(!role.contains("A wait ending is not proof"));
+                assert!(!role.contains("list_subagent"));
+                assert!(!role.contains("wait_subagent"));
+                let empty = TemplateRenderer::new(Default::default(), Default::default());
+                let role = ctx.render_role_with_renderer(&empty).unwrap_or_default();
+                assert!(!role.contains("A wait ending is not proof"));
+                assert!(!role.contains("${"));
+            }
+        }
     }
 
     #[test]

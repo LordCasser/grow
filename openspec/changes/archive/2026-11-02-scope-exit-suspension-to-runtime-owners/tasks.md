@@ -1,0 +1,4 @@
+- [x] 固化退出 scope、启动中和 close/drain 并发的回归场景。
+- [x] 按既有 runtime/leader 所有权接通完整退出链路。
+- [x] 完成定向对抗性验证和开发说明。
+- [x] strict、归档及归档后校验。

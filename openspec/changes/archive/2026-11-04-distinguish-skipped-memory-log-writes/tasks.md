@@ -1,0 +1,5 @@
+- [x] Define and document the daily-log write result; keep ephemeral writes suppressed and test both written and skipped results.
+- [x] Propagate skipped results through memory flush and session-end handling; add focused regression coverage for flush notification/checkpoint behavior where existing fixtures permit.
+- [x] Document that an ephemeral daily-log skip is not a successful flush checkpoint.
+- [x] Update memory user documentation to describe the accurate receipt for ephemeral workspaces.
+- [x] Run targeted Rust regressions and strict OpenSpec validation; record results before completion.

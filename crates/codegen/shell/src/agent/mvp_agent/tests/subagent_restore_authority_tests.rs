@@ -54,80 +54,138 @@ fn delegate(
 fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
     const HOME: &str = "GROW_TEST_CHILD_AUTHORITY_HOME";
     let Ok(home) = std::env::var(HOME) else {
-        let temp = tempfile::tempdir().unwrap();
-        for phase in ["suspend", "missing-birth", "invalid-birth", "restore"] {
-            if phase != "suspend" {
-                // Fault injection happens only after the old process retired
-                // all writers. Keep every other durable identity unchanged.
-                let cwd = temp.path().join("workspace").canonicalize().unwrap();
-                let root = std::fs::read_to_string(temp.path().join("root-id")).unwrap();
-                let timeline = temp
-                    .path()
-                    .join("sessions")
-                    .join(crate::util::grow_home::encode_cwd_dirname(
-                        cwd.to_str().unwrap(),
-                    ))
-                    .join(root)
-                    .join("timeline.jsonl");
-                let mut patched = String::new();
-                let mut count = 0;
-                for line in std::fs::read_to_string(&timeline).unwrap().lines() {
-                    let record = crate::session::history::decode_record(line.as_bytes()).unwrap();
-                    if let crate::session::history::JournalFact::Domain {
-                        mut event,
-                        response_anchor,
-                    } = record.fact
+        for birth_case in ["empty", "narrow", "removed", "alias", "changed-model"] {
+            let temp = tempfile::tempdir().unwrap();
+            for phase in [
+                "suspend",
+                "missing-birth",
+                "invalid-birth",
+                "missing-mcp",
+                "plugin-fallback",
+                "restore",
+            ] {
+                if phase != "suspend" {
+                    // Fault injection happens only after the old process retired
+                    // all writers. Keep every other durable identity unchanged.
+                    let cwd = temp.path().join("workspace").canonicalize().unwrap();
+                    let root = std::fs::read_to_string(temp.path().join("root-id")).unwrap();
+                    let timeline = temp
+                        .path()
+                        .join("sessions")
+                        .join(crate::util::grow_home::encode_cwd_dirname(
+                            cwd.to_str().unwrap(),
+                        ))
+                        .join(root)
+                        .join("timeline.jsonl");
+                    let mut patched = String::new();
+                    let mut count = 0;
+                    for line in std::fs::read_to_string(temp.path().join("original-timeline"))
+                        .unwrap()
+                        .lines()
                     {
-                        if let chat_state::TimelineEventKind::Subagent(
-                            chat_state::SubagentEvent::Spawned(spawn),
-                        ) = &mut event.kind
+                        let record =
+                            crate::session::history::decode_record(line.as_bytes()).unwrap();
+                        if let crate::session::history::JournalFact::Domain {
+                            mut event,
+                            response_anchor,
+                        } = record.fact
                         {
-                            assert_eq!(spawn.subagent_id, "authority-child");
-                            spawn.capability_mode = match phase {
-                                "missing-birth" => None,
-                                "invalid-birth" => Some("invalid-mode".into()),
-                                _ => Some("read-only".into()),
-                            };
-                            count += 1;
-                            let raw = serde_json::value::to_raw_value(&event).unwrap();
-                            patched.push_str(
-                                &String::from_utf8(
-                                    crate::session::history::encode_domain(
-                                        record.seq,
-                                        &raw,
-                                        response_anchor,
+                            if let chat_state::TimelineEventKind::Subagent(
+                                chat_state::SubagentEvent::Spawned(spawn),
+                            ) = &mut event.kind
+                            {
+                                assert_eq!(spawn.subagent_id, "authority-child");
+                                match phase {
+                                    "missing-birth" => spawn.capability_mode = None,
+                                    "invalid-birth" => {
+                                        spawn.capability_mode = Some("invalid-mode".into())
+                                    }
+                                    "missing-mcp" => spawn.birth_mcp_servers = None,
+                                    _ => {}
+                                }
+                                count += 1;
+                                let raw = serde_json::value::to_raw_value(&event).unwrap();
+                                patched.push_str(
+                                    &String::from_utf8(
+                                        crate::session::history::encode_domain(
+                                            record.seq,
+                                            &raw,
+                                            response_anchor,
+                                        )
+                                        .unwrap(),
                                     )
                                     .unwrap(),
-                                )
-                                .unwrap(),
-                            );
-                            continue;
+                                );
+                                continue;
+                            }
                         }
+                        patched.push_str(line);
+                        patched.push('\n');
                     }
-                    patched.push_str(line);
-                    patched.push('\n');
+                    assert_eq!(count, 1);
+                    if phase == "restore" {
+                        patched =
+                            std::fs::read_to_string(temp.path().join("original-timeline")).unwrap();
+                    }
+                    std::fs::write(timeline, patched).unwrap();
+                    std::fs::copy(
+                        temp.path().join("original-child-timeline"),
+                        path_for_root(temp.path(), &cwd, &acp::SessionId::new("authority-child")),
+                    )
+                    .unwrap();
                 }
-                assert_eq!(count, 1);
-                std::fs::write(timeline, patched).unwrap();
-            }
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "agent::mvp_agent::tests::subagent_restore_authority_tests::suspended_child_cold_restore_retains_birth_authority_end_to_end", "--nocapture"])
-                .env(HOME, temp.path()).env("GROW_HOME", temp.path())
+                .env(HOME, temp.path())
+                .env("GROW_TEST_CHILD_MCP_BIRTH", birth_case).env("GROW_HOME", temp.path())
                 .env("GROW_TEST_CHILD_AUTHORITY_PHASE", phase)
                 .output().unwrap();
-            assert!(
-                output.status.success(),
-                "{phase} failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+                assert!(
+                    output.status.success(),
+                    "{phase} failed:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+                if phase == "suspend" {
+                    let cwd = temp.path().join("workspace").canonicalize().unwrap();
+                    let id = acp::SessionId::new(
+                        std::fs::read_to_string(temp.path().join("root-id")).unwrap(),
+                    );
+                    let timeline = temp
+                        .path()
+                        .join("sessions")
+                        .join(crate::util::grow_home::encode_cwd_dirname(
+                            cwd.to_str().unwrap(),
+                        ))
+                        .join(id.0.as_ref())
+                        .join("timeline.jsonl");
+                    std::fs::copy(timeline, temp.path().join("original-timeline")).unwrap();
+                    std::fs::copy(
+                        path_for_root(temp.path(), &cwd, &acp::SessionId::new("authority-child")),
+                        temp.path().join("original-child-timeline"),
+                    )
+                    .unwrap();
+                }
+            }
         }
         return;
     };
     run_local_for_bridge_test(|| async move {
         let phase = std::env::var("GROW_TEST_CHILD_AUTHORITY_PHASE").unwrap();
         let restore = phase != "suspend";
+        let birth_case = std::env::var("GROW_TEST_CHILD_MCP_BIRTH").unwrap();
+        let expected_birth = if birth_case == "empty" {
+            std::collections::BTreeSet::new()
+        } else {
+            std::collections::BTreeSet::from(["birth".to_owned()])
+        };
+        let available_birth = if matches!(birth_case.as_str(), "narrow" | "alias" | "changed-model")
+        {
+            expected_birth.clone()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         let home = std::path::PathBuf::from(home);
         let cwd = home.join("workspace");
         std::fs::create_dir_all(cwd.join(".grow/agents")).unwrap();
@@ -135,8 +193,20 @@ fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
         if !restore {
             git2::Repository::init(&cwd).unwrap();
             for (name, mode) in [("birth-reader", "read-only"), ("selected-all", "all")] {
-                std::fs::write(cwd.join(format!(".grow/agents/{name}.md")), format!("---\nname: {name}\ndescription: Authority regression\ncapabilityMode: {mode}\ntools: [run_terminal_cmd, task, get_task_output, kill_task]\nagentsMd: false\ndiscoverSkills: false\ninheritSkills: false\n---\nExecute the assigned task.\n")).unwrap();
+                let inheritance = if name == "selected-all" {
+                    "all"
+                } else if birth_case == "empty" {
+                    "none"
+                } else {
+                    "\n  named: [birth]"
+                };
+                std::fs::write(cwd.join(format!(".grow/agents/{name}.md")), format!("---\nname: {name}\ndescription: Authority regression\ncapabilityMode: {mode}\nmcpInheritance: {inheritance}\ntools: [run_terminal_cmd, task, get_command_output, list_subagent, get_subagent_status, wait_subagent, kill_task]\nagentsMd: false\ndiscoverSkills: false\ninheritSkills: false\n---\nExecute the assigned task.\n")).unwrap();
             }
+        }
+        if phase == "restore" {
+            // The active Agent was durably switched to selected-all before
+            // suspension. Continuing it must not re-admit the old birth type.
+            std::fs::remove_file(cwd.join(".grow/agents/birth-reader.md")).unwrap();
         }
         let sequence = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = sequence.clone();
@@ -157,6 +227,28 @@ fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
                 ([("content-type", "text/event-stream")], format!("data: {delta}\n\ndata: {done}\n\ndata: [DONE]\n\n"))
             }
         }));
+        let mcp_calls = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::<
+            String,
+            usize,
+        >::new()));
+        let observed_calls = mcp_calls.clone();
+        let app = app.route("/mcp/{name}", axum::routing::post(move |axum::extract::Path(name): axum::extract::Path<String>, axum::Json(message): axum::Json<serde_json::Value>| {
+            use axum::response::IntoResponse as _;
+            let calls = observed_calls.clone();
+            async move {
+                if message.get("id").is_none() { return axum::http::StatusCode::ACCEPTED.into_response(); }
+                let result = match message["method"].as_str().unwrap() {
+                    "initialize" => serde_json::json!({"protocolVersion":message["params"]["protocolVersion"], "capabilities":{"tools":{}}, "serverInfo":{"name":name,"version":"1"}}),
+                    "tools/list" => serde_json::json!({"tools":[{"name":"probe","description":"Birth membership probe","inputSchema":{"type":"object","properties":{}}, "annotations":{"readOnlyHint":true,"destructiveHint":false}}]}),
+                    "tools/call" => {
+                        *calls.lock().unwrap().entry(name.clone()).or_default() += 1;
+                        serde_json::json!({"content":[{"type":"text","text":format!("current incarnation {name}")}], "isError":false})
+                    }
+                    _ => panic!("unexpected MCP request {message}"),
+                };
+                axum::Json(serde_json::json!({"jsonrpc":"2.0", "id":message["id"], "result":result})).into_response()
+            }
+        }));
         let bind_address = if restore {
             std::fs::read_to_string(home.join("provider-address")).unwrap()
         } else {
@@ -170,18 +262,36 @@ fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        let mcp_servers: Vec<_> = ["birth", "extra"]
+            .into_iter()
+            .filter(|name| !(restore && birth_case == "removed" && *name == "birth"))
+            .map(|name| {
+                acp::McpServer::Http(
+                    acp::McpServerHttp::new(name, format!("http://{address}/mcp/{name}"))
+                        .headers(vec![]),
+                )
+            })
+            .collect();
         // Reuse the endpoint across processes: a changed transport route must
         // correctly fail checkpoint validation independently of this test.
+        let catalog_key = if restore && birth_case == "alias" {
+            "renamed"
+        } else {
+            "default"
+        };
         let raw = format!(
             r#"
 [models]
-default = "test/default"
+default = "test/{catalog_key}"
 [provider.test]
 api_backend = "chat_completions"
 [provider.test.options]
 base_url = "http://{address}/v1"
 api_key = "test-only"
-[provider.test.models.default]
+[provider.test.models.{catalog_key}]
+model = "default"
+context_window = 128000
+[provider.test.models.second]
 context_window = 128000
 [subagents]
 permission_mode = "ask"
@@ -195,6 +305,19 @@ max_depth = 3
         cfg.default_model_override = None;
         cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
         cfg.subagent_permission_mode = workspace::permission::types::RequestPermissionMode::Ask;
+        let replaced_native_profile = if phase == "plugin-fallback" {
+            let native = cwd.join(".grow/agents/selected-all.md");
+            let original = std::fs::read(&native).unwrap();
+            let plugin = home.join("replacement-plugin");
+            std::fs::create_dir_all(plugin.join("agents")).unwrap();
+            std::fs::write(plugin.join("plugin.json"), r#"{"name":"replacement"}"#).unwrap();
+            std::fs::write(plugin.join("agents/selected-all.md"), &original).unwrap();
+            std::fs::remove_file(&native).unwrap();
+            cfg.plugins.cli_plugin_dirs = vec![plugin];
+            Some((native, original))
+        } else {
+            None
+        };
         let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
         let (permission_tx, mut permission_rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::task::spawn_local(async move {
@@ -216,17 +339,32 @@ max_depth = 3
         let agent = MvpAgent::new(GatewaySender::new(gateway_tx), &cfg).unwrap();
         cold_recovery_stage("authority.initialize", agent.initialize(acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(serde_json::json!({"startupHints":{"skipGitStatus":true,"skipProjectLayout":true}}).as_object().cloned()))).await.unwrap();
         agent.set_auth_method(acp::AuthMethodId::new("provider.api_key"));
+        if phase == "plugin-fallback" {
+            agent.ensure_plugin_registry();
+            let plugins = agent.plugin_registry_handle.snapshot().unwrap();
+            let resolved = agent::discovery::by_name_in_cwd_with_plugins(
+                "selected-all",
+                &cwd,
+                Some(plugins.as_ref()),
+            )
+            .expect("fixture must expose the unique same-name plugin fallback");
+            assert_eq!(resolved.selector_identity(), "replacement:selected-all");
+        }
         let child_id = acp::SessionId::new("authority-child");
         let root_id;
         if !restore {
             root_id = cold_recovery_stage(
                 "authority.new",
-                agent.new_session(acp::NewSessionRequest::new(cwd.clone())),
+                agent.new_session(
+                    acp::NewSessionRequest::new(cwd.clone()).mcp_servers(mcp_servers.clone()),
+                ),
             )
             .await
             .unwrap()
             .session_id;
             std::fs::write(home.join("root-id"), root_id.0.as_ref()).unwrap();
+            let root = agent.control_session_handle(&root_id).unwrap();
+            wait_for_mcp_pool(&root, 2).await;
             let _child_result =
                 delegate(&agent, &root_id, child_id.0.as_ref(), "birth-reader", None);
             let first = cold_recovery_stage("authority.first_permission", permission_rx.recv())
@@ -252,6 +390,25 @@ max_depth = 3
                     responds_to,
                 })
                 .unwrap();
+            let selected_model = if birth_case == "changed-model" {
+                let catalog = Arc::new(agent.models_manager.published_catalog());
+                let route = catalog
+                    .resolve_session_route(&crate::agent::models::ModelId::new("test/second"), None)
+                    .unwrap();
+                let (responds_to, selected) = tokio::sync::oneshot::channel();
+                child
+                    .cmd_tx
+                    .send(crate::session::SessionCommand::SetSessionModel {
+                        route,
+                        catalog: Some(catalog),
+                        intent: None,
+                        responds_to,
+                    })
+                    .unwrap();
+                Some(selected)
+            } else {
+                None
+            };
             first
                 .response_tx
                 .send(Ok(acp::RequestPermissionResponse::new(
@@ -264,6 +421,12 @@ max_depth = 3
                 .await
                 .unwrap()
                 .unwrap();
+            if let Some(selected) = selected_model {
+                cold_recovery_stage("authority.select_child_model", selected)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
             let pending = cold_recovery_stage("authority.second_permission", permission_rx.recv())
                 .await
                 .unwrap();
@@ -279,6 +442,7 @@ max_depth = 3
                     .constrain_mode(Mode::All),
                 Mode::ReadOnly
             );
+            assert_mcp_membership(&child, &root, &expected_birth).await;
             let (operation, nodes) = cold_recovery_stage(
                 "authority.suspend",
                 agent.suspend_session_tree(
@@ -299,29 +463,118 @@ max_depth = 3
                 agent.control_session_handle(&root_id).is_none(),
                 "old root retired"
             );
+            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+            let birth_events = storage
+                .read_timeline_events_sync(&crate::session::info::Info {
+                    id: root_id.clone(),
+                    cwd: cwd.to_str().unwrap().to_owned(),
+                })
+                .unwrap();
+            let born = birth_events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Spawned(spawn),
+                    ) if spawn.subagent_id == child_id.0.as_ref() => Some(spawn),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                born.birth_mcp_servers.as_ref(),
+                Some(&expected_birth),
+                "check the actual durable birth grant before fault injection"
+            );
             std::fs::write(home.join("operation-id"), operation).unwrap();
             drop(pending);
         } else {
             root_id = acp::SessionId::new(std::fs::read_to_string(home.join("root-id")).unwrap());
             let loaded = cold_recovery_stage(
                 "authority.cold_load",
-                agent.load_session(acp::LoadSessionRequest::new(root_id.clone(), cwd.clone())),
+                agent.load_session(
+                    acp::LoadSessionRequest::new(root_id.clone(), cwd.clone())
+                        .mcp_servers(mcp_servers.clone()),
+                ),
             )
             .await;
+            if phase == "plugin-fallback" {
+                let error = format!(
+                    "{:?}",
+                    loaded.expect_err("a plugin must not replace the original native Agent")
+                );
+                assert!(error.contains("selected-all"), "{error}");
+                assert!(error.contains("different plugin"), "{error}");
+                assert!(
+                    agent.control_session_handle(&child_id).is_none(),
+                    "the mismatched child must not be installed"
+                );
+                assert_eq!(
+                    sequence.load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "identity rejection must precede model sampling"
+                );
+                let root = agent
+                    .control_session_handle(&root_id)
+                    .expect("prepared root owner must remain resident");
+                let runtime = root.chat_state_handle.runtime_state().await.unwrap();
+                assert_eq!(
+                    runtime.phase,
+                    chat_state::session_runtime::RuntimePhase::Restoring
+                );
+                assert!(!runtime.resume_committed);
+                assert_eq!(
+                    runtime.operation_id.as_deref(),
+                    Some(
+                        std::fs::read_to_string(home.join("operation-id"))
+                            .unwrap()
+                            .as_str()
+                    )
+                );
+                assert!(
+                    runtime.instance_id.is_some(),
+                    "the original prepared instance must be retained"
+                );
+                let events = root.chat_state_handle.timeline_events().await.unwrap();
+                assert!(
+                    !events.iter().any(|event| matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                            _
+                        ))
+                    )),
+                    "identity rejection must not terminalize the original child"
+                );
+                assert!(
+                    !events.iter().any(|event| matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Runtime(
+                            chat_state::session_runtime::SessionRuntimeEvent::ExecutionReleased { .. }
+                        )
+                    )),
+                    "the failed tree must not be released"
+                );
+                let (native, original) = replaced_native_profile.unwrap();
+                std::fs::write(native, original).unwrap();
+                server.abort();
+                return;
+            }
             if phase != "restore" {
                 let error = format!(
                     "{:?}",
                     loaded.expect_err("invalid birth fact must block the tree")
                 );
-                assert!(error.contains("birth capability_mode"), "{error}");
-                assert!(
-                    error.contains(if phase == "missing-birth" {
-                        "missing"
-                    } else {
-                        "invalid"
-                    }),
-                    "{error}"
-                );
+                if phase == "missing-mcp" {
+                    assert!(error.contains("missing birth MCP membership"), "{error}");
+                } else {
+                    assert!(error.contains("birth capability_mode"), "{error}");
+                    assert!(
+                        error.contains(if phase == "missing-birth" {
+                            "missing"
+                        } else {
+                            "invalid"
+                        }),
+                        "{error}"
+                    );
+                }
                 assert!(
                     agent.control_session_handle(&child_id).is_none(),
                     "no child was installed"
@@ -331,23 +584,86 @@ max_depth = 3
                     0,
                     "no node sampled before all birth facts were validated"
                 );
-                if let Some(root) = agent.control_session_handle(&root_id) {
-                    let runtime = root.chat_state_handle.runtime_state().await.unwrap();
+                assert!(
+                    agent.control_session_handle(&root_id).is_none(),
+                    "failed cold-load root must retire before retry"
+                );
+                let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+                let events = storage
+                    .read_timeline_events_sync(&crate::session::info::Info {
+                        id: root_id.clone(),
+                        cwd: cwd.to_str().unwrap().to_owned(),
+                    })
+                    .unwrap();
+                let timeline = chat_state::Timeline::from_events(events.clone()).unwrap();
+                assert_eq!(
+                    timeline.runtime_lifecycle().phase,
+                    chat_state::session_runtime::RuntimePhase::Suspended
+                );
+                assert!(!timeline.runtime_lifecycle().resume_committed);
+                assert!(
+                    !events.iter().any(|event| matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                            _
+                        ))
+                    )),
+                    "admission failure must not terminalize the original child"
+                );
+                if phase == "missing-mcp" {
+                    // Repair only after the failed temporary writer is gone,
+                    // then retry through the SAME manager, not a new process.
+                    std::fs::write(
+                        &path_for_root(&home, &cwd, &root_id),
+                        std::fs::read(home.join("original-timeline")).unwrap(),
+                    )
+                    .unwrap();
+                    cold_recovery_stage(
+                        "authority.same_process_retry",
+                        agent.load_session(
+                            acp::LoadSessionRequest::new(root_id.clone(), cwd.clone())
+                                .mcp_servers(mcp_servers.clone()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    let resumed = agent.control_session_handle(&root_id).unwrap();
+                    let runtime = resumed.chat_state_handle.runtime_state().await.unwrap();
                     assert_eq!(
                         runtime.phase,
-                        chat_state::session_runtime::RuntimePhase::Suspended
+                        chat_state::session_runtime::RuntimePhase::Running
                     );
-                    assert!(!runtime.resume_committed);
-                    let events = root.chat_state_handle.timeline_events().await.unwrap();
-                    assert!(
-                        !events.iter().any(|event| matches!(
-                            &event.kind,
-                            chat_state::TimelineEventKind::Subagent(
-                                chat_state::SubagentEvent::Ended(_)
-                            )
-                        )),
-                        "admission failure must not terminalize the original child"
+                    assert_eq!(
+                        runtime.operation_id.as_deref(),
+                        Some(
+                            std::fs::read_to_string(home.join("operation-id"))
+                                .unwrap()
+                                .as_str()
+                        )
                     );
+                    let original_wait =
+                        cold_recovery_stage("authority.retry_original_wait", permission_rx.recv())
+                            .await
+                            .unwrap();
+                    assert_eq!(
+                        original_wait.request.tool_call.tool_call_id.0.as_ref(),
+                        "call-original-1"
+                    );
+                    assert_eq!(
+                        sequence.load(std::sync::atomic::Ordering::SeqCst),
+                        0,
+                        "retry must resume the original call, not resample its response"
+                    );
+                    cold_recovery_stage(
+                        "authority.retry_resuspend",
+                        agent.suspend_session_tree(
+                            &root_id,
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(9),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    drop(original_wait);
                 }
                 server.abort();
                 return;
@@ -357,6 +673,21 @@ max_depth = 3
             let child = agent
                 .control_session_handle(&child_id)
                 .expect("same child identity restored");
+            let backend =
+                tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+                    agent.subagent_event_tx.clone(),
+                    root_id.0.to_string(),
+                );
+            let inspection = backend.inspect(child_id.0.as_ref()).await.unwrap().unwrap();
+            assert_eq!(inspection.child_session_id, child_id.0.as_ref());
+            let signals = child.signals_handle.snapshot().await.unwrap();
+            assert!(matches!(
+                inspection.snapshot.status,
+                tools::implementations::grow_build::task::types::SubagentSnapshotStatus::Running {
+                    turn_count, tool_call_count, ..
+                } if turn_count == signals.turn_count && tool_call_count == signals.tool_call_count
+            ));
+            assert_eq!(sequence.load(std::sync::atomic::Ordering::SeqCst), 0);
             for handle in [&root, &child] {
                 let runtime = handle.chat_state_handle.runtime_state().await.unwrap();
                 assert_eq!(
@@ -373,6 +704,31 @@ max_depth = 3
                 );
                 assert!(runtime.resume_committed);
             }
+            wait_for_mcp_pool(&root, mcp_servers.len()).await;
+            assert_mcp_membership(&child, &root, &available_birth).await;
+            let expected_model = if birth_case == "changed-model" {
+                "test/second"
+            } else if birth_case == "alias" {
+                "test/renamed"
+            } else {
+                "test/default"
+            };
+            assert_eq!(
+                child.model_route.snapshot().model_id.0.as_ref(),
+                expected_model,
+                "resume uses the checkpoint's selected route, not its birth route"
+            );
+            let model_events = child.chat_state_handle.timeline_events().await.unwrap();
+            assert_eq!(
+                crate::session::persistence::latest_model_selection(&model_events)
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    .0
+                    .as_ref(),
+                expected_model,
+                "alias rebind is a durable model observation"
+            );
             assert_eq!(child.agent_profile.name(), "selected-all");
             assert_eq!(
                 child
@@ -450,6 +806,7 @@ max_depth = 3
             let grandchild = agent
                 .control_session_handle(&acp::SessionId::new("authority-grandchild"))
                 .unwrap();
+            assert_mcp_membership(&grandchild, &root, &available_birth).await;
             assert_eq!(
                 grandchild
                     .delegable_capability_ceiling
@@ -485,6 +842,34 @@ max_depth = 3
                     .iter()
                     .all(|spawn| spawn.capability_mode.as_deref() == Some("read-only"))
             );
+            assert_eq!(
+                spawns
+                    .iter()
+                    .find(|spawn| spawn.subagent_id == child_id.0.as_ref())
+                    .unwrap()
+                    .birth_mcp_servers
+                    .as_ref(),
+                Some(&expected_birth)
+            );
+            assert_eq!(
+                spawns
+                    .iter()
+                    .find(|spawn| spawn.subagent_id == "authority-grandchild")
+                    .unwrap()
+                    .birth_mcp_servers
+                    .as_ref(),
+                Some(&available_birth)
+            );
+            assert_eq!(
+                mcp_calls
+                    .lock()
+                    .unwrap()
+                    .get("extra")
+                    .copied()
+                    .unwrap_or_default(),
+                0,
+                "unborn MCP server must never be invoked"
+            );
             cold_recovery_stage(
                 "authority.resuspend",
                 agent.suspend_session_tree(
@@ -498,4 +883,77 @@ max_depth = 3
         }
         server.abort();
     });
+}
+
+async fn wait_for_mcp_pool(
+    handle: &crate::session::SessionHandle,
+    count: usize,
+) -> crate::session::mcp_servers::SharedMcpPool {
+    cold_recovery_stage("authority.mcp_pool", async {
+        loop {
+            if let Some(pool) = handle.snapshot_mcp_pool().await
+                && pool.len() == count
+            {
+                return pool;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+}
+
+async fn assert_mcp_membership(
+    child: &crate::session::SessionHandle,
+    root: &crate::session::SessionHandle,
+    expected: &std::collections::BTreeSet<String>,
+) {
+    let child_pool = child.snapshot_mcp_pool().await;
+    let actual: std::collections::BTreeSet<_> = child_pool
+        .as_ref()
+        .map(|pool| pool.server_names().map(str::to_owned).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        &actual, expected,
+        "live child pool must retain only surviving birth members"
+    );
+    let parent_pool = root.snapshot_mcp_pool().await.unwrap();
+    for name in ["birth", "extra"] {
+        if let Some(client) = parent_pool.get_client(name) {
+            assert_eq!(
+                child
+                    .delegable_capability_ceiling
+                    .as_ref()
+                    .unwrap()
+                    .permits_mcp_binding(name, client.client_id()),
+                expected.contains(name),
+                "fresh incarnation binding {name}"
+            );
+        }
+        let called = cold_recovery_stage(
+            "authority.mcp_call",
+            child.call_mcp_tool(name.into(), None, "probe".into(), serde_json::json!({})),
+        )
+        .await;
+        if expected.contains(name) {
+            called.unwrap();
+        } else {
+            assert!(
+                called.unwrap_err().contains("not found"),
+                "unborn/unavailable member must not dispatch"
+            );
+        }
+    }
+}
+
+fn path_for_root(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    root: &acp::SessionId,
+) -> std::path::PathBuf {
+    home.join("sessions")
+        .join(crate::util::grow_home::encode_cwd_dirname(
+            cwd.to_str().unwrap(),
+        ))
+        .join(root.0.as_ref())
+        .join("timeline.jsonl")
 }

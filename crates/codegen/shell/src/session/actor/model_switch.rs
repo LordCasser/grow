@@ -2221,7 +2221,7 @@ impl SessionActor {
         let current_goal_authority = current_bridge
             .read_resource::<tools::implementations::grow_build::update_goal::GoalMutationAuthorityResource>()
             .await;
-        let already_applied = {
+        let mut already_applied = {
             let current = self.agent.borrow();
             current
                 .definition()
@@ -2230,6 +2230,30 @@ impl SessionActor {
                 && (self.rebuild_spec.workflow_owned
                     || current.subagent_toggle() == new_agent.subagent_toggle())
         };
+        if already_applied {
+            let catalog = self
+                .subagent_capabilities
+                .as_ref()
+                .map(|capabilities| capabilities.native_catalog_prompt());
+            let expected = ConversationItem::system_reminder(
+                crate::session::control::agent_role_transition_context(
+                    &new_agent_name,
+                    new_agent.role_prompt(),
+                    catalog.as_deref(),
+                ),
+            )
+            .text_content();
+            let events = self
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .ok_or_else(|| {
+                    acp::Error::internal_error().data("Agent role authority is unavailable")
+                })?;
+            already_applied = crate::session::control::desired_agent_role_context(&events)
+                .as_deref()
+                == Some(expected.as_str());
+        }
         if already_applied {
             // Reconnect is at-least-once: a rearmed Agent control may be
             // replayed after the Shell applied it but before Pager observed

@@ -24,13 +24,29 @@ async fn ai_suggest_stream_records_terminal_and_raw_body_in_its_sideband_attempt
                 let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx, sideband_events) =
                     sideband_persistence_harness();
-                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 let server = MockInferenceServer::start().await.unwrap();
                 server.set_response("pwd");
-                let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
-                config.base_url = server.url();
-                config.api_backend = backend.clone();
-                actor.chat_state_handle.replace_sampling_route(config);
+                let mut entry = crate::agent::config::ModelEntry::baseline("test-model");
+                entry.api_key = Some("test-only-aux-key".into());
+                entry.info.base_url = server.url();
+                entry.info.api_backend = backend.clone();
+                actor.models_manager = crate::agent::models::ModelsManager::new(
+                    indexmap::IndexMap::from([("test-model".to_owned(), entry)]),
+                    crate::agent::models::ModelId::new("test-model"),
+                    crate::agent::config::Config::default(),
+                );
+                let primary_url = actor
+                    .model_route
+                    .snapshot()
+                    .sampling_config
+                    .base_url
+                    .clone();
+                assert_ne!(
+                    primary_url,
+                    server.url(),
+                    "aux fixture must not replace the primary route"
+                );
 
                 assert_eq!(
                     actor
@@ -38,6 +54,21 @@ async fn ai_suggest_stream_records_terminal_and_raw_body_in_its_sideband_attempt
                         .await,
                     Some("pwd".to_owned()),
                     "{backend:?}"
+                );
+                let inference_requests: Vec<_> = server
+                    .requests()
+                    .into_iter()
+                    .filter(|request| request.method == "POST")
+                    .collect();
+                assert_eq!(inference_requests.len(), 1, "{backend:?}");
+                assert_eq!(
+                    inference_requests[0].path,
+                    match &backend {
+                        ApiBackend::ChatCompletions => "/v1/chat/completions",
+                        ApiBackend::Responses => "/v1/responses",
+                        ApiBackend::Messages => "/v1/messages",
+                    },
+                    "AI suggest must use the exact catalog backend route"
                 );
                 let evidence = actor
                     .chat_state_handle
@@ -88,16 +119,26 @@ async fn ai_suggest_stream_records_terminal_and_raw_body_in_its_sideband_attempt
 
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx, sideband_events) = sideband_persistence_harness();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             let server = MockInferenceServer::start().await.unwrap();
             server.enqueue_response(
                 "/v1/chat/completions",
                 ScriptedResponse::sse(vec![SseEvent::data("{malformed")]),
             );
-            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
-            config.base_url = server.url();
-            config.api_backend = ApiBackend::ChatCompletions;
-            actor.chat_state_handle.replace_sampling_route(config);
+            let mut entry = crate::agent::config::ModelEntry::baseline("test-model");
+            entry.api_key = Some("test-only-aux-key".into());
+            entry.info.base_url = server.url();
+            entry.info.api_backend = ApiBackend::ChatCompletions;
+            actor.models_manager = crate::agent::models::ModelsManager::new(
+                indexmap::IndexMap::from([("test-model".to_owned(), entry)]),
+                crate::agent::models::ModelId::new("test-model"),
+                crate::agent::config::Config::default(),
+            );
+            assert_ne!(
+                actor.model_route.snapshot().sampling_config.base_url,
+                server.url(),
+                "malformed auxiliary route must be distinct from primary"
+            );
 
             assert_eq!(
                 actor
@@ -131,6 +172,269 @@ async fn ai_suggest_stream_records_terminal_and_raw_body_in_its_sideband_attempt
                     ..
                 })
             )));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auxiliary_suggestion_and_memory_rewrite_use_catalog_provider_routes() {
+    use sampler::{AuthScheme, AuthScheme::Bearer};
+    use sampling_types::ApiBackend;
+    use test_support::MockInferenceServer;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let primary = MockInferenceServer::start().await.unwrap();
+            let shell = MockInferenceServer::start().await.unwrap();
+            let prompt = MockInferenceServer::start().await.unwrap();
+            let rewrite = MockInferenceServer::start().await.unwrap();
+            let vision = MockInferenceServer::start().await.unwrap();
+            shell.set_response("git status");
+            prompt.set_response("run the tests");
+            rewrite.set_response("## Durable Note\n\n- Keep this detail.");
+
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx, _sideband_events) =
+                sideband_persistence_harness();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            let entry = |wire_model: &str,
+                         base_url: String,
+                         backend: ApiBackend,
+                         auth_scheme: AuthScheme,
+                         api_key: &str| {
+                let mut entry = crate::agent::config::ModelEntry::baseline(wire_model);
+                entry.info.base_url = base_url;
+                entry.info.api_backend = backend;
+                entry.info.auth_scheme = auth_scheme;
+                entry.api_key = Some(api_key.to_owned());
+                entry
+            };
+            let session_entry = entry(
+                "session-wire",
+                primary.url(),
+                ApiBackend::ChatCompletions,
+                Bearer,
+                "primary-secret",
+            );
+            let shell_entry = entry(
+                "shell-wire",
+                shell.url(),
+                ApiBackend::Responses,
+                Bearer,
+                "shell-secret",
+            );
+            let prompt_entry = entry(
+                "prompt-wire",
+                prompt.url(),
+                ApiBackend::Messages,
+                AuthScheme::XApiKey,
+                "prompt-secret",
+            );
+            let rewrite_entry = entry(
+                "rewrite-wire",
+                rewrite.url(),
+                ApiBackend::ChatCompletions,
+                Bearer,
+                "rewrite-secret",
+            );
+            let vision_entry = entry(
+                "vision-wire",
+                vision.url(),
+                ApiBackend::Messages,
+                AuthScheme::XApiKey,
+                "vision-secret",
+            );
+            let catalog = indexmap::indexmap! {
+                "session/main".to_owned() => session_entry.clone(),
+                "aux/shell".to_owned() => shell_entry.clone(),
+                "aux/prompt".to_owned() => prompt_entry.clone(),
+                "grow-build".to_owned() => rewrite_entry.clone(),
+                "aux/vision".to_owned() => vision_entry,
+            };
+            let mut manager_config = crate::agent::config::Config::default();
+            manager_config.image_description_model = Some("aux/vision".to_owned());
+            actor.models_manager = crate::agent::models::ModelsManager::new(
+                catalog,
+                crate::agent::models::ModelId::new("session/main"),
+                manager_config.clone(),
+            );
+
+            let primary_route = sampler::SamplerConfig {
+                base_url: primary.url(),
+                model: "session-wire".to_owned(),
+                api_backend: ApiBackend::ChatCompletions,
+                auth_scheme: Bearer,
+                api_key: Some("primary-secret".to_owned()),
+                context_window: 200_000,
+                ..Default::default()
+            };
+            let run_route = crate::session::workflow::tracker::WorkflowRuntimeRoute::capture(
+                "session/main",
+                primary_route.clone(),
+                &actor.models_manager,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+            actor.startup_hints.workflow_runtime_route = Some(run_route);
+
+            // A later live catalog is deliberately different. All requests in
+            // this Workflow Run must keep using the route snapshot captured above.
+            let live_catalog = indexmap::indexmap! {
+                "session/main".to_owned() => session_entry,
+                "aux/shell".to_owned() => entry(
+                    "live-shell-wire", "https://live-shell.invalid/v1".to_owned(),
+                    ApiBackend::Messages, AuthScheme::XApiKey, "live-shell-secret"
+                ),
+                "aux/prompt".to_owned() => entry(
+                    "live-prompt-wire", "https://live-prompt.invalid/v1".to_owned(),
+                    ApiBackend::Responses, Bearer, "live-prompt-secret"
+                ),
+                "grow-build".to_owned() => entry(
+                    "live-rewrite-wire", "https://live-rewrite.invalid/v1".to_owned(),
+                    ApiBackend::Responses, Bearer, "live-rewrite-secret"
+                ),
+                "aux/vision".to_owned() => entry(
+                    "live-vision-wire", "https://live-vision.invalid/v1".to_owned(),
+                    ApiBackend::Responses, Bearer, "live-vision-secret"
+                ),
+                "aux/late".to_owned() => entry(
+                    "late-wire", "https://late.invalid/v1".to_owned(),
+                    ApiBackend::ChatCompletions, Bearer, "late-secret"
+                ),
+            };
+            actor.models_manager = crate::agent::models::ModelsManager::new(
+                live_catalog,
+                crate::agent::models::ModelId::new("session/main"),
+                manager_config,
+            );
+            actor.model_route.replace(
+                crate::agent::models::ModelId::new("session/main"),
+                primary_route,
+            );
+            let mut session_sampling = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            session_sampling.base_url = primary.url();
+            session_sampling.model = "session-wire".to_owned();
+            session_sampling.api_backend = ApiBackend::ChatCompletions;
+            actor
+                .chat_state_handle
+                .replace_sampling_route(session_sampling);
+            actor
+                .chat_state_handle
+                .update_credentials(chat_state::Credentials {
+                    api_key: Some("primary-secret".to_owned()),
+                    ..Default::default()
+                });
+
+            let image_route = actor
+                .resolve_aux_sampler_config("aux/vision")
+                .await
+                .expect("the frozen Workflow image-description route remains available");
+            assert_eq!(image_route.base_url, vision.url());
+            assert_eq!(image_route.model, "vision-wire");
+            assert_eq!(image_route.api_key.as_deref(), Some("vision-secret"));
+            assert_eq!(image_route.auth_scheme, AuthScheme::XApiKey);
+            assert_eq!(vision.request_count(), 0);
+            assert!(
+                actor.resolve_aux_sampler_config("aux/late").await.is_none(),
+                "a model added after Run capture is not part of its frozen route"
+            );
+
+            assert_eq!(
+                actor
+                    .handle_ai_suggest("git", "/repo", Some("shell-wire"))
+                    .await,
+                None,
+                "a provider wire name is not a catalog route"
+            );
+            assert_eq!(primary.request_count(), 0);
+            assert_eq!(shell.request_count(), 0);
+
+            assert_eq!(
+                actor
+                    .handle_ai_suggest("git", "/repo", Some("aux/shell"))
+                    .await
+                    .as_deref(),
+                Some("git status")
+            );
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::user("Fix the compiler error."),
+                    ConversationItem::assistant("The compiler error is fixed."),
+                ],
+            )
+            .await;
+            assert_eq!(
+                actor.handle_suggest_prompt(Some("prompt-wire")).await,
+                None,
+                "a provider wire name is not a catalog route"
+            );
+            assert_eq!(prompt.request_count(), 0);
+            assert_eq!(
+                actor
+                    .handle_suggest_prompt(Some("aux/prompt"))
+                    .await
+                    .as_deref(),
+                Some("run the tests")
+            );
+            assert_eq!(
+                actor
+                    .handle_rewrite_memory_note(
+                        "The parser rejects orphan deltas.",
+                        "Tests found a strict stream failure."
+                    )
+                    .await
+                    .unwrap(),
+                "## Durable Note\n\n- Keep this detail."
+            );
+
+            let (request, expected_path, expected_model, expected_auth, auth_header) = (
+                shell.requests().pop().unwrap(),
+                "/v1/responses",
+                "shell-wire",
+                "Bearer shell-secret",
+                "authorization",
+            );
+            assert_eq!(request.path, expected_path);
+            assert_eq!(request.body.as_ref().unwrap()["model"], expected_model);
+            assert_eq!(request.header(auth_header), Some(expected_auth));
+
+            let request = prompt.requests().pop().unwrap();
+            assert_eq!(request.path, "/v1/messages");
+            assert_eq!(request.body.as_ref().unwrap()["model"], "prompt-wire");
+            assert_eq!(request.header("x-api-key"), Some("prompt-secret"));
+
+            let request = rewrite.requests().pop().unwrap();
+            assert_eq!(request.path, "/v1/chat/completions");
+            assert_eq!(request.body.as_ref().unwrap()["model"], "rewrite-wire");
+            assert_eq!(
+                request.header("authorization"),
+                Some("Bearer rewrite-secret")
+            );
+
+            actor.startup_hints.workflow_runtime_route = None;
+            let mut missing_rewrite_route = actor.models_manager.models();
+            missing_rewrite_route.shift_remove("grow-build");
+            actor.models_manager = crate::agent::models::ModelsManager::new(
+                missing_rewrite_route,
+                crate::agent::models::ModelId::new("session/main"),
+                crate::agent::config::Config::default(),
+            );
+            assert!(
+                actor
+                    .handle_rewrite_memory_note("A note.", "Context.")
+                    .await
+                    .is_err(),
+                "missing implicit rewrite selector must fail rather than reuse the session route"
+            );
+            assert_eq!(rewrite.request_count(), 1);
+            assert_eq!(
+                primary.request_count(),
+                0,
+                "auxiliary calls must not use the session route"
+            );
         })
         .await;
 }

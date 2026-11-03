@@ -38,6 +38,13 @@ pub(crate) fn set_current_session_id(id: Option<acp::SessionId>) {
     *CURRENT_SESSION_ID.lock() = id;
 }
 
+pub(crate) fn clear_current_session_id(session_id: &acp::SessionId) {
+    let mut current = CURRENT_SESSION_ID.lock();
+    if current.as_ref() == Some(session_id) {
+        *current = None;
+    }
+}
+
 /// Lets the signal handler route SIGINT/SIGTERM/SIGHUP into the same graceful
 /// quit as `/quit` (running teardown + history/diagnostics flushes) instead of a
 /// hard exit. Registered by the event loop before it starts.

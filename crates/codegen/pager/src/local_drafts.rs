@@ -1164,6 +1164,11 @@ impl Default for LocalDraftRuntime {
 }
 
 impl LocalDraftRuntime {
+    #[cfg(test)]
+    pub(crate) fn with_test_root(root: PathBuf) -> Self {
+        Self::direct(LocalDraftStore::new(root))
+    }
+
     fn direct(store: LocalDraftStore) -> Self {
         Self {
             store,
@@ -2268,6 +2273,78 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn acknowledged_dashboard_close_preserves_latest_unsynced_draft() {
+        use crate::app::{
+            actions::{Action, TaskResult},
+            root::dispatch::dispatch,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.local_drafts =
+            LocalDraftRuntime::direct(LocalDraftStore::new(directory.path().to_path_buf()));
+        let id = *app.agents.keys().next().unwrap();
+        let sid = acp_transport::protocol::SessionId::new("ack-close-draft");
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.bind_session_id(sid.clone());
+        let epoch = agent.session_binding_epoch;
+        agent.prompt.set_text("latest unsynced draft");
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionCloseResolved {
+                agent_id: id,
+                session_id: sid.clone(),
+                binding_epoch: epoch,
+                result: Ok(()),
+            }),
+            &mut app,
+        );
+        assert!(!app.agents.contains_key(&id));
+        let draft = app
+            .local_drafts
+            .store
+            .load(&LocalDraftKey::session(&sid.0).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(draft.composer.unwrap().text, "latest unsynced draft");
+    }
+
+    #[test]
+    fn failed_session_delete_retirement_preserves_the_latest_session_draft() {
+        use crate::app::{
+            actions::{Action, TaskResult},
+            root::dispatch::dispatch,
+        };
+        for runtime_invalidated in [Some(true), None] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = crate::app::root::tests::test_app_with_agent();
+            app.local_drafts =
+                LocalDraftRuntime::direct(LocalDraftStore::new(directory.path().to_path_buf()));
+            let id = *app.agents.keys().next().unwrap();
+            let sid = acp_transport::protocol::SessionId::new("failed-delete-draft");
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.bind_session_id(sid.clone());
+            agent.prompt.set_text("latest undeleted draft");
+            let bindings = vec![(id, app.agents[&id].session_binding_epoch)];
+            dispatch(
+                Action::TaskComplete(TaskResult::DeleteSessionFailed {
+                    bindings,
+                    session_id: sid.0.to_string(),
+                    error: "not confirmed".into(),
+                    runtime_invalidated,
+                }),
+                &mut app,
+            );
+            assert!(!app.agents.contains_key(&id));
+            let draft = app
+                .local_drafts
+                .store
+                .load(&LocalDraftKey::session(&sid.0).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(draft.composer.unwrap().text, "latest undeleted draft");
+        }
     }
 
     #[test]

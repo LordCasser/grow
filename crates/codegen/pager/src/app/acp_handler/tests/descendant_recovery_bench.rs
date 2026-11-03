@@ -93,6 +93,7 @@ fn spawn_fact(
         resumed_from: None,
         parent_prompt_id: None,
         capability_mode: Some("read-only".into()),
+        birth_mcp_servers: Some(Default::default()),
         permission_mode: Some("auto".into()),
         effective_permission_mode: Some("auto".into()),
         workflow_run_id: None,

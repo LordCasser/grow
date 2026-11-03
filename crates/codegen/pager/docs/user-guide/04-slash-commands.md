@@ -20,7 +20,7 @@ Open the session picker to reload a previous session from disk.
 
 ### `/dashboard`
 
-Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach).
+Open the [Agent Dashboard](23-dashboard.md): session overview with read-only preview, new-session input, search, pin, rename and session controls. Open a session's details to reply.
 
 Not `/config-agents`, which manages Agent definitions. Hidden in minimal mode; disable with `GROW_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
 
@@ -102,7 +102,7 @@ Leave the current session and return to the welcome screen.
 
 Delete the current session's history and return to the welcome screen. Confirms first.
 
-To delete a session you are not in, open `/resume` or the welcome session list and press `d` then `y`. On the dashboard, press `Ctrl+X` twice or click `[✗]`.
+To delete a session you are not in, open `/resume` or the welcome session list and press `d` then `y`. On the dashboard, select the session, press `Ctrl+X`, then `D`, and confirm with `Y` (`N` / `Esc` cancels).
 
 ### `/rename`
 

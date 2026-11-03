@@ -66,6 +66,7 @@ impl SessionActor {
     ) -> Result<String, SideQuestionError> {
         let prepared = self.prepare_chat_completion_config(false).await;
         let model = prepared.model.clone();
+        let context_window = prepared.context_window;
         let image_key = sampling_types::model_image_input_key_from_parts(
             &prepared.model,
             &prepared.api_backend,
@@ -82,44 +83,19 @@ impl SessionActor {
             }
         });
 
-        let image_projection = tokio::select! {
-            biased;
-            _ = self.sideband_cancel.cancelled() => {
-                return Err(SideQuestionError::Sideband("side question cancelled".into()));
-            }
-            guard = self.image_projection_gate.read() => guard,
-        };
-        // Freeze the committed context and its source reference together.
         let materialized = self
-            .chat_state_handle
-            .materialize_timeline(self.session_info.id.to_string())
+            .freeze_sideband_surface()
             .await
-            .ok_or_else(|| SideQuestionError::Sideband("chat-state actor is unavailable".into()))?;
-        let input_ref = materialized.input_ref;
-        // Mid-turn snapshots can contain unanswered calls. The shared portable
-        // projection omits those protocols and reasoning while retaining real
-        // results (including partially completed batches) and assistant text.
-        // Trimming by tail item type would also erase completed tool evidence.
-        let mut surface = materialized.surface;
-        // Main owns conversion. Prefer its acknowledged text even when this
-        // request's capability cache has no negative entry.
-        for group in sampling_types::conversation::conversation_image_groups(&surface) {
-            if let Some(description) =
-                sampling_types::conversation::item_image_description(&surface[group.item_index])
-                    .map(str::to_owned)
-            {
-                sampling_types::conversation::replace_item_images_with_text(
-                    &mut surface[group.item_index],
-                    &description,
-                );
-            }
-        }
-        if self.model_image_input_is_unsupported(&image_key).await {
-            sampling_types::conversation::select_image_descriptions(&mut surface)
-                .map_err(|error| SideQuestionError::Sideband(error.into()))?;
-        }
-        drop(image_projection);
-        let mut items = sampling_types::project_portable_history(&surface);
+            .map_err(SideQuestionError::Sideband)?;
+        let frozen = (
+            &materialized.surface[..],
+            &materialized.surface_ids[..],
+            materialized.surface_revision,
+        );
+        let mut items = sampling_types::project_portable_history(&materialized.surface);
+        self.prepare_sideband_images(&mut items, frozen, &image_key)
+            .await
+            .map_err(SideQuestionError::Sideband)?;
 
         // Wrap the question in a <system-reminder> user message.
         let tag = self.reminder_wrapper_tag();
@@ -150,7 +126,7 @@ impl SessionActor {
         // Built once; each attempt clones it and stamps a fresh req_id (the
         // per-attempt clone is the cost of the owned-request API — retries
         // are rare, so the success path pays exactly one clone).
-        let base_request = ConversationRequest {
+        let mut base_request = ConversationRequest {
             items,
             model: Some(model.clone()),
             temperature: None,
@@ -161,8 +137,13 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::SideQuestion,
                 wrapped_question,
-                SidebandSource::Frozen(vec![input_ref]),
-                chat_state::SidebandBudgetPolicy::for_request(&base_request, 3),
+                SidebandSource::Frozen(vec![materialized.input_ref.clone()]),
+                {
+                    let mut policy =
+                        chat_state::SidebandBudgetPolicy::for_request(&base_request, 4);
+                    policy.max_input_tokens_per_attempt = context_window;
+                    policy
+                },
                 chat_state::SidebandRoute {
                     model: model.clone(),
                     backend: sampling_client.api_backend(),
@@ -186,8 +167,14 @@ impl SessionActor {
                 )
                 .await
                 .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-            let settled = sideband
-                .run_provider(sampling_client.conversation_collect(base_request.clone()))
+            let settled = self
+                .collect_sideband_with_image_recovery(
+                    &mut sideband,
+                    &sampling_client,
+                    &mut base_request,
+                    frozen,
+                    &image_key,
+                )
                 .await
                 .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
             match settled {
@@ -257,19 +244,23 @@ impl SessionActor {
         // the conversation reads as bumped-after-capture and cancels this recap.
         let recap_epoch = self.recap_epoch.get();
 
-        let Some(materialized) = self
-            .chat_state_handle
-            .materialize_timeline(self.session_info.id.to_string())
-            .await
-        else {
-            tracing::warn!("recap: chat-state actor is unavailable");
-            if !auto {
-                self.emit_recap_unavailable().await;
+        let materialized = match self.freeze_sideband_surface().await {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                tracing::warn!(%error, "recap: context unavailable");
+                if !auto {
+                    self.emit_recap_unavailable().await;
+                }
+                return;
             }
-            return;
         };
-        let input_ref = materialized.input_ref;
-        let conversation = materialized.surface;
+        let input_ref = materialized.input_ref.clone();
+        let conversation = materialized.surface.clone();
+        let frozen = (
+            &materialized.surface[..],
+            &materialized.surface_ids[..],
+            materialized.surface_revision,
+        );
         let main_turns = session_recap::main_turn_count(&conversation);
 
         let stored = self.last_recap_main_turn.get();
@@ -315,6 +306,12 @@ impl SessionActor {
         let prepared = self.prepare_chat_completion_config(false).await;
         let context_window = prepared.context_window;
         let model = prepared.model.clone();
+        let image_key = sampling_types::model_image_input_key_from_parts(
+            &prepared.model,
+            &prepared.api_backend,
+            &prepared.base_url,
+            &prepared.query_params,
+        );
         let sampling_client = match sampler::SamplingClient::new(prepared) {
             Ok(c) => c,
             Err(e) => {
@@ -344,8 +341,19 @@ impl SessionActor {
             sampling_client.api_backend() == crate::sampling::ApiBackend::Messages;
 
         // The model, backend and budget belong to the client preparation snapshot.
-        let items =
+        let mut items =
             session_recap::budget_recap_items(conversation, tag, strip_reasoning, context_window);
+        if let Err(error) = self
+            .prepare_sideband_images(&mut items, frozen, &image_key)
+            .await
+        {
+            tracing::warn!(%error, "recap: image context unavailable");
+            clear_in_flight();
+            if !auto {
+                self.emit_recap_unavailable().await;
+            }
+            return;
+        }
 
         // Leave BOTH temperature and max_output_tokens unset: the cli-chat-proxy
         // layer may inject a `thinking` budget for thinking-enabled models
@@ -354,7 +362,7 @@ impl SessionActor {
         // dropping the recap. The recap instruction keeps the body to
         // ~25–40 words, and `clean_recap_text` caps it at a generous
         // RECAP_MAX_CHARS safety net, so an explicit token cap isn't needed.
-        let request = ConversationRequest {
+        let mut request = ConversationRequest {
             items,
             model: Some(model.clone()),
             temperature: None,
@@ -367,7 +375,12 @@ impl SessionActor {
                 chat_state::SidebandPurpose::SessionRecap,
                 session_recap::recap_instruction(tag),
                 SidebandSource::Frozen(vec![input_ref]),
-                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
+                {
+                    let mut policy = chat_state::SidebandBudgetPolicy::for_request(&request, 2);
+                    policy.max_input_tokens_per_attempt =
+                        session_recap::recap_input_budget(context_window);
+                    policy
+                },
                 chat_state::SidebandRoute {
                     model: model.clone(),
                     backend: sampling_client.api_backend(),
@@ -397,8 +410,14 @@ impl SessionActor {
             }
             return;
         }
-        let response = match sideband
-            .run_provider(sampling_client.conversation_collect(request))
+        let response = match self
+            .collect_sideband_with_image_recovery(
+                &mut sideband,
+                &sampling_client,
+                &mut request,
+                frozen,
+                &image_key,
+            )
             .await
         {
             Ok(Ok(response)) => response,
@@ -580,7 +599,14 @@ impl SessionActor {
         cwd: &str,
         model_override: Option<&str>,
     ) -> Option<String> {
-        let sampling_client = self.prepare_chat_completion(false).await.ok()?;
+        let model_id = model_override.unwrap_or("grow-build");
+        let (sampling_client, model) = match self.build_auxiliary_sampling_client(model_id).await {
+            Ok(route) => route,
+            Err(error) => {
+                tracing::debug!(%error, "AI suggest model route unavailable");
+                return None;
+            }
+        };
 
         let system = "You are a shell command autocomplete engine. \
             Given a partial command, output ONLY the completed command. \
@@ -593,11 +619,6 @@ impl SessionActor {
             ConversationItem::system(system.to_owned()),
             ConversationItem::user(user_msg),
         ];
-
-        let model = match model_override {
-            Some(m) => m.to_owned(),
-            None => "grow-build".to_owned(),
-        };
 
         let request = ConversationRequest {
             items,
@@ -728,8 +749,8 @@ impl SessionActor {
     /// [`prompt_suggest::effective_suggest_model`]: env
     /// (`GROW_PROMPT_SUGGESTIONS_MODEL`) > `[models] prompt_suggestion`
     /// (config.toml) > remote `prompt_suggestion_model` (remote settings) >
-    /// client hint. Every tier except env is catalog-guarded against this
-    /// shell's own model catalog. Without an explicit model the request is
+    /// client hint. Every tier must identify a route in this shell's model
+    /// catalog. Without an explicit model the request is
     /// skipped entirely. The session model is never used:
     /// a per-turn background call must stay on the small model.
     /// Temperature, max_output_tokens, and
@@ -772,8 +793,8 @@ impl SessionActor {
             return None;
         };
 
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        let (sampling_client, model) = match self.build_auxiliary_sampling_client(&model).await {
+            Ok(route) => route,
             Err(e) => {
                 tracing::debug!(error = %e, "prompt suggest: sampling client unavailable");
                 return None;

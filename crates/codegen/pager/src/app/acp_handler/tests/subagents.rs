@@ -413,6 +413,7 @@
                             resumed_from: None,
                             parent_prompt_id: None,
                             capability_mode: None,
+                            birth_mcp_servers: Some(Default::default()),
                             permission_mode: None,
                             effective_permission_mode: None,
                             workflow_run_id: None,
@@ -1260,6 +1261,127 @@
                 "lazy open must set child_updates_replayed"
             );
         });
+    }
+
+    #[test]
+    fn subagent_resume_restores_history_before_first_live_update() {
+        for kind in ["thinking", "assistant", "tool", "turn_completed", "finished", "live_then_finished"] {
+            with_replay_disk_home(|home| {
+                let child_sid = "child-resume-live-first";
+                let task = "preserve the original task";
+                let mut app = make_app_with_agent("sess-parent");
+                app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = true;
+                let history = format!("{}\n{}", child_user_message_line(child_sid, task), child_tool_line(child_sid));
+                spawn_subagent_with_optional_history(home, &mut app, child_sid, Some(&history));
+                // A resumed child can produce output while its parent is still
+                // crossing the load barrier, before any child view is opened.
+                if matches!(kind, "finished" | "live_then_finished") {
+                    if kind == "finished" {
+                        app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = false;
+                    } else {
+                        handle(make_agent_chunk_message(child_sid, "new output before finish"), &mut app);
+                    }
+                    handle(make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)), &mut app);
+                } else if kind == "turn_completed" {
+                    handle(make_ext_session_notification(child_sid, GrowSessionUpdate::TurnCompleted {
+                        prompt_id: "child-live-prompt".into(),
+                        stop_reason: "end_turn".into(),
+                        identity: None,
+                        agent_result: None,
+                        usage: None,
+                    }), &mut app);
+                } else {
+                    let update = match kind {
+                        "thinking" => acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new("new thinking")),
+                        )),
+                        "assistant" => acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new("new output")),
+                        )),
+                        "tool" => acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+                            acp::ToolCallId::new(Arc::from("live-tool")), "new tool",
+                        ).status(acp::ToolCallStatus::Pending)),
+                        _ => unreachable!(),
+                    };
+                    let (response_tx, _) = tokio::sync::oneshot::channel();
+                    handle(AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                        request: acp::SessionNotification::new(acp::SessionId::new(child_sid), update),
+                        response_tx,
+                    }), &mut app);
+                }
+                if kind != "finished" {
+                    let replayed_spawn = subagent_ext_replay("sess-parent",
+                        serde_json::to_value(test_subagent_spawned("sess-parent", child_sid)).unwrap(),
+                        "sess-parent-41",
+                    );
+                    handle_ext_notification(&replayed_spawn, &mut app);
+                }
+                let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+                assert_eq!(child_scrollback_matching_prompt_count(parent, child_sid, task), 1, "{kind}: task is restored before live presentation");
+                assert_eq!(child_scrollback_tool_call_count(parent, child_sid), if kind == "tool" { 2 } else { 1 }, "{kind}: old tool record survives");
+                let child = &parent.subagent_views[child_sid];
+                assert!(matches!(child.scrollback.entry(0).unwrap().block, RenderBlock::UserPrompt(_)), "{kind}: task precedes live content");
+                if matches!(kind, "finished" | "live_then_finished") {
+                    assert_eq!(child.scrollback.iter_entries().filter(|(_, entry)| matches!(entry.block, RenderBlock::SessionEvent(_))).count(), 1, "{kind}: live terminal has one footer even during root load");
+                }
+                let before_open = child.scrollback.len();
+                parent.session.loading_replay = false;
+                parent.open_subagent_fullscreen(child_sid.into());
+                parent.open_subagent_fullscreen(child_sid.into());
+                assert_eq!(parent.subagent_views[child_sid].scrollback.len(), before_open, "{kind}: reopen does not duplicate history or footers");
+            });
+        }
+    }
+
+    #[test]
+    fn subagent_resume_deduplicates_persisted_live_overlap() {
+        for kind in ["user", "tool", "completed_tool", "assistant", "thinking"] {
+            with_replay_disk_home(|home| {
+                let child_sid = "child-resume-overlap";
+                let chunk = || acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("same content")));
+                let update = match kind {
+                    "user" => acp::SessionUpdate::UserMessageChunk(chunk().meta(Some(
+                        serde_json::json!({ "messageId": "same-message" }).as_object().unwrap().clone(),
+                    ))),
+                    "tool" | "completed_tool" => acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+                        acp::ToolCallId::new(Arc::from("same-tool")), "same tool",
+                    ).status(if kind == "tool" { acp::ToolCallStatus::Pending } else { acp::ToolCallStatus::Completed })),
+                    "assistant" => acp::SessionUpdate::AgentMessageChunk(chunk()),
+                    "thinking" => acp::SessionUpdate::AgentThoughtChunk(chunk()),
+                    _ => unreachable!(),
+                };
+                let notification = acp::SessionNotification::new(acp::SessionId::new(child_sid), update)
+                    .meta(serde_json::json!({ "eventId": format!("{child_sid}-32") }).as_object().cloned());
+                let directory = write_session_summary(home, "/tmp", child_sid, Some("subagent"));
+                shell::session::testkit::write_timeline_history_fixture(&directory, &[], &[
+                    shell::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
+                ]).unwrap();
+                let mut app = make_app_with_agent("sess-parent");
+                app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = true;
+                spawn_subagent_with_optional_history(home, &mut app, child_sid, None);
+                let (response_tx, _) = tokio::sync::oneshot::channel();
+                handle(AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                    request: notification,
+                    response_tx,
+                }), &mut app);
+                let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+                let child = &parent.subagent_views[child_sid];
+                assert_eq!(child.scrollback.len(), 1, "{kind}: replay/live overlap has one row");
+                match &child.scrollback.entry(0).unwrap().block {
+                    RenderBlock::AgentMessage(message) => assert_eq!(message.text(), "same content"),
+                    RenderBlock::Thinking(thought) => assert_eq!(thought.text(), "same content"),
+                    _ => {}
+                }
+                parent.open_subagent_fullscreen(child_sid.into());
+                assert_eq!(parent.subagent_views[child_sid].scrollback.len(), 1, "{kind}: open remains idempotent");
+                // The watermark rejects only already-covered transport work;
+                // a newly minted event must still enter the same child view.
+                handle(make_agent_chunk_with_event(child_sid, "later output", "later-prompt", Some(&format!("{child_sid}-33"))), &mut app);
+                assert!(app.agents[&AgentId(0)].subagent_views[child_sid].scrollback.iter_entries().any(|(_, entry)| {
+                    matches!(&entry.block, RenderBlock::AgentMessage(message) if message.text().contains("later output"))
+                }), "{kind}: new live output remains visible");
+            });
+        }
     }
 
     /// Resume enrichment is projected from the parent's Timeline once, after

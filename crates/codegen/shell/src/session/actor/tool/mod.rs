@@ -409,13 +409,18 @@ impl SessionActor {
                 let completion_delivery = completion_delivery.clone();
                 let wait_owner_turn = wait_owner_turn.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
-                let interruptible =
-                    is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
+                let interruptible = prepared.wait_input.is_some();
+                let wait_args = prepared.wait_input.as_ref().map(|input| match input {
+                    tools::types::tool_io::ToolInput::Dynamic(value) => value.clone(),
+                    input => serde_json::to_value(input).expect("typed wait input is JSON data"),
+                }).unwrap_or(serde_json::Value::Null);
+                let wait_task_ids = super::completion_delivery::wait_task_ids(&wait_args);
                 let tracked_task_ids = if goal_active {
-                    super::completion_delivery::wait_task_ids(&prepared.parsed_args)
+                    wait_task_ids.clone()
                 } else {
                     Default::default()
                 };
+                let has_wait_task_ids = !wait_task_ids.is_empty();
                 let lock = lock_path_for_args(&prepared.parsed_args)
                     .and_then(|fp| file_locks.get(fp).cloned());
                 let tools_execute_span = tracing::Span::current();
@@ -488,20 +493,22 @@ impl SessionActor {
                                     );
                                     let result = if from_parent {
                                         interrupted_wait_tool_result_with_msg(
-                                            &prepared.parsed_args,
-                                            if tracked_task_ids.is_empty() {
-                                                "Wait ended early because the delegating agent sent an intervention."
+                                            &wait_args,
+                                            if !has_wait_task_ids {
+                                                "Wait was interrupted by a parent intervention; no task execution state was observed."
                                             } else {
-                                                "Wait moved to background because the delegating agent sent an intervention. The task is still running and its completion will be delivered automatically."
+                                                "Wait was interrupted by a parent intervention; execution state is unconfirmed. Pending completion notifications remain enabled."
                                             },
+                                            exec_start.elapsed().as_millis() as u64,
                                         )
-                                    } else if tracked_task_ids.is_empty() {
+                                    } else if !has_wait_task_ids {
                                         interrupted_wait_tool_result_with_msg(
-                                            &prepared.parsed_args,
-                                            "Wait ended early because the user sent a message.",
+                                            &wait_args,
+                                            "Wait was interrupted by a user message; no task execution state was observed.",
+                                            exec_start.elapsed().as_millis() as u64,
                                         )
                                     } else {
-                                        interrupted_wait_tool_result(&prepared.parsed_args)
+                                        interrupted_wait_tool_result(&wait_args, exec_start.elapsed().as_millis() as u64)
                                     };
                                     Ok(result)
                                 }
@@ -801,6 +808,7 @@ impl SessionActor {
     pub(super) async fn request_plan_approval(
         &self,
         tool_call_id: &acp::ToolCallId,
+        expected: &crate::session::behavior::BehaviorSnapshot,
         plan_content: String,
     ) -> Result<tools::implementations::grow_build::plan_control::PlanApprovalExtResponse, acp::Error>
     {
@@ -808,17 +816,30 @@ impl SessionActor {
         use tools::implementations::grow_build::plan_control::{
             PlanApprovalExtRequest, PlanApprovalExtResponse,
         };
+        let content_hash = blake3::hash(plan_content.as_bytes()).to_hex();
+        if expected.plan_artifact_hash.as_deref() != Some(content_hash.as_str()) {
+            return Err(acp::Error::invalid_params()
+                .data("Plan approval body differs from its captured artifact"));
+        }
         let runtime_suspend = self.state.lock().await.runtime_suspend.clone();
-        let snapshot = self.behavior.lock().snapshot();
+        if self
+            .behavior
+            .lock()
+            .pending_plan_approval_snapshot()
+            .as_ref()
+            != Some(expected)
+        {
+            return Err(acp::Error::invalid_params().data("Plan approval candidate was replaced"));
+        }
         let ext_req = PlanApprovalExtRequest {
             session_id: self.session_id_string(),
             tool_call_id: tool_call_id.to_string(),
             plan_content,
-            submission_id: snapshot.plan_submission_id.ok_or_else(|| {
+            submission_id: expected.plan_submission_id.ok_or_else(|| {
                 acp::Error::internal_error().data("Plan has no submission identity")
             })?,
-            artifact_revision: snapshot.plan_artifact_revision,
-            artifact_hash: snapshot.plan_artifact_hash.ok_or_else(|| {
+            artifact_revision: expected.plan_artifact_revision,
+            artifact_hash: expected.plan_artifact_hash.clone().ok_or_else(|| {
                 acp::Error::internal_error().data("Plan has no artifact identity")
             })?,
         };
@@ -844,7 +865,15 @@ impl SessionActor {
                 "plan approval notification hook lifecycle was not durable: {error}"
             ))
         })?;
-        debug_assert!(self.behavior.lock().approval_pending());
+        if self
+            .behavior
+            .lock()
+            .pending_plan_approval_snapshot()
+            .as_ref()
+            != Some(expected)
+        {
+            return Err(acp::Error::invalid_params().data("Plan approval candidate was replaced"));
+        }
         let mut pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
             self.pending_interactions.clone(),
             self.notifications.gateway.clone(),
@@ -1129,21 +1158,6 @@ impl SessionActor {
         self.send_available_commands_update().await;
         Ok(())
     }
-    /// Leave Plan and tell the client to show Normal.
-    async fn finish_plan_to_default(&self) -> Result<(), String> {
-        let previous_behavior = self.behavior.lock().snapshot();
-        let deactivated = self.behavior.lock().finish_plan();
-        if deactivated {
-            self.commit_behavior_mutation_or_restore(previous_behavior)
-                .await?;
-            self.enqueue_current_mode_update(acp::SessionModeId::new(
-                tools::types::BehaviorId::Normal.as_id(),
-            ));
-            self.send_available_commands_update().await;
-        }
-        Ok(())
-    }
-
     /// Finish Plan only if the pending approval still describes the exact
     /// state captured before the reverse request. A stale abandon decision
     /// must not terminate a newer Plan.
@@ -1195,41 +1209,65 @@ impl SessionActor {
     /// submitted Plan without its immutable artifact cannot remain in
     /// AwaitingApproval; normalize it to Normal through a durable Control
     /// barrier so the restored actor is always able to accept another turn.
-    pub(super) async fn reconcile_restored_plan_approval(&self) -> Result<bool, String> {
-        let snapshot = self.behavior.lock().snapshot();
+    async fn prepare_restored_plan_approval(
+        &self,
+    ) -> Result<Option<(crate::session::behavior::BehaviorSnapshot, String)>, String> {
+        let (snapshot, approvable) = {
+            let behavior = self.behavior.lock();
+            (
+                behavior.snapshot(),
+                behavior.pending_plan_approval_snapshot().is_some(),
+            )
+        };
         if !snapshot.approval_pending {
-            return Ok(false);
+            return Ok(None);
         }
-        if self
-            .behavior
-            .lock()
-            .pending_plan_approval_snapshot()
-            .is_none()
-        {
-            // A persisted transport bit without an approval-capable phase is
-            // stale state. Clear only the bit while preserving the current
-            // Plan phase, then durably publish that normalization.
-            if !self.behavior.lock().clear_approval_pending_if(&snapshot) {
-                return Ok(false);
+        if !approvable {
+            // A stale transport bit has no approval-capable phase. Normalize
+            // only the captured state and preserve its current Plan phase.
+            let _boundary = self.step_control_gate.lock().await;
+            if !self.state.lock().await.execution_open() {
+                return Err("session is shutting down".into());
             }
-            self.commit_behavior_mutation_or_restore(snapshot).await?;
-            return Ok(false);
+            let _transaction = self.goal_transaction_gate.lock().await;
+            if self.behavior.lock().snapshot() != snapshot {
+                return Ok(None);
+            }
+            let mut next = crate::session::behavior::BehaviorCoordinator::from_snapshot(snapshot);
+            next.set_approval_pending(false);
+            let goal = self.goal_tracker.lock().snapshot().cloned();
+            let persisted = if next.behavior() == tool_types::BehaviorId::Plan {
+                self.persist_plan_phase_transition_durably(next.snapshot(), goal)
+                    .await
+            } else {
+                self.persist_control_snapshot_durably(next.snapshot(), goal)
+                    .await
+            };
+            persisted.map_err(|error| {
+                format!("Plan approval normalization was not persisted: {error}")
+            })?;
+            *self.behavior.lock() = next;
+            return Ok(None);
         }
-        let artifact_hash = self.behavior.lock().plan_artifact_hash().map(str::to_owned);
-        let artifact_valid = match artifact_hash {
+        let content = match snapshot.plan_artifact_hash.clone() {
             Some(hash) => read_plan_artifact_async(self.session_directory.clone(), hash)
                 .await
-                .is_ok_and(|content| !content.trim().is_empty()),
-            None => false,
+                .ok()
+                .filter(|content| !content.trim().is_empty()),
+            None => None,
         };
-        if artifact_valid {
-            return Ok(true);
+        if let Some(content) = content {
+            return Ok((self.behavior.lock().snapshot() == snapshot).then_some((snapshot, content)));
         }
         tracing::warn!(
-            "plan_control restore: submitted artifact is unavailable; normalizing Plan to Normal"
+            "plan_control restore: submitted artifact is unavailable; normalizing its exact Plan snapshot"
         );
         let _ = self.finish_plan_to_default_if(&snapshot, None).await?;
-        Ok(false)
+        Ok(None)
+    }
+
+    pub(super) async fn reconcile_restored_plan_approval(&self) -> Result<bool, String> {
+        Ok(self.prepare_restored_plan_approval().await?.is_some())
     }
 
     pub(super) async fn reconcile_restored_plan_handoff_notification(&self) -> Result<(), String> {
@@ -1287,46 +1325,16 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
-        let approval_snapshot = self.behavior.lock().pending_plan_approval_snapshot();
-        let Some(approval_snapshot) = approval_snapshot else {
-            return;
-        };
         if crate::session::pending_interaction::has_parked_plan_approval(&self.pending_interactions)
         {
             tracing::debug!("plan_control resume: approval already pending; skip re-park");
             return;
         }
-        match self.reconcile_restored_plan_approval().await {
-            Ok(true) => {}
-            Ok(false) => return,
+        let (approval_snapshot, plan_content) = match self.prepare_restored_plan_approval().await {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return,
             Err(error) => {
                 tracing::error!(%error, "plan_control resume normalization was not durable");
-                return;
-            }
-        }
-        let artifact_hash = self.behavior.lock().plan_artifact_hash().map(str::to_owned);
-        let plan_content = match artifact_hash {
-            Some(hash) => {
-                match read_plan_artifact_async(self.session_directory.clone(), hash).await {
-                    Ok(content) if !content.trim().is_empty() => content,
-                    _ => {
-                        tracing::info!(
-                            "plan_control resume: candidate artifact disappeared after reconciliation"
-                        );
-                        if let Err(error) = self.finish_plan_to_default().await {
-                            tracing::error!(%error, "failed to durably normalize missing Plan artifact");
-                        }
-                        return;
-                    }
-                }
-            }
-            _ => {
-                tracing::info!(
-                    "plan_control resume: candidate Plan disappeared after reconciliation"
-                );
-                if let Err(error) = self.finish_plan_to_default().await {
-                    tracing::error!(%error, "failed to durably normalize missing Plan artifact");
-                }
                 return;
             }
         };
@@ -1338,7 +1346,7 @@ impl SessionActor {
             "plan_control: re-parking approval after resume"
         );
         let parsed = match self
-            .request_plan_approval(&tool_call_id, plan_content.clone())
+            .request_plan_approval(&tool_call_id, &approval_snapshot, plan_content.clone())
             .await
         {
             Ok(parsed) => parsed,
@@ -2764,7 +2772,13 @@ mod plan_finish_projection_tests {
                     .select_behavior(tool_types::BehaviorId::Plan);
                 while event_rx.try_recv().is_ok() {}
 
-                actor.finish_plan_to_default().await.unwrap();
+                let expected = actor.behavior.lock().snapshot();
+                assert!(
+                    actor
+                        .finish_plan_to_default_if(&expected, None)
+                        .await
+                        .unwrap()
+                );
 
                 let mut available_commands = None;
                 while let Ok(event) = event_rx.try_recv() {
@@ -2956,6 +2970,76 @@ mod plan_control_failure_regressions {
                 )
             })
             .count()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_plan_pending_bit_is_published_only_after_control_ack() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::actor::tests::support::create_test_actor_ex;
+
+                for reject in [false, true] {
+                    let (gateway_tx, _gateway_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (mut actor, _event_rx) =
+                        create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+                    let content = "# Draft candidate retained while normalizing transport";
+                    crate::session::behavior::write_plan_artifact(
+                        &actor.session_directory,
+                        content,
+                    )
+                    .unwrap();
+                    let snapshot_a = {
+                        let mut behavior = actor.behavior.lock();
+                        behavior.select_behavior(tool_types::BehaviorId::Plan);
+                        behavior.record_plan_artifact(content);
+                        behavior.set_approval_pending(true);
+                        behavior.snapshot()
+                    };
+                    actor
+                        .persist_control_snapshot_durably(snapshot_a.clone(), None)
+                        .await
+                        .expect("persist Control A before fault injection");
+                    let committed_a = actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .expect("capture committed Control A timeline");
+                    assert_eq!(behavior_from_timeline(&committed_a), snapshot_a);
+
+                    let (events, reject_controls) = install_control_fault(&mut actor).await;
+                    assert_eq!(
+                        behavior_from_timeline(
+                            &events.lock().expect("fault log remains available")
+                        ),
+                        snapshot_a
+                    );
+                    reject_controls.store(reject, std::sync::atomic::Ordering::SeqCst);
+
+                    let result = actor.prepare_restored_plan_approval().await;
+                    if reject {
+                        assert!(result.is_err(), "rejected Control must fail normalization");
+                        assert_eq!(actor.behavior.lock().snapshot(), snapshot_a);
+                        let committed = events.lock().expect("fault log remains available").clone();
+                        assert_eq!(
+                            serde_json::to_value(&committed).unwrap(),
+                            serde_json::to_value(&committed_a).unwrap()
+                        );
+                        assert_eq!(behavior_from_timeline(&committed), snapshot_a);
+                    } else {
+                        assert_eq!(result.expect("acknowledged Control normalization"), None);
+                        let actual = actor.behavior.lock().snapshot();
+                        let mut expected = snapshot_a.clone();
+                        expected.approval_pending = false;
+                        assert_eq!(actual, expected);
+                        let committed = events.lock().expect("fault log remains available").clone();
+                        assert_eq!(behavior_from_timeline(&committed), actual);
+                    }
+                }
+            })
+            .await;
     }
 
     fn drain_session_events(
@@ -3405,6 +3489,183 @@ mod retained_plan_review_gate_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn restored_plan_artifact_read_cannot_normalize_a_replacement_plan() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _events) = crate::session::actor::tests::support::create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let actor = Arc::new(actor);
+                let original = "# Original candidate";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, original)
+                    .unwrap();
+                let initial = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(original);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                actor
+                    .persist_control_snapshot_durably(initial, None)
+                    .await
+                    .unwrap();
+                let (read_ready, read_finished) = tokio::sync::oneshot::channel();
+                let (release_read, read_release) = tokio::sync::oneshot::channel();
+                PLAN_ARTIFACT_READ_BARRIER
+                    .with(|probe| *probe.borrow_mut() = Some((read_ready, read_release)));
+                let (completion_tx, mut completions) = tokio::sync::mpsc::unbounded_channel();
+                let recovery =
+                    tokio::task::spawn_local(actor.clone().resume_plan_approval(completion_tx));
+                read_finished.await.unwrap();
+                // A real durable replacement is installed while the original read
+                // is in flight. Its body is intentionally unavailable: the old
+                // code's second lookup must not normalize this newer candidate.
+                let mut replacement = crate::session::behavior::BehaviorCoordinator::from_snapshot(
+                    actor.behavior.lock().snapshot(),
+                );
+                replacement.select_behavior(tool_types::BehaviorId::Normal);
+                replacement.select_behavior(tool_types::BehaviorId::Plan);
+                replacement.record_plan_artifact("# Replacement whose artifact is absent");
+                assert!(replacement.submit_initial_plan());
+                let expected = replacement.snapshot();
+                actor
+                    .persist_control_snapshot_durably(expected.clone(), None)
+                    .await
+                    .unwrap();
+                *actor.behavior.lock() = replacement;
+                release_read.send(()).unwrap();
+                recovery.await.unwrap();
+                assert_eq!(actor.behavior.lock().snapshot(), expected);
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(behavior_from_latest_control(&events), expected);
+                assert!(completions.try_recv().is_err());
+                assert!(
+                    !std::iter::from_fn(|| gateway_rx.try_recv().ok()).any(|message| matches!(
+                        message,
+                        acp_transport::AcpClientMessage::ExtMethod(_)
+                    )),
+                    "stale recovery must not ask about the replacement candidate"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_plan_approval_normalization_waits_for_exact_snapshot_transaction() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use std::future::Future as _;
+
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let actor = Arc::new(actor);
+
+                // A is a persisted Plan Drafting snapshot with only a stale
+                // transport bit; it has no approval-capable Plan phase.
+                let snapshot_a = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.set_approval_pending(true);
+                    behavior.snapshot()
+                };
+                actor
+                    .persist_control_snapshot_durably(snapshot_a.clone(), None)
+                    .await
+                    .expect("persist stale-bit Control A");
+
+                let gate = actor.step_control_gate.lock().await;
+                let mut normalization = Box::pin(actor.prepare_restored_plan_approval());
+                let first_poll = std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(normalization.as_mut().poll(cx))
+                })
+                .await;
+                assert!(
+                    first_poll.is_pending(),
+                    "normalization must wait for the gate"
+                );
+                assert_eq!(
+                    actor.behavior.lock().snapshot(),
+                    snapshot_a,
+                    "stale approval state must not mutate before its gated transaction"
+                );
+
+                // Install a real, newer submitted Plan B while normalization
+                // is pinned behind the gate. Its submission counter advances
+                // from A and must remain the actor's current state.
+                let content_b = "# Plan B submitted during stale recovery";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content_b)
+                    .expect("write Plan B artifact");
+                let mut replacement = crate::session::behavior::BehaviorCoordinator::from_snapshot(
+                    snapshot_a.clone(),
+                );
+                replacement.select_behavior(tool_types::BehaviorId::Normal);
+                replacement.select_behavior(tool_types::BehaviorId::Plan);
+                replacement.record_plan_artifact(content_b);
+                assert!(replacement.submit_initial_plan());
+                let snapshot_b = replacement.snapshot();
+                assert!(snapshot_b.last_plan_submission_id > snapshot_a.last_plan_submission_id);
+                actor
+                    .persist_control_snapshot_durably(snapshot_b.clone(), None)
+                    .await
+                    .expect("persist submitted Control B");
+                *actor.behavior.lock() = replacement;
+                let events_after_b = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read timeline after Control B");
+                let controls_after_b = events_after_b
+                    .iter()
+                    .filter(|event| {
+                        matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                    })
+                    .count();
+                drop(gate);
+
+                assert_eq!(
+                    normalization.await.expect("normalize exact stale snapshot"),
+                    None
+                );
+                assert_eq!(actor.behavior.lock().snapshot(), snapshot_b);
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read final timeline");
+                assert_eq!(behavior_from_latest_control(&events), snapshot_b);
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| {
+                            matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                        })
+                        .count(),
+                    controls_after_b,
+                    "stale recovery must not append a normalization Control"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn idle_resume_receiving_deferred_keeps_plan_draft_without_starting_a_turn() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -3505,6 +3766,345 @@ mod retained_plan_review_gate_tests {
                         .count()
                 };
                 assert_eq!(started_turns(&after), started_turns(&before));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn approval_request_never_combines_an_old_body_with_a_new_identity() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _events) = crate::session::actor::tests::support::create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let content = "# Body A";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content)
+                    .unwrap();
+                let expected = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                actor
+                    .persist_control_snapshot_durably(expected.clone(), None)
+                    .await
+                    .unwrap();
+                let tool_id = acp::ToolCallId::new("identity-race");
+                let wrong_body = actor
+                    .request_plan_approval(&tool_id, &expected, "different body".into())
+                    .await
+                    .unwrap_err();
+                assert!(format!("{wrong_body:?}").contains("body differs"));
+                let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let observed = sent.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = gateway_rx.recv().await {
+                        match message {
+                            acp_transport::AcpClientMessage::ExtMethod(args) => {
+                                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                let _ =
+                                    args.response_tx.send(Err(acp::Error::invalid_params()
+                                        .data("unexpected stale request")));
+                            }
+                            acp_transport::AcpClientMessage::ExtNotification(args) => {
+                                let _ = args.response_tx.send(Ok(()));
+                            }
+                            acp_transport::AcpClientMessage::SessionNotification(args) => {
+                                let _ = args.response_tx.send(Ok(()));
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                let state = actor.state.lock().await;
+                let request = actor.request_plan_approval(&tool_id, &expected, content.into());
+                tokio::pin!(request);
+                assert!(
+                    futures::poll!(&mut request).is_pending(),
+                    "request must wait at the state boundary after its body was supplied"
+                );
+                drop(state);
+                let mut replacement =
+                    crate::session::behavior::BehaviorCoordinator::from_snapshot(expected.clone());
+                replacement.select_behavior(tool_types::BehaviorId::Normal);
+                replacement.select_behavior(tool_types::BehaviorId::Plan);
+                replacement.record_plan_artifact("# Body B");
+                assert!(replacement.submit_initial_plan());
+                let next = replacement.snapshot();
+                actor
+                    .persist_control_snapshot_durably(next.clone(), None)
+                    .await
+                    .unwrap();
+                *actor.behavior.lock() = replacement;
+                let error = request.await.unwrap_err();
+                assert!(format!("{error:?}").contains("candidate was replaced"));
+                assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(actor.behavior.lock().snapshot(), next);
+                assert!(
+                    !actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|event| matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Interaction(_)
+                        )),
+                    "a stale body cannot open a waiter under another submission"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_plan_approval_can_be_explicitly_reparked_on_the_same_connection() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::implementations::grow_build::plan_control::PlanApprovalExtRequest;
+
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let actor = Arc::new(actor);
+                let content = "# Repark only after an explicit restore";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content)
+                    .unwrap();
+                let submitted = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                let submission_id = submitted.plan_submission_id.unwrap();
+                let artifact_hash = submitted.plan_artifact_hash.clone().unwrap();
+                actor
+                    .persist_control_snapshot_durably(submitted.clone(), None)
+                    .await
+                    .expect("submitted Plan Control");
+                let before = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read pre-resume Timeline");
+                let started_turns = |events: &[chat_state::TimelineEvent]| {
+                    events
+                        .iter()
+                        .filter(|event| {
+                            matches!(
+                                &event.kind,
+                                chat_state::TimelineEventKind::Turn(
+                                    chat_state::TurnEvent::Started { .. }
+                                )
+                            )
+                        })
+                        .count()
+                };
+                let turn_count_before = started_turns(&before);
+                let expected_session = actor.session_id_string();
+                let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let captured_requests = requests.clone();
+                let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let counted_requests = request_count.clone();
+                let expected_artifact_hash = artifact_hash.clone();
+                let expected_artifact_revision = submitted.plan_artifact_revision;
+                tokio::task::spawn_local(async move {
+                    let mut approval_number = 0;
+                    while approval_number < 2 {
+                        let Some(message) = gateway_rx.recv().await else {
+                            break;
+                        };
+                        let acp_transport::AcpClientMessage::ExtMethod(args) = message else {
+                            continue;
+                        };
+                        if args.request.method.as_ref() != "grow/plan_approval" {
+                            continue;
+                        }
+                        let request: PlanApprovalExtRequest =
+                            serde_json::from_str(args.request.params.get())
+                                .expect("approval request schema");
+                        assert_eq!(request.session_id, expected_session);
+                        assert_eq!(request.submission_id, submission_id);
+                        assert_eq!(request.plan_content, content);
+                        assert_eq!(request.artifact_hash, expected_artifact_hash);
+                        assert_eq!(request.artifact_revision, expected_artifact_revision);
+                        captured_requests.lock().unwrap().push(request);
+                        counted_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+                        let response = if approval_number == 0 {
+                            // Missing decisionId deliberately makes this a malformed response.
+                            serde_json::json!({
+                                "outcome": "deferred",
+                                "submissionId": submission_id,
+                            })
+                        } else {
+                            serde_json::json!({
+                                "outcome": "deferred",
+                                "feedback": "review later",
+                                "submissionId": submission_id,
+                                "decisionId": "explicit-repark-defer",
+                            })
+                        };
+                        let raw = serde_json::value::to_raw_value(&response).unwrap();
+                        args.response_tx
+                            .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())))
+                            .expect("same gateway connection accepts both responses");
+                        approval_number += 1;
+                    }
+                });
+
+                let (completion_tx, mut completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor
+                    .clone()
+                    .resume_plan_approval(completion_tx.clone())
+                    .await;
+
+                assert_eq!(
+                    request_count.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "malformed response closes this attempt without retrying"
+                );
+                assert_eq!(requests.lock().unwrap().len(), 1);
+                assert!(completion_rx.try_recv().is_err());
+                assert!(actor.state.lock().await.foreground.is_idle());
+                assert_eq!(actor.behavior.lock().snapshot(), submitted);
+                assert_eq!(
+                    crate::session::behavior::read_plan_artifact(
+                        &actor.session_directory,
+                        &artifact_hash,
+                    )
+                    .unwrap(),
+                    content,
+                );
+                let after_malformed = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read Timeline after malformed response");
+                assert_eq!(
+                    behavior_from_latest_control(&after_malformed),
+                    submitted,
+                    "failed interaction leaves the pending Control snapshot unchanged"
+                );
+                assert_eq!(started_turns(&after_malformed), turn_count_before);
+
+                let plan_interactions = |events: &[chat_state::TimelineEvent]| {
+                    events
+                        .iter()
+                        .filter_map(|event| match &event.kind {
+                            chat_state::TimelineEventKind::Interaction(
+                                chat_state::InteractionEvent::Opened {
+                                    tool_call_id,
+                                    attempt_id,
+                                    kind: chat_state::InteractionKind::PlanApproval,
+                                },
+                            ) => Some((tool_call_id.clone(), attempt_id.clone(), None)),
+                            chat_state::TimelineEventKind::Interaction(
+                                chat_state::InteractionEvent::Resolved {
+                                    tool_call_id,
+                                    attempt_id,
+                                    kind: chat_state::InteractionKind::PlanApproval,
+                                    resolution,
+                                },
+                            ) => {
+                                Some((tool_call_id.clone(), attempt_id.clone(), Some(*resolution)))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let first_attempt = plan_interactions(&after_malformed);
+                assert_eq!(first_attempt.len(), 2);
+                assert_eq!(first_attempt[0].0, first_attempt[1].0);
+                assert_eq!(first_attempt[0].1, first_attempt[1].1);
+                assert_eq!(first_attempt[0].2, None);
+                assert_eq!(
+                    first_attempt[1].2,
+                    Some(chat_state::InteractionResolution::Failed)
+                );
+
+                // A second call models an explicit RestorePlanApproval on the same owner.
+                actor.clone().resume_plan_approval(completion_tx).await;
+
+                assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+                let final_events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read Timeline after explicit restore");
+                let interactions = plan_interactions(&final_events);
+                assert_eq!(interactions.len(), 4);
+                assert_eq!(interactions[0].1, interactions[1].1);
+                assert_ne!(interactions[0].1, interactions[2].1);
+                assert_eq!(interactions[2].0, interactions[3].0);
+                assert_eq!(
+                    interactions[1].2,
+                    Some(chat_state::InteractionResolution::Failed)
+                );
+                assert_eq!(
+                    interactions[3].2,
+                    Some(chat_state::InteractionResolution::Answered)
+                );
+                assert_eq!(requests.lock().unwrap().len(), 2);
+                assert!(completion_rx.try_recv().is_err(), "Deferred starts no turn");
+                assert!(actor.state.lock().await.foreground.is_idle());
+                assert_eq!(started_turns(&final_events), turn_count_before);
+
+                let deferred_controls = final_events
+                    .iter()
+                    .filter_map(|event| {
+                        let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                            return None;
+                        };
+                        control
+                            .snapshot
+                            .get("behavior")
+                            .cloned()
+                            .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                    })
+                    .filter(|snapshot| {
+                        snapshot.retained_plan.as_ref().is_some_and(|candidate| {
+                            candidate.status == RetainedPlanStatus::Deferred
+                        })
+                    })
+                    .count();
+                assert_eq!(deferred_controls, 1, "one Deferred Control is committed");
+                let deferred = behavior_from_latest_control(&final_events);
+                let candidate = deferred.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.submission_id, submission_id);
+                assert_eq!(candidate.status, RetainedPlanStatus::Deferred);
+                assert_eq!(candidate.decisions.len(), 1);
+                assert_eq!(candidate.decisions[0].decision_id, "explicit-repark-defer");
+                assert!(!deferred.approval_pending);
+                assert!(deferred.last_plan_handoff.is_none());
+                assert_eq!(plan_handoff_count(&final_events), 0);
+                assert_eq!(
+                    crate::session::behavior::read_plan_artifact(
+                        &actor.session_directory,
+                        &artifact_hash,
+                    )
+                    .unwrap(),
+                    content,
+                );
             })
             .await;
     }
@@ -3835,10 +4435,13 @@ mod retained_plan_review_gate_tests {
                         .await
                         .expect("defer v1")
                 );
-                actor
-                    .finish_plan_to_default()
-                    .await
-                    .expect("close v1 Plan before replacement");
+                let expected = actor.behavior.lock().snapshot();
+                assert!(
+                    actor
+                        .finish_plan_to_default_if(&expected, None)
+                        .await
+                        .expect("close v1 Plan before replacement")
+                );
 
                 let v2_content = "# replacement Plan";
                 crate::session::behavior::write_plan_artifact(&actor.session_directory, v2_content)
@@ -4997,7 +5600,7 @@ mod deferred_plan_tool_terminal_tests {
 mod wait_interrupt_tests {
     use super::{
         BlockingWaitGuard, interrupted_wait_tool_result, interrupted_wait_tool_result_with_msg,
-        is_interruptible_wait_tool, wait_for_pending_interjection,
+        interruptible_wait_input, wait_for_pending_interjection,
     };
     use tool_types::TaskOutputOutput;
     use tools::types::output::ToolOutput;
@@ -5038,52 +5641,150 @@ mod wait_interrupt_tests {
         assert_eq!(out, "wait-result");
     }
     #[test]
-    fn interruptible_wait_tool_only_when_timeout_positive() {
-        assert!(is_interruptible_wait_tool(
-            "get_command_or_subagent_output",
-            &serde_json::json!({"task_ids": ["t"], "timeout_ms": 120_000})
-        ));
-        assert!(!is_interruptible_wait_tool(
-            "get_task_output",
-            &serde_json::json!({"task_ids": ["t"], "timeout_ms": 0})
-        ));
-        assert!(!is_interruptible_wait_tool(
-            "get_task_output",
-            &serde_json::json!({"task_ids": ["t"]})
-        ));
-        assert!(!is_interruptible_wait_tool(
-            "read_file",
-            &serde_json::json!({"target_file": "/tmp/x"})
-        ));
+    fn interruptible_wait_uses_typed_semantics_with_renamed_tools() {
+        use tools::types::tool_io::ToolInput;
+        assert!(
+            interruptible_wait_input(
+                "renamed_wait",
+                &ToolInput::SubagentWait(tool_types::WaitSubagentInput {
+                    subagent_ids: vec!["child".into()],
+                    timeout_ms: None,
+                })
+            )
+            .is_some()
+        );
+        for timeout in [None, Some(0), Some(1000)] {
+            assert_eq!(
+                interruptible_wait_input(
+                    "renamed_command_output",
+                    &ToolInput::TaskOutput(tool_types::TaskOutputToolInput {
+                        task_ids: vec!["command".into()],
+                        timeout_ms: timeout,
+                    })
+                )
+                .is_some(),
+                timeout.is_some_and(|ms| ms > 0)
+            );
+        }
+        assert!(
+            interruptible_wait_input(
+                "get_subagent_status",
+                &ToolInput::SubagentStatus(tool_types::GetSubagentStatusInput {
+                    subagent_ids: vec!["child".into()],
+                })
+            )
+            .is_none()
+        );
+        assert!(
+            interruptible_wait_input(
+                "list_subagent",
+                &ToolInput::SubagentList(Default::default())
+            )
+            .is_none()
+        );
     }
     #[test]
-    fn interrupted_task_wait_result_keeps_task_running() {
-        let r = interrupted_wait_tool_result(&serde_json::json!({
-            "task_ids": ["bg-9"],
-            "timeout_ms": 60_000
-        }));
-        assert!(
-            r.prompt_text
-                .contains("Wait moved to background because the user sent a message.")
+    fn interrupted_multi_task_wait_preserves_all_ids_as_unconfirmed() {
+        let r = interrupted_wait_tool_result(
+            &serde_json::json!({
+                "task_ids": ["bg-9", " bg-9 ", "bg-10"],
+                "timeout_ms": 60_000
+            }),
+            17,
+        );
+        assert!(r.prompt_text.contains("execution state is unconfirmed"));
+        assert!(!r.prompt_text.contains("still running"));
+        match &r.output {
+            ToolOutput::TaskOutput(TaskOutputOutput::MultiResult(result)) => {
+                assert_eq!(result.mode, "wait_all");
+                assert_eq!(
+                    result.summary,
+                    "Wait interrupted; execution state remains unconfirmed for 2 tasks."
+                );
+                assert_eq!(
+                    result
+                        .results
+                        .iter()
+                        .map(|item| item.task_id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["bg-10", "bg-9"]
+                );
+                assert!(result.results.iter().all(|item| {
+                    item.status == "observation_interrupted"
+                        && item.output.contains("execution state is unconfirmed")
+                }));
+            }
+            other => panic!("expected interrupted MultiResult, got {other:?}"),
+        }
+        assert!(tools::reminders::task_completion::consumed_completion_ids(&r.output).is_empty());
+        assert!(!r.output.is_error());
+    }
+
+    #[test]
+    fn interrupted_single_task_wait_keeps_its_id_without_inventing_status() {
+        let r = interrupted_wait_tool_result_with_msg(
+            &serde_json::json!({"task_id": " bg-single ", "timeout_ms": 60_000}),
+            "Wait was interrupted by a parent intervention; execution state is unconfirmed. Pending completion notifications remain enabled.",
+            17,
         );
         match &r.output {
-            ToolOutput::TaskOutput(TaskOutputOutput::Result(res)) => {
-                assert_eq!(res.task_id, "bg-9");
-                assert_eq!(res.status, "running");
+            ToolOutput::TaskOutput(TaskOutputOutput::Result(result)) => {
+                assert_eq!(result.task_id, "bg-single");
+                assert_eq!(result.status, "observation_interrupted");
             }
-            other => panic!("expected TaskOutput Result, got {other:?}"),
+            other => panic!("expected interrupted single Result, got {other:?}"),
         }
-        assert!(!r.output.is_error());
+        assert!(r.prompt_text.contains("execution state is unconfirmed"));
+        assert!(
+            r.prompt_text
+                .contains("Pending completion notifications remain enabled")
+        );
+        assert!(!r.prompt_text.contains("still running"));
+        assert!(tools::reminders::task_completion::consumed_completion_ids(&r.output).is_empty());
     }
     #[test]
     fn pure_timing_wait_does_not_claim_a_background_completion() {
         let r = interrupted_wait_tool_result_with_msg(
             &serde_json::json!({"duration_ms": 60_000}),
-            "Wait ended early because the user sent a message.",
+            "Wait was interrupted by a user message; no task execution state was observed.",
+            17,
         );
-        assert!(r.prompt_text.contains("Wait ended early"));
+        assert!(r.prompt_text.contains("Wait was interrupted"));
         assert!(!r.prompt_text.contains("still running"));
         assert!(!r.prompt_text.contains("delivered automatically"));
+        match &r.output {
+            ToolOutput::TaskOutput(TaskOutputOutput::Result(result)) => {
+                assert!(result.task_id.is_empty());
+                assert_eq!(result.status, "observation_interrupted");
+            }
+            other => panic!("expected interrupted wait Result, got {other:?}"),
+        }
+        assert!(tools::reminders::task_completion::consumed_completion_ids(&r.output).is_empty());
+    }
+    #[test]
+    fn interrupted_subagent_wait_keeps_all_ids_and_actual_elapsed_time() {
+        let result = interrupted_wait_tool_result(
+            &serde_json::json!({"subagent_ids": [" b ", "a", "b"]}),
+            37,
+        );
+        let ToolOutput::SubagentWait(wait) = &result.output else {
+            panic!("expected subagent wait");
+        };
+        assert_eq!(wait.reason, tool_types::SubagentWaitReason::Interrupted);
+        assert_eq!(wait.waited_ms, 37);
+        assert_eq!(
+            wait.subagents
+                .iter()
+                .map(|row| row.subagent_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(wait.subagents.iter().all(|row| row.status
+            == tool_types::SubagentStatus::ObservationInterrupted
+            && row.duration_ms.is_none()));
+        assert!(
+            tools::reminders::task_completion::consumed_completion_ids(&result.output).is_empty()
+        );
     }
     /// `BlockingWaitGuard` counts nested waits; drop always decrements.
     #[test]

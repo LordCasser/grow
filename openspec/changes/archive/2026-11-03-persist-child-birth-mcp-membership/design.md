@@ -1,0 +1,17 @@
+## 权威与边界
+遵循tool-authorization的immutable child creation ceiling及current-authority续接，extension-runtime的session内server name正式身份；2026-11-02分析稿不替代主规范。RWX现有持久事实保留，native eligibility仍可随显式Agent选择变化。
+
+## 最小实现
+Spawn新增可区分缺事实与已知空集的birth_mcp_servers。新建child在Agent inheritance与直接父live ceiling过滤后，从实际pool捕获已连接server names，并把同一pool交给actor初始化。将现有纯pool过滤前移到Spawn durable admission之前，不增加服务端配置全集缓存。
+
+恢复先require出生集合，再将当前可用parent pool限制为原集合与当前Agent inheritance/父ceiling之交；保留项使用本进程新client IDs建立原有live ceiling，旧process ID不跨进程当凭据。server名大小写/资格保持原正式身份，不猜alias、不归一化、不持久化凭据。当前更窄可以少服务；当前更宽不能补服务。缺事实明确拒绝，不从今日profile猜原集合。
+
+## 验证
+Tier3：真实父pool的窄继承child→改宽profile/扩parent pool→跨进程恢复；原服务可以重新绑定新incarnation，新增服务不可见不可调用不可委派，当前移除成员仍不可调用；已知空集合不扩展，缺事实在prepare/release前拒绝，祖孙交集与live generation permit继续有效。使用既有MCP test fixture和公共Subagent Spawn/load入口，所有GROW_HOME隔离。独立复审。
+
+## 独立审查修正：授权出生点
+出生点明确为canonical Spawn admission的冻结grant。旧pool.clients是快照、import却读取live current_clients；仅复用pool对象并不能同源。先将filtered live current_clients样本冻结为SharedMcpPool的Bindings scope（server→client ID），从同一静态map写出生名称及初始化DelegableCeiling。actor再次freeze幂等；import/实际MCP调用仍与live upstream求交。移除成员或同名新ID在旧child不可用，不能因后续初始化await换一批client。cold restore才按durable名称与当前许可取交并冻结新ID。普通非冻结pool的live rebind契约保留。
+
+正向测试使用真实suspend后的原始Timeline备份；故障阶段只改目标字段，restore原样还原，不重写预期出生事实。suspend阶段先断言真实持久出生值。
+
+父ceiling核对也必须使用同一冻结样本：先在inheritance/恢复名称过滤后freeze，再以静态client_bindings逐(server,id)和直接父ceiling求交，之后不再读取live来决定出生grant。即使无await，父actor也能在另一线程替换transport，先核对live再freeze会错误接纳同名新ID。对应受控测试分别验证冻结后replacement不改变原grant，以及当前新ID被父旧ID ceiling拒绝。

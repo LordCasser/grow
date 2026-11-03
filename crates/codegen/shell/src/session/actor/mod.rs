@@ -1410,6 +1410,8 @@ pub(crate) struct PreparedToolCall {
     raw_arguments: String,
     /// Parsed JSON arguments ready for bridge.call().
     parsed_args: serde_json::Value,
+    /// Canonical typed waiting input, frozen before parameter/name renames.
+    wait_input: Option<tools::types::tool_io::ToolInput>,
     /// Model ID at time of call.
     model_id: String,
     /// Whether concatenated JSON recovery was used, and how many objects were found.
@@ -1702,6 +1704,8 @@ pub(crate) struct SessionActor {
     /// bounded FIFO of waiting inquiries for this target Session.
     coordination_inquiries: std::cell::RefCell<VecDeque<coordination::QueuedCoordinationInquiry>>,
     coordination_inquiry_active: std::cell::Cell<bool>,
+    /// Derived coordination frontier; Timeline remains the sole synchronization authority.
+    coordination_answer_next_seq: std::cell::Cell<u64>,
     /// Long-lived session services are explicit owners rather than detached
     /// LocalSet tasks. Teardown closes their ingress, then joins them before
     /// dismantling persistence and permission authorities.
@@ -1754,7 +1758,7 @@ pub(crate) struct SessionActor {
     pub(crate) idle_flush_timeout: Option<std::time::Duration>,
     /// Periodic dream check interval: `None` = disabled.
     pub(crate) dream_check_timeout: Option<std::time::Duration>,
-    /// Conversation length at last idle flush — skip if unchanged (no new messages).
+    /// Conversation length at last successful idle flush checkpoint.
     pub(crate) last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize,
     /// Internal event queue for actor-owned replay buffering and flush barriers.
     pub(crate) event_tx: mpsc::UnboundedSender<SessionEvent>,
@@ -1905,8 +1909,8 @@ pub(crate) struct SessionActor {
     pub(crate) last_announced_local_date: std::cell::Cell<chrono::NaiveDate>,
     /// Prompt index when search_tool last ran. -1 = never. Used for turns_since_last_search.
     pub(crate) last_search_prompt_index: std::sync::atomic::AtomicI64,
-    /// Timestamp (millis since epoch) of the last successful API request.
-    /// Used to detect session resume after idle and proactively refresh model metadata.
+    /// Last primary API activity in epoch milliseconds, from runtime Metrics
+    /// or the validated Request facts of a restored session. Gates auto recap.
     pub(crate) last_api_request_at: std::sync::atomic::AtomicI64,
     hooks: HookSessionState,
     /// Plugin registry snapshot for this session. Updated on `/plugins reload`
@@ -2329,7 +2333,7 @@ impl SessionActor {
     }
 }
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 pub(crate) use tests::support::build_actor as build_actor_for_subagent_test;
 /// Drop guard that records aggregate turn metrics on the current tracing span

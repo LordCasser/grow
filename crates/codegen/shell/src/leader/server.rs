@@ -895,6 +895,47 @@ fn inject_capabilities_into_session_new(
     mutated
 }
 
+/// Exit scope comes from driver routing, never from a client-supplied page list.
+fn inject_exit_scope(
+    json: &mut serde_json::Value,
+    client_id: ClientId,
+    session_driver: &HashMap<String, ClientId>,
+    child_sessions: &HashMap<String, HashSet<String>>,
+) -> bool {
+    if method_of(json) != Some("grow/session/suspend_for_exit") {
+        return false;
+    }
+    let wrapped = json
+        .get("params")
+        .is_some_and(|params| params.get("method").is_some() && params.get("params").is_some());
+    let params = if wrapped {
+        json.pointer_mut("/params/params")
+    } else {
+        json.get_mut("params")
+    };
+    let Some(params) = params.and_then(serde_json::Value::as_object_mut) else {
+        return false;
+    };
+    let mut session_ids = session_driver
+        .iter()
+        .filter(|(sid, driver)| {
+            **driver == client_id
+                && !child_sessions
+                    .values()
+                    .any(|children| children.contains(*sid))
+        })
+        .map(|(sid, _)| sid.as_str())
+        .collect::<Vec<_>>();
+    session_ids.sort_unstable();
+    params.insert(
+        "leaderScope".into(),
+        serde_json::json!({
+            "clientId": client_id.0, "sessionIds": session_ids,
+        }),
+    );
+    true
+}
+
 /// Stamp queue-control requests with the server-assigned connection identity.
 /// The value is authoritative for transient edit holds, so a client-supplied
 /// value must never survive forwarding.
@@ -1421,6 +1462,7 @@ pub async fn run_leader_server(
     // the tombstone when it establishes ownership again.
     let mut retired_sessions: HashSet<String> = HashSet::new();
     let mut pending_load_by_req: HashMap<String, (ClientId, String)> = HashMap::new();
+    let mut pending_new_by_req: HashMap<String, ClientId> = HashMap::new();
     let mut load_live_buffer: HashMap<(ClientId, String), Vec<BufferedLive>> = HashMap::new();
     let mut pending_resync: HashSet<(ClientId, String)> = HashSet::new();
     let mut orphan_replay_warned: HashSet<ClientId> = HashSet::new();
@@ -1539,6 +1581,7 @@ pub async fn run_leader_server(
                         );
                     }
                     pending_load_by_req.retain(|_, (c, _)| *c != id);
+                    pending_new_by_req.retain(|_, c| *c != id);
                     load_live_buffer.retain(|(c, _), _| *c != id);
                     pending_resync.retain(|(c, _)| *c != id);
                     load_replay_max_seq.retain(|(c, _), _| *c != id);
@@ -1671,6 +1714,24 @@ pub async fn run_leader_server(
                         }
                         continue;
                     }
+                    if let Some(request) = json.as_ref()
+                        && method_of(request) == Some("grow/session/suspend_for_exit")
+                        && (pending_new_by_req.values().any(|client| *client == id)
+                            || pending_load_by_req
+                                .values()
+                                .any(|(client, _)| *client == id))
+                    {
+                        if let (Some(request_id), Some(client)) =
+                            (request.get("id"), clients.get(&id))
+                        {
+                            let response = serde_json::json!({"jsonrpc":"2.0", "id": request_id,
+                                "error":{"code":-32000,"message":"Session startup is still pending; retry exit after startup completes"}});
+                            let _ = client
+                                .tx
+                                .try_send(ClientOutbound::Acp(response.to_string().into()));
+                        }
+                        continue;
+                    }
                     if let Some(client) = clients.get(&id)
                         && client.mode == ClientMode::Stdio
                     {
@@ -1704,6 +1765,8 @@ pub async fn run_leader_server(
                     }
                     if let (Some(json), Some(client)) = (json.as_mut(), clients.get_mut(&id)) {
                         payload_mutated |= inject_queue_control_client_id(json, id);
+                        payload_mutated |=
+                            inject_exit_scope(json, id, &session_driver, &child_sessions);
                         if !client.initialize_seen {
                             let (injected, was_initialize) =
                                 inject_client_identity_into_initialize(json, &client.client_type);
@@ -1737,6 +1800,12 @@ pub async fn run_leader_server(
                         pending_load_by_req.insert(ns_id.clone(), (id, load_sid.clone()));
                         load_live_buffer.entry((id, load_sid)).or_default();
                     }
+                    if let Some(request) = json.as_ref()
+                        && method_of(request) == Some(AGENT_METHOD_NAMES.session_new)
+                        && let Some((request_id, _)) = rewritten.as_ref()
+                    {
+                        pending_new_by_req.insert(request_id.clone(), id);
+                    }
                     if rewritten.is_some() {
                         pending_requests += 1;
                         agent_busy.store(true, Ordering::Relaxed);
@@ -1749,7 +1818,8 @@ pub async fn run_leader_server(
             LeaderServerPoll::Response(payload) => {
                 let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
                 let parsed_response = json.as_mut().and_then(parse_response_id);
-                if parsed_response.is_some() {
+                if let Some((_, request_id)) = parsed_response.as_ref() {
+                    pending_new_by_req.remove(request_id);
                     pending_requests = pending_requests.saturating_sub(1);
                     agent_busy.store(pending_requests > 0, Ordering::Relaxed);
                 }
@@ -5213,6 +5283,155 @@ mod tests {
             "Client B should NOT receive session A's notification"
         );
         cancel.cancel();
+    }
+
+    #[test]
+    fn exit_scope_overwrites_forged_direct_and_wrapped_params_and_excludes_children() {
+        let drivers = HashMap::from([
+            ("root-a".into(), ClientId(1)),
+            ("root-b".into(), ClientId(2)),
+            ("child-b".into(), ClientId(2)),
+        ]);
+        let children = HashMap::from([("root-b".into(), HashSet::from(["child-b".into()]))]);
+        for wrapped in [false, true] {
+            let params = serde_json::json!({"exit_id":"request", "leaderScope":{"clientId":1,"sessionIds":["root-a"]}});
+            let mut json = if wrapped {
+                serde_json::json!({"method":"_grow/session/suspend_for_exit",
+                "params":{"method":"grow/session/suspend_for_exit","params":params}})
+            } else {
+                serde_json::json!({"method":"grow/session/suspend_for_exit","params":params})
+            };
+            assert!(inject_exit_scope(
+                &mut json,
+                ClientId(2),
+                &drivers,
+                &children
+            ));
+            assert_eq!(
+                interaction_inner_params(&json).unwrap()["leaderScope"],
+                serde_json::json!({"clientId":2,"sessionIds":["root-b"]})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_scope_socket_uses_driver_roots_not_viewer_subscriptions() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut a_reader, mut a_writer, a_id) =
+            connect_register_get_id(&sock_path, "exit-a").await;
+        load_session(&mut a_writer, "root-a").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        next_acp_payload(&mut a_reader).await.unwrap();
+        let (mut b_reader, mut b_writer, b_id) =
+            connect_register_get_id(&sock_path, "exit-b").await;
+        load_session(&mut b_writer, "root-b").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        next_acp_payload(&mut b_reader).await.unwrap();
+        load_session(&mut b_writer, "root-a").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        next_acp_payload(&mut b_reader).await.unwrap();
+        for (writer, expected, root, wrapped) in [
+            (&mut b_writer, b_id, "root-b", true),
+            (&mut a_writer, a_id, "root-a", false),
+        ] {
+            let params = serde_json::json!({"exit_id":"request", "leaderScope":{"clientId":999,"sessionIds":["root-a","root-b"]}});
+            let request = if wrapped {
+                serde_json::json!({"id":81,"method":"_grow/session/suspend_for_exit",
+                "params":{"method":"grow/session/suspend_for_exit","params":params}})
+            } else {
+                serde_json::json!({"id":81,"method":"grow/session/suspend_for_exit","params":params})
+            };
+            write_message(
+                writer,
+                &ClientMessage::Acp {
+                    payload: request.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+            assert_eq!(
+                interaction_inner_params(&json).unwrap()["leaderScope"],
+                serde_json::json!({"clientId":expected.0,"sessionIds":[root]})
+            );
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn exit_scope_waits_for_new_and_load_request_registration() {
+        for method in ["session/new", "session/load"] {
+            let temp = TempDir::new().unwrap();
+            let (sock_path, cancel, response_tx, mut acp_rx) =
+                setup_persistent_server_with_agent(&temp).await;
+            let (mut reader, mut writer, client_id) =
+                connect_register_get_id(&sock_path, "exit-startup").await;
+            let request =
+                serde_json::json!({"id":1,"method":method,"params":{"sessionId":"starting-root"}});
+            write_message(
+                &mut writer,
+                &ClientMessage::Acp {
+                    payload: request.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            let forwarded = acp_rx.recv().await.unwrap();
+            let startup: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+            let exit = serde_json::json!({"id":2,"method":"grow/session/suspend_for_exit","params":{"exit_id":"request"}});
+            write_message(
+                &mut writer,
+                &ClientMessage::Acp {
+                    payload: exit.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            let refusal: serde_json::Value =
+                serde_json::from_str(&next_acp_payload(&mut reader).await.unwrap()).unwrap();
+            assert_eq!(refusal["id"], 2);
+            assert!(
+                refusal["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("startup")
+            );
+            assert!(
+                acp_rx.try_recv().is_err(),
+                "unregistered startup cannot be declared suspended"
+            );
+            response_tx
+                .send(
+                    serde_json::json!({"id":startup["id"],"result":{"sessionId":"starting-root"}})
+                        .to_string(),
+                )
+                .unwrap();
+            next_acp_payload(&mut reader).await.unwrap();
+            write_message(
+                &mut writer,
+                &ClientMessage::Acp {
+                    payload: exit.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let accepted: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+            assert_eq!(
+                accepted["params"]["leaderScope"],
+                serde_json::json!({"clientId":client_id.0,"sessionIds":["starting-root"]})
+            );
+            cancel.cancel();
+        }
     }
 
     #[tokio::test]

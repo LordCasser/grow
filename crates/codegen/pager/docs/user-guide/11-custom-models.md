@@ -230,7 +230,17 @@ image_description = "vision/describe"
 prompt_suggestion = "fast/suggest"
 ```
 
-Every referenced value must be a configured `provider/model` ID.
+Every referenced value must be a configured `provider/model` catalog ID. Other auxiliary entry
+points may use a stable alias provided by their owner, such as `grow-build`; these selectors still
+have to resolve to a configured catalog entry.
+
+These selectors resolve the full configured provider route, including its endpoint, API backend,
+and credentials. The catalog entry's optional `model` value is the name sent to that provider; a
+wire-model name alone does not identify a route. If a selected auxiliary model is unavailable,
+Grow skips or fails that auxiliary call instead of sending it through the active session provider.
+The same rule applies to explicit AI shell-suggestion and memory note-rewrite selectors. The
+`GROW_PROMPT_SUGGESTIONS_MODEL` override changes prompt-suggestion precedence but still must name a
+catalog entry.
 
 ## Missing or invalid configuration
 

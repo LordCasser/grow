@@ -331,7 +331,7 @@ pub(crate) struct ChatState {
     pub(super) turn_capture: Option<TurnCaptureState>,
 }
 
-type ImagePartIdentity = (SurfaceId, usize);
+type ImagePartPosition = (usize, usize);
 type ReplacedImageSource = (std::sync::Weak<str>, Option<std::sync::Weak<str>>);
 
 #[derive(Clone)]
@@ -339,9 +339,9 @@ pub(crate) struct ImageBudgetSelection {
     pub route: ModelImageInputKey,
     pub use_image_descriptions: bool,
     pub surface_ids: Vec<SurfaceId>,
-    /// Source identity and part position, checked against the original Arc
-    /// allocation without retaining or rescanning its base64 payload.
-    pub replaced: BTreeMap<ImagePartIdentity, ReplacedImageSource>,
+    /// Saved item/part offsets are bound to `surface_ids` at the same index.
+    /// Reuse also checks the original Arc allocation without scanning base64.
+    pub replaced: BTreeMap<ImagePartPosition, ReplacedImageSource>,
 }
 
 /// The immutable payload recorded for one model-attempt settlement.

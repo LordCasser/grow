@@ -142,9 +142,12 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+X`, then `E` | Agent screen | Open the reasoning-effort picker |
 | `Ctrl+X`, then `P` | Agent screen | Open the Permission picker |
 | `Ctrl+X`, then `B` | Agent screen | Open the Behavior picker (Normal / Clarify / Plan / Workflow / Goal) |
+| `Ctrl+X`, then `C` | Agent screen | Close the session after runtime confirmation, retaining history |
+| `Ctrl+X`, then `D` | Agent screen | Request permanent deletion; confirm with `Y`, cancel with `N` / `Esc` |
+| `Ctrl+X`, then `Ctrl+X` or `X` | Agent screen | Stop session work; idle sessions remain open |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
-**Note:** `Ctrl+X` is a two-key leader with a two-second timeout. While active, the draft is preserved and dimmed, the cursor is hidden, and the available continuation keys appear above the input. Esc, Backspace, an unknown continuation, or timeout cancels the leader without editing the draft. The five pickers share their catalogs and execution paths with `/model`, `/agent`, `/effort`, `/permission`, and `/behavior`.
+**Note:** `Ctrl+X` opens a session-command prefix with a two-second selection timeout. While active, the draft is preserved and dimmed, the cursor is hidden, and the available continuation keys appear above the input. Esc, Backspace, an unknown continuation, or timeout cancels the prefix without editing the draft. The separate deletion dialog opened by `D` uses explicit `Y` / `N` / `Esc` confirmation. The five pickers share their catalogs and execution paths with `/model`, `/agent`, `/effort`, `/permission`, and `/behavior`.
 
 **Note:** Minimal-mode external editing resolves `$VISUAL`, then `$EDITOR`, then `vi`. Values may include quoted arguments. Saving replaces only the draft; an empty file clears it. Drafts with pasted/file/image chips must be edited in the composer so attachments are not flattened.
 
@@ -249,21 +252,23 @@ Bindings while the [Agent Dashboard](23-dashboard.md) is focused (`Ctrl+\` or `/
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓`, `j` / `k` | Navigate agent rows (selecting a row opens peek) |
-| `Enter` | Open the selected agent, or send a typed peek reply / dispatch prompt |
-| `Ctrl+S` | Reply or dispatch **and** attach to that agent |
+| `↑` / `↓`, `j` / `k` | Navigate sessions; selection updates the read-only preview |
+| `Enter` / double-click a row | Open the selected session in its ordinary details view |
+| `Enter` in the new-session input | Create a new session from the prompt |
+| `Ctrl+S` in the new-session input | Create a new session and attach to it |
 | `Ctrl+/` | Toggle search / filter mode |
 | `Ctrl+R` | Rename the selected agent |
 | `Ctrl+T` | Pin / unpin |
-| `Ctrl+G` | Toggle grouping (state ↔ working directory) |
-| `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
-| `Ctrl+O` | Toggle always-approve on the selected agent |
-| `Tab` | Toggle focus between the list and the dispatch / peek input |
-| `Esc` | Step back (cancel search → close peek → clear filter → unfocus → unselect → exit) |
-| `Ctrl+\` | Exit the dashboard (or return from an attached agent) |
-| `Ctrl+.` (alt: `?`) | Shortcuts cheatsheet |
+| `Ctrl+G` | Cycle grouping: open → state → directory |
+| `Ctrl+X` | Open the session-command prefix for the selected session |
+| `Tab` | Toggle focus between the overview and new-session input |
+| `Esc` | Step back through search, input focus, row selection, and dashboard |
+| `Ctrl+\` | Return to the dashboard from session details, or exit the dashboard |
+| `?` | Open the command palette (scrollback focused) |
 
-Details (peek vs dispatch, search prefixes, persistence): [Agent Dashboard](23-dashboard.md).
+Use `/shortcuts` in an open session to browse and search keyboard shortcuts.
+
+Search prefixes and persistence: [Agent Dashboard](23-dashboard.md).
 
 ---
 

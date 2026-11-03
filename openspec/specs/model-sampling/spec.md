@@ -1150,31 +1150,32 @@ A failure returned by the tool execution pipeline SHALL stop the admitted model 
 - **THEN** 内容按原有语义保留，不执行通用子串过滤或修改原始持久记录。
 
 ### Requirement: Side questions reuse durable image fallback
-/btw SHALL be a read-only consumer of the primary session's image projection and SHALL use its prepared primary LLM route. Before freezing Sideband context it SHALL wait for any in-progress primary image conversion, including its durable ImageProjection acknowledgement. It SHALL select every available image description from that acknowledged Surface on the request copy, independently of the negative-capability cache. It SHALL NOT start vision/OCR/conversion work, write negative image capability or retry an image rejection by mutating the primary Surface. The question and answer SHALL remain Sideband-only. Waiting SHALL observe session Sideband cancellation and SHALL NOT hold the image projection gate during its provider request or overload retries. An unsupported transport with unresolved images SHALL fail without issuing an image-bearing request; unconverted media for an unknown transport retains existing optimistic semantics.
+
+/btw SHALL use one prepared route and one frozen acknowledged context, preferring existing descriptions. It SHALL wait for primary image projection acknowledgement and observe Sideband cancellation. If the selected request still contains images on a known rejecting route, it SHALL reuse neutral image description/OCR recovery before provider admission. An unknown route SHALL receive its first optimistic request. Only an explicit image capability rejection SHALL record negative capability for that actual route and permit one recovered text attempt. Recovery SHALL preserve the frozen source range, revision and coordinates, SHALL NOT rebase to new context or mutate the primary Surface, and SHALL fail when a selected image cannot be described or the recovered request exceeds its admitted budget. Ordinary errors SHALL retain existing handling. The question and answer remain Sideband-only.
 
 #### Scenario: Known text-only route
-- **WHEN** main context retains original images paired with acknowledged descriptions and /btw is requested
-- **THEN** its frozen portable context uses the existing descriptions without raw media or another auxiliary request, including when negative capability is absent
+- **WHEN** /btw selects images on a known text-only route
+- **THEN** acknowledged descriptions or neutral recovery supply text before its answer request; missing descriptions fail without sending images.
 
 #### Scenario: Primary conversion has not finished
-- **WHEN** main vision/OCR recovery or its ImageProjection acknowledgement is pending and /btw is requested
-- **THEN** /btw waits without starting a provider or conversion request, then freezes and uses the acknowledged text branch once main conversion completes
-
-#### Scenario: Unrelated failure or failed projection
-- **WHEN** main conversion cannot commit a usable text branch or the waiting SideQuestion is cancelled
-- **THEN** /btw returns failure without independently converting images or emitting an unacknowledged textual provider request
-
-#### Scenario: No main conversion owns unresolved images
-- **WHEN** the prepared transport is known text-only but main context has unresolved images and no conversion is in progress
-- **THEN** /btw fails as context not ready without triggering recovery or modifying image capability
+- **WHEN** primary conversion or its durable acknowledgement is pending
+- **THEN** capture waits cancellably and uses the acknowledged result.
 
 #### Scenario: Historical images rejected by side question
-- **WHEN** its frozen request receives an image rejection or ordinary 400
-- **THEN** it records the Sideband failure and returns it without starting shared image recovery or writing negative capability
+- **WHEN** an unknown prepared route explicitly rejects selected images
+- **THEN** only that route is marked unsupported and at most one text recovery attempt follows using the same frozen source, while an ordinary 400 causes no recovery.
 
 #### Scenario: Foreground context advances during the failed request
-- **WHEN** /btw's frozen provider request fails while main context advances
-- **THEN** /btw returns the failure without projecting either its frozen images or images from the newer Surface
+- **WHEN** main history advances while the frozen request is rejected
+- **THEN** recovery and the answer use only the original frozen images and text, preserving their provenance and leaving the primary Surface unchanged.
+
+#### Scenario: Unrelated failure or failed projection
+- **WHEN** a provider returns an ordinary error or primary projection failed
+- **THEN** ordinary errors cause no capability learning; a failed durable primary write retains the writer fail-stop and cannot be bypassed by independent recovery or a cached description.
+
+#### Scenario: No main conversion owns unresolved images
+- **WHEN** selected images have no description and the prepared route is known text-only
+- **THEN** neutral frozen recovery runs before answer admission, without changing primary history.
 
 ### Requirement: Skill publication uses projected request context pressure
 
@@ -1398,3 +1399,75 @@ Local OCR SHALL execute its helper in a process group/job whose lifetime is owne
 #### Scenario: Storage failure belongs to another session
 - **WHEN** 非共享存储故障只属于另一 session，当前前台和存储 gate 仍允许后继采样
 - **THEN** 压缩后在同一 Turn 继续普通 provider 请求，不因其他 session 的单独故障停止。
+
+### Requirement: Recap reuses acknowledged image descriptions
+
+Manual and automatic recap SHALL select acknowledged image descriptions after cancellably waiting for primary image projection. They SHALL preserve existing backend reasoning selection, complete tool evidence, bounded window, display-only result and recap cancellation identity. Only images retained by the final budget SHALL be recovered. Known rejecting routes SHALL prepare text before provider admission; explicit rejection by an unknown route SHALL record actual route capability and permit one frozen text recovery attempt. Recovery SHALL NOT mutate the primary Surface or rebase its source. Missing descriptions or exceeded budget SHALL use existing manual unavailable or automatic silent failure behavior.
+
+#### Scenario: Existing descriptions after a model switch
+- **WHEN** recap selects described images after switching to text
+- **THEN** it sends text without raw media or another description call.
+
+#### Scenario: Unresolved selected images
+- **WHEN** known or newly confirmed text-only recap selects unresolved images
+- **THEN** neutral recovery supplies text for that frozen source or recap terminates through its existing failure path.
+
+#### Scenario: Unresolved images are outside the retained budget
+- **WHEN** budgeting removes unresolved old images
+- **THEN** they do not block or start image recovery.
+
+#### Scenario: Conversion awaits acknowledgement
+- **WHEN** recap arrives during primary image conversion or durable acknowledgement
+- **THEN** it waits cancellably before capture and only selected unresolved images may subsequently need neutral recovery.
+
+### Requirement: Restored automatic recap uses durable primary API activity
+
+An existing session actor SHALL initialize its recap idle clock from the most recent primary Request fact in its validated Timeline. Later Sideband, UI or load activity SHALL NOT replace that primary timestamp. A fresh or newly seeded task, or history without primary Request evidence, SHALL retain the no-evidence state. Runtime primary sampling SHALL continue to update the same field. Restoration SHALL NOT bypass the existing three-minute idle interval, minimum main turns, new-turn, away identity or cancellation gates.
+
+#### Scenario: Cold load precedes return from away
+- **WHEN** a session with at least three real main turns and durable primary requests is loaded into a new process, and its main API activity is older than the idle threshold when recap is requested
+- **THEN** automatic recap may pass the idle gate using the durable request time and recover its frozen historical images without requiring another main prompt first.
+
+#### Scenario: Auxiliary work follows the last main request
+- **WHEN** later Sideband or UI facts follow the most recent primary Request
+- **THEN** they do not delay the restored main API idle clock.
+
+#### Scenario: No primary activity is proven
+- **WHEN** the actor is fresh, is a newly seeded task or has no primary Request facts
+- **THEN** restoration does not invent an API timestamp or bypass the existing automatic recap gate.
+
+### Requirement: Context consuming auxiliary extensions wait for session load
+
+Side questions, memory flush and manual compaction extensions SHALL use the existing session/load publication barrier before looking up the target actor. A concurrent load SHALL complete or fail before the extension decides whether the session exists. Closed command channels SHALL return admission failure; no successful acknowledgement SHALL be inferred from an ignored send error.
+
+#### Scenario: Reconnect load overlaps auxiliary input
+- **WHEN** a side question, memory flush or manual compaction arrives while its session/load is in flight
+- **THEN** it waits for load publication and dispatches to the restored actor, or reports absence only after the load failed.
+
+#### Scenario: Actor command channel closed
+- **WHEN** the resolved actor no longer accepts commands
+- **THEN** the extension returns an admission error without claiming provider execution or memory persistence.
+
+### Requirement: Auxiliary model selectors use their configured provider route
+
+AI shell suggestion, prompt suggestion, and memory note rewrite SHALL resolve the selected auxiliary model through its exact configured catalog ID or alias. The resolved sampler configuration SHALL determine the sampling client and the provider-facing `ConversationRequest.model`, so endpoint, backend, credentials, and wire model belong to the same catalog entry. A wire-model string alone SHALL NOT be treated as a catalog identity. If a selected ID is unavailable, the caller SHALL follow its existing empty/failed result path without issuing a request through the active session route.
+
+#### Scenario: Auxiliary catalog route differs from the session route
+
+- **WHEN** an auxiliary entry point selects a catalog ID whose endpoint, backend, credentials, and provider-facing model differ from the active session
+- **THEN** the actual request uses that catalog entry's full route and wire model, and is not sent to the active session provider.
+
+#### Scenario: Provider-facing name is not a catalog key
+
+- **WHEN** a selector contains only a provider-facing model name that is not itself a catalog key
+- **THEN** Grow does not infer its provider or reuse the active session route, and the suggestion/rewrite follows its existing unavailable-model result.
+
+#### Scenario: Selected model is unavailable
+
+- **WHEN** AI suggestion, prompt suggestion, or memory note rewrite selects an ID absent from the usable catalog or without usable credentials
+- **THEN** no provider request is sent through the active session route; the call follows its existing best-effort empty result or error path.
+
+#### Scenario: Workflow Run selector is frozen
+
+- **WHEN** one of these auxiliary calls runs under a Workflow Run with a frozen sampler snapshot
+- **THEN** the exact Run image-description selector uses its dedicated frozen image sampler, another selector resolves only through a sampler captured by that Run with credential-only refresh, and a missing/changed selector fails without consulting live catalog routing.

@@ -156,6 +156,7 @@ fn incoming_inquiry_from_peer(
     outcome: Option<crate::coordination::InquiryOutcome>,
 ) -> chat_state::TimelineEvent {
     let audit = crate::coordination::IncomingInquiryAudit {
+        answer_context: None,
         direction: crate::coordination::InquiryDirection::ParentToChild,
         source_peer_id: source_peer_id.into(),
         source_session_id: source_session_id

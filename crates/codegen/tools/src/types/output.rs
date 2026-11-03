@@ -485,6 +485,9 @@ pub enum ToolOutput {
     WebFetch(WebFetchOutput),
     MCP(MCPOutput),
     TaskOutput(TaskOutputOutput),
+    SubagentList(tool_types::ListSubagentOutput),
+    SubagentStatus(tool_types::GetSubagentStatusOutput),
+    SubagentWait(tool_types::WaitSubagentOutput),
     KillTask(KillTaskOutput),
     SearchTool(SearchToolOutput),
     SubagentCompleted(SubagentCompletedOutput),
@@ -632,6 +635,15 @@ impl ToolOutput {
                     )
                 }
             }
+            ToolOutput::SubagentWait(output) => {
+                serde_json::to_string_pretty(output).expect("subagent wait is JSON data")
+            }
+            ToolOutput::SubagentStatus(output) => {
+                serde_json::to_string_pretty(output).expect("subagent status is JSON data")
+            }
+            ToolOutput::SubagentList(output) => {
+                serde_json::to_string_pretty(output).expect("subagent list is JSON data")
+            }
             ToolOutput::TaskOutput(task_output) => match task_output {
                 TaskOutputOutput::Result(r) => {
                     let mut lines = vec![
@@ -664,7 +676,7 @@ impl ToolOutput {
                 }
                 TaskOutputOutput::TaskNotFound(msg) => msg.to_owned(),
                 TaskOutputOutput::MultiResult(mr) => {
-                    let mut lines = vec![format!("=== Multi-wait ({}) ===", mr.mode)];
+                    let mut lines = vec![format!("=== Tasks ({}) ===", mr.mode)];
                     for r in &mr.results {
                         lines.push(format!(
                             "--- Task {} [{}] ---\nCommand: {}\nDuration: {:.2}s",

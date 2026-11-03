@@ -234,46 +234,18 @@ impl SessionActor {
         }
     }
 
-    /// Bind descriptions to original images; each provider/model selects its
-    /// representation independently when building a request.
-    async fn project_conversation_images_for_text_model_once(
+    /// Produce neutral descriptions for immutable source coordinates. The caller
+    /// owns projection: main recovery may commit shadows; a Sideband only uses
+    /// them on its frozen request copy.
+    pub(in crate::session::actor) async fn describe_frozen_image_groups(
         &self,
+        source_ids: &[chat_state::SurfaceId],
+        source_revision: u64,
+        groups: &[sampling_types::conversation::ConversationImageGroup],
         rejected_key: &sampling_types::ModelImageInputKey,
         operation_id: &str,
         prompt_id: Option<&str>,
-        operation_started: &mut bool,
-    ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
-        use sampling_types::conversation::conversation_image_groups;
-
-        let materialized = self
-            .chat_state_handle
-            .materialize_branch_transcript(self.session_info.id.to_string())
-            .await
-            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
-        let conversation = &materialized.transcript;
-        let groups = conversation_image_groups(conversation)
-            .into_iter()
-            .filter(|group| {
-                sampling_types::conversation::item_image_description(
-                    &conversation[group.item_index],
-                )
-                .is_none()
-            })
-            .collect::<Vec<_>>();
-        if groups.is_empty() {
-            return Ok(chat_state::ImageProjectionReport::default());
-        }
-        if !*operation_started {
-            self.send_grow_notification(GrowSessionUpdate::ImageRecoveryOperation {
-                operation_id: operation_id.to_owned(),
-                prompt_id: prompt_id.map(str::to_owned),
-                state: crate::extensions::notification::ImageRecoveryOperationState::Started {
-                    message: "Preparing image recovery…".into(),
-                },
-            })
-            .await;
-            *operation_started = true;
-        }
+    ) -> Vec<chat_state::ImageShadow> {
         let mut shadows = Vec::with_capacity(groups.len());
         let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
 
@@ -283,12 +255,12 @@ impl SessionActor {
             let prepared = groups
                 .iter()
                 .map(|group| {
-                    let source = materialized.transcript_ids[group.item_index];
+                    let source = source_ids[group.item_index];
                     let source_key = format!("{}:{}", source.event.get(), source.item);
                     let cache_key = self.image_describe_cache.key_for_urls(
                         &group.image_urls,
                         &source_key,
-                        materialized.surface_revision,
+                        source_revision,
                     );
                     (group, source, cache_key)
                 })
@@ -310,7 +282,7 @@ impl SessionActor {
                 match crate::session::image_describe::recover_completed_descriptions(
                     self.session_directory.clone(),
                     self.session_info.id.to_string(),
-                    materialized.surface_revision,
+                    source_revision,
                     queries,
                 )
                 .await
@@ -375,7 +347,7 @@ impl SessionActor {
                     continue;
                 };
                 let source_ref = chat_state::TimelineRangeRef {
-                    timeline_id: materialized.source_ref.timeline_id.clone(),
+                    timeline_id: self.session_info.id.to_string(),
                     first_seq: source.event.get(),
                     last_seq: source.event.get(),
                 };
@@ -408,7 +380,7 @@ impl SessionActor {
                         &request,
                         client.api_backend(),
                         vec![source_ref.clone()],
-                        Some(materialized.surface_revision),
+                        Some(source_revision),
                         vec![source],
                         vec![source],
                         "image-group",
@@ -564,7 +536,7 @@ impl SessionActor {
         let missing = groups
             .iter()
             .filter(|group| {
-                let source = materialized.transcript_ids[group.item_index];
+                let source = source_ids[group.item_index];
                 !shadows.iter().any(|shadow| shadow.source == source)
             })
             .collect::<Vec<_>>();
@@ -585,7 +557,7 @@ impl SessionActor {
                 .await
                 {
                     Ok(description) => shadows.push(chat_state::ImageShadow {
-                        source: materialized.transcript_ids[group.item_index],
+                        source: source_ids[group.item_index],
                         fingerprint: group.fingerprint.clone(),
                         image_count: group.image_count(),
                         replacement: crate::session::image_describe::render_image_description_block(
@@ -599,6 +571,60 @@ impl SessionActor {
                 }
             }
         }
+
+        shadows
+    }
+
+    /// Bind descriptions to original images; each provider/model selects its
+    /// representation independently when building a request.
+    async fn project_conversation_images_for_text_model_once(
+        &self,
+        rejected_key: &sampling_types::ModelImageInputKey,
+        operation_id: &str,
+        prompt_id: Option<&str>,
+        operation_started: &mut bool,
+    ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
+        use sampling_types::conversation::conversation_image_groups;
+
+        let materialized = self
+            .chat_state_handle
+            .materialize_branch_transcript(self.session_info.id.to_string())
+            .await
+            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
+        let conversation = &materialized.transcript;
+        let groups = conversation_image_groups(conversation)
+            .into_iter()
+            .filter(|group| {
+                sampling_types::conversation::item_image_description(
+                    &conversation[group.item_index],
+                )
+                .is_none()
+            })
+            .collect::<Vec<_>>();
+        if groups.is_empty() {
+            return Ok(chat_state::ImageProjectionReport::default());
+        }
+        if !*operation_started {
+            self.send_grow_notification(GrowSessionUpdate::ImageRecoveryOperation {
+                operation_id: operation_id.to_owned(),
+                prompt_id: prompt_id.map(str::to_owned),
+                state: crate::extensions::notification::ImageRecoveryOperationState::Started {
+                    message: "Preparing image recovery…".into(),
+                },
+            })
+            .await;
+            *operation_started = true;
+        }
+        let mut shadows = self
+            .describe_frozen_image_groups(
+                &materialized.transcript_ids,
+                materialized.surface_revision,
+                &groups,
+                rejected_key,
+                operation_id,
+                prompt_id,
+            )
+            .await;
 
         // Every remaining group becomes a typed unsupported-model removal: the
         // primary model already confirmed it cannot accept images, so keeping
@@ -1219,7 +1245,7 @@ impl SessionActor {
         // is cheap; inference only happens when an auto request arrives.
         let auto_cfg = crate::util::config::resolve_auto_mode_config_from_disk();
         let aux_classifier_sampler = match auto_cfg.classifier_model.as_deref() {
-            Some(slug) => self.resolve_auto_classifier_sampler(slug).await.map(Some),
+            Some(slug) => self.build_auxiliary_sampling_client(slug).await.map(Some),
             None => Ok(None),
         };
         let (prompt_type, classifier_reasoning_effort) =
@@ -1643,19 +1669,24 @@ impl SessionActor {
             "Wired live LLM permission auto-mode classifier (session sampling channel)"
         );
     }
-    /// Resolve a standalone aux-model `SamplerConfig` from the configured
-    /// provider catalog. `None` (including an empty model ID) leaves fallback
-    /// policy to the caller: optional classifiers may inherit the active
-    /// sampler, while explicitly configured image description must fail
-    /// visibly instead of switching models.
-    pub(super) async fn resolve_aux_sampler_config(
+    /// Resolve one auxiliary model from the provider catalog, or from the
+    /// frozen Workflow Run samplers when this session belongs to a Run.
+    pub(in crate::session::actor) async fn resolve_aux_sampler_config(
         &self,
         model_id: &str,
     ) -> Option<sampler::SamplerConfig> {
         let creds = self.chat_state_handle.get_credentials().await;
         if let Some(route) = &self.startup_hints.workflow_runtime_route {
-            return route
-                .image_description_sampler_for(model_id, &self.models_manager, creds.alpha_test_key)
+            let resolved = if route.image_description_model() == Some(model_id) {
+                route.image_description_sampler_for(
+                    model_id,
+                    &self.models_manager,
+                    creds.alpha_test_key,
+                )
+            } else {
+                route.sampler_for(model_id, &self.models_manager, creds.alpha_test_key)
+            };
+            return resolved
                 .map_err(|error| {
                     tracing::warn!(model_id, error, "Workflow auxiliary route unavailable")
                 })
@@ -1668,21 +1699,18 @@ impl SessionActor {
             creds.alpha_test_key.clone(),
         )
     }
-    /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
-    /// stamping session-local auth/attribution like image-describe (which relies
-    /// on the resolver, not a config override, for `base_url`/`api_backend` so
-    /// credentials stay consistent). Once a classifier model is configured,
-    /// resolution/build failure is terminal for that classifier request; it
-    /// must not silently switch to the session model.
-    async fn resolve_auto_classifier_sampler(
+    /// Build a client and explicit wire model from one resolved auxiliary
+    /// route. The active session contributes only fields with existing
+    /// session-local stamp semantics; it never supplies the auxiliary route.
+    pub(in crate::session::actor) async fn build_auxiliary_sampling_client(
         &self,
-        slug: &str,
+        model_id: &str,
     ) -> Result<(sampler::SamplingClient, String), String> {
         let active_session_config = self.reconstruct_full_config().await;
         let mut cfg = self
-            .resolve_aux_sampler_config(slug)
+            .resolve_aux_sampler_config(model_id)
             .await
-            .ok_or_else(|| format!("configured auto classifier model `{slug}` is unavailable"))?;
+            .ok_or_else(|| format!("configured auxiliary model `{model_id}` is unavailable"))?;
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut cfg,
             &active_session_config,
@@ -1690,7 +1718,7 @@ impl SessionActor {
         );
         let model = cfg.model.clone();
         let client = sampler::SamplingClient::new(cfg).map_err(|error| {
-            format!("configured auto classifier model `{slug}` could not be initialized: {error}")
+            format!("configured auxiliary model `{model_id}` could not be initialized: {error}")
         })?;
         Ok((client, model))
     }

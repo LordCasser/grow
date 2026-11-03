@@ -1,0 +1,8 @@
+{
+  "observed_at": "2026-11-03T16:21:43.939620+08:00",
+  "grow_pid": 3999,
+  "grow_footprint_bytes": 2785381928,
+  "grow_peak_footprint_bytes": 3252833856,
+  "system_swap": "vm.swapusage: total = 8192.00M  used = 6732.69M  free = 1459.31M  (encrypted)",
+  "matching_test_processes": []
+}

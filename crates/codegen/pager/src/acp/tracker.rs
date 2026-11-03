@@ -64,8 +64,7 @@ pub enum WaitingReason {
     AgentSwitch,
     /// Blocked on a running foreground subagent (`task` / `spawn_subagent`).
     Subagent,
-    /// Blocked polling/awaiting a background task's output
-    /// (`get_command_or_subagent_output` / `get_task_output`).
+    /// Blocked waiting for terminal output or a subagent result.
     ///
     /// `task_ids` come from the tool's `raw_input` (empty until it arrives).
     /// `subject` is an optional display name (description preferred, else
@@ -165,6 +164,7 @@ impl WaitingReason {
 struct BlockingWait {
     reason: WaitingReason,
     stream_start_ms: Option<i64>,
+    always_blocking: bool,
 }
 /// `strings`-greppable marker proving a binary carries this fix (kept by `#[used]`).
 #[used]
@@ -269,7 +269,7 @@ pub struct AcpUpdateTracker {
     /// Their ToolCallUpdate counterparts are silently dropped too.
     suppressed_tools: std::collections::HashSet<String>,
     /// Suppressed-but-blocking tool calls, keyed by tool-call ID → the reason
-    /// the turn is waiting. These tools (`get_command_or_subagent_output`,
+    /// the turn is waiting. These tools (`get_command_output`, `wait_subagent`,
     /// `Sleep`, …) are kept out of `pending_tools` (so they never
     /// hit scrollback) but the turn *is* blocked on them — without this the
     /// spinner falls back to a generic "Waiting…". Populated in
@@ -1250,6 +1250,14 @@ impl AcpUpdateTracker {
             .count()
     }
 
+    /// Start a new transcript without discarding the session's control projection.
+    pub(crate) fn fresh_transcript(&self) -> Self {
+        let mut tracker = Self::new();
+        tracker.historical_thinking = self.historical_thinking;
+        tracker.behavior_availability = self.behavior_availability.clone();
+        tracker
+    }
+
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.finish_thinking(scrollback);
@@ -1429,6 +1437,7 @@ impl AcpUpdateTracker {
                         BlockingWait {
                             reason: WaitingReason::Subagent,
                             stream_start_ms: self.last_stream_start_ms,
+                            always_blocking: false,
                         },
                     );
                 }
@@ -1438,6 +1447,7 @@ impl AcpUpdateTracker {
                     BlockingWait {
                         reason,
                         stream_start_ms: self.last_stream_start_ms,
+                        always_blocking: is_subagent_wait_tool(&tc),
                     },
                 );
             }
@@ -1512,18 +1522,26 @@ impl AcpUpdateTracker {
                         self.blocking_waits.remove(&tc_id_str);
                     }
                 }
-                if let Some(WaitingReason::TaskOutput {
-                    task_ids, waits, ..
-                }) = self
-                    .blocking_waits
-                    .get_mut(&tc_id_str)
-                    .map(|w| &mut w.reason)
+                if let Some(wait) = self.blocking_waits.get_mut(&tc_id_str)
+                    && let WaitingReason::TaskOutput {
+                        task_ids, waits, ..
+                    } = &mut wait.reason
                 {
-                    let extracted = task_ids_from_raw_input(raw_input);
+                    let is_subagent_wait = wait.always_blocking
+                        || raw_input.get("variant").and_then(|v| v.as_str())
+                            == Some("SubagentWait")
+                        || raw_input.get("subagent_ids").is_some();
+                    let extracted = if is_subagent_wait {
+                        subagent_ids_from_raw_input(raw_input)
+                    } else {
+                        task_ids_from_raw_input(raw_input)
+                    };
                     if !extracted.is_empty() {
                         *task_ids = extracted;
                     }
-                    if raw_input.get("timeout_ms").is_some() {
+                    if is_subagent_wait {
+                        *waits = true;
+                    } else if raw_input.get("timeout_ms").is_some() {
                         *waits = timeout_waits(Some(raw_input));
                     }
                 }
@@ -2722,7 +2740,7 @@ fn content_text(tc: &acp::ToolCall) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-/// Check if a tool call is bg-task internal plumbing: task output/kill and the
+/// Check if a tool call is bg-task internal plumbing: terminal output/kill and the
 /// external background-await tool.
 ///
 /// These are suppressed from scrollback because the bg task pane provides
@@ -2730,22 +2748,26 @@ fn content_text(tc: &acp::ToolCall) -> String {
 fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
     matches!(
         tc.title.as_str(),
-        // Model-facing defaults and internal tool ids.
-        "get_command_or_subagent_output"
+        "get_command_output"
+            | "wait_subagent"
             | "kill_command_or_subagent"
-            | "get_task_output"
             | "kill_task"
             | "AwaitShell"
             | "Await"
     ) || tc.title.starts_with("Await:")
+        || tc.title.starts_with("Wait for subagents:")
         || tc.title.starts_with("Sleep ")
         || tc.title.starts_with("Kill task:")
+        || matches!(
+            canonical_tool_kind(tc),
+            Some("background_task_action" | "subagent_wait")
+        )
         || tc
             .raw_input
             .as_ref()
             .and_then(|v| v.get("variant"))
             .and_then(|v| v.as_str())
-            .is_some_and(|v| matches!(v, "TaskOutput" | "KillTask"))
+            .is_some_and(|v| matches!(v, "TaskOutput" | "SubagentWait" | "KillTask"))
 }
 /// Classify a *blocking* suppressed tool into the [`WaitingReason`] the turn is
 /// waiting on, or `None` for suppressed tools that don't block the turn (e.g.
@@ -2759,8 +2781,22 @@ fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
         .as_ref()
         .and_then(|v| v.get("variant"))
         .and_then(|v| v.as_str());
-    if matches!(title, "get_command_or_subagent_output" | "get_task_output")
-        || variant == Some("TaskOutput")
+    let kind = canonical_tool_kind(tc);
+    if is_subagent_wait_tool(tc) {
+        let task_ids = tc
+            .raw_input
+            .as_ref()
+            .map(subagent_ids_from_raw_input)
+            .unwrap_or_default();
+        return Some(WaitingReason::TaskOutput {
+            task_ids,
+            subject: None,
+            waits: true,
+        });
+    }
+    if variant == Some("TaskOutput")
+        || kind == Some("background_task_action")
+        || title == "get_command_output"
     {
         let task_ids = tc
             .raw_input
@@ -2781,6 +2817,18 @@ fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
     }
     None
 }
+
+fn is_subagent_wait_tool(tc: &acp::ToolCall) -> bool {
+    let variant = tc
+        .raw_input
+        .as_ref()
+        .and_then(|v| v.get("variant"))
+        .and_then(|v| v.as_str());
+    variant == Some("SubagentWait")
+        || canonical_tool_kind(tc) == Some("subagent_wait")
+        || tc.title == "wait_subagent"
+        || tc.title.starts_with("Wait for subagents:")
+}
 /// Whether the wait tool call actually blocks: `timeout_ms > 0` in raw_input.
 /// Missing input / missing field / 0 all mean an instant poll.
 fn timeout_waits(raw: Option<&serde_json::Value>) -> bool {
@@ -2788,11 +2836,19 @@ fn timeout_waits(raw: Option<&serde_json::Value>) -> bool {
         .and_then(|v| v.as_u64())
         .is_some_and(|t| t > 0)
 }
-/// Extract `task_ids` from a `get_task_output` / wait tool's raw_input JSON.
+/// Extract `task_ids` from a terminal-output tool's raw_input JSON.
 fn task_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
+    ids_from_raw_input(raw, "task_ids", "task_id")
+}
+
+fn subagent_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
+    ids_from_raw_input(raw, "subagent_ids", "subagent_id")
+}
+
+fn ids_from_raw_input(raw: &serde_json::Value, list_key: &str, singular_key: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::<String>::new();
-    if let Some(arr) = raw.get("task_ids").and_then(|v| v.as_array()) {
+    if let Some(arr) = raw.get(list_key).and_then(|v| v.as_array()) {
         for v in arr {
             if let Some(id) = v.as_str() {
                 let id = id.trim();
@@ -2803,7 +2859,7 @@ fn task_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
         }
     }
     if out.is_empty()
-        && let Some(id) = raw.get("task_id").and_then(|v| v.as_str())
+        && let Some(id) = raw.get(singular_key).and_then(|v| v.as_str())
     {
         let id = id.trim();
         if !id.is_empty() {
@@ -5850,9 +5906,8 @@ mod tests {
     }
     /// The blocking bg-plumbing tools are kept out of scrollback but the turn
     /// IS blocked on them — `activity()` must name the wait instead of the old
-    /// generic `None` (→ "Waiting…"). Task-output tools only advertise once
-    /// raw_input proves them blocking (`timeout_ms > 0`); before that the
-    /// wait is not shown (display mirrors interject eligibility).
+    /// generic `None` (→ "Waiting…"). Terminal-output only advertises once
+    /// raw_input proves it blocking (`timeout_ms > 0`); subagent wait always blocks.
     #[test]
     fn activity_waiting_for_blocking_bg_plumbing_tools() {
         let cases = [
@@ -5873,7 +5928,7 @@ mod tests {
                 "title {title:?} should produce {expected:?}"
             );
         }
-        for title in ["get_command_or_subagent_output", "get_task_output"] {
+        for title in ["get_command_output"] {
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             tracker.handle_update(
@@ -5893,6 +5948,92 @@ mod tests {
                 "{title:?}: known-blocking wait must be named"
             );
         }
+        for title in [
+            "get_task_output",
+            "get_command_or_subagent_output",
+            "list_subagent",
+            "get_subagent_status",
+        ] {
+            let tc = initial_tool_call("old-or-nonwait", title);
+            assert!(
+                blocking_wait_reason(&tc).is_none(),
+                "{title:?} must not be a wait"
+            );
+            assert!(!is_bg_plumbing_tool(&tc), "{title:?} must remain visible");
+        }
+    }
+
+    #[test]
+    fn subagent_wait_is_blocking_without_timeout_and_uses_subagent_ids() {
+        let mut tc = initial_tool_call("wait-sub", "Wait for subagents:child-1");
+        tc.raw_input = Some(serde_json::json!({"subagent_ids": ["child-1", "child-2"]}));
+        assert!(is_bg_plumbing_tool(&tc));
+        assert!(
+            matches!(blocking_wait_reason(&tc), Some(WaitingReason::TaskOutput {
+            task_ids, waits: true, ..
+        }) if task_ids == vec!["child-1", "child-2"])
+        );
+
+        let mut renamed = initial_tool_call("wait-sub-meta", "opaque title");
+        renamed.meta = Some(
+            [(
+                "grow/tool".to_owned(),
+                serde_json::json!({"kind": "subagent_wait"}),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        renamed.raw_input = Some(serde_json::json!({"subagent_ids": ["child-3"]}));
+        assert!(is_bg_plumbing_tool(&renamed));
+        assert!(
+            matches!(blocking_wait_reason(&renamed), Some(WaitingReason::TaskOutput {
+            task_ids, waits: true, ..
+        }) if task_ids == vec!["child-3"])
+        );
+
+        let mut variant = initial_tool_call("wait-sub-variant", "opaque title");
+        variant.raw_input = Some(serde_json::json!({
+            "variant": "SubagentWait",
+            "subagent_ids": ["child-4"]
+        }));
+        assert!(is_bg_plumbing_tool(&variant));
+        assert!(
+            matches!(blocking_wait_reason(&variant), Some(WaitingReason::TaskOutput {
+            task_ids, waits: true, ..
+        }) if task_ids == vec!["child-4"])
+        );
+    }
+
+    #[test]
+    fn subagent_list_and_status_variants_are_not_suppressed_or_waiting() {
+        for variant in ["SubagentList", "SubagentStatus"] {
+            let mut tc = initial_tool_call("subagent-query", "ordinary title");
+            tc.raw_input = Some(serde_json::json!({"variant": variant}));
+            assert!(!is_bg_plumbing_tool(&tc));
+            assert!(blocking_wait_reason(&tc).is_none());
+        }
+    }
+
+    #[test]
+    fn subagent_wait_remains_blocking_on_partial_timeout_update() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCall(
+                initial_tool_call("wait-sub", "wait_subagent")
+                    .raw_input(Some(serde_json::json!({"subagent_ids": ["child"]}))),
+            ),
+            &meta(),
+            &mut sb,
+        );
+        tracker.handle_update(timeout_update("wait-sub", 0), &meta(), &mut sb);
+        assert!(matches!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
+                waits: true,
+                ..
+            }))
+        ));
     }
     /// A known-blocking wait must beat an open (residual/pre-created) thought entry.
     #[test]
@@ -5903,7 +6044,7 @@ mod tests {
         tracker.handle_update(thought_chunk("planning the wait…"), &meta(), &mut sb);
         assert_eq!(tracker.activity(), Some(TurnActivity::Thinking));
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &meta(),
             &mut sb,
         );
@@ -5927,7 +6068,7 @@ mod tests {
         let mut tracker = AcpUpdateTracker::new();
         let m = meta_stream(42);
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &m,
             &mut sb,
         );
@@ -5951,7 +6092,7 @@ mod tests {
         let mut tracker = AcpUpdateTracker::new();
         let m1 = meta_stream(1_000);
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &m1,
             &mut sb,
         );
@@ -5980,7 +6121,7 @@ mod tests {
         let mut tracker = AcpUpdateTracker::new();
         let m = meta_stream(100);
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &m,
             &mut sb,
         );
@@ -6017,7 +6158,7 @@ mod tests {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &meta(),
             &mut sb,
         );
@@ -6035,7 +6176,7 @@ mod tests {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &meta(),
             &mut sb,
         );
@@ -6065,7 +6206,7 @@ mod tests {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_task_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &meta(),
             &mut sb,
         );
@@ -6085,7 +6226,7 @@ mod tests {
         let mut tracker = AcpUpdateTracker::new();
         let m = meta_stream(100);
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &m,
             &mut sb,
         );
@@ -6126,7 +6267,7 @@ mod tests {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_output"),
             &meta(),
             &mut sb,
         );
@@ -6158,7 +6299,7 @@ mod tests {
         let tc = |raw: Option<serde_json::Value>| {
             acp::ToolCall::new(
                 acp::ToolCallId::new(std::sync::Arc::from("w")),
-                "get_task_output",
+                "get_command_output",
             )
             .kind(acp::ToolKind::Other)
             .status(acp::ToolCallStatus::Pending)
@@ -6542,6 +6683,21 @@ mod tests {
             tools::types::BehaviorAvailabilityDisposition::Unavailable
         );
         assert_eq!(normal.reason.as_deref(), Some("Goal is exclusive"));
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new("retained-tool", "read").kind(acp::ToolKind::Read),
+            ),
+            &meta(),
+            &mut sb,
+        );
+        assert!(!tracker.tool_entries.is_empty());
+        let fresh = tracker.fresh_transcript();
+        assert!(fresh.tool_entries.is_empty());
+        assert!(fresh.pending_tools.is_empty());
+        assert_eq!(
+            fresh.behavior_availability().unwrap().current,
+            tools::types::BehaviorId::Goal,
+        );
     }
     #[test]
     fn tracker_tools_meta_absent_when_meta_missing() {
@@ -6708,7 +6864,7 @@ mod tests {
     fn is_bg_plumbing_tool_recognizes_canonical_names_and_ids() {
         assert!(is_bg_plumbing_tool(&initial_tool_call(
             "t1",
-            "get_command_or_subagent_output"
+            "get_command_output"
         )));
         assert!(is_bg_plumbing_tool(&initial_tool_call(
             "t2",
@@ -6716,7 +6872,7 @@ mod tests {
         )));
         assert!(is_bg_plumbing_tool(&initial_tool_call(
             "t3",
-            "get_task_output"
+            "get_command_output"
         )));
         assert!(is_bg_plumbing_tool(&initial_tool_call("t4", "kill_task")));
         assert!(is_bg_plumbing_tool(&initial_tool_call("t5", "AwaitShell")));

@@ -31,14 +31,20 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let req: BtwRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();
-    let session = agent.sessions.borrow().get(&sid).cloned().ok_or_else(|| {
-        acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
-    })?;
+    let session = agent
+        .session_handle_waiting_for_load(&sid)
+        .await
+        .ok_or_else(|| {
+            acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
+        })?;
     let (tx, rx) = oneshot::channel();
-    let _ = session.cmd_tx.send(SessionCommand::SideQuestion {
-        question: req.question,
-        respond_to: tx,
-    });
+    session
+        .cmd_tx
+        .send(SessionCommand::SideQuestion {
+            question: req.question,
+            respond_to: tx,
+        })
+        .map_err(|_| acp::Error::internal_error().data("session command channel closed"))?;
     match rx
         .await
         .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?

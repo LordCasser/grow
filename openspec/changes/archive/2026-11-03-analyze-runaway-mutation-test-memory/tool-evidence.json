@@ -1,0 +1,216 @@
+{
+  "parent_session_id": "01a19a05-5281-7201-bae3-89f599512353",
+  "child_session_id": "01a1a066-955a-7050-a9f2-0727eed1456b",
+  "agent_name": "software-engineering/coder",
+  "cwd": "/Users/lordcasser/workspace/projects/solaris-agent",
+  "records": [
+    {
+      "timeline_seq": 798,
+      "at_ms": 1793692881618,
+      "type": "tool",
+      "event": {
+        "state": "started",
+        "call_id": "toolu_d6bd949133b04dc3959374ef",
+        "turn": "12060310531163878208",
+        "step": {
+          "turn": "12060310531163878208",
+          "index": 23
+        },
+        "name": "run_terminal_command",
+        "input": {
+          "command": "cd /tmp/f9-1-verify && cat > /tmp/run_mutants.sh <<'SH'\nset -u\ncd /tmp/f9-1-verify\nT=records::timeline\nrun() { name=\"$1\"; file=\"$2\"; from=\"$3\"; to=\"$4\"; filt=\"$5\"\n  cp \"$file\" /tmp/b.rs\n  python3 - \"$file\" \"$from\" \"$to\" <<'EOF'\nimport sys, pathlib\np=pathlib.Path(sys.argv[1]); s=p.read_text()\nif sys.argv[2] not in s: print(\"NOPAT\"); sys.exit(7)\np.write_text(s.replace(sys.argv[2], sys.argv[3],1))\nEOF\n  if [ $? -eq 7 ]; then cp /tmp/b.rs \"$file\"; echo \"$name  SKIP-pattern\"; return; fi\n  out=$(cargo test --lib \"$filt\" 2>&1 | tail -3)\n  cp /tmp/b.rs \"$file\"\n  if echo \"$out\" | grep -q \"test result: ok\"; then echo \"$name  SURVIVED\"; else echo \"$name  KILLED\"; fi\n}\nrun \"M1 node parent-seq strict\"  src/records/timeline/node.rs    'if parent.seq >= seq {' 'if parent.seq > seq {' \"$T\"\nrun \"M2 node root depth\"         src/records/timeline/node.rs    'seq, depth: 1 }' 'seq, depth: 0 }' \"$T\"\nrun \"M3 checked parent strict\"   src/records/timeline/checked.rs 'if parent.seq >= node.seq || parent.depth + 1 != node.depth {' 'if parent.seq > node.seq {' \"$T\"\nrun \"M4 checked no-current\"      src/records/timeline/checked.rs '            Err(corrupt())' '            Ok(())' \"$T\"\nrun \"M5 A4 window-not-set\"       src/records/timeline/index.rs   '    for node_id in &nodes {\n        seqs.insert(seq_of(index, node_id)?);\n    }' '    let lo = seq_of(index, &nodes[0])?;\n    let hi = seq_of(index, target)?;\n    for s in lo..=hi {\n        seqs.insert(s);\n    }' \"$T\"\nrun \"M6 invent main\"             src/records/timeline/index.rs   '        return Ok(Some(VisibleRange::linear()));' '        return visible(index, Some(\"main\"), head);' \"$T\"\nrun \"M7 frozen accepts revision\" src/records/timeline/branch.rs  '    if branch.frozen {' '    if false {' \"$T\"\nrun \"M8 point kind free-form\"    src/records/timeline/branch.rs  '    if !POINT_KINDS.contains(&kind) {' '    if false {' \"$T\"\nrun \"M9 chain no bound\"          src/records/timeline/index.rs   '        if path.len() > index.nodes.len() {' '        if false {' \"$T\"\nrun \"M10 base off path\"          src/records/timeline/checked.rs '    if !chain(index, &branch.head)?.iter().any(|node_id| *node_id == branch.base_head) {' '    if false {' \"$T\"\nSH\nbash /tmp/run_mutants.sh 2>&1",
+          "description": "Run mutation battery against timeline guards",
+          "timeout": 600000
+        }
+      }
+    },
+    {
+      "timeline_seq": 814,
+      "at_ms": 1793693181766,
+      "type": "tool_result",
+      "event": {
+        "type": "tool_result",
+        "tool_call_id": "toolu_d6bd949133b04dc3959374ef",
+        "content": "exit: killed (timeout)\nM1 node parent-seq strict  KILLED\nM2 node root depth  KILLED\nM3 checked parent strict  KILLED\nM4 checked no-current  KILLED\nM5 A4 window-not-set  KILLED\nM6 invent main  KILLED\nM7 frozen accepts revision  KILLED\nM8 point kind free-form  KILLED\n"
+      }
+    },
+    {
+      "timeline_seq": 815,
+      "at_ms": 1793693181816,
+      "type": "tool",
+      "event": {
+        "state": "completed",
+        "call_id": "toolu_d6bd949133b04dc3959374ef",
+        "name": "run_terminal_command",
+        "outcome": "error",
+        "duration_ms": 300132
+      }
+    },
+    {
+      "timeline_seq": 827,
+      "at_ms": 1793693187045,
+      "type": "tool",
+      "event": {
+        "state": "started",
+        "call_id": "toolu_7d48362cc5cc4115800be409",
+        "turn": "12060310531163878208",
+        "step": {
+          "turn": "12060310531163878208",
+          "index": 24
+        },
+        "name": "run_terminal_command",
+        "input": {
+          "command": "cd /tmp/f9-1-verify && T=records::timeline && run() { name=\"$1\"; file=\"$2\"; from=\"$3\"; to=\"$4\"\n  cp \"$file\" /tmp/b2.rs\n  python3 - \"$file\" \"$from\" \"$to\" <<'EOF'\nimport sys, pathlib\np=pathlib.Path(sys.argv[1]); s=p.read_text()\nif sys.argv[2] not in s: print(\"NOPAT\"); sys.exit(7)\np.write_text(s.replace(sys.argv[2], sys.argv[3],1))\nEOF\n  if [ $? -eq 7 ]; then cp /tmp/b2.rs \"$file\"; echo \"$name SKIP\"; return; fi\n  out=$(cargo test --lib \"$T\" 2>&1 | tail -3); cp /tmp/b2.rs \"$file\"\n  echo \"$out\" | grep -q \"test result: ok\" && echo \"$name SURVIVED\" || echo \"$name KILLED\"; }\nrun \"M9 chain length bound\" src/records/timeline/index.rs '        if path.len() > index.nodes.len() {' '        if false {'\nrun \"M10 base on path\" src/records/timeline/checked.rs '    if !chain(index, &branch.head)?.iter().any(|node_id| *node_id == branch.base_head) {' '    if false {'",
+          "description": "Finish remaining two mutations",
+          "timeout": 420000
+        }
+      }
+    },
+    {
+      "timeline_seq": 837,
+      "at_ms": 1793693487348,
+      "type": "tool_result",
+      "event": {
+        "type": "tool_result",
+        "tool_call_id": "toolu_7d48362cc5cc4115800be409",
+        "content": "exit: killed (timeout)\nNOPAT\nM9 chain length bound SKIP\n"
+      }
+    },
+    {
+      "timeline_seq": 838,
+      "at_ms": 1793693487377,
+      "type": "tool",
+      "event": {
+        "state": "completed",
+        "call_id": "toolu_7d48362cc5cc4115800be409",
+        "name": "run_terminal_command",
+        "outcome": "error",
+        "duration_ms": 300273
+      }
+    },
+    {
+      "timeline_seq": 893,
+      "at_ms": 1793693498254,
+      "type": "tool",
+      "event": {
+        "state": "started",
+        "call_id": "toolu_52016fa4546b46e69690f274",
+        "turn": "12060310531163878208",
+        "step": {
+          "turn": "12060310531163878208",
+          "index": 27
+        },
+        "name": "run_terminal_command",
+        "input": {
+          "command": "cd /tmp/f9-1-verify && python3 - <<'EOF'\nimport pathlib\np = pathlib.Path('src/records/timeline/index.rs')\ns = p.read_text()\ns = s.replace('        if false {\\n            return Err(corrupt());\\n        }',\n              '        if path.len() > index.nodes.len() {\\n            return Err(corrupt());\\n        }', 1)\np.write_text(s)\nEOF\ngrep -n \"path.len()\" src/records/timeline/index.rs && diff <(sed -n '/pub(crate) fn chain/,/^}/p' src/records/timeline/index.rs) <(sed -n '/pub(crate) fn chain/,/^}/p' /Users/lordcasser/workspace/projects/solaris-agent/rust/src/records/timeline/index.rs) && echo \"RESTORED-OK\"",
+          "description": "Restore chain bound in /tmp copy"
+        }
+      }
+    },
+    {
+      "timeline_seq": 902,
+      "at_ms": 1793693498431,
+      "type": "tool_result",
+      "event": {
+        "type": "tool_result",
+        "tool_call_id": "toolu_52016fa4546b46e69690f274",
+        "content": "exit: 0\n63:        if path.len() > index.nodes.len() {\nRESTORED-OK\n"
+      }
+    },
+    {
+      "timeline_seq": 903,
+      "at_ms": 1793693498475,
+      "type": "tool",
+      "event": {
+        "state": "completed",
+        "call_id": "toolu_52016fa4546b46e69690f274",
+        "name": "run_terminal_command",
+        "outcome": "success",
+        "duration_ms": 165
+      }
+    },
+    {
+      "timeline_seq": 914,
+      "at_ms": 1793693502164,
+      "type": "tool",
+      "event": {
+        "state": "started",
+        "call_id": "toolu_f587e5a46d4046b5829d945c",
+        "turn": "12060310531163878208",
+        "step": {
+          "turn": "12060310531163878208",
+          "index": 28
+        },
+        "name": "run_terminal_command",
+        "input": {
+          "command": "cd /tmp/f9-1-verify && cp src/records/timeline/index.rs /tmp/b3.rs && python3 - <<'EOF'\nimport pathlib\np=pathlib.Path('src/records/timeline/index.rs'); s=p.read_text()\np.write_text(s.replace('if path.len() > index.nodes.len() {','if false {',1))\nEOF\ncargo test --lib records::timeline 2>&1 | tail -4; cp /tmp/b3.rs src/records/timeline/index.rs",
+          "description": "Mutation M9: remove chain loop bound",
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "timeline_seq": 922,
+      "at_ms": 1793693802270,
+      "type": "tool_result",
+      "event": {
+        "type": "tool_result",
+        "tool_call_id": "toolu_f587e5a46d4046b5829d945c",
+        "content": "exit: killed (timeout)\n"
+      }
+    },
+    {
+      "timeline_seq": 923,
+      "at_ms": 1793693802311,
+      "type": "tool",
+      "event": {
+        "state": "completed",
+        "call_id": "toolu_f587e5a46d4046b5829d945c",
+        "name": "run_terminal_command",
+        "outcome": "error",
+        "duration_ms": 300094
+      }
+    },
+    {
+      "timeline_seq": 935,
+      "at_ms": 1793693806091,
+      "type": "tool",
+      "event": {
+        "state": "started",
+        "call_id": "toolu_a8c36fcafb1c4ac8b0320e92",
+        "turn": "12060310531163878208",
+        "step": {
+          "turn": "12060310531163878208",
+          "index": 29
+        },
+        "name": "run_terminal_command",
+        "input": {
+          "command": "cd /tmp/f9-1-verify && grep -n \"if false {\\|path.len() > index\" src/records/timeline/index.rs | head; cp /tmp/b3.rs src/records/timeline/index.rs; grep -n \"path.len() > index\" src/records/timeline/index.rs && echo RESTORED",
+          "description": "Verify and restore after hang"
+        }
+      }
+    },
+    {
+      "timeline_seq": 944,
+      "at_ms": 1793693806231,
+      "type": "tool_result",
+      "event": {
+        "type": "tool_result",
+        "tool_call_id": "toolu_a8c36fcafb1c4ac8b0320e92",
+        "content": "exit: 0\n63:        if false {\n63:        if path.len() > index.nodes.len() {\nRESTORED\n"
+      }
+    },
+    {
+      "timeline_seq": 945,
+      "at_ms": 1793693806248,
+      "type": "tool",
+      "event": {
+        "state": "completed",
+        "call_id": "toolu_a8c36fcafb1c4ac8b0320e92",
+        "name": "run_terminal_command",
+        "outcome": "success",
+        "duration_ms": 129
+      }
+    }
+  ]
+}

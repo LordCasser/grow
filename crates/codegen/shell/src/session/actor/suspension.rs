@@ -197,7 +197,7 @@ impl SessionActor {
                 continue;
             }
             let body = if recipe.run_in_background {
-                match self.tool_context.task_output_tool_name.as_deref() {
+                match self.tool_context.subagent_wait_tool_name.as_deref() {
                     Some(output_tool) => {
                         let bridge = self.agent.borrow().tool_bridge().clone();
                         let param_names = bridge
@@ -206,7 +206,7 @@ impl SessionActor {
                             .and_then(|renderer| {
                                 renderer
                                     .param_names()
-                                    .remove(&tools::types::tool::ToolKind::BackgroundTaskAction)
+                                    .remove(&tools::types::tool::ToolKind::SubagentWait)
                             })
                             .unwrap_or_default();
                         tool_types::format_subagent_started_background(
@@ -407,6 +407,7 @@ impl SessionActor {
                             .data("tree release left an original child suspended"));
                     }
                     SubagentSnapshotStatus::Running { .. }
+                    | SubagentSnapshotStatus::RunningProgressUnavailable
                     | SubagentSnapshotStatus::Initializing
                     | SubagentSnapshotStatus::FinalizationPending { .. } => {}
                 }
@@ -452,17 +453,35 @@ impl SessionActor {
             .checkpoint
             .as_ref()
             .ok_or("runtime checkpoint missing")?;
-        if self.runtime_source_hash().await? != checkpoint.runtime_source_hash {
-            return Err(
-                "original workspace, Agent source or model route changed; tree remains suspended"
-                    .into(),
-            );
-        }
+        // Admission follows durable identities and execution dependencies:
+        // the loader validates workspace/selector/route and child birth grants;
+        // current tool permits, unknown Hook outcomes and frozen Workflow
+        // sources remain independent checks. Aggregate metadata is diagnostic.
         let events = self
             .chat_state_handle
             .timeline_events()
             .await
             .ok_or("Timeline unavailable")?;
+        let (_, saved_effort, saved_provider, saved_transport) =
+            crate::session::persistence::model_selection_at_frontier(&events, checkpoint.frontier)
+                .map_err(|error| error.to_string())?
+                .ok_or("original model route baseline is missing")?;
+        let route = self.model_route.snapshot();
+        let config = &route.sampling_config;
+        let transport = sampling_types::model_image_input_key_from_parts(
+            &config.model,
+            &config.api_backend,
+            &config.base_url,
+            &config.query_params,
+        );
+        if saved_provider != config.model
+            || saved_transport != transport
+            || saved_effort != config.reasoning_effort
+        {
+            return Err(
+                "original model route or reasoning effort changed; tree remains suspended".into(),
+            );
+        }
         let mut tool_names = std::collections::BTreeMap::new();
         let mut goal_id = None;
         let mut turn_kind = crate::session::TurnKind::Internal;

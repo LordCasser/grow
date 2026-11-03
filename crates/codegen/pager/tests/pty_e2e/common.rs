@@ -467,64 +467,7 @@ pub(crate) fn responses_api_tool_call_events(
     name: &str,
     arguments: &str,
 ) -> Vec<SseEvent> {
-    let mut events = Vec::new();
-    let mut seq = 0u64;
-    events.push(SseEvent::data(
-        json!({
-            "type": "response.created",
-            "sequence_number": seq,
-            "response": {
-                "id": "resp_read_hdr",
-                "object": "response",
-                "created_at": 1234567890,
-                "model": "test-model",
-                "status": "in_progress",
-                "output": []
-            }
-        })
-        .to_string(),
-    ));
-    seq += 1;
-    events.push(SseEvent::data(
-        json!({
-            "type": "response.function_call_arguments.delta",
-            "sequence_number": seq,
-            "item_id": call_id,
-            "output_index": 0,
-            "delta": arguments
-        })
-        .to_string(),
-    ));
-    seq += 1;
-    events.push(SseEvent::data(
-        json!({
-            "type": "response.completed",
-            "sequence_number": seq,
-            "response": {
-                "id": "resp_read_hdr",
-                "object": "response",
-                "created_at": 1234567890,
-                "model": "test-model",
-                "status": "completed",
-                "output": [{
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": arguments
-                }],
-                "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 20,
-                    "total_tokens": 30,
-                    "input_tokens_details": { "cached_tokens": 0 },
-                    "output_tokens_details": { "reasoning_tokens": 0 }
-                }
-            }
-        })
-        .to_string(),
-    ));
-    events.push(SseEvent::data("[DONE]".to_string()));
-    events
+    sse::responses_api_reasoning_then_tool_call_events("", call_id, name, arguments, "test-model")
 }
 
 /// [`chat_completions_tool_call_events`] with an explicit `tool_call` id, for
@@ -706,13 +649,30 @@ pub(crate) fn responses_api_parallel_tool_call_events(
         })
         .to_string(),
     ));
-    for (i, (call_id, _name, arguments)) in calls.iter().enumerate() {
+    for (i, (call_id, name, arguments)) in calls.iter().enumerate() {
+        seq += 1;
+        events.push(SseEvent::data(
+            json!({
+                "type": "response.output_item.added",
+                "sequence_number": seq,
+                "output_index": i,
+                "item": {
+                    "type": "function_call",
+                    "id": format!("item_{call_id}"),
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": "",
+                    "status": "in_progress"
+                }
+            })
+            .to_string(),
+        ));
         seq += 1;
         events.push(SseEvent::data(
             json!({
                 "type": "response.function_call_arguments.delta",
                 "sequence_number": seq,
-                "item_id": call_id,
+                "item_id": format!("item_{call_id}"),
                 "output_index": i,
                 "delta": arguments
             })
@@ -725,6 +685,7 @@ pub(crate) fn responses_api_parallel_tool_call_events(
         .map(|(call_id, name, arguments)| {
             json!({
                 "type": "function_call",
+                "id": format!("item_{call_id}"),
                 "call_id": call_id,
                 "name": name,
                 "arguments": arguments
@@ -817,20 +778,18 @@ pub(crate) fn chat_completions_parallel_tool_call_events(
     ]
 }
 
-/// Queue one scripted turn with parallel tool calls on both inference
-/// endpoints (see [`expect_tool_turn`]).
+/// Register one foreground turn with parallel tool calls on both inference
+/// endpoints (see [`expect_tool_turn`]). The expectation matcher prevents
+/// auxiliary requests from consuming the tool-call script.
 pub(crate) fn enqueue_parallel_tool_turn(
     content: &ContentController,
     calls: &[(&str, &str, String)],
-) {
-    content.enqueue_response(
-        "/v1/responses",
+) -> AgentTurnExpectation {
+    content.expect_agent_turn_with_responses(
+        "parallel tool turn",
         ScriptedResponse::sse(responses_api_parallel_tool_call_events(calls)),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
         ScriptedResponse::sse(chat_completions_parallel_tool_call_events(calls)),
-    );
+    )
 }
 
 /// Seed a target file under the isolated HOME and queue a scripted `read_file`

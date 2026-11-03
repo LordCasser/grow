@@ -167,14 +167,56 @@ impl JsonlStorageAdapter {
         mut remaining_bytes: Option<&mut u64>,
         mut remaining_records: Option<&mut usize>,
     ) -> io::Result<(JournalData, blake3::Hasher)> {
-        file.seek(io::SeekFrom::Start(0))?;
-        let mut reader = io::BufReader::new(file.take(complete_len));
-        let mut data = JournalData {
-            events: Vec::new(),
-            history: HistorySnapshot::default(),
-            state: history::AppendState::default(),
-        };
+        let mut events = Vec::new();
+        let mut history = HistorySnapshot::default();
+        let mut state = history::AppendState::default();
         let mut hash = blake3::Hasher::new();
+        Self::scan_journal_range(
+            file,
+            0..complete_len,
+            path,
+            &mut state,
+            &mut hash,
+            remaining_bytes.take(),
+            remaining_records.take(),
+            |record| {
+                history.push(&record);
+                if let JournalFact::Domain { event, .. } = record.fact {
+                    events.push(event);
+                }
+            },
+        )?;
+        history.bytes = complete_len;
+        history.prefix_hash = hash.finalize().to_hex().to_string();
+        Ok((
+            JournalData {
+                events,
+                history,
+                state,
+            },
+            hash,
+        ))
+    }
+
+    // One physical scanner for full readers and a proven unchanged prefix.
+    // The sink sees records only after the same wire and identity validation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the reader's existing optional byte/record budgets and caller-owned fold state at one scanner"
+    )]
+    fn scan_journal_range(
+        file: &mut std::fs::File,
+        range: std::ops::Range<u64>,
+        path: &Path,
+        state: &mut history::AppendState,
+        hash: &mut blake3::Hasher,
+        mut remaining_bytes: Option<&mut u64>,
+        mut remaining_records: Option<&mut usize>,
+        mut visit: impl FnMut(history::JournalRecord),
+    ) -> io::Result<()> {
+        file.seek(io::SeekFrom::Start(range.start))?;
+        let expected = range.end - range.start;
+        let mut reader = io::BufReader::new(file.take(expected));
         let mut line = Vec::new();
         let mut consumed = 0u64;
         loop {
@@ -209,26 +251,21 @@ impl JsonlStorageAdapter {
                 } else {
                     io::Error::new(
                         error.kind(),
-                        format!("{}:{}: {error}", path.display(), data.state.records + 1),
+                        format!("{}:{}: {error}", path.display(), state.records + 1),
                     )
                 }
             })?;
-            data.state.accept(&record)?;
-            data.history.push(&record);
-            if let JournalFact::Domain { event, .. } = record.fact {
-                data.events.push(event);
-            }
+            state.accept(&record)?;
+            visit(record);
             hash.update(&line);
         }
-        if consumed != complete_len {
+        if consumed != expected {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Timeline changed while reading committed prefix",
             ));
         }
-        data.history.bytes = complete_len;
-        data.history.prefix_hash = hash.finalize().to_hex().to_string();
-        Ok((data, hash))
+        Ok(())
     }
 
     pub(super) async fn append_journal_fact(
@@ -468,5 +505,69 @@ impl JsonlStorageAdapter {
         #[cfg(any(unix, windows))]
         let _ = FileExt::unlock(&lock);
         result
+    }
+}
+
+impl super::super::TimelineLedgerReader {
+    /// Consume a previously validated read projection only after proving its
+    /// complete prefix against this freshly pinned entity and snapshot.
+    pub(crate) fn read_timeline_projection(
+        mut self,
+        mut previous: Option<super::super::TimelineReadProjection>,
+    ) -> io::Result<super::super::TimelineReadProjection> {
+        let complete_len =
+            JsonlStorageAdapter::find_previous_newline(&mut self.file, self.snapshot_len)?
+                .map_or(0, |position| position + 1);
+        let mut hash = blake3::Hasher::new();
+        let reuse = if let Some(prior) = previous
+            .as_ref()
+            .filter(|prior| prior.complete_len <= complete_len)
+        {
+            self.file.seek(io::SeekFrom::Start(0))?;
+            let read = io::copy(&mut (&mut self.file).take(prior.complete_len), &mut hash)?;
+            read == prior.complete_len && hash.finalize() == prior.prefix_hash
+        } else {
+            false
+        };
+        let (mut timeline, mut state, start) = if reuse {
+            let prior = previous.take().unwrap();
+            (prior.timeline, prior.state, prior.complete_len)
+        } else {
+            // A changed prefix cannot reuse this fold. Release it before
+            // constructing its replacement, rather than retaining both.
+            drop(previous.take());
+            hash = blake3::Hasher::new();
+            (
+                chat_state::Timeline::default(),
+                history::AppendState::default(),
+                0,
+            )
+        };
+        let mut events = Vec::new();
+        JsonlStorageAdapter::scan_journal_range(
+            &mut self.file,
+            start..complete_len,
+            &self.label,
+            &mut state,
+            &mut hash,
+            None,
+            None,
+            |record| {
+                if let JournalFact::Domain { event, .. } = record.fact {
+                    events.push(event);
+                }
+            },
+        )?;
+        // Preserve the full reader's error order: validate all physical
+        // records before applying any new domain lifecycle facts.
+        timeline = timeline
+            .with_replayed_suffix(events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(super::super::TimelineReadProjection {
+            timeline,
+            state,
+            complete_len,
+            prefix_hash: hash.finalize(),
+        })
     }
 }

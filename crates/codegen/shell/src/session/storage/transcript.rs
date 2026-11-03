@@ -1194,6 +1194,7 @@ mod tests {
             resumed_from: None,
             parent_prompt_id: None,
             capability_mode: None,
+            birth_mcp_servers: Some(Default::default()),
             permission_mode: None,
             effective_permission_mode: None,
             workflow_run_id: None,

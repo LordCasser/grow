@@ -177,19 +177,21 @@ impl ChatStateActor {
 
     /// Repair the current Surface through the acknowledged Timeline path.
     /// Callers that are themselves durable boundaries must never expose a
-    /// repair that the ledger did not commit.
+    /// repair that the ledger did not commit. Some returns the existing healthy
+    /// owned copy for request reuse; None means a replacement was committed.
     pub(super) async fn ensure_conversation_integrity_durably(
         &mut self,
         reason: DanglingToolCallReason,
-    ) -> Result<(), crate::commands::TimelineWriteError> {
+    ) -> Result<Option<Vec<ConversationItem>>, crate::commands::TimelineWriteError> {
         let mut conversation = self.state.timeline.surface().to_vec();
         let report = crate::compaction_utils::repair_history_with_reason(&mut conversation, reason);
         if !report.changed() {
-            return Ok(());
+            return Ok(Some(conversation));
         }
         tracing::info!(?report, "Repaired conversation before durable boundary");
         self.replace_conversation_durably(conversation, MessageCause::IntegrityRepair)
-            .await
+            .await?;
+        Ok(None)
     }
 
     /// The command loop remains serialized across the two durable appends:
@@ -463,7 +465,8 @@ impl ChatStateActor {
         &mut self,
         item: ConversationItem,
     ) -> Result<crate::TimelineEvent, crate::commands::TimelineWriteError> {
-        self.ensure_conversation_integrity_durably(DanglingToolCallReason::UserCancelled)
+        let _ = self
+            .ensure_conversation_integrity_durably(DanglingToolCallReason::UserCancelled)
             .await?;
         let cause = message_cause(&item)?;
         let mut candidate = self.state.timeline.clone();

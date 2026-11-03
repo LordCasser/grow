@@ -1,6 +1,6 @@
-//! Workspace-only, subagent-free variant of `get_task_output` (delegates to [`TaskOutputTool`]).
+//! Terminal command output tool.
 
-use super::{TaskOutputTool, background_bash_requires_exprs};
+use super::{background_bash_requires_exprs, run_terminal_tasks};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use tool_types::{TaskOutputOutput, TaskOutputToolInput};
@@ -10,9 +10,9 @@ fn terminal_command_output_requires_expr() -> Expr<ToolRequirement> {
 }
 
 #[derive(Debug, Default)]
-pub struct GetTerminalCommandOutputTool;
+pub struct GetCommandOutputTool;
 
-impl crate::types::tool_metadata::ToolMetadata for GetTerminalCommandOutputTool {
+impl crate::types::tool_metadata::ToolMetadata for GetCommandOutputTool {
     fn kind(&self) -> ToolKind {
         ToolKind::BackgroundTaskAction
     }
@@ -29,7 +29,7 @@ impl crate::types::tool_metadata::ToolMetadata for GetTerminalCommandOutputTool 
 
 Usage notes:
 - Pass ${{ params.background_task_action.task_ids }} with one or more ids from ${%- if params is defined and params.execute is defined and params.execute.is_background %} ${{ params.execute.is_background }}=true commands${%- else %} background commands${%- endif %}${%- if tools.by_kind.monitor %} (a monitor's ${{ params.kill_task_action.task_id }} is returned by ${{ tools.by_kind.monitor }})${%- endif %}; for a single task use a one-element array. Multiple ids with a positive ${{ params.background_task_action.timeout_ms }} wait until all complete
-- Omit ${{ params.background_task_action.timeout_ms }} or pass 0 for a non-blocking status snapshot; set a positive ${{ params.background_task_action.timeout_ms }} to wait up to that many milliseconds, capped at {max_wait_ms}
+- Omit ${{ params.background_task_action.timeout_ms }} or pass 0 for a non-blocking status snapshot; set a positive ${{ params.background_task_action.timeout_ms }} to wait with a total call budget of that many milliseconds, capped at {max_wait_ms}
 - Returns current output, status, and exit code if completed${%- if tools.by_kind.read %}
 - If output is large, use ${{ tools.by_kind.read }} on the output_file path${%- endif %}"#
     }
@@ -39,17 +39,17 @@ Usage notes:
     }
 }
 
-impl tool_runtime::Tool for GetTerminalCommandOutputTool {
+impl tool_runtime::Tool for GetCommandOutputTool {
     type Args = TaskOutputToolInput;
     type Output = TaskOutputOutput;
 
     fn id(&self) -> tool_protocol::ToolId {
-        tool_protocol::ToolId::new("get_terminal_command_output").expect("valid tool id")
+        tool_protocol::ToolId::new("get_command_output").expect("valid tool id")
     }
 
     fn description(&self, _ctx: &::tool_runtime::ListToolsContext) -> tool_types::ToolDescription {
         tool_types::ToolDescription::new(
-            "get_terminal_command_output",
+            "get_command_output",
             crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
@@ -62,7 +62,7 @@ impl tool_runtime::Tool for GetTerminalCommandOutputTool {
     }
 
     #[tracing::instrument(
-        name = "tool.get_terminal_command_output",
+        name = "tool.get_command_output",
         skip_all,
         fields(waits = %input.waits())
     )]
@@ -71,7 +71,8 @@ impl tool_runtime::Tool for GetTerminalCommandOutputTool {
         ctx: tool_runtime::ToolCallContext,
         input: TaskOutputToolInput,
     ) -> Result<TaskOutputOutput, tool_runtime::ToolError> {
-        tool_runtime::Tool::run(&TaskOutputTool, ctx, input).await
+        let resources = crate::types::tool_metadata::shared_resources(&ctx)?;
+        run_terminal_tasks(&input.resolved_task_ids(), input.timeout_ms, resources).await
     }
 }
 
@@ -86,11 +87,8 @@ mod tests {
 
     #[test]
     fn tool_name_and_description_are_subagent_free() {
-        let tool = GetTerminalCommandOutputTool;
-        assert_eq!(
-            tool_runtime::Tool::id(&tool).as_str(),
-            "get_terminal_command_output"
-        );
+        let tool = GetCommandOutputTool;
+        assert_eq!(tool_runtime::Tool::id(&tool).as_str(), "get_command_output");
         let tmpl = ToolMetadata::description_template(&tool);
         assert!(tmpl.contains("background terminal command"));
         assert!(
@@ -101,7 +99,7 @@ mod tests {
 
     #[test]
     fn output_wait_is_observation_only() {
-        let tool = GetTerminalCommandOutputTool;
+        let tool = GetCommandOutputTool;
         assert_eq!(
             tool_runtime::Tool::capabilities(&tool).max_access,
             tool_protocol::ToolAccess::Read
@@ -109,11 +107,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegates_to_task_output_for_running_task() {
+    async fn returns_running_terminal_snapshot() {
         let snapshot = make_snapshot("tc-1", false, None);
         let resources = resources_with_terminal(Some(snapshot));
         let result = tool_runtime::Tool::run(
-            &GetTerminalCommandOutputTool,
+            &GetCommandOutputTool,
             test_ctx(resources.into_shared()),
             TaskOutputToolInput {
                 task_ids: vec!["tc-1".into()],
@@ -133,11 +131,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegates_to_task_output_for_completed_task() {
+    async fn returns_completed_terminal_snapshot() {
         let snapshot = make_snapshot("tc-2", true, Some(0));
         let resources = resources_with_terminal(Some(snapshot));
         let result = tool_runtime::Tool::run(
-            &GetTerminalCommandOutputTool,
+            &GetCommandOutputTool,
             test_ctx(resources.into_shared()),
             TaskOutputToolInput {
                 task_ids: vec!["tc-2".into()],

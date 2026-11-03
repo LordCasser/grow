@@ -874,19 +874,17 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             long_help: None,
         },
         ActionDef {
-            id: ActionId::DashboardStop,
-            label: "delete",
-            description: "Stop / Delete agent",
+            id: ActionId::SessionCommands,
+            label: "commands",
+            description: "Session commands",
             default_key: key!('x', CONTROL),
             alt_keys: vec![],
-            category: Category::Dashboard,
-            context: When::DashboardFocused,
+            category: Category::Session,
+            context: When::Always,
             hint_priority: None,
             hint_key_display: None,
             requires_confirmation: false,
-            long_help: Some(
-                "On a busy top-level row, Ctrl+X cancels the running turn. Once the row is idle, press Ctrl+X again within 2s to permanently delete the session.\nOn a subagent row, Ctrl+X kills the subagent.",
-            ),
+            long_help: Some("Open session commands: M Model, A Agent, E Effort, P Permission, B Behavior, C Close session, D Delete history.\nRepeat the prefix to stop session work; idle sessions stay open.\nDelete has its own confirmation."),
         },
         ActionDef {
             id: ActionId::DashboardToggleGrouping,
@@ -1063,24 +1061,6 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             hint_key_display: Some("Ctrl+]"),
             requires_confirmation: false,
             long_help: None,
-        },
-        // Dashboard-parity stop inside the session overlay — state
-        // machine documented at `dispatch_dashboard_overlay_stop`.
-        // Ctrl+X is the overlay's stop chord.
-        ActionDef {
-            id: ActionId::DashboardOverlayStop,
-            label: "stop",
-            description: "Stop agent, close session (back to dashboard)",
-            default_key: key!('x', CONTROL),
-            alt_keys: vec![],
-            category: Category::Dashboard,
-            context: When::DashboardOverlay,
-            hint_priority: None,
-            hint_key_display: Some("Ctrl+x"),
-            requires_confirmation: true,
-            long_help: Some(
-                "Inside a session overlay, stops the attached agent and closes it, returning you to the dashboard list.\nRequires confirmation: press Ctrl+X twice.",
-            ),
         },
     ]);
 

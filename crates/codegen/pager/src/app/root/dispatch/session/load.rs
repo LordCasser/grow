@@ -722,6 +722,14 @@ pub(in crate::app::root::dispatch) fn handle_session_load_failed(
         agent.session.replay_first_applied = None;
         agent.session.replay_first_frame = false;
         agent.session.replay_live_cursor_seen = false;
+        if agent.pending_fork_banner.is_some() {
+            agent.unbind_session_id();
+            return super::fork::handle_fork_session_failed(
+                app,
+                agent_id,
+                format!("Couldn't load fork: {error}"),
+            );
+        }
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
         load_return_view = agent.load_return_view.take();
@@ -741,16 +749,19 @@ pub(in crate::app::root::dispatch) fn handle_session_load_failed(
         }
     }
     if let Some(return_view) = load_return_view {
-        app.agents.shift_remove(&agent_id);
-        match return_view {
-            crate::app::root::ActiveView::Welcome => show_welcome(app),
-            crate::app::root::ActiveView::Agent(origin) if app.agents.contains_key(&origin) => {
-                switch_to_agent(app, origin, SwitchCause::Load);
+        let foreground = app.active_view == crate::app::root::ActiveView::Agent(agent_id);
+        super::modal::retire_agent_view(app, agent_id);
+        if foreground {
+            match return_view {
+                crate::app::root::ActiveView::Welcome => show_welcome(app),
+                crate::app::root::ActiveView::Agent(origin) if app.agents.contains_key(&origin) => {
+                    switch_to_agent(app, origin, SwitchCause::Load);
+                }
+                crate::app::root::ActiveView::AgentDashboard if app.dashboard.is_some() => {
+                    app.active_view = crate::app::root::ActiveView::AgentDashboard;
+                }
+                _ => show_welcome(app),
             }
-            crate::app::root::ActiveView::AgentDashboard if app.dashboard.is_some() => {
-                app.active_view = crate::app::root::ActiveView::AgentDashboard;
-            }
-            _ => show_welcome(app),
         }
         app.show_toast(&format!("Couldn't load session: {error}"));
     }

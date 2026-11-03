@@ -124,7 +124,7 @@ pub struct TerminalRunRequest {
     ///
     /// When set, the terminal actor stores this on the `ProcessEntry` so
     /// `get_task()` returns it in `TaskSnapshot.display_command`. This
-    /// ensures model-facing `get_task_output` shows the user's command
+    /// ensures model-facing `get_command_output` shows the user's command
     /// instead of the `unshare`/mount wrapper.
     pub display_command: Option<String>,
 

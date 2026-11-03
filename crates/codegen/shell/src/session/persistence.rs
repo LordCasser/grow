@@ -133,6 +133,16 @@ type PersistedModelSelection = (
     sampling_types::ModelImageInputKey,
 );
 
+/// The checkpoint frontier binds the actual destination of the saved task;
+/// later catalog observations are not permission to redirect its continuation.
+pub(crate) fn model_selection_at_frontier(
+    events: &[chat_state::TimelineEvent],
+    frontier: chat_state::EventSeq,
+) -> io::Result<Option<PersistedModelSelection>> {
+    let end = events.partition_point(|event| event.seq <= frontier);
+    latest_model_selection(&events[..end])
+}
+
 /// Fold model selection facts into the latest durable selection.
 ///
 /// Matching observations are a closed contract: malformed or discontinuous
@@ -2938,6 +2948,7 @@ pub(crate) async fn new_child(
     lineage: SessionLineage,
     initial_surface: Vec<ConversationItem>,
     initial_prompt_blobs: ImmutablePromptBlobs,
+    initial_presentation: crate::session::history::SeedPresentation,
 ) -> io::Result<(
     PersistenceHandle,
     chat_state::Timeline,
@@ -2952,6 +2963,7 @@ pub(crate) async fn new_child(
             initial_summary,
             initial_surface,
             initial_prompt_blobs,
+            initial_presentation,
             vec![chat_state::TimelineEventKind::SubagentSeed(
                 lineage.subagent_seed,
             )],

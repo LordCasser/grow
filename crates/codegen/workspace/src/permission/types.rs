@@ -387,6 +387,9 @@ impl AccessKind {
                 glob: g.glob.clone(),
             },
             ToolInput::TaskOutput(_)
+            | ToolInput::SubagentList(_)
+            | ToolInput::SubagentStatus(_)
+            | ToolInput::SubagentWait(_)
             | ToolInput::Lsp(_)
             | ToolInput::MemorySearch(_)
             | ToolInput::MemoryGet(_)

@@ -47,11 +47,8 @@ pub enum Action {
     ExitSession,
     /// Exit session without double-press confirmation (e.g., from command palette).
     ExitSessionConfirmed,
-    /// `/delete`: confirm, then delete history and return home.
+    /// Confirm permanent deletion of the current session history.
     DeleteCurrentSession,
-    DeleteCurrentSessionAnswered {
-        confirmed: bool,
-    },
     /// Open an arbitrary URL in the system browser (with scheme validation).
     OpenUrl(String),
     /// Open a semantic scrollback link.
@@ -703,8 +700,7 @@ pub enum Action {
     /// Attach to a dashboard row — switches to the parent agent and
     /// (for subagent rows) sets the parent's `active_subagent`.
     DashboardAttach(crate::views::dashboard::DashboardRowId),
-    /// Submit the dispatch-input contents: either a filter, a new
-    /// top-level agent, or a no-op when too short.
+    /// Submit the new-session composer contents.
     /// `attach` mirrors Ctrl+S (dispatch + attach / "send + open").
     DashboardDispatch {
         text: String,
@@ -727,24 +723,17 @@ pub enum Action {
     DashboardCommitRename,
     /// Cancel an in-progress rename without committing.
     DashboardCancelRename,
-    /// Ctrl+X on the selected row. Top-level: cancels a running turn on a
-    /// busy row, else double-press permanently deletes an idle row.
-    /// Subagent: kills the subagent.
+    /// Stop work on the selected session or subagent. This never closes a
+    /// session or deletes its history.
     DashboardStop,
-    /// Confirm permanent delete of the armed dashboard row.
+    /// Request permanent-delete confirmation for the selected eligible row.
     DashboardDelete,
     /// Cycle the dispatch input's mode for the next spawned agent
     /// (Normal → Plan → Always-Approve → Normal). Bound to Shift+Tab.
     DashboardCycleMode,
-    /// Cycle the PEEKED agent's live mode (Normal → Plan → Always-Approve
-    /// → Normal) — the peek-panel counterpart to [`Self::DashboardCycleMode`].
-    /// Unlike that staged dispatch mode, this changes the existing agent
-    /// directly (same effect as Shift+Tab inside the agent's chat view).
-    /// Emitted when Shift+Tab fires while the peek panel is open.
-    DashboardPeekCycleMode,
-    /// Toggle grouping (State ↔ Directory).
+    /// Cycle overview grouping: Open, State, then Directory.
     DashboardToggleGrouping,
-    /// Set the live filter (typically driven by the dispatch input).
+    /// Set the live overview filter.
     DashboardSetFilter(crate::views::dashboard::FilterValue),
     /// Move selection cursor one row down.
     DashboardSelectNext,
@@ -754,27 +743,24 @@ pub enum Action {
     DashboardReorderUp,
     /// Reorder the selected row one slot down (Shift+↓).
     DashboardReorderDown,
-    /// Exit the dashboard's session-overlay (the bordered
-    /// `[Prev] [Next] [✗]` chrome wrapped around an attached
-    /// agent view). Returns to the dashboard with the cursor on
-    /// the previously attached row. Bound to Esc / Ctrl+\\ /
-    /// `[✗]` click inside the overlay.
+    /// Return from attached session detail to the Dashboard. Triggered by
+    /// Ctrl+\\ or the explicit Dashboard control, not ordinary detail keys.
     DashboardOverlayExit,
-    /// Cycle the dashboard's session-overlay to the previous
-    /// top-level agent in the row list (`[Prev]` click or
-    /// Ctrl+\[).
+    /// Cycle attached detail to the previous locally open session. The
+    /// cycle order is independent of Dashboard filtering and grouping.
     DashboardOverlayPrev,
-    /// Cycle the dashboard's session-overlay to the next
-    /// top-level agent in the row list (`[Next]` click or
-    /// Ctrl+\]).
+    /// Cycle attached detail to the next locally open session.
     DashboardOverlayNext,
-    /// Confirmed stop from inside the dashboard's session-overlay:
-    /// close the attached session and return to the dashboard. State
-    /// machine documented at `dispatch_dashboard_overlay_stop`.
-    DashboardOverlayStop,
+    /// Stop work in the attached session; the detail view remains open.
+    StopSessionWork,
+    /// Request an acknowledged close of the active session.
+    CloseCurrentSession,
+    /// Confirm or cancel the active session-history deletion dialog.
+    ConfirmSessionDelete,
+    CancelSessionDelete,
     /// Toggle worktree-dispatch mode: when on, the next agent dispatched
     /// from the dashboard spawns in a fresh git worktree (and the `[+ New
-    /// Agent]` button reads `[+ New Worktree]`). Bound to Ctrl+W. Gated on
+    /// session]` button reads `[+ New Worktree]`). Bound to Ctrl+W. Gated on
     /// the cwd being a git repo — worktrees require one, so the toggle is a
     /// no-op (with an explanatory toast) outside a repo.
     DashboardToggleWorktree,
@@ -789,7 +775,7 @@ pub enum Action {
     /// from the modal-chrome `CloseRequested` outcome and from
     /// Esc when the modal is open.
     DashboardCloseShortcutsHelp,
-    /// Focus the header's `[+ New Agent]` button. Mirrors a
+    /// Focus the header's `[+ New session]` button. Mirrors a
     /// row-selection action — the button becomes the cursor
     /// target, the previous row selection (if any) clears, and
     /// the dispatch input's placeholder flips back to the
@@ -797,10 +783,10 @@ pub enum Action {
     /// from the first row, and the button's mouse-click handler.
     DashboardFocusNewAgentButton,
     /// Create a new session AND open its detail view. Routed
-    /// from `[+ New Agent]` click and from Enter-on-empty-prompt
+    /// from `[+ New session]` click and from Enter-on-empty-prompt
     /// while the button is focused. Distinct from
-    /// `DashboardDispatch` (which queues a prompt + stays on the
-    /// dashboard) because the no-prompt path has no text to
+    /// `DashboardDispatch` (which queues a prompt and follows its
+    /// `attach` choice) because the no-prompt path has no text to
     /// enqueue and the user expects to land inside the new
     /// agent's view immediately.
     DashboardCreateNewAgentWithDetail,
@@ -830,49 +816,6 @@ pub enum Action {
     /// the dialog's Enter submit.
     DashboardConfirmWorktree {
         label: Option<String>,
-    },
-    /// Answer a permission request via the dashboard peek panel.
-    ///
-    /// Carries `request_id` captured at peek-toggle time so that a
-    /// stale answer (the front-of-queue changed between snapshot and
-    /// number-key press) can be detected and dropped instead of
-    /// popping the wrong permission.
-    DashboardPermissionSelect {
-        row: crate::views::dashboard::DashboardRowId,
-        request_id: usize,
-        option_id: acp::PermissionOptionId,
-    },
-    /// Reject the peeked agent's pending permission with a typed
-    /// feedback message (the peek panel's "No, type to add feedback"
-    /// path). Resolves the front request with the `RejectOnce` option
-    /// and the text attached as `followup_message` meta — mirroring the
-    /// agent view's `PermissionFollowup`. `request_id` guards against a
-    /// stale answer if the queue rotated.
-    DashboardPermissionFollowup {
-        row: crate::views::dashboard::DashboardRowId,
-        request_id: usize,
-        text: String,
-    },
-    /// Answer the peeked agent's pending `AskUserQuestion` (the Ask tool)
-    /// from the dashboard peek panel. `option_idx` selects an option;
-    /// `None` with non-empty `freeform` submits the "Other" free-text
-    /// answer. Only valid for a single-question, single-select ext ask.
-    DashboardQuestionAnswer {
-        row: crate::views::dashboard::DashboardRowId,
-        tool_call_id: String,
-        option_idx: Option<usize>,
-        freeform: String,
-    },
-    /// Send / queue a reply to the peeked agent from the dashboard
-    /// peek panel's `❯ reply` input. The reply targets `row`'s owning
-    /// top-level agent: when it is idle the prompt is sent immediately
-    /// (a turn starts), when it is mid-turn the prompt is queued and
-    /// drains after the current turn finishes. `attach` (Ctrl+S)
-    /// additionally walks into the agent's detail view.
-    DashboardPeekReply {
-        row: crate::views::dashboard::DashboardRowId,
-        text: String,
-        attach: bool,
     },
     /// Open the memory browser modal.
     OpenMemoryModal,
@@ -1043,12 +986,6 @@ pub enum ClipboardPasteTarget {
     },
     /// Dashboard new-session dispatch input.
     DashboardDispatch,
-    /// Dashboard peek reply input. `row` is the peeked row at enqueue time; the
-    /// completion drops the paste if the panel closed or moved to another row,
-    /// so the attachment can't land in a different agent's reply.
-    DashboardPeek {
-        row: crate::views::dashboard::DashboardRowId,
-    },
 }
 impl ClipboardPasteTarget {
     /// Diagnostic surface label for the empty-clipboard paste-key event.
@@ -1056,7 +993,6 @@ impl ClipboardPasteTarget {
         match self {
             Self::AgentPrompt { .. } => "agent",
             Self::DashboardDispatch => "dashboard",
-            Self::DashboardPeek { .. } => "peek",
         }
     }
 }
@@ -1873,6 +1809,12 @@ pub enum Effect {
     },
     /// Unregister a session from the active-sessions registry (clean exit).
     UnregisterActiveSession { session_id: acp::SessionId },
+    /// Retire a runtime without deleting its persisted history.
+    CloseSession {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+    },
     /// Quit the application.
     Quit,
     /// Ask the shell to suspend the session tree before allowing exit.
@@ -1890,6 +1832,7 @@ pub enum Effect {
         session_id: String,
         cwd: String,
         after: AfterSessionDelete,
+        bindings: Vec<(AgentId, u32)>,
     },
     /// Deep-search sessions by content (FTS via ACP).
     DeepSearchSessions { query: String, seq: u64 },
@@ -2613,6 +2556,13 @@ pub enum TaskResult {
         nonce: u64,
     },
     /// Session rename completed successfully.
+    SessionCloseResolved {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        result: Result<(), String>,
+    },
+    /// Session rename completed successfully.
     RenameSessionComplete {
         agent_id: AgentId,
         title: String,
@@ -2626,11 +2576,15 @@ pub enum TaskResult {
     DeleteSessionComplete {
         session_id: String,
         after: AfterSessionDelete,
+        bindings: Vec<(AgentId, u32)>,
     },
     /// Session delete failed.
     DeleteSessionFailed {
         session_id: String,
         error: String,
+        /// None: transport/acknowledgement unknown; false: preflight preserved it.
+        runtime_invalidated: Option<bool>,
+        bindings: Vec<(AgentId, u32)>,
     },
     /// Context info fetched successfully.
     ContextInfoComplete {
@@ -2775,8 +2729,8 @@ pub enum TaskResult {
         new_session_id: acp::SessionId,
         cwd: std::path::PathBuf,
     },
-    /// `grow/session/fork` failed. The placeholder agent stays in
-    /// `app.agents` with no `session_id` so the user can switch away.
+    /// `grow/session/fork` failed. Empty placeholders retire; unsubmitted
+    /// input remains in a failed local draft.
     ForkSessionFailed {
         agent_id: AgentId,
         error: String,

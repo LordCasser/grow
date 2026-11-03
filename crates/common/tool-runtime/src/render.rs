@@ -87,6 +87,8 @@ impl ToolOutput for String {}
 /// Lets `tool_types::TaskOutputOutput` be used directly as a `Tool::Output`
 /// (handy for stub/test tools and pass-through proxies).
 impl ToolOutput for tool_types::TaskOutputOutput {}
+impl ToolOutput for tool_types::ListSubagentOutput {}
+impl ToolOutput for tool_types::GetSubagentStatusOutput {}
 
 /// Lets `tool_types::SubagentCompletedOutput` be used directly as a
 /// `Tool::Output` (the `task` tool's structured completion output).
@@ -726,3 +728,5 @@ mod tests {
         );
     }
 }
+
+impl ToolOutput for tool_types::WaitSubagentOutput {}

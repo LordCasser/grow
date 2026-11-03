@@ -28,7 +28,7 @@
 //!   recursively, so `objects/` and `modules/` (13k+ dirs on big repos) cost
 //!   nothing. `GROW_FSNOTIFY_PER_DIR=1|0` overrides the platform default.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -658,15 +658,60 @@ fn select_per_dir_watch_dirs(
     root: &Path,
     custom_ignore: &Option<GlobSet>,
     custom_include: &Option<GlobSet>,
-) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = pruning_walker(root, custom_ignore, custom_include)
+    budget: usize,
+) -> (Vec<PathBuf>, usize) {
+    let candidates = pruning_walker(root, custom_ignore, custom_include)
         .flatten()
-        .filter(|e| e.depth() > 0 && e.file_type().is_some_and(|ft| ft.is_dir()))
-        .map(|e| e.into_path())
-        .collect();
-    // Walk order is DFS; re-order shallow-first so a budget cut is depth-based.
-    dirs.sort_by_key(|d| d.components().count());
-    dirs
+        .filter_map(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                return None;
+            }
+            let depth = entry.path().components().count();
+            Some((depth, entry.into_path()))
+        });
+    select_shallowest_paths(candidates, budget)
+}
+
+/// Retain only the shallowest candidates while still counting the complete
+/// input. The ordinal reproduces stable sort order for paths at equal depth.
+fn select_shallowest_paths(
+    candidates: impl IntoIterator<Item = (usize, PathBuf)>,
+    budget: usize,
+) -> (Vec<PathBuf>, usize) {
+    let mut candidates = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (depth, path))| (depth, ordinal, path));
+    let mut selected: Vec<_> = candidates.by_ref().take(budget).collect();
+    let mut total = selected.len();
+    let Some(first_overflow) = candidates.next() else {
+        // Candidates were collected in source-ordinal order, so stable depth
+        // sorting preserves the same (depth, ordinal) total order.
+        selected.sort_by_key(|(depth, _, _)| *depth);
+        return (
+            selected.into_iter().map(|(_, _, path)| path).collect(),
+            total,
+        );
+    };
+
+    let mut heap = BinaryHeap::from(selected);
+    for (depth, ordinal, path) in std::iter::once(first_overflow).chain(candidates) {
+        total += 1;
+        if heap
+            .peek()
+            .is_some_and(|(deepest, latest, _)| (depth, ordinal) < (*deepest, *latest))
+        {
+            heap.pop();
+            heap.push((depth, ordinal, path));
+        }
+    }
+    (
+        heap.into_sorted_vec()
+            .into_iter()
+            .map(|(_, _, path)| path)
+            .collect(),
+        total,
+    )
 }
 
 /// The watches a discovered `.git` dir needs in per-dir mode, replacing the
@@ -1063,15 +1108,18 @@ pub(crate) fn start_with_timeout(
                 // `Some(dirs)` whenever the root watch is non-recursive.
                 let initial = match strategy {
                     WatchStrategy::PerDir => {
-                        let mut dirs =
-                            select_per_dir_watch_dirs(&watch_path, &custom_ignore, &custom_include);
-                        if dirs.len() > budget {
+                        let (dirs, total) = select_per_dir_watch_dirs(
+                            &watch_path,
+                            &custom_ignore,
+                            &custom_include,
+                            budget,
+                        );
+                        if total > budget {
                             tracing::warn!(
                                 "fs_notify: {} non-ignored dirs exceed watch budget {budget}; \
                                  shedding the deepest (raise with GROW_FSNOTIFY_MAX_WATCHES)",
-                                dirs.len()
+                                total
                             );
-                            dirs.truncate(budget);
                         }
                         Some(dirs)
                     }
@@ -3303,7 +3351,8 @@ mod tests {
             fs::create_dir_all(root.join("svc/target/debug/deps")).unwrap();
             fs::create_dir_all(root.join("svc/src")).unwrap();
 
-            let dirs = select_per_dir_watch_dirs(root, &None, &None);
+            let (dirs, total) = select_per_dir_watch_dirs(root, &None, &None, usize::MAX);
+            assert_eq!(total, dirs.len());
             let names = rel(&dirs, root);
 
             for expected in ["web", "web/src", "web/src/components", "svc", "svc/src"] {
@@ -3334,7 +3383,8 @@ mod tests {
             fs::create_dir_all(root.join("a/b/c/d")).unwrap();
             fs::create_dir_all(root.join("z")).unwrap();
 
-            let dirs = select_per_dir_watch_dirs(root, &None, &None);
+            let (dirs, total) = select_per_dir_watch_dirs(root, &None, &None, usize::MAX);
+            assert_eq!(total, dirs.len());
             let depths: Vec<usize> = dirs.iter().map(|d| d.components().count()).collect();
             let mut sorted = depths.clone();
             sorted.sort_unstable();
@@ -3351,7 +3401,8 @@ mod tests {
             fs::create_dir_all(root.join("keep/sub")).unwrap();
 
             let (ignore, include) = build_globsets(&["skipme".to_string()]);
-            let dirs = select_per_dir_watch_dirs(root, &ignore, &include);
+            let (dirs, total) = select_per_dir_watch_dirs(root, &ignore, &include, usize::MAX);
+            assert_eq!(total, dirs.len());
             let names = rel(&dirs, root);
 
             assert!(names.contains(&"keep".to_string()));
@@ -3373,7 +3424,8 @@ mod tests {
             fs::create_dir_all(root.join("real")).unwrap();
             std::os::unix::fs::symlink(outside.path(), root.join("linked")).unwrap();
 
-            let dirs = select_per_dir_watch_dirs(root, &None, &None);
+            let (dirs, total) = select_per_dir_watch_dirs(root, &None, &None, usize::MAX);
+            assert_eq!(total, dirs.len());
             let names = rel(&dirs, root);
             assert!(names.contains(&"real".to_string()));
             assert!(
@@ -3554,6 +3606,130 @@ mod tests {
                 &mut added,
             );
             assert!(added.is_empty(), "symlink must not be added: {added:?}");
+        }
+
+        fn old_stable_sort_truncate(
+            mut candidates: Vec<(usize, PathBuf)>,
+            budget: usize,
+        ) -> (Vec<PathBuf>, usize) {
+            candidates.sort_by_key(|(depth, _)| *depth);
+            let total = candidates.len();
+            candidates.truncate(budget);
+            (
+                candidates.into_iter().map(|(_, path)| path).collect(),
+                total,
+            )
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum CandidateDepths {
+            Mixed,
+            Equal,
+            CyclicUp,
+            CyclicDown,
+        }
+
+        fn synthetic_candidates(count: usize, shape: CandidateDepths) -> Vec<(usize, PathBuf)> {
+            (0..count)
+                .map(|ordinal| {
+                    let depth = match shape {
+                        CandidateDepths::Mixed => 1 + ordinal.wrapping_mul(17) % 6,
+                        CandidateDepths::Equal => 4,
+                        CandidateDepths::CyclicUp => 1 + ordinal % 6,
+                        CandidateDepths::CyclicDown => 6 - ordinal % 6,
+                    };
+                    let mut path = PathBuf::from("/synthetic-root");
+                    for component in 0..depth {
+                        path.push(format!("p{ordinal:05}-{component}"));
+                    }
+                    (path.components().count(), path)
+                })
+                .collect()
+        }
+
+        fn old_select_per_dir_watch_dirs(
+            root: &Path,
+            custom_ignore: &Option<GlobSet>,
+            custom_include: &Option<GlobSet>,
+            budget: usize,
+        ) -> (Vec<PathBuf>, usize) {
+            let dirs: Vec<_> = pruning_walker(root, custom_ignore, custom_include)
+                .flatten()
+                .filter(|entry| {
+                    entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir())
+                })
+                .map(|entry| entry.into_path())
+                .collect();
+            old_stable_sort_truncate(
+                dirs.into_iter()
+                    .map(|path| (path.components().count(), path))
+                    .collect(),
+                budget,
+            )
+        }
+
+        #[test]
+        fn bounded_per_dir_selection_matches_stable_sort_boundaries() {
+            for shape in [
+                CandidateDepths::Mixed,
+                CandidateDepths::Equal,
+                CandidateDepths::CyclicUp,
+                CandidateDepths::CyclicDown,
+            ] {
+                for count in [0, 1, 128, 512, 2_048, 12_000] {
+                    let candidates = synthetic_candidates(count, shape);
+                    let mut budgets = vec![0, 1, 8, 128, count, DEFAULT_MAX_WATCHES];
+                    budgets.sort_unstable();
+                    budgets.dedup();
+                    for budget in budgets {
+                        let expected = old_stable_sort_truncate(candidates.clone(), budget);
+                        let actual = select_shallowest_paths(candidates.clone(), budget);
+                        assert_eq!(
+                            actual.1, count,
+                            "full candidate count for {shape:?}, N={count}, B={budget}"
+                        );
+                        assert_eq!(
+                            actual.0, expected.0,
+                            "stable selection for {shape:?}, N={count}, B={budget}"
+                        );
+                        assert_eq!(actual.0.len(), count.min(budget));
+                    }
+                }
+            }
+
+            // Input order is the stable tie-breaker, even when it is opposite
+            // to the lexical order of the path components.
+            let reversed_equal_depth = synthetic_candidates(32, CandidateDepths::Equal)
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>();
+            for budget in [8, DEFAULT_MAX_WATCHES] {
+                let expected = old_stable_sort_truncate(reversed_equal_depth.clone(), budget);
+                let actual = select_shallowest_paths(reversed_equal_depth.clone(), budget);
+                assert_eq!(actual, expected, "reversed lexical tie order at B={budget}");
+            }
+        }
+
+        #[test]
+        fn bounded_per_dir_selection_matches_actual_12000_directory_walk() {
+            let temp = TempDir::new().unwrap();
+            for group in 0..120 {
+                let group_path = temp.path().join(format!("g{group:03}"));
+                fs::create_dir(&group_path).unwrap();
+                for child in 0..99 {
+                    fs::create_dir(group_path.join(format!("d{child:03}"))).unwrap();
+                }
+            }
+
+            for budget in [8, DEFAULT_MAX_WATCHES] {
+                let expected = old_select_per_dir_watch_dirs(temp.path(), &None, &None, budget);
+                let actual = select_per_dir_watch_dirs(temp.path(), &None, &None, budget);
+                assert_eq!(actual.1, 12_000);
+                assert_eq!(
+                    actual, expected,
+                    "actual filesystem selection at B={budget}"
+                );
+            }
         }
     }
 

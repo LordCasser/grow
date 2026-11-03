@@ -8,6 +8,8 @@ mod grow_facts;
 pub(crate) use grow_facts::GrowHistoryFact;
 mod projector;
 pub(crate) use projector::{HISTORY_CURSOR_KEY, PreparedHistory};
+mod seed;
+pub(crate) use seed::SeedPresentation;
 
 use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};

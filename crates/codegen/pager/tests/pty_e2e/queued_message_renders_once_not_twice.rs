@@ -96,12 +96,7 @@ async fn queued_message_renders_once_not_twice() {
         "timeout_ms": 600_000
     })
     .to_string();
-    let _wait_turn = expect_tool_turn(
-        &content,
-        "call_qonce_wait",
-        "get_command_or_subagent_output",
-        wait_args,
-    );
+    let _wait_turn = expect_tool_turn(&content, "call_qonce_wait", "get_command_output", wait_args);
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
     // The wait parks the turn with the row HELD: the status row explains the

@@ -106,16 +106,6 @@ pub(crate) struct DeferredDispatchSend {
     pub(crate) attach: bool,
 }
 
-/// A peek-reply send (reply to an existing agent) stashed while a clipboard
-/// attachment probe is off-thread. `row` pins the reply's target so a peek
-/// that closed or moved to another row drops the stash instead of replying to
-/// the wrong agent.
-#[derive(Debug)]
-pub(crate) struct DeferredPeekSend {
-    pub(crate) row: DashboardRowId,
-    pub(crate) attach: bool,
-}
-
 /// Persistent identity for a pinned/reordered row.
 ///
 /// Replaces the previous `AgentId(usize)`-keyed
@@ -182,11 +172,6 @@ impl PersistedRowId {
     }
 }
 
-/// Window within which a second confirming gesture (`Ctrl+X`, a `[✗]`
-/// click, or `y`) deletes the armed row. Also reused by the
-/// dashboard-overlay stop for its double-press close confirm.
-pub const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// Coarse state used for the dashboard grouping.
 ///
 /// See [`super::row::classify_top_level`] / [`super::row::classify_subagent`]
@@ -251,7 +236,7 @@ impl RowState {
             Self::NeedsInput => "Awaiting",
             Self::Working => "Working",
             Self::Idle => "Idle",
-            Self::Inactive => "Inactive",
+            Self::Inactive => "Not opened here",
             Self::Completed => "Done",
             Self::Failed => "Failed",
             Self::Blocked => "Blocked",
@@ -292,8 +277,10 @@ pub enum Focusable {
 /// Grouping mode for the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Grouping {
-    /// Group by `RowState` (the default).
+    /// Stable session identity order; activity never reorders rows.
     #[default]
+    Open,
+    /// Optional activity grouping for the overview only.
     State,
     /// Group by working directory (one section per cwd).
     Directory,
@@ -303,7 +290,8 @@ impl Grouping {
     pub fn toggled(self) -> Self {
         match self {
             Self::State => Self::Directory,
-            Self::Directory => Self::State,
+            Self::Directory => Self::Open,
+            Self::Open => Self::State,
         }
     }
 }
@@ -406,7 +394,7 @@ pub struct DashboardState {
     pub hovered_row: Option<DashboardRowId>,
     /// Section-header cursor target. When `Some`, a collapsible section
     /// title (e.g. "Working") holds the cursor instead of a row or the
-    /// `[+ New Agent]` button. Mutually exclusive with [`Self::selected`]
+    /// `[+ New session]` button. Mutually exclusive with [`Self::selected`]
     /// and [`Self::new_agent_button_focused`].
     pub selected_section: Option<SectionKey>,
     /// Hovered section header (mouse-move driven); the renderer brightens
@@ -447,8 +435,10 @@ pub struct DashboardState {
     /// yellow `Search:`, and Enter confirms (keeps the filter,
     /// leaves search) while Esc / `Ctrl+/` cancel (clear it).
     pub search_mode: bool,
-    /// Dispatch / filter input widget.
+    /// New-session composer; row selection and search never change its target.
     pub dispatch: PromptWidget,
+    /// Independent search editor, preserving composer undo and attachments.
+    pub search_query: PromptWidget,
     /// In-flight deferred clipboard attachment probes for this dashboard. A send
     /// while `> 0` is stashed per surface so a paste-then-immediate-send never
     /// builds content blocks before the image attaches.
@@ -456,55 +446,17 @@ pub struct DashboardState {
     /// A dispatch-input send deferred until the in-flight paste probe(s)
     /// complete; re-issued (with the now-updated widget text) on completion.
     pub(crate) deferred_dispatch_send: Option<DeferredDispatchSend>,
-    /// A peek-reply send deferred the same way; per-surface slots so stashing
-    /// one surface can never overwrite the other's pending send.
-    pub(crate) deferred_peek_send: Option<DeferredPeekSend>,
     /// Peek panel state (Space toggles).
     pub peek: Option<PeekPanelState>,
     /// Session-scoped guest viewport for the live-tail peek (capture once
     /// on select; sticky while the same row is peeked; restore on leave).
     pub(crate) peek_viewport: Option<PeekViewportLease>,
-    /// The peek panel's `❯ reply` input — a full [`PromptWidget`] so
-    /// the reply gets paste chips (`[Pasted: N lines]`), word
-    /// navigation, undo, and text selection exactly like [`Self::dispatch`].
-    /// Owned here (NOT inside [`PeekPanelState`]) because a widget
-    /// carries a fuzzy-file-matcher daemon thread and the panel struct
-    /// is rebuilt whenever the selection cursor lands on a row. The
-    /// draft is cleared when the peeked row changes or the panel
-    /// closes (see [`Self::set_peek`]). `@` file completion is live
-    /// (applied from the async completion edge, rooted at the peeked agent's cwd — see
-    /// [`Self::peek_reply_cwd`]); slash completion stays inert because
-    /// the dashboard never refreshes its snapshot for this widget.
-    pub peek_reply: PromptWidget,
-    /// Last frame's screen rect of the peek reply input (the `❯ reply`
-    /// row, or the reject-feedback slot in question mode). Mirrors
-    /// [`Self::dispatch_rect`]: consumed by mouse handling for
-    /// click-to-focus and drag text selection. `None` while the peek
-    /// is closed.
-    pub peek_reply_rect: Option<Rect>,
-    /// Directory the reply's `@` file-search daemon is currently rooted
-    /// at. Tracked so [`Self::ensure_peek_reply_cwd`] can skip a
-    /// `retarget` (which drops the daemon so the next @-use rebuilds it)
-    /// when the peeked agent's cwd hasn't actually changed. `None` = the
-    /// construction default (`.`); set to the launch cwd at dashboard open.
-    peek_reply_cwd: Option<PathBuf>,
-    /// Cwd of the currently-peeked agent, recorded by the render pass
-    /// (which has the agents map). Applied lazily to the reply's `@`
-    /// picker on first compose — NOT on every cursor move — so merely
-    /// navigating past agents in other directories spawns no matcher
-    /// threads. `None` when no row is peeked or the row has no local
-    /// agent (roster).
-    peek_reply_target_cwd: Option<PathBuf>,
     /// Inline-rename state for `Ctrl+R` — `Some` when the cursor is on a
     /// row and the user is mid-edit.
     pub rename: Option<RenameDraft>,
     /// Latest transient dashboard feedback. Tone and text are kept separate
     /// so success, warning and error states share one presentation path.
     pub feedback: Option<UiFeedback>,
-    /// Row armed for delete, and when. A second gesture on the same row
-    /// within [`CONFIRM_WINDOW`] deletes it (see [`Self::armed_delete_row`]);
-    /// otherwise it lapses. Cleared on any focus change.
-    pub delete_confirm: Option<(DashboardRowId, Instant)>,
     /// Shared monotonic sample installed by the app before this frame renders.
     /// Transient render context; never persisted and never advanced by events.
     pub motion_frame: crate::motion::FrameStamp,
@@ -527,31 +479,9 @@ pub struct DashboardState {
     pub idle_overflow_rect: Option<Rect>,
     /// Last frame's content-area rect for resize-aware peek toggling.
     pub last_area: Rect,
-    /// When `Some(id)`, an agent conversation is
-    /// attached as a popup overlay on top of the dashboard. The
-    /// agent's full view (scrollback + prompt) renders inside the
-    /// popup rect; input is routed to that agent (Esc closes the
-    /// popup, returning to the dashboard rows). For subagent
-    /// attaches, the parent agent's `active_subagent` field is also
-    /// set so the subagent's child view renders within the parent's
-    /// own subagent takeover.
+    /// Agent session currently attached to the dashboard overlay.
     pub attached_agent: Option<AgentId>,
-    /// Hit rect for the popup's `[✗]` close
-    /// affordance. Populated by the renderer when the popup chrome
-    /// is painted; consumed by `handle_mouse` to dispatch a popup
-    /// close on click. `None` when no popup is open or the popup
-    /// is too small for the affordance.
-    pub popup_close_rect: Option<Rect>,
-    /// Outer rect of the popup overlay (border
-    /// included). Populated by the renderer; consumed by
-    /// `handle_mouse` to:
-    ///   - swallow clicks that land on the popup chrome (border /
-    ///     title row) instead of dispatching dashboard actions, and
-    ///   - dispatch `DashboardAttach(clicked_row)` when the user
-    ///     clicks a dashboard row OUTSIDE this rect (switches the
-    ///     popup target to the clicked row).
-    pub popup_outer_rect: Option<Rect>,
-    /// Hit area for the header's `[+ New Agent]`
+    /// Hit area for the header's `[+ New session]`
     /// button. Painted by `render_header` and consumed by the mouse
     /// handler to create a new session. Carries both the rect (for
     /// click hit-testing) and a `hovered` flag (driven by mouse-move
@@ -604,7 +534,7 @@ pub struct DashboardState {
     /// Last mouse-down on a row + timestamp, used to detect a
     /// double-click as the "attach" gesture.
     pub last_click: Option<(DashboardRowId, Instant)>,
-    /// Last mouse-down on dispatch / peek-reply (paste-chip double-click).
+    /// Last mouse-down on dispatch (paste-chip double-click).
     pub last_prompt_click: Option<Instant>,
     /// Rect that closes the peek when clicked (`[×]`).
     pub peek_close_rect: Option<Rect>,
@@ -614,6 +544,7 @@ pub struct DashboardState {
     /// `list_focused` — regardless of vim mode. `None` while peek mode
     /// or an attached-agent overlay replaces the input.
     pub dispatch_rect: Option<Rect>,
+    pub(crate) search_text_rect: Option<Rect>,
     /// Top of the visible row window. Clamped so the
     /// selected row stays visible. Wheel + PgUp/PgDn adjust this.
     pub viewport_offset: usize,
@@ -633,7 +564,7 @@ pub struct DashboardState {
     /// list. Cleared on close (Esc, `[✗]`, or the chrome's
     /// CloseRequested).
     pub shortcuts_modal: Option<Box<ShortcutsModalState>>,
-    /// True when the header's `[+ New Agent]` button has focus.
+    /// True when the header's `[+ New session]` button has focus.
     ///
     /// The button is the default selection target when no row is
     /// selected — Up-arrow from the first row, Esc deselect, and
@@ -708,7 +639,7 @@ pub struct DashboardState {
     /// Prompt state stashed while [`Self::worktree_dialog`] is open.
     pub pending_worktree_prompt: Option<crate::views::prompt_widget::StashedPrompt>,
     /// Whether confirming the in-flight [`Self::worktree_dialog`] should open
-    /// the new agent's detail view (`true` — the `[+ New Agent]` button and
+    /// the new agent's detail view (`true` — the `[+ New session]` button and
     /// `Ctrl+S` "send + open") or stay on the dashboard (`false` — a plain
     /// `Enter` prompt-send). Stashed alongside [`Self::pending_worktree_prompt`]
     /// when the dialog opens; consumed on confirm. Mirrors the `attach` flag of
@@ -1372,11 +1303,6 @@ impl DashboardState {
         // /compact, /fork, /rewind — they make no sense with no session).
         let mut dispatch = PromptWidget::new();
         dispatch.hide_session_scoped_commands();
-        // The peek reply is a quick single-row input — compact mode
-        // lowers the `[Pasted: N lines]` chip threshold to 2 lines so
-        // multi-line pastes fold instead of overflowing the row.
-        let mut peek_reply = PromptWidget::new();
-        peek_reply.set_compact(true);
         Self {
             selected: None,
             hovered_row: None,
@@ -1400,18 +1326,13 @@ impl DashboardState {
             filter: Filter::None,
             search_mode: false,
             dispatch,
+            search_query: PromptWidget::new(),
             paste_probe_in_flight: 0,
             deferred_dispatch_send: None,
-            deferred_peek_send: None,
             peek: None,
             peek_viewport: None,
-            peek_reply,
-            peek_reply_rect: None,
-            peek_reply_cwd: None,
-            peek_reply_target_cwd: None,
             rename: None,
             feedback: None,
-            delete_confirm: None,
             motion_frame: crate::motion::FrameStamp::default(),
             row_rects: Vec::new(),
             row_delete_rects: Vec::new(),
@@ -1420,8 +1341,6 @@ impl DashboardState {
             idle_overflow_rect: None,
             last_area: Rect::default(),
             attached_agent: None,
-            popup_close_rect: None,
-            popup_outer_rect: None,
             new_agent_button_hit: crate::app::agent_view::HitArea::default(),
             slash_dropdown_items_area: None,
             slash_dropdown_hit: Default::default(),
@@ -1435,6 +1354,7 @@ impl DashboardState {
             last_prompt_click: None,
             peek_close_rect: None,
             dispatch_rect: None,
+            search_text_rect: None,
             viewport_offset: 0,
             manual_scroll_active: false,
             shortcuts_modal: None,
@@ -1462,43 +1382,38 @@ impl DashboardState {
         }
     }
 
-    /// Adopt the shared slash MRU store (owned by `AppView`) into both the
-    /// dispatch input and the peek-reply input so dashboard slash completion
-    /// shares command recency with agent prompts.
+    /// Adopt the shared slash MRU store (owned by `AppView`) into the dispatch
+    /// input so dashboard slash completion shares command recency with agent
+    /// prompts.
     pub(crate) fn adopt_slash_mru(
         &mut self,
         mru: std::rc::Rc<std::cell::RefCell<crate::slash::mru::SlashMru>>,
     ) {
-        self.dispatch.adopt_slash_mru(mru.clone());
-        self.peek_reply.adopt_slash_mru(mru);
+        self.dispatch.adopt_slash_mru(mru);
     }
 
-    /// Adopt the shared per-command tag map (owned by `AppView`) into both the
-    /// dispatch input and the peek-reply input so dashboard slash completion
-    /// renders the same tags as agent prompts.
+    /// Adopt the shared per-command tag map (owned by `AppView`) into the
+    /// dispatch input so dashboard slash completion renders the same tags as
+    /// agent prompts.
     pub(crate) fn adopt_command_tags(
         &mut self,
         command_tags: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>,
     ) {
-        self.dispatch.adopt_command_tags(command_tags.clone());
-        self.peek_reply.adopt_command_tags(command_tags);
+        self.dispatch.adopt_command_tags(command_tags);
     }
 
     pub(crate) fn set_screen_mode(&mut self, mode: crate::app::ScreenMode) {
         self.dispatch.set_screen_mode(mode);
-        self.peek_reply.set_screen_mode(mode);
     }
 
     pub(crate) fn set_recap_visible(&mut self, visible: bool) {
         self.dispatch.set_recap_visible(visible);
-        self.peek_reply.set_recap_visible(visible);
     }
 
-    /// Gate `/auto` on both dashboard prompt registries (dispatch + peek
-    /// reply). See [`crate::slash::SlashController::set_auto_mode_available`].
+    /// Gate `/auto` on the dashboard prompt registry. See
+    /// [`crate::slash::SlashController::set_auto_mode_available`].
     pub(crate) fn set_auto_mode_available(&mut self, available: bool) {
         self.dispatch.set_auto_mode_available(available);
-        self.peek_reply.set_auto_mode_available(available);
     }
 
     pub(crate) fn set_feedback(&mut self, tone: NoticeTone, msg: impl Into<String>) {
@@ -1525,7 +1440,7 @@ impl DashboardState {
         self.feedback = None;
     }
 
-    /// Focus the header's `[+ New Agent]` button. Clears any
+    /// Focus the header's `[+ New session]` button. Clears any
     /// row selection so the "button focused → no row selected"
     /// invariant stays honoured. Idempotent — safe to call when
     /// the button is already focused.
@@ -1534,7 +1449,6 @@ impl DashboardState {
         self.selected = None;
         self.selected_section = None;
         self.selected_idle_overflow = false;
-        self.delete_confirm = None;
     }
 
     /// Focus the row identified by `id`. Clears the
@@ -1544,13 +1458,6 @@ impl DashboardState {
     /// risk — the invariant only holds when both fields are
     /// written through here.
     pub fn focus_row(&mut self, id: DashboardRowId) {
-        if self
-            .delete_confirm
-            .as_ref()
-            .is_some_and(|(armed, _)| armed != &id)
-        {
-            self.delete_confirm = None;
-        }
         self.selected = Some(id);
         self.new_agent_button_focused = false;
         self.selected_section = None;
@@ -1558,14 +1465,13 @@ impl DashboardState {
     }
 
     /// Focus the section header identified by `key` — the third cursor
-    /// target alongside rows and the `[+ New Agent]` button. Clears the
+    /// target alongside rows and the `[+ New session]` button. Clears the
     /// row selection and button focus so exactly one cursor is active.
     pub fn focus_section(&mut self, key: SectionKey) {
         self.selected_section = Some(key);
         self.selected = None;
         self.new_agent_button_focused = false;
         self.selected_idle_overflow = false;
-        self.delete_confirm = None;
     }
 
     /// Focus the Idle group's "N more" overflow toggle —
@@ -1576,77 +1482,10 @@ impl DashboardState {
         self.selected = None;
         self.selected_section = None;
         self.new_agent_button_focused = false;
-        self.delete_confirm = None;
     }
 
     fn set_list_focused(&mut self, focused: bool) {
         self.list_focused = focused;
-        if !focused {
-            self.delete_confirm = None;
-        }
-    }
-
-    /// The armed row while its [`CONFIRM_WINDOW`] is still live, clearing
-    /// an expired arm as a side effect. The accessor the dispatcher and
-    /// mouse handler share so "armed on screen" and "armed for delete"
-    /// never diverge.
-    pub fn armed_delete_row(&mut self) -> Option<DashboardRowId> {
-        match &self.delete_confirm {
-            Some((id, at)) if at.elapsed() < CONFIRM_WINDOW => Some(id.clone()),
-            Some(_) => {
-                self.delete_confirm = None;
-                None
-            }
-            None => None,
-        }
-    }
-
-    /// Read-only counterpart of [`Self::armed_delete_row`] for the
-    /// renderer (does not clear an expired arm).
-    pub fn armed_delete_row_ref(&self) -> Option<&DashboardRowId> {
-        self.armed_delete_row_ref_at(Instant::now())
-    }
-
-    pub fn armed_delete_row_ref_at(&self, now: Instant) -> Option<&DashboardRowId> {
-        self.delete_confirm
-            .as_ref()
-            .filter(|(_, at)| now < *at + CONFIRM_WINDOW)
-            .map(|(id, _)| id)
-    }
-
-    pub fn delete_confirm_deadline(&self) -> Option<Instant> {
-        self.delete_confirm
-            .as_ref()
-            .map(|(_, armed_at)| *armed_at + CONFIRM_WINDOW)
-    }
-
-    pub fn maintain_delete_confirm(&mut self, now: Instant) -> bool {
-        if self
-            .delete_confirm_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.delete_confirm = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn arm_delete(&mut self, id: DashboardRowId) {
-        self.delete_confirm = Some((id, Instant::now()));
-    }
-
-    /// Enforce the invariant that a delete arm belongs to the selected
-    /// row. Selection changes routed through the focus helpers already
-    /// disarm, but `reanchor_selection` / `gc_stale_refs` can drop or move
-    /// `selected` directly — without this a stale arm would let a later
-    /// `y` delete a row that is no longer selected.
-    fn sync_delete_confirm_to_selection(&mut self) {
-        if let Some((armed, _)) = self.delete_confirm.as_ref()
-            && self.selected.as_ref() != Some(armed)
-        {
-            self.delete_confirm = None;
-        }
     }
 
     /// Toggle whether the Idle group shows every agent (`true`) or caps
@@ -1686,7 +1525,8 @@ impl DashboardState {
     /// and the prior filter so the query builds from empty.
     pub fn enter_search_mode(&mut self) {
         self.search_mode = true;
-        self.dispatch.set_text("");
+        self.set_list_focused(false);
+        self.search_query.set_text("");
         self.filter = Filter::None;
         self.feedback = None;
         self.manual_scroll_active = false;
@@ -1698,7 +1538,7 @@ impl DashboardState {
     /// `search_mode` off; see [`Self::handle_key`].)
     pub fn exit_search_mode(&mut self) {
         self.search_mode = false;
-        self.dispatch.set_text("");
+        self.search_query.set_text("");
         self.filter = Filter::None;
         self.manual_scroll_active = false;
     }
@@ -1810,20 +1650,13 @@ impl DashboardState {
             self.last_click = None;
         }
         // `attached_agent` is keyed by `AgentId`, not
-        // `DashboardRowId`, so we materialise the equivalent
-        // `DashboardRowId::TopLevel` and probe `alive`. Clears the
-        // popup gracefully when the underlying session was closed
-        // outside the dashboard (e.g. via another surface).
+        // `DashboardRowId`, so materialise the equivalent top-level row
+        // and clear the attach if its session closed elsewhere.
         if let Some(agent_id) = self.attached_agent
             && !alive(&DashboardRowId::TopLevel(agent_id))
         {
-            // close_popup() also clears
-            // `popup_close_rect` / `popup_outer_rect` so the
-            // invariant ("None attached_agent → None hit rects")
-            // holds at every close site, not just here.
             self.close_popup();
         }
-        self.sync_delete_confirm_to_selection();
     }
 
     /// Switch grouping (`Ctrl+G`).
@@ -1937,24 +1770,16 @@ impl DashboardState {
     /// Every site that toggles `peek` now goes
     /// through this helper so the close-rect can't be left stale.
     ///
-    /// Reply-draft lifecycle: the dashboard-owned [`Self::peek_reply`]
-    /// draft dies with the panel it was typed for — it is cleared
-    /// whenever the peeked ROW changes through this helper (close,
-    /// open, or retarget). Per-frame refreshes of an open panel go
-    /// through `PeekPanelState::apply_fields` (not here), so an
-    /// in-progress draft survives live updates.
-    ///
     /// Does **not** restore the live-tail viewport lease — permission
     /// refresh may call `set_peek(None)` while the same row stays
     /// selected and reopens next paint.
     pub fn set_peek(&mut self, peek: Option<PeekPanelState>) {
         if peek.is_none() {
             self.peek_close_rect = None;
-            self.peek_reply_rect = None;
         }
         let row_changed = peek.as_ref().map(|p| &p.row) != self.peek.as_ref().map(|p| &p.row);
         if row_changed {
-            self.clear_peek_reply();
+            self.last_prompt_click = None;
         }
         self.peek = peek;
     }
@@ -2035,72 +1860,11 @@ impl DashboardState {
         lease.page_flip_entry = Some(entry_id);
     }
 
-    /// Clear the peek reply draft AND its undo history.
-    ///
-    /// The history wipe is the load-bearing part: `set_text("")` alone
-    /// records a `Replace` checkpoint, leaving the prior draft one
-    /// `Ctrl+Z` away. On a row change that resurrected reply would
-    /// target a DIFFERENT agent — exactly the mis-send the draft clear
-    /// exists to prevent — so every lifecycle clear (row change, panel
-    /// open/close, post-send, per-question reset) routes through here.
-    pub(crate) fn clear_peek_reply(&mut self) {
-        self.peek_reply.set_text("");
-        self.peek_reply.clear_history();
-        self.last_prompt_click = None;
-    }
-
-    /// Record the peeked agent's working directory so the reply's `@`
-    /// picker can later resolve `@paths` against it. Called by the
-    /// render pass (the only place with the agents map); the actual
-    /// `retarget` is deferred to [`Self::ensure_peek_reply_cwd`].
-    pub(crate) fn set_peek_reply_target_cwd(&mut self, cwd: Option<PathBuf>) {
-        self.peek_reply_target_cwd = cwd;
-    }
-
-    /// Lazily root the reply's `@` file-search daemon at the peeked
-    /// agent's cwd (recorded in [`Self::peek_reply_target_cwd`]).
-    ///
-    /// Applied only when it differs from the daemon's current root, and only
-    /// when the user composes into the reply (never on a bare cursor move),
-    /// because `retarget` throws away the built matcher daemon and the next
-    /// @-use rebuilds it. So navigating past a dozen agents in other
-    /// directories costs nothing; the single retarget happens on the first
-    /// keystroke or paste into the reply, deduped by cwd.
-    fn ensure_peek_reply_cwd(&mut self) {
-        if let Some(target) = self.peek_reply_target_cwd.clone()
-            && self.peek_reply_cwd.as_deref() != Some(target.as_path())
-        {
-            self.peek_reply.file_search.retarget(&target);
-            self.peek_reply_cwd = Some(target);
-        }
-    }
-
-    /// The file-search state backing the `@` dropdown that is actually
-    /// on screen: the peek reply's while the panel is open (the dropdown
-    /// is drawn from `peek_reply` then — see `render_dashboard`),
-    /// otherwise the dispatch box's. Used to route mouse-wheel scrolling
-    /// to the SAME picker the user is looking at, so wheel navigation
-    /// matches the rendered list.
+    /// The file-search state backing the dashboard's new-session composer.
     pub(crate) fn dropdown_file_search_mut(
         &mut self,
     ) -> &mut crate::views::file_search::FileSearchState {
-        if self.peek.is_some() {
-            &mut self.peek_reply.file_search
-        } else {
-            &mut self.dispatch.file_search
-        }
-    }
-
-    /// Feed a key to the reply widget after ensuring its `@` picker is
-    /// rooted at the peeked agent's cwd. All reply-composing paths route
-    /// through here so the lazy retarget lands before a freshly typed
-    /// `@` kicks off the directory walk on a stale root.
-    fn peek_reply_handle_key(
-        &mut self,
-        key: &KeyEvent,
-    ) -> crate::views::prompt_widget::PromptEvent {
-        self.ensure_peek_reply_cwd();
-        self.peek_reply.handle_key(key)
+        &mut self.dispatch.file_search
     }
 
     /// Convenience for closing the peek panel.
@@ -2108,20 +1872,9 @@ impl DashboardState {
         self.set_peek(None);
     }
 
-    /// Atomically clear all popup state
-    /// when the overlay closes. `attached_agent`, `popup_close_rect`,
-    /// and `popup_outer_rect` are semantically linked: a `None`
-    /// `attached_agent` should never leave behind "stale Some" hit
-    /// rects, because a future contributor reading
-    /// `popup_outer_rect` without the `attached_agent` guard would
-    /// get a phantom hit area. Centralising the clear here keeps the
-    /// invariant honest at every close site (Esc / Ctrl+\\ key
-    /// handlers, `[✗]` mouse click, `dispatch_exit_dashboard`,
-    /// `dispatch_open_dashboard`'s toggle branch).
+    /// Clear the attached session and its overlay header hit areas.
     pub fn close_popup(&mut self) {
         self.attached_agent = None;
-        self.popup_close_rect = None;
-        self.popup_outer_rect = None;
         self.overlay_close_hit.clear();
         self.overlay_prev_hit.clear();
         self.overlay_next_hit.clear();
@@ -2175,34 +1928,119 @@ impl DashboardState {
             return InputOutcome::Unchanged;
         }
 
+        if self.search_mode {
+            match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if key.code == KeyCode::Esc || key!('/', CONTROL).matches(key) {
+                        self.exit_search_mode();
+                        return InputOutcome::Changed;
+                    }
+                    if key.modifiers.is_empty() {
+                        if key.code == KeyCode::Up {
+                            return InputOutcome::Action(Action::DashboardSelectPrev);
+                        }
+                        if key.code == KeyCode::Down {
+                            return InputOutcome::Action(Action::DashboardSelectNext);
+                        }
+                    }
+                    if key.code == KeyCode::Enter || key.code == KeyCode::Tab {
+                        self.search_mode = false;
+                        self.search_query.set_text("");
+                        self.list_focused = key.code == KeyCode::Enter;
+                        return InputOutcome::Changed;
+                    }
+                    if crate::input::key::is_paste_key(key) {
+                        match crate::clipboard::system_clipboard_read_text() {
+                            Ok(Some(text)) => {
+                                self.search_query.textarea.insert_str(&text);
+                            }
+                            Ok(None) => {}
+                            Err(_) => self.set_error("Unable to read clipboard text"),
+                        }
+                    } else {
+                        self.search_query.handle_key(key);
+                    }
+                }
+                Event::Paste(text) => {
+                    if crate::wrap_clipboard_image::try_decode_wrap_host_image_paste(text).is_none()
+                    {
+                        self.search_query.textarea.insert_str(text);
+                    }
+                }
+                Event::Mouse(mouse)
+                    if mouse.kind
+                        == crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left,
+                        )
+                        && self.search_text_rect.is_some_and(|rect| {
+                            rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        }) =>
+                {
+                    use unicode_segmentation::UnicodeSegmentation;
+                    use unicode_width::UnicodeWidthStr;
+                    let rect = self.search_text_rect.unwrap();
+                    let viewport = ratatui_textarea::EditBuffer::from_parts(
+                        self.search_query.text(),
+                        self.search_query.cursor(),
+                    )
+                    .single_line_viewport(rect.width as usize);
+                    let mut byte = viewport.visible_byte_range.start;
+                    let mut column = 0;
+                    let target = mouse.column.saturating_sub(rect.x) as usize;
+                    for (index, grapheme) in self.search_query.text()
+                        [viewport.visible_byte_range.clone()]
+                    .grapheme_indices(true)
+                    {
+                        if column + grapheme.width() > target {
+                            break;
+                        }
+                        byte = viewport.visible_byte_range.start + index + grapheme.len();
+                        column += grapheme.width();
+                    }
+                    self.search_query.set_cursor(byte);
+                    self.list_focused = false;
+                    return InputOutcome::Changed;
+                }
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        crossterm::event::MouseEventKind::Drag(_)
+                            | crossterm::event::MouseEventKind::Up(_)
+                    ) =>
+                {
+                    return InputOutcome::Unchanged;
+                }
+                Event::Mouse(mouse) => return self.handle_mouse(mouse),
+                _ => return InputOutcome::Unchanged,
+            }
+            let text = self.search_query.text();
+            self.filter = if text.trim().is_empty() {
+                Filter::None
+            } else {
+                Filter::from_value(parse_filter(text.trim()))
+            };
+            self.manual_scroll_active = false;
+            return InputOutcome::Changed;
+        }
+
         match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 self.handle_key(key, registry, effects)
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            // Bracketed paste — wrap magic first (never as text); when the
-            // peek panel is open it owns the paste (text + images into
-            // `peek_reply`), mirroring the Ctrl/Cmd+V chord in
-            // `handle_peek_key` (without this, terminals that deliver paste
-            // as `Event::Paste` would leak into the HIDDEN new-session
-            // dispatch input). Otherwise route through the dispatch paste
-            // pipeline.
+            // Bracketed paste — wrap magic first (never as text), then route
+            // through the new-session dispatch paste pipeline.
             Event::Paste(text) => {
                 if let Some(wrap) =
                     crate::wrap_clipboard_image::try_decode_wrap_host_image_paste(text)
                 {
                     return match wrap {
                         crate::wrap_clipboard_image::WrapImagePaste::Image(data) => {
-                            let pasted = crate::prompt_images::from_clipboard_data(&data);
-                            if self.peek.is_some() {
-                                if let Some(p) = self.peek.as_mut() {
-                                    p.focused = true;
-                                }
-                                self.ensure_peek_reply_cwd();
-                                self.attach_peek_pasted_image(pasted, effects).0
-                            } else {
-                                self.attach_pasted_image(pasted, effects).0
-                            }
+                            self.attach_pasted_image(
+                                crate::prompt_images::from_clipboard_data(&data),
+                                effects,
+                            )
+                            .0
                         }
                         crate::wrap_clipboard_image::WrapImagePaste::NoImage => {
                             InputOutcome::Unchanged
@@ -2211,7 +2049,6 @@ impl DashboardState {
                 }
                 self.handle_bracketed_paste(
                     text,
-                    self.peek.is_some(),
                     paste_provenance.may_probe_clipboard_attachments(),
                     effects,
                 )
@@ -2220,9 +2057,7 @@ impl DashboardState {
         }
     }
 
-    /// Bracketed-paste payload into the dispatch input (`peek = false`) or the
-    /// peek reply (`peek = true`).
-    ///
+    /// Bracketed-paste payload into the new-session dispatch input.
     /// A file-path / URL paste attaches as `[Image #N]` / path chips
     /// synchronously and wins; else the clipboard image / file-url probe defers
     /// off the event loop (the image wins over the caption, which is inserted on
@@ -2232,47 +2067,14 @@ impl DashboardState {
     fn handle_bracketed_paste(
         &mut self,
         text: &str,
-        peek: bool,
         probe_clipboard_attachments: bool,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
-        // The peek reply has extra preconditions the dispatch input does not.
-        let in_question = if peek {
-            let Some(p) = self.peek.as_ref() else {
-                return InputOutcome::Unchanged;
-            };
-            // In question mode the `❯ reply` line is hidden — the reply widget
-            // only backs the `RejectOnce` / "Other" free-text option. Accepting
-            // a paste when that option isn't selected would silently fill an
-            // invisible buffer that resurfaces if the user later highlights it.
-            let in_question = p.question.is_some();
-            if in_question {
-                let on_reject = p.selected_option.is_some() && p.reject_option == p.selected_option;
-                if !on_reject {
-                    return InputOutcome::Unchanged;
-                }
-            }
-            // Pasting implies an intent to reply — focus the input and root the
-            // `@` picker at the peeked agent's cwd (a pasted `@path` walks it).
-            if let Some(p) = self.peek.as_mut() {
-                p.focused = true;
-            }
-            self.ensure_peek_reply_cwd();
-            in_question
-        } else {
-            false
-        };
-
-        // Question mode is text-only on the wire — never attach/defer an image.
-        if in_question {
-            return self.insert_pasted_caption(Some(text), true).0;
-        }
-
         // Pasted text may be image file path(s) / `file://` URL(s) (drag-drop
         // from Finder, or Copy on a file). Resolve them synchronously and win —
         // before deferring the clipboard probe, so a path paste is not ALSO
         // attached as the clipboard raster (no double insert).
-        if !text.trim().is_empty() && self.insert_dropped_paths(text, peek, effects).is_some() {
+        if !text.trim().is_empty() && self.insert_dropped_paths(text, effects).is_some() {
             return InputOutcome::Changed;
         }
 
@@ -2291,7 +2093,6 @@ impl DashboardState {
                 crate::app::actions::ClipboardPasteSource::BracketedDeferred {
                     text: text.to_owned(),
                 },
-                peek,
                 change_count,
                 effects,
             );
@@ -2303,7 +2104,7 @@ impl DashboardState {
         }
 
         // Plain text paste (no raster).
-        self.insert_pasted_caption(Some(text), peek).0
+        self.insert_pasted_caption(Some(text)).0
     }
 
     /// Attach a pasted image to the dispatch input as an `[Image #N]` chip.
@@ -2340,7 +2141,6 @@ impl DashboardState {
     fn insert_dropped_paths(
         &mut self,
         text: &str,
-        peek: bool,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> Option<crate::app::actions::ClipboardPasteCompletion> {
         use crate::app::actions::{
@@ -2355,15 +2155,11 @@ impl DashboardState {
         for entry in entries {
             let inserted = match entry {
                 crate::prompt_images::DroppedPath::Image(image) => {
-                    if peek {
-                        self.attach_peek_pasted_image(image, effects).1
-                    } else {
-                        self.attach_pasted_image(image, effects).1
-                    }
+                    self.attach_pasted_image(image, effects).1
                 }
                 crate::prompt_images::DroppedPath::NonImage(path) => {
                     let text = format!("{} ", path.display());
-                    match self.insert_pasted_caption(Some(&text), peek).1 {
+                    match self.insert_pasted_caption(Some(&text)).1 {
                         ClipboardTextInsertion::Inserted => ClipboardPasteCompletion::Handled,
                         _ => {
                             ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion)
@@ -2378,14 +2174,12 @@ impl DashboardState {
         Some(completion)
     }
 
-    /// Insert a plain-text (caption) paste into the dispatch input (`peek =
-    /// false`) or the peek reply (`peek = true`); the image / file-url portion of
-    /// a paste is handled by the deferred probe. Whitespace-only text is a no-op
-    /// (matches the bracketed arm — no stray spaces inserted).
+    /// Insert a plain-text caption into the dispatch input; the image / file-url
+    /// portion of a paste is handled by the deferred probe. Whitespace-only
+    /// text is a no-op (matches the bracketed arm — no stray spaces inserted).
     fn insert_pasted_caption(
         &mut self,
         text: Option<&str>,
-        peek: bool,
     ) -> (InputOutcome, crate::app::actions::ClipboardTextInsertion) {
         use crate::app::actions::ClipboardTextInsertion;
         let Some(text) = text else {
@@ -2395,12 +2189,8 @@ impl DashboardState {
         if text.trim().is_empty() {
             return (InputOutcome::Unchanged, ClipboardTextInsertion::Empty);
         }
-        let event = if peek {
-            self.peek_reply.handle_paste(text)
-        } else {
-            self.dispatch.handle_paste(text)
-        };
-        if !peek && matches!(event, crate::views::prompt_widget::PromptEvent::Edited) {
+        let event = self.dispatch.handle_paste(text);
+        if matches!(event, crate::views::prompt_widget::PromptEvent::Edited) {
             self.dispatch.refresh_slash(&self.models);
         }
         let completion = match event {
@@ -2414,106 +2204,34 @@ impl DashboardState {
     fn enqueue_clipboard_attachment_probe(
         &mut self,
         source: crate::app::actions::ClipboardPasteSource,
-        peek: bool,
         change_count: Option<u64>,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) {
-        let target = if peek {
-            // Callers only pass `peek = true` with the panel open; stamping the
-            // row lets the completion drop a paste whose panel closed/moved.
-            let Some(p) = self.peek.as_ref() else {
-                return;
-            };
-            crate::app::actions::ClipboardPasteTarget::DashboardPeek { row: p.row.clone() }
-        } else {
-            crate::app::actions::ClipboardPasteTarget::DashboardDispatch
-        };
         self.paste_probe_in_flight += 1;
         effects.push(crate::app::actions::Effect::ProbeClipboardAttachment {
-            ctx: crate::app::actions::ClipboardPasteContext { target, source },
+            ctx: crate::app::actions::ClipboardPasteContext {
+                target: crate::app::actions::ClipboardPasteTarget::DashboardDispatch,
+                source,
+            },
             change_count,
         });
     }
 
-    /// Attach a pasted image to the peek reply as an `[Image #N]` chip.
-    fn attach_peek_pasted_image(
-        &mut self,
-        mut pasted: crate::prompt_images::PastedImage,
-        effects: &mut Vec<crate::app::actions::Effect>,
-    ) -> (InputOutcome, crate::app::actions::ClipboardPasteCompletion) {
-        if self.peek.as_ref().is_some_and(|p| p.question.is_some()) {
-            return (
-                InputOutcome::Unchanged,
-                crate::app::actions::ClipboardPasteCompletion::Dropped,
-            );
-        }
-        let preparation = pasted.preview_preparation();
-        pasted.session_image_path = None;
-        pasted.staged_temp_path = None;
-        let completion = match self.peek_reply.insert_image(pasted) {
-            Ok(()) => {
-                if let Some(preparation) = preparation {
-                    effects.push(crate::app::actions::Effect::PreparePromptImagePreview {
-                        preparation,
-                    });
-                }
-                crate::app::actions::ClipboardPasteCompletion::Handled
-            }
-            Err(msg) => {
-                self.set_error(msg);
-                crate::app::actions::ClipboardPasteCompletion::Failed(
-                    crate::app::actions::ClipboardPasteFailure::AlreadyReported,
-                )
-            }
-        };
-        (InputOutcome::Changed, completion)
-    }
-
-    /// Ctrl/Cmd+V into the dispatch input (`peek = false`) or the peek reply
-    /// (`peek = true`): a pasted file path resolves synchronously and wins; else
-    /// the clipboard raster/file-url probe defers off the event loop (the image
-    /// wins over the caption, inserted on completion only if no image); else
-    /// plain text with no raster inserts synchronously.
+    /// Ctrl/Cmd+V into the dispatch input: a pasted file path resolves
+    /// synchronously and wins; else the clipboard raster/file-url probe defers
+    /// off the event loop (the image wins over the caption, inserted on
+    /// completion only if no image); else plain text with no raster inserts
+    /// synchronously.
     fn handle_paste_key_deferred(
         &mut self,
         clipboard_text: crate::app::actions::ClipboardTextRead,
-        peek: bool,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
-        // The peek reply has extra preconditions the dispatch input does not.
-        let in_question = if peek {
-            let Some(p) = self.peek.as_ref() else {
-                return InputOutcome::Unchanged;
-            };
-            let in_question = p.question.is_some();
-            if in_question {
-                let on_reject = p.selected_option.is_some() && p.reject_option == p.selected_option;
-                if !on_reject {
-                    return InputOutcome::Unchanged;
-                }
-            }
-            // Pasting implies an intent to reply — focus + root the `@` picker.
-            if let Some(p) = self.peek.as_mut() {
-                p.focused = true;
-            }
-            self.ensure_peek_reply_cwd();
-            in_question
-        } else {
-            false
-        };
-
-        // Question mode is text-only on the wire — never attach/defer an image.
-        if in_question {
-            return self
-                .insert_pasted_caption(clipboard_text.as_deref(), true)
-                .0;
-        }
-
         // A pasted file path resolves synchronously and wins (drag-drop / Finder
         // Cmd+C) — before deferring, so it is not double-attached.
         if let Some(text) = clipboard_text.as_deref()
             && !text.trim().is_empty()
-            && self.insert_dropped_paths(text, peek, effects).is_some()
+            && self.insert_dropped_paths(text, effects).is_some()
         {
             return InputOutcome::Changed;
         }
@@ -2528,7 +2246,6 @@ impl DashboardState {
                     text: clipboard_text,
                     tip_showing: false,
                 },
-                peek,
                 change_count,
                 effects,
             );
@@ -2536,14 +2253,13 @@ impl DashboardState {
         }
 
         // No raster / lone URL: insert the plain text synchronously.
-        self.insert_pasted_caption(clipboard_text.as_deref(), peek)
-            .0
+        self.insert_pasted_caption(clipboard_text.as_deref()).0
     }
 
     /// Attach the result of a deferred clipboard attachment probe
-    /// ([`Effect::ProbeClipboardAttachment`]) to the surface named by
-    /// `ctx.target` (dispatch input or peek reply). The heavy read/decode
-    /// already ran off-thread; this only mutates input state on the event loop.
+    /// ([`Effect::ProbeClipboardAttachment`]) to the dispatch input. The heavy
+    /// read/decode already ran off-thread; this only mutates input state on the
+    /// event loop.
     pub(crate) fn complete_clipboard_attachment_paste(
         &mut self,
         ctx: crate::app::actions::ClipboardPasteContext,
@@ -2552,49 +2268,17 @@ impl DashboardState {
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> crate::app::actions::ClipboardPasteCompletion {
         use crate::app::actions::{
-            ClipboardPasteCompletion, ClipboardPasteFailure, ClipboardPasteTarget, ProbedAttachment,
+            ClipboardPasteCompletion, ClipboardPasteFailure, ProbedAttachment,
         };
-        let peek_row = match &ctx.target {
-            ClipboardPasteTarget::DashboardPeek { row } => Some(row.clone()),
-            _ => None,
-        };
-        let peek = peek_row.is_some();
         self.paste_probe_in_flight = self.paste_probe_in_flight.saturating_sub(1);
-        // Drop a peek completion if the panel closed OR moved to another row
-        // between enqueue and now, so the attachment can't land in the hidden
-        // reply buffer or a different agent's reply (mirrors the agent's
-        // agent-id-gone guard in dispatch).
-        if let Some(row) = &peek_row
-            && self.peek.as_ref().is_none_or(|p| p.row != *row)
-        {
-            return ClipboardPasteCompletion::Dropped;
-        }
-        // A question that arrived on the peeked row mid-probe makes the reply
-        // text-only on the wire: attachments are discarded LOUDLY below (the
-        // attach helper's silent question no-op would drop them with zero
-        // feedback), and the caption/wrap paths stay suppressed.
-        let peek_in_question = peek && self.peek.as_ref().is_some_and(|p| p.question.is_some());
-        let insert_deferred_text = !peek_in_question
-            && matches!(
-                &image,
-                ProbedAttachment::NoRaster
-                    | ProbedAttachment::ProbeDropped
-                    | ProbedAttachment::ProbeFailed
-            );
-        let mut attachment = match image {
-            ProbedAttachment::Image(pasted) => {
-                if peek_in_question {
-                    self.set_warning("Pasted image discarded — reply switched to a question");
-                    ClipboardPasteCompletion::Dropped
-                } else {
-                    let (_, completion) = if peek {
-                        self.attach_peek_pasted_image(pasted, effects)
-                    } else {
-                        self.attach_pasted_image(pasted, effects)
-                    };
-                    completion
-                }
-            }
+        let insert_deferred_text = matches!(
+            &image,
+            ProbedAttachment::NoRaster
+                | ProbedAttachment::ProbeDropped
+                | ProbedAttachment::ProbeFailed
+        );
+        let attachment = match image {
+            ProbedAttachment::Image(pasted) => self.attach_pasted_image(pasted, effects).1,
             ProbedAttachment::PersistFailed(msg) => {
                 self.set_error(msg);
                 ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
@@ -2605,19 +2289,11 @@ impl DashboardState {
                 ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AttachmentRead)
             }
         };
-        if peek_in_question && attachment == ClipboardPasteCompletion::FullMiss {
-            if file_urls.as_deref().is_some_and(|urls| {
-                !crate::prompt_images::try_read_images_from_paste(urls).is_empty()
-            }) {
-                self.set_warning("Pasted image discarded — reply switched to a question");
-            }
-            attachment = ClipboardPasteCompletion::Dropped;
-        }
         let file = if attachment == ClipboardPasteCompletion::FullMiss {
             file_urls.and_then(|urls| {
-                self.insert_dropped_paths(&urls, peek, effects).or_else(|| {
+                self.insert_dropped_paths(&urls, effects).or_else(|| {
                     ctx.source.file_url_text_on_miss(&urls).map(|text| {
-                        match self.insert_pasted_caption(Some(text), peek).1 {
+                        match self.insert_pasted_caption(Some(text)).1 {
                             crate::app::actions::ClipboardTextInsertion::Inserted => {
                                 ClipboardPasteCompletion::Handled
                             }
@@ -2635,7 +2311,7 @@ impl DashboardState {
             ctx.source
                 .text_to_insert_on_miss()
                 .filter(|text| !text.trim().is_empty())
-                .map(|text| self.insert_pasted_caption(Some(text), peek).1)
+                .map(|text| self.insert_pasted_caption(Some(text)).1)
         } else {
             None
         };
@@ -2651,13 +2327,10 @@ impl DashboardState {
         completion
     }
 
-    /// After a deferred paste probe completes, take the sends stashed while the
-    /// probe(s) were in flight — dispatch first, then peek — rebuilding each
-    /// from its now-updated widget text so a freshly attached image chip (and
-    /// its aligned range) travels with it. Returns empty while probes remain in
-    /// flight. A peek stash whose panel closed, moved to another row, or now
-    /// shows a question is dropped with a toast (the reply draft stays in the
-    /// widget).
+    /// After a deferred paste probe completes, take the dispatch send stashed
+    /// while the probe(s) were in flight, rebuilding it from the updated widget
+    /// so a freshly attached image chip (and its aligned range) travels with it.
+    /// Returns empty while probes remain in flight.
     pub(crate) fn take_deferred_sends_after_paste(&mut self) -> Vec<crate::app::actions::Action> {
         if self.paste_probe_in_flight != 0 {
             return Vec::new();
@@ -2669,471 +2342,7 @@ impl DashboardState {
                 attach,
             });
         }
-        if let Some(DeferredPeekSend { row, attach }) = self.deferred_peek_send.take() {
-            let same_row = self.peek.as_ref().is_some_and(|p| p.row == row);
-            let in_question = self.peek.as_ref().is_some_and(|p| p.question.is_some());
-            if same_row && !in_question {
-                actions.push(crate::app::actions::Action::DashboardPeekReply {
-                    row,
-                    text: self.peek_reply.text().to_string(),
-                    attach,
-                });
-            } else if !same_row {
-                // Never reply to a row the user is no longer peeking.
-                self.set_warning("Reply canceled — peek panel changed");
-            } else {
-                // A question now owns the panel (Enter answers it there, and the
-                // reply dispatch would silently queue a prompt + wipe the draft
-                // behind the dialog) — drop the stash; the draft stays put.
-                self.set_warning("Reply canceled — answer the question first");
-            }
-        }
         actions
-    }
-
-    /// Handle a key while the peek panel is open.
-    ///
-    /// The peek panel's `❯ reply` line is a live [`PromptWidget`]
-    /// editor ([`Self::peek_reply`]), so when peek is open it owns the
-    /// bare keys: printable characters, Backspace/Delete/arrows, and
-    /// the widget's editing chords (word nav, `Ctrl+A`/`Ctrl+E`,
-    /// `Alt+Backspace`, undo, Shift+arrow selection, inline paste)
-    /// all edit the reply. Up/Down move the caret WITHIN the reply when
-    /// it has content (multi-line drafts); when the reply is empty (or
-    /// unfocused via Tab) they switch the peeked agent instead (the
-    /// panel follows the selection cursor). Enter sends
-    /// / queues the reply (Ctrl+S sends AND opens the agent; Shift+Enter
-    /// / Alt+Enter insert a newline); Esc closes the panel; and 1–9
-    /// select (toggle) a pending question's option, after which Enter
-    /// answers the selection.
-    ///
-    /// `dashboard_owned` is whether the key resolved to a
-    /// `When::DashboardFocused` registry binding (`Ctrl+X` stop,
-    /// `Shift+↑/↓` reorder, …) — those return `None`
-    /// so the dashboard handler (and the remaining app-global
-    /// shortcuts) still fire with the panel open.
-    ///
-    /// Returns `Some` for keys the panel consumes and `None` for keys
-    /// it leaves to the normal dashboard / global handling.
-    fn handle_peek_key(
-        &mut self,
-        key: &KeyEvent,
-        from_registry: Option<crate::actions::ActionId>,
-        effects: &mut Vec<crate::app::actions::Effect>,
-    ) -> Option<InputOutcome> {
-        let dashboard_owned = from_registry.is_some();
-        // Paste → reply widget (text + images). Handled up-front because
-        // the paste chord carries CONTROL / SUPER and must not be
-        // mistaken for a dashboard chord.
-        if crate::input::key::is_paste_key(key) {
-            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
-                crate::clipboard::system_clipboard_read_text(),
-            );
-            return Some(self.handle_paste_key_deferred(
-                clipboard_text,
-                /* peek */ true,
-                effects,
-            ));
-        }
-
-        // The global Quit key is handled by the app. Ctrl+C remains local
-        // to this reply widget so it can clear a draft without closing Grow.
-        if key!('d', CONTROL).matches(key) {
-            return Some(InputOutcome::Unchanged);
-        }
-
-        // `@`-file-search intercept — while the reply's context picker
-        // dropdown is open it owns Up/Down/PageUp-Down/Tab/Enter/Esc/
-        // Ctrl+P-N (navigate / accept / dismiss), mirroring the dispatch
-        // box's intercept. Routed BEFORE the peek's own nav / send /
-        // close handlers so those keys steer the dropdown instead. Keys
-        // the picker ignores fall through to the normal peek handling
-        // below (so e.g. Ctrl+X stop still fires with the dropdown up).
-        if self.peek_reply.file_search_visible() {
-            match self.peek_reply_handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => {
-                    return Some(InputOutcome::Changed);
-                }
-                crate::views::prompt_widget::PromptEvent::Ignored => {}
-            }
-        }
-
-        // Dashboard-owned chords fall through so the registry actions
-        // (Ctrl+X stop, Ctrl+T pin, Shift+↑/↓ reorder,
-        // …) and the hardcoded Ctrl+/ search toggle keep working with
-        // the panel open. Keys the peek itself owns are exempt:
-        //   - bare / Shift printable chars TYPE into the reply (vim's
-        //     bare `j`/`k` nav lose to typing; `?` help only when the
-        //     reply is non-empty — empty handled above),
-        //   - bare Up/Down are the peek's agent switcher (handled
-        //     below, independent of the dispatch box's focus gating),
-        //   - Esc / Enter / Tab drive the peek's own affordances.
-        // Everything else — non-owned Ctrl/Alt/Super editing chords
-        // (word nav, kill-line, undo, …) — falls through to the reply
-        // widget delegation at the bottom.
-        let is_typing_char = matches!(key.code, KeyCode::Char(_))
-            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
-        let peek_owned = is_typing_char
-            || matches!(key.code, KeyCode::Esc | KeyCode::Enter)
-            || (matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Tab)
-                && key.modifiers.is_empty());
-        if (dashboard_owned && !peek_owned) || key!('/', CONTROL).matches(key) {
-            return None;
-        }
-
-        // Ctrl+S = "send + open": send / queue the reply AND walk into
-        // the agent's detail view. This is the chord that replaced
-        // Shift+Enter (now freed, with Alt+Enter, for newline). An empty
-        // reply — or any pending question, which has no reply line —
-        // simply opens the agent. Handled before the question / Esc / Tab
-        // blocks so it works in every peek state.
-        if key!('s', CONTROL).matches(key) {
-            let Some(row) = self.peek.as_ref().map(|p| p.row.clone()) else {
-                return Some(InputOutcome::Unchanged);
-            };
-            let reply_text = self.peek_reply.text().to_string();
-            let has_question = self.peek.as_ref().is_some_and(|p| p.question.is_some());
-            if has_question || reply_text.trim().is_empty() {
-                return Some(InputOutcome::Action(Action::DashboardAttach(row)));
-            }
-            return Some(InputOutcome::Action(Action::DashboardPeekReply {
-                row,
-                text: reply_text,
-                attach: true,
-            }));
-        }
-
-        // Number keys 1–9 SELECT (toggle) the matching option when a question
-        // is showing — they no longer answer directly. Selecting focuses the
-        // panel so it becomes an answer surface (`Enter` then answers);
-        // pressing the selected option's key again deselects it (→ navigation).
-        if let KeyCode::Char(c) = key.code
-            && let Some(d) = c.to_digit(10)
-            && (1..=9).contains(&d)
-            && self.peek.as_ref().is_some_and(|p| p.question.is_some())
-        {
-            let idx = (d - 1) as usize;
-            let valid = self.peek.as_ref().is_some_and(|p| idx < p.options.len());
-            if !valid {
-                let n_opts = self.peek.as_ref().map(|p| p.options.len()).unwrap_or(0);
-                self.set_error(format!("No such option (only {n_opts} available)"));
-                return Some(InputOutcome::Changed);
-            }
-            if let Some(p) = self.peek.as_mut() {
-                p.focused = true;
-                p.selected_option = if p.selected_option == Some(idx) {
-                    None
-                } else {
-                    Some(idx)
-                };
-            }
-            return Some(InputOutcome::Changed);
-        }
-
-        // Esc: the peek is shown by default while a row is selected, so
-        // Esc UNSELECTS — first clearing a typed reply, then deselecting
-        // the row and focusing the `[+ New Agent]` button (which closes
-        // the peek and brings back the new-session input).
-        if matches!(key.code, KeyCode::Esc) {
-            if !self.peek_reply.text().is_empty() {
-                self.clear_peek_reply();
-                return Some(InputOutcome::Changed);
-            }
-            self.set_peek(None);
-            self.focus_new_agent_button();
-            return Some(InputOutcome::Changed);
-        }
-
-        // Tab toggles focus between the reply input and the row list,
-        // mirroring the dispatch box's two-focus model. Unfocusing dims
-        // the panel border and hides the caret (see `render_peek_panel`).
-        if matches!(key.code, KeyCode::Tab) && key.modifiers.is_empty() {
-            if let Some(p) = self.peek.as_mut() {
-                p.focused = !p.focused;
-            }
-            return Some(InputOutcome::Changed);
-        }
-
-        // When a permission / ask-tool question is showing and the panel is
-        // focused it's an option picker. With NO option selected (the
-        // default) it stays a navigation surface: `↑`/`↓` switch agents and
-        // `Enter` opens the row in detail. Once an option is selected (number
-        // key) it becomes a modal answer surface: `↑`/`↓` move within the
-        // options (spilling to the prev/next agent at the first/last option),
-        // `Enter` answers, and the `RejectOnce` ("No") option accepts inline
-        // free-text feedback.
-        let vim_mode = crate::appearance::cache::load_vim_mode();
-        let question_mode = self
-            .peek
-            .as_ref()
-            .is_some_and(|p| p.focused && p.question.is_some() && !p.options.is_empty());
-        if question_mode {
-            let selected = self.peek.as_ref().and_then(|p| p.selected_option);
-            let opt_count = self.peek.as_ref().map(|p| p.options.len()).unwrap_or(0);
-            let on_reject = selected.is_some()
-                && self
-                    .peek
-                    .as_ref()
-                    .is_some_and(|p| p.reject_option == selected);
-            match (key.code, selected) {
-                // ── No option selected → navigate agents / open ──
-                (KeyCode::Up, None) => {
-                    return Some(InputOutcome::Action(Action::DashboardSelectPrev));
-                }
-                (KeyCode::Down, None) => {
-                    return Some(InputOutcome::Action(Action::DashboardSelectNext));
-                }
-                (KeyCode::Enter, None) => {
-                    let row = self.peek.as_ref().map(|p| p.row.clone());
-                    return Some(
-                        row.map(|r| InputOutcome::Action(Action::DashboardAttach(r)))
-                            .unwrap_or(InputOutcome::Unchanged),
-                    );
-                }
-                // Right (and vim `l`) open detail on the nav surface;
-                // without this the modal catch-all below swallows them.
-                (KeyCode::Right | KeyCode::Char('l'), None)
-                    if key.modifiers.is_empty()
-                        && (matches!(key.code, KeyCode::Right) || vim_mode) =>
-                {
-                    let row = self.peek.as_ref().map(|p| p.row.clone());
-                    return Some(
-                        row.map(|r| InputOutcome::Action(Action::DashboardAttach(r)))
-                            .unwrap_or(InputOutcome::Unchanged),
-                    );
-                }
-                // ── Option selected → move within options (spill at edges) ──
-                (KeyCode::Up, Some(0)) => {
-                    return Some(InputOutcome::Action(Action::DashboardSelectPrev));
-                }
-                (KeyCode::Up, Some(i)) => {
-                    if let Some(p) = self.peek.as_mut() {
-                        p.selected_option = Some(i - 1);
-                    }
-                    return Some(InputOutcome::Changed);
-                }
-                (KeyCode::Down, Some(i)) if i + 1 >= opt_count => {
-                    return Some(InputOutcome::Action(Action::DashboardSelectNext));
-                }
-                (KeyCode::Down, Some(i)) => {
-                    if let Some(p) = self.peek.as_mut() {
-                        p.selected_option = Some(i + 1);
-                    }
-                    return Some(InputOutcome::Changed);
-                }
-                (KeyCode::Enter, Some(i)) => {
-                    let is_ask = self.peek.as_ref().is_some_and(|p| p.is_ask_question());
-                    if on_reject
-                        && matches!(
-                            self.peek_reply.try_element_interaction(key),
-                            Some(crate::views::prompt_widget::ElementInteraction::Inlined)
-                        )
-                    {
-                        return Some(InputOutcome::Changed);
-                    }
-                    // On the reject/free-text option with typed text: submit
-                    // the ask "Other" answer, or the permission rejection +
-                    // feedback message.
-                    let feedback = on_reject
-                        .then(|| self.peek_reply.text_without_image_chips())
-                        .filter(|t| !t.trim().is_empty());
-                    if let Some(text) = feedback {
-                        let row = self.peek.as_ref().map(|p| p.row.clone());
-                        let request_id = self.peek.as_ref().and_then(|p| p.request_id);
-                        let question_id = self.peek.as_ref().and_then(|p| p.question_id.clone());
-                        if let Some(row) = row {
-                            if is_ask {
-                                let Some(tool_call_id) = question_id else {
-                                    return Some(InputOutcome::Changed);
-                                };
-                                return Some(InputOutcome::Action(
-                                    Action::DashboardQuestionAnswer {
-                                        row,
-                                        tool_call_id,
-                                        option_idx: None,
-                                        freeform: text,
-                                    },
-                                ));
-                            } else if let Some(request_id) = request_id {
-                                return Some(InputOutcome::Action(
-                                    Action::DashboardPermissionFollowup {
-                                        row,
-                                        request_id,
-                                        text,
-                                    },
-                                ));
-                            }
-                        }
-                        return Some(InputOutcome::Unchanged);
-                    }
-                    // Otherwise answer the selected option — `peek_number_key`
-                    // routes to the permission / ask answer action by source.
-                    if let Some(action) = super::peek::peek_number_key(self, i + 1) {
-                        return Some(InputOutcome::Action(action));
-                    }
-                    return Some(InputOutcome::Unchanged);
-                }
-                _ => {}
-            }
-            // Free-text feedback editing — only when the reject option is
-            // the selected one. Delegated to the reply widget so the
-            // feedback field gets the same editing surface (selection,
-            // word ops, chips) as the main reply line.
-            if on_reject
-                && matches!(
-                    self.peek_reply_handle_key(key),
-                    crate::views::prompt_widget::PromptEvent::Edited
-                )
-            {
-                return Some(InputOutcome::Changed);
-            }
-            // Modal while the question picker is up: consume any other key so
-            // it can't leak into the (hidden) reply row or row navigation.
-            return Some(InputOutcome::Unchanged);
-        }
-
-        let focused = self.peek.as_ref().map(|p| p.focused).unwrap_or(false);
-
-        // BARE Up/Down switch the peeked agent ONLY while the reply is a
-        // navigation surface — either unfocused (Tab → row nav) or empty
-        // (a browse convenience, mirroring the dispatch input's
-        // empty-prompt gate). With a non-empty FOCUSED reply the arrows
-        // move the caret WITHIN the text instead (multi-line drafts), so
-        // typing then arrowing edits the reply rather than jumping to
-        // another agent — they fall through to the widget delegation
-        // below.
-        //
-        // MODIFIED arrows (e.g. `Shift+↑/↓` row reorder) must fall through
-        // to the registry actions regardless — matching on `key.code`
-        // alone would otherwise swallow them as agent-switch and the peek
-        // (shown by default on selection) would make reorder appear broken.
-        if key.modifiers.is_empty()
-            && matches!(key.code, KeyCode::Up | KeyCode::Down)
-            && (!focused || self.peek_reply.text().is_empty())
-        {
-            return Some(InputOutcome::Action(match key.code {
-                KeyCode::Up => Action::DashboardSelectPrev,
-                _ => Action::DashboardSelectNext,
-            }));
-        }
-
-        // Open detail (mirror of overlay Left-to-back). Right: nav surface
-        // (unfocused or empty). Vim `l`: unfocused only — focused reply
-        // must type literal `l`, same as focused `j`/`k`.
-        let open_detail = key.modifiers.is_empty()
-            && match key.code {
-                KeyCode::Right => !focused || self.peek_reply.text().is_empty(),
-                KeyCode::Char('l') if vim_mode => !focused,
-                _ => false,
-            };
-        if open_detail {
-            let Some(row) = self.peek.as_ref().map(|p| p.row.clone()) else {
-                return Some(InputOutcome::Unchanged);
-            };
-            return Some(InputOutcome::Action(Action::DashboardAttach(row)));
-        }
-
-        if matches!(key.code, KeyCode::Enter) {
-            let mod_enter = crate::input::is_mod_enter(key);
-            if focused
-                && !mod_enter
-                && matches!(
-                    self.peek_reply.try_element_interaction(key),
-                    Some(crate::views::prompt_widget::ElementInteraction::Inlined)
-                )
-            {
-                return Some(InputOutcome::Changed);
-            }
-            let enter_is_newline =
-                focused && compose_enter_is_newline(self.multiline_mode, mod_enter);
-            if !enter_is_newline {
-                let Some(row) = self.peek.as_ref().map(|p| p.row.clone()) else {
-                    return Some(InputOutcome::Unchanged);
-                };
-                if !focused && vim_mode {
-                    if let Some(p) = self.peek.as_mut() {
-                        p.focused = true;
-                    }
-                    return Some(InputOutcome::Changed);
-                }
-                let reply_text = self.peek_reply.text().to_string();
-                if !focused || reply_text.trim().is_empty() {
-                    return Some(InputOutcome::Action(Action::DashboardAttach(row)));
-                }
-                return Some(InputOutcome::Action(Action::DashboardPeekReply {
-                    row,
-                    text: reply_text,
-                    attach: false,
-                }));
-            }
-        }
-
-        // Ctrl+M: ToggleMultiline is PromptFocused only, so hardcode here.
-        if key!('m', CONTROL).matches(key) {
-            return Some(InputOutcome::Action(Action::SetMultilineMode(
-                !self.multiline_mode,
-            )));
-        }
-
-        // Space is just text now (the peek is tied to selection, so there
-        // is no Space-to-close — use Esc to unselect). It falls through to
-        // the reply editor below.
-        if focused {
-            // Focused reply input — everything else is an edit attempt,
-            // delegated to the reply widget (chars, Backspace/Delete,
-            // arrows, word nav, kill-line, undo, Shift+arrow selection,
-            // inline paste, …). Keys the widget ignores are still
-            // CONSUMED (`Unchanged`) so they can't leak into the hidden
-            // dispatch input below; app-global shortcuts still fire off
-            // the `Unchanged` bubble-up.
-            return Some(match self.peek_reply_handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => InputOutcome::Changed,
-                crate::views::prompt_widget::PromptEvent::Ignored => InputOutcome::Unchanged,
-            });
-        }
-
-        // Vim unfocused: j/k select rows; i focuses reply without typing `i`.
-        if vim_mode && key.modifiers.is_empty() {
-            match key.code {
-                KeyCode::Char('j') => {
-                    return Some(InputOutcome::Action(Action::DashboardSelectNext));
-                }
-                KeyCode::Char('k') => {
-                    return Some(InputOutcome::Action(Action::DashboardSelectPrev));
-                }
-                KeyCode::Char('i') => {
-                    if let Some(p) = self.peek.as_mut() {
-                        p.focused = true;
-                    }
-                    return Some(InputOutcome::Changed);
-                }
-                _ => {}
-            }
-        }
-
-        // Unfocused: non-vim printable focuses+types; vim swallows (focus via Enter/i/Tab).
-        if is_typing_char {
-            if vim_mode {
-                return Some(InputOutcome::Unchanged);
-            }
-            if let Some(p) = self.peek.as_mut() {
-                p.focused = true;
-            }
-            let _ = self.peek_reply_handle_key(key);
-            return Some(InputOutcome::Changed);
-        }
-
-        // Every OTHER key is CONSUMED (`Unchanged`) rather than left to
-        // fall through. The dispatch box is HIDDEN while the peek is open,
-        // so a `None` here would let editing chords (Backspace, Delete,
-        // `Ctrl+W`/`Ctrl+U`/`Ctrl+K`, Home/End, …) leak into and silently
-        // mutate the invisible new-session draft behind the panel.
-        // Dashboard-owned chords (`Ctrl+X` stop, `Shift+↑/↓` reorder, …),
-        // `Ctrl+/`, and `Ctrl+C`/`Ctrl+D` already returned above, so
-        // nothing reaching here has a dashboard or row-nav meaning;
-        // returning `Unchanged` (not `None`) still lets app-global
-        // shortcuts fire off the bubble-up.
-        Some(InputOutcome::Unchanged)
     }
 
     /// Resolve the dispatch input's send action for the given `attach`
@@ -3141,13 +2350,16 @@ impl DashboardState {
     /// dashboard) and the `Ctrl+S` "send + open" chord (`attach ==
     /// true`, walk into the detail view). Empty-prompt fallbacks mirror
     /// the old Enter handler: open the selected row, or create from the
-    /// `[+ New Agent]` button. A `/command` always routes to the slash
+    /// `[+ New session]` button. A `/command` always routes to the slash
     /// dispatcher (there's no session to "open"), so `attach` only
     /// affects the plain-dispatch path.
     fn dispatch_send_action(&self, attach: bool) -> InputOutcome {
         let text = self.dispatch.text().to_string();
         let trimmed = text.trim();
         if trimmed.is_empty() {
+            if !self.list_focused {
+                return InputOutcome::Unchanged;
+            }
             if let Some(id) = self.selected.clone() {
                 return InputOutcome::Action(Action::DashboardAttach(id));
             }
@@ -3162,76 +2374,28 @@ impl DashboardState {
         InputOutcome::Action(Action::DashboardDispatch { text, attach })
     }
 
-    /// List-focused `y`/`n` confirm for an already-armed delete (arming is
-    /// via `Ctrl+X` / `[✗]`, not `d`). When the list isn't focused,
-    /// disarming is left to the caller so a second `Ctrl+X` reaches the
-    /// dispatcher.
-    fn handle_delete_confirm_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
-        if key.kind == KeyEventKind::Release {
-            return None;
-        }
-        if !self.list_focused {
-            return None;
-        }
-        self.armed_delete_row()?;
-        if !key.modifiers.is_empty() {
-            self.delete_confirm = None;
-            return None;
-        }
-        match key.code {
-            KeyCode::Char('y') => Some(InputOutcome::Action(Action::DashboardDelete)),
-            KeyCode::Char('n') => {
-                self.delete_confirm = None;
-                Some(InputOutcome::Changed)
-            }
-            _ => {
-                self.delete_confirm = None;
-                None
-            }
-        }
-    }
-
     fn handle_key(
         &mut self,
         key: &KeyEvent,
         registry: &ActionRegistry,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
-        // Resolve the registry binding up-front — the toast / delete-confirm
-        // clear below needs to know whether this key IS the stop key, and
-        // it must run before the peek intercept (the lookup itself is a
-        // pure read; the action is honoured further down).
-        //
-        // Vim-aware lookup: `lookup_with_mode` suppresses the bare-letter
-        // (`j`/`k`) nav bindings when vim-mode is OFF, so they type into
-        // the dispatch input instead of moving the row selection —
-        // matching the agent view's scrollback. In vim-mode they navigate
-        // (when the prompt is empty, per the `bare_letter_ok` gate below).
-        // Arrows / Ctrl combos always resolve.
         let vim_mode = crate::appearance::cache::load_vim_mode();
         let from_registry =
             registry.lookup_with_mode(key, crate::actions::When::DashboardFocused, vim_mode);
-
-        // Clear transient feedback on any keypress so it never lingers; kept for
-        // `Ctrl+X` so the arm path's own messaging survives its first press.
-        let is_stop_key = matches!(from_registry, Some(crate::actions::ActionId::DashboardStop));
-        if !is_stop_key {
-            self.feedback = None;
-        }
-
-        // Disarm delete-confirm on any non-confirming key. Two gestures are
-        // preserved: `Ctrl+X` (its second press is the confirm, read by the
-        // dispatcher) and a list-focused bare `y`/`n` (handled just below).
-        let confirm_via_yn = self.list_focused
-            && self.armed_delete_row().is_some()
-            && key.modifiers.is_empty()
-            && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('n'));
-        if !is_stop_key && !confirm_via_yn {
-            self.delete_confirm = None;
-        }
-
-        if !is_stop_key && let Some(outcome) = self.handle_delete_confirm_key(key) {
-            return outcome;
+        if registry.matches_id(crate::actions::ActionId::SessionCommands, key) {
+            if key.kind == KeyEventKind::Repeat {
+                return InputOutcome::Unchanged;
+            }
+            return match self.selected.clone() {
+                Some(row @ (DashboardRowId::TopLevel(_) | DashboardRowId::Subagent { .. })) => {
+                    InputOutcome::ActionThenForward(Action::DashboardAttach(row))
+                }
+                _ => {
+                    self.set_warning("Open a session to use session commands");
+                    InputOutcome::Changed
+                }
+            };
         }
 
         // Keyboard override: Ctrl+O opens the pinned announcement CTA (when one is
@@ -3243,27 +2407,6 @@ impl DashboardState {
             return InputOutcome::Action(Action::AnnouncementsOpenCta);
         }
 
-        // When the peek panel is open it owns the bare keys: the `❯ reply`
-        // line is a live editor, Up/Down switch the peeked agent, Enter
-        // sends / queues the reply, and Esc closes. Routing here first
-        // keeps peek typing from leaking into the (hidden) dispatch input
-        // or the row-nav / new-session machinery below. Keys the panel
-        // doesn't own (registry-bound dashboard chords like Ctrl+X stop
-        // or Shift+↑/↓ reorder) return `None` and fall through so the
-        // dashboard's registry actions and global shortcuts still fire.
-        if self.peek.is_some()
-            && let Some(outcome) = self.handle_peek_key(key, from_registry, effects)
-        {
-            return outcome;
-        }
-
-        let prompt_empty = self.dispatch.text().is_empty();
-
-        // Peek permission answering (digits 1–9) and
-        // all other peek input is handled up-front by `handle_peek_key`
-        // (the early return at the top of this function), so by the time
-        // execution reaches here the peek panel is guaranteed closed.
-
         // ── Ctrl+V / Cmd+V paste ────────────────────────────────────────
         // Read the pbpaste text once and route through the shared deferred
         // paste pipeline: a file path wins synchronously, else the clipboard
@@ -3273,7 +2416,7 @@ impl DashboardState {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
                 crate::clipboard::system_clipboard_read_text(),
             );
-            return self.handle_paste_key_deferred(clipboard_text, /* peek */ false, effects);
+            return self.handle_paste_key_deferred(clipboard_text, effects);
         }
 
         // ── @-file-search intercept ─────────────────────────────────────
@@ -3327,7 +2470,7 @@ impl DashboardState {
         // Shared by the section and overflow blocks below.
         let vim_fold = vim_mode && self.list_focused;
         if let Some(section) = self.selected_section
-            && (prompt_empty || self.list_focused)
+            && self.list_focused
             && key.modifiers.is_empty()
         {
             match key.code {
@@ -3353,10 +2496,7 @@ impl DashboardState {
         }
 
         // Idle "N more" overflow: Enter toggles; Right/`l` reveal, Left/`h` re-fold.
-        if self.selected_idle_overflow
-            && (prompt_empty || self.list_focused)
-            && key.modifiers.is_empty()
-        {
+        if self.selected_idle_overflow && self.list_focused && key.modifiers.is_empty() {
             match key.code {
                 KeyCode::Enter => {
                     self.toggle_idle_show_all();
@@ -3382,7 +2522,7 @@ impl DashboardState {
         // list focus. Vim `l`: list focus only (same as `j`/`k`).
         let open_row_detail = key.modifiers.is_empty()
             && match key.code {
-                KeyCode::Right => prompt_empty || self.list_focused,
+                KeyCode::Right => self.list_focused,
                 KeyCode::Char('l') if vim_mode => self.list_focused && !self.search_mode,
                 _ => false,
             };
@@ -3476,10 +2616,6 @@ impl DashboardState {
                 self.exit_search_mode();
                 return InputOutcome::Changed;
             }
-            if self.peek.is_some() {
-                self.set_peek(None);
-                return InputOutcome::Changed;
-            }
             // An active filter clears next — the empty-state message
             // promises "press Esc to clear the filter", so this stays
             // ahead of the focus/exit tiers regardless of which pane
@@ -3510,7 +2646,7 @@ impl DashboardState {
             // makes the dispatch input reply to it, and deselecting flips
             // it back to "new session" mode without leaving the dashboard.
             if self.selected.is_some() {
-                // Deselect → focus the `[+ New Agent]` button so
+                // Deselect → focus the `[+ New session]` button so
                 // the cursor lands on a stable target instead of
                 // floating in `None`. The Enter-with-empty-prompt
                 // path keys off this to create-and-open, and the
@@ -3526,7 +2662,7 @@ impl DashboardState {
                 return InputOutcome::Changed;
             }
             if self.selected_section.is_some() {
-                // Deselect the section header → focus the `[+ New Agent]`
+                // Deselect the section header → focus the `[+ New session]`
                 // button, mirroring the row-deselect tier above.
                 self.focus_new_agent_button();
                 self.manual_scroll_active = false;
@@ -3534,7 +2670,7 @@ impl DashboardState {
             }
             if self.selected_idle_overflow {
                 // Deselect the Idle overflow toggle → focus the
-                // `[+ New Agent]` button, mirroring the section tier.
+                // `[+ New session]` button, mirroring the section tier.
                 self.focus_new_agent_button();
                 self.manual_scroll_active = false;
                 return InputOutcome::Changed;
@@ -3555,9 +2691,7 @@ impl DashboardState {
         //    act regardless of focus — they can't be typed.
         if let Some(id) = from_registry {
             let honor = match key.code {
-                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
-                    self.list_focused || (prompt_empty && !self.search_mode)
-                }
+                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => self.list_focused,
                 KeyCode::Char(_)
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
@@ -3569,9 +2703,6 @@ impl DashboardState {
             // Ctrl+X arm→confirm — holding the key would arm and immediately
             // confirm a delete. Require discrete presses, like the picker's
             // `y` confirm. Non-destructive actions may still repeat.
-            if id == crate::actions::ActionId::DashboardStop && key.kind == KeyEventKind::Repeat {
-                return InputOutcome::Unchanged;
-            }
             if honor && let Some(outcome) = dashboard_action_for_id(id) {
                 return outcome;
             }
@@ -3685,6 +2816,8 @@ impl DashboardState {
         let event = self.dispatch.handle_key(key);
         let new = self.dispatch.text().to_string();
         if old != new {
+            self.feedback = None;
+            self.set_list_focused(false);
             // Live-update the filter as the user types ONLY in search
             // mode — the dispatch buffer is then the search query.
             // Outside search mode the buffer is a dispatch prompt and
@@ -3728,7 +2861,7 @@ impl DashboardState {
         self.last_mouse_pos = Some((mouse.column, mouse.row));
 
         // Update hover state when the mouse moves over a row or the
-        // header's `[+ New Agent]` button.
+        // header's `[+ New session]` button.
         if matches!(mouse.kind, MouseEventKind::Moved) {
             let mut changed = self
                 .new_agent_button_hit
@@ -3757,16 +2890,8 @@ impl DashboardState {
                 changed |= self.dispatch.set_slash_hovered(None);
             }
             if let Some(dd_area) = self.file_search_dropdown_items_area {
-                let result_count = if self.peek.is_some() {
-                    self.peek_reply.file_search.result_count()
-                } else {
-                    self.dispatch.file_search.result_count()
-                };
-                let scroll_offset = if self.peek.is_some() {
-                    self.peek_reply.file_search.scroll_offset()
-                } else {
-                    self.dispatch.file_search.scroll_offset()
-                };
+                let result_count = self.dispatch.file_search.result_count();
+                let scroll_offset = self.dispatch.file_search.scroll_offset();
                 let has_scrollbar = result_count > dd_area.height as usize;
                 let on_scrollbar =
                     has_scrollbar && mouse.column >= dd_area.x + dd_area.width.saturating_sub(2);
@@ -3779,9 +2904,6 @@ impl DashboardState {
                 changed |= self.dropdown_file_search_mut().set_hovered(new_dd_hover);
             } else {
                 changed |= self.dispatch.file_search.set_hovered(None);
-                if self.peek.is_some() {
-                    changed |= self.peek_reply.file_search.set_hovered(None);
-                }
             }
 
             let new_hover = self
@@ -3844,7 +2966,7 @@ impl DashboardState {
             return InputOutcome::Unchanged;
         }
 
-        // Click on the peek-panel close button.
+        // Click on the read-only preview close button.
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && let Some(rect) = self.peek_close_rect
             && mouse.column >= rect.x
@@ -3852,62 +2974,14 @@ impl DashboardState {
             && mouse.row >= rect.y
             && mouse.row < rect.y + rect.height
         {
-            // `set_peek(None)` enforces the
-            // peek/close-rect invariant atomically.
+            // `set_peek(None)` clears the close hit target atomically.
             self.set_peek(None);
             return InputOutcome::Changed;
         }
 
-        // Peek reply input — mouse interaction with the `❯ reply` row
-        // (or the reject-feedback slot in question mode), mirroring the
-        // dispatch box's click-to-focus plus the agent prompt's drag
-        // text selection:
-        //   - a left click inside the recorded rect focuses the reply
-        //     and forwards to the widget so the caret lands under the
-        //     pointer (double/triple-click word/line selection included);
-        //   - Drag/Up anywhere continue a selection drag that STARTED in
-        //     the input (the textarea tracks its drag state internally;
-        //     stray Drag/Up events with no active drag are no-ops), so
-        //     dragging past the box edge keeps selecting.
-        if self.peek.is_some() {
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = self.peek_reply_rect
-                        && mouse.column >= rect.x
-                        && mouse.column < rect.x + rect.width
-                        && mouse.row >= rect.y
-                        && mouse.row < rect.y + rect.height
-                    {
-                        if let Some(p) = self.peek.as_mut() {
-                            p.focused = true;
-                        }
-                        let _ = self.peek_reply.handle_mouse(mouse);
-                        let now = Instant::now();
-                        if self.last_prompt_click.is_some_and(|last| {
-                            now.duration_since(last).as_millis() < PROMPT_MULTI_CLICK_MS
-                        }) {
-                            let _ = self.peek_reply.expand_paste_element_at_cursor();
-                        }
-                        self.last_prompt_click = Some(now);
-                        return InputOutcome::Changed;
-                    }
-                }
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-                    if !self.peek_reply.text().is_empty() =>
-                {
-                    let _ = self.peek_reply.handle_mouse(mouse);
-                    return InputOutcome::Changed;
-                }
-                _ => {}
-            }
-        }
-
-        // Same Drag/Up treatment for the dispatch box, gated off while a
-        // peek is open (the dispatch input is hidden then) and in search
-        // mode (the search line renders outside the textarea, matching
-        // the Down forwarding below).
-        if self.peek.is_none()
-            && !self.search_mode
+        // Drag/Up continue a selection started in the dispatch box even if
+        // the pointer leaves its bounds. Search mode renders its own editor.
+        if !self.search_mode
             && !self.dispatch.text().is_empty()
             && matches!(
                 mouse.kind,
@@ -3955,21 +3029,12 @@ impl DashboardState {
 
             // File-search (`@`) dropdown click — same priority as slash:
             // absorb the hit so it never attaches a session row under the
-            // list. Uses the on-screen picker (peek reply while peeking,
-            // otherwise the dispatch box).
+            // list. The dashboard has one composer, so this is its picker.
             if let Some(dd_area) = self.file_search_dropdown_items_area
                 && dd_area.contains((mouse.column, mouse.row).into())
             {
-                let result_count = if self.peek.is_some() {
-                    self.peek_reply.file_search.result_count()
-                } else {
-                    self.dispatch.file_search.result_count()
-                };
-                let scroll_offset = if self.peek.is_some() {
-                    self.peek_reply.file_search.scroll_offset()
-                } else {
-                    self.dispatch.file_search.scroll_offset()
-                };
+                let result_count = self.dispatch.file_search.result_count();
+                let scroll_offset = self.dispatch.file_search.scroll_offset();
                 let has_scrollbar = result_count > dd_area.height as usize;
                 let on_scrollbar =
                     has_scrollbar && mouse.column >= dd_area.x + dd_area.width.saturating_sub(2);
@@ -3978,11 +3043,7 @@ impl DashboardState {
                     let click_frac = (mouse.row - dd_area.y) as f64 / dd_area.height.max(1) as f64;
                     let target = (click_frac * result_count as f64) as usize;
                     let max = result_count.saturating_sub(1);
-                    let selected = if self.peek.is_some() {
-                        self.peek_reply.file_search.selected()
-                    } else {
-                        self.dispatch.file_search.selected()
-                    };
+                    let selected = self.dispatch.file_search.selected();
                     self.dropdown_file_search_mut()
                         .move_selection(target.min(max) as isize - selected as isize);
                 } else {
@@ -3990,11 +3051,7 @@ impl DashboardState {
                     let fs = self.dropdown_file_search_mut();
                     fs.set_hovered(Some(row_idx));
                     if fs.select_hovered() {
-                        if self.peek.is_some() {
-                            self.peek_reply.accept_file_search_result();
-                        } else {
-                            self.dispatch.accept_file_search_result();
-                        }
+                        self.dispatch.accept_file_search_result();
                     }
                 }
                 self.set_list_focused(false);
@@ -4013,17 +3070,12 @@ impl DashboardState {
                 .map(|(id, _)| id.clone())
             {
                 self.manual_scroll_active = false;
-                // Second `[✗]` click within the window confirms; else re-arm.
-                if self.armed_delete_row().as_ref() == Some(&id) {
-                    return InputOutcome::Action(Action::DashboardDelete);
-                }
-                self.focus_row(id.clone());
+                self.focus_row(id);
                 self.set_list_focused(true);
-                self.arm_delete(id);
-                return InputOutcome::Changed;
+                return InputOutcome::Action(Action::DashboardDelete);
             }
 
-            // Click on the `[+ New Agent]` button — same outcome
+            // Click on the `[+ New session]` button — same outcome
             // as Enter-with-empty-prompt while the button is
             // focused. Routed through the dispatcher so the
             // create-session + view-switch sequence stays in one
@@ -4043,7 +3095,7 @@ impl DashboardState {
             }
 
             // Click on the header location label → open the location
-            // picker. Sits next to the `[+ New Agent]` check since both
+            // picker. Sits next to the `[+ New session]` check since both
             // are header affordances in separate columns.
             if self.location_hit.contains(mouse.column, mouse.row) {
                 return InputOutcome::Action(Action::DashboardOpenLocationPicker);
@@ -4112,9 +3164,17 @@ impl DashboardState {
                 // so the two cursor states stay mutually exclusive
                 // (clicking a row while the button was focused
                 // hands the cursor over to the row).
+                let double_click = self.last_click.as_ref().is_some_and(|(last, at)| {
+                    *last == id && at.elapsed() <= std::time::Duration::from_millis(500)
+                });
                 self.focus_row(id.clone());
+                self.list_focused = true;
                 self.last_click = Some((id.clone(), Instant::now()));
-                return InputOutcome::Action(Action::DashboardAttach(id));
+                return if double_click {
+                    InputOutcome::Action(Action::DashboardAttach(id))
+                } else {
+                    InputOutcome::Changed
+                };
             }
 
             // Click anywhere on the dispatch input box focuses it —
@@ -4332,7 +3392,7 @@ impl DashboardState {
                 // stashed prompt (from the prompt-send path) to the dispatch
                 // input so they can resend it instead of losing it. Mirrors the
                 // restore in `dispatch_dashboard_confirm_worktree`'s not-a-repo
-                // error path. When the dialog was opened from the [+ New Agent]
+                // error path. When the dialog was opened from the [+ New session]
                 // button there's no stash, so `take()` yields `None` and the
                 // input is left untouched.
                 if let Some(prompt) = self.pending_worktree_prompt.take() {
@@ -4473,7 +3533,7 @@ impl DashboardState {
         // Working agent going idle) removes the header outright.
         // Re-derive the focusable set the renderer is about to paint
         // and, when the cursor's header is gone, move it to the
-        // `[+ New Agent]` button (mirroring `toggle_grouping`) so the
+        // `[+ New session]` button (mirroring `toggle_grouping`) so the
         // footer hints and the Right/Left/Enter collapse keys never
         // act on an invisible section.
         let focusables = super::render::focusables(
@@ -4496,7 +3556,7 @@ impl DashboardState {
         // disappears when the Idle group shrinks below the cap (or the
         // user expands it, which removes the fold). A stranded cursor
         // there would leave Enter/footer hints acting on nothing, so
-        // fall back to the `[+ New Agent]` button.
+        // fall back to the `[+ New session]` button.
         if self.selected_idle_overflow
             && !focusables
                 .iter()
@@ -4530,7 +3590,6 @@ impl DashboardState {
             rows.iter().filter(|r| !r.is_more_placeholder).collect();
         if selectable.is_empty() {
             self.selected = None;
-            self.delete_confirm = None;
             return;
         }
         if let Some(sel) = self.selected.as_ref()
@@ -4541,7 +3600,6 @@ impl DashboardState {
             // the user's job.
             self.selected = None;
         }
-        self.sync_delete_confirm_to_selection();
     }
 }
 
@@ -4574,7 +3632,7 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         ActionId::DashboardSelectPrev => Some(InputOutcome::Action(Action::DashboardSelectPrev)),
         ActionId::DashboardTogglePin => Some(InputOutcome::Action(Action::DashboardTogglePin)),
         ActionId::DashboardBeginRename => Some(InputOutcome::Action(Action::DashboardBeginRename)),
-        ActionId::DashboardStop => Some(InputOutcome::Action(Action::DashboardStop)),
+        ActionId::SessionCommands => None,
         ActionId::DashboardToggleWorktree => {
             Some(InputOutcome::Action(Action::DashboardToggleWorktree))
         }
@@ -4654,7 +3712,7 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         | ActionId::DashboardOverlayExit
         | ActionId::DashboardOverlayPrev
         | ActionId::DashboardOverlayNext
-        | ActionId::DashboardOverlayStop => None,
+        => None,
     }
 }
 
@@ -4820,9 +3878,10 @@ pub fn load_persisted_from_path(path: &std::path::Path) -> Option<PersistedDashb
         .and_then(|s| match s {
             "directory" | "dir" => Some(Grouping::Directory),
             "state" => Some(Grouping::State),
+            "open" => Some(Grouping::Open),
             _ => None,
         })
-        .unwrap_or(Grouping::State);
+        .unwrap_or_default();
     let pinned: BTreeSet<PersistedRowId> = match table.get("pinned") {
         Some(item) => parse_persist_keys(item),
         None => BTreeSet::new(),
@@ -4885,6 +3944,7 @@ pub fn write_persisted_to_path(
     };
     t["enabled"] = toml_edit::value(p.enabled);
     t["grouping"] = toml_edit::value(match p.grouping {
+        Grouping::Open => "open",
         Grouping::State => "state",
         Grouping::Directory => "directory",
     });
@@ -5024,6 +4084,8 @@ impl DashboardState {
     pub(crate) fn clone_for_test(&self) -> Self {
         let mut s = Self::new();
         s.selected = self.selected.clone();
+        s.new_agent_button_focused = self.new_agent_button_focused;
+        s.list_focused = self.list_focused;
         s.pinned = self.pinned.clone();
         s.reorder = self.reorder.clone();
         s.grouping = self.grouping;
@@ -5306,11 +4368,13 @@ mod tests {
     #[test]
     fn grouping_toggles() {
         let mut state = DashboardState::new();
+        assert_eq!(state.grouping, Grouping::Open);
+        state.toggle_grouping();
         assert_eq!(state.grouping, Grouping::State);
         state.toggle_grouping();
         assert_eq!(state.grouping, Grouping::Directory);
         state.toggle_grouping();
-        assert_eq!(state.grouping, Grouping::State);
+        assert_eq!(state.grouping, Grouping::Open);
     }
 
     /// `Ctrl+G` (the rebound grouping chord) emits `DashboardToggleGrouping`,
@@ -5321,6 +4385,7 @@ mod tests {
         use crate::app::actions::Action;
         let reg = crate::actions::ActionRegistry::defaults();
         let mut state = DashboardState::new();
+        state.list_focused = true;
         let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
         assert!(
             matches!(
@@ -5330,7 +4395,7 @@ mod tests {
             "Ctrl+G must emit DashboardToggleGrouping",
         );
 
-        // Ctrl+S on the empty `[+ New Agent]` button is "send + open"
+        // Ctrl+S on the empty `[+ New session]` button is "send + open"
         // (create + detail), NOT a grouping toggle.
         let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         assert!(
@@ -5494,7 +4559,7 @@ mod tests {
         let loaded = load_persisted_from_path(&path).expect("section present");
         // Garbage → default `true`.
         assert!(loaded.enabled);
-        assert_eq!(loaded.grouping, Grouping::State);
+        assert_eq!(loaded.grouping, Grouping::Open);
         assert!(loaded.pinned.is_empty());
     }
 
@@ -5567,8 +4632,6 @@ mod tests {
         let start = state.grouping;
         state.toggle_grouping();
         state.toggle_grouping();
-        state.toggle_grouping();
-        assert_ne!(state.grouping, start);
         state.toggle_grouping();
         assert_eq!(state.grouping, start);
     }
@@ -5818,7 +4881,7 @@ mod tests {
         assert_eq!(state.dispatch.drain_images().len(), 1);
     }
 
-    /// Cancelling the dialog when it was opened from the `[+ New Agent]`
+    /// Cancelling the dialog when it was opened from the `[+ New session]`
     /// button (no stashed prompt) leaves the dispatch input untouched.
     #[test]
     fn worktree_dialog_cancel_without_stash_leaves_input_empty() {
@@ -5875,7 +4938,7 @@ mod tests {
 
     fn make_state_with_selection() -> DashboardState {
         let mut s = DashboardState::new();
-        s.selected = Some(DashboardRowId::TopLevel(AgentId(0)));
+        s.focus_row(DashboardRowId::TopLevel(AgentId(0)));
         s
     }
 
@@ -5895,7 +4958,7 @@ mod tests {
 
     /// edge case 13: Esc closes peek first.
     #[test]
-    fn esc_closes_peek_first() {
+    fn esc_returns_new_session_input_focus_to_overview_list() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let mut state = make_state_with_selection();
         state.peek = Some(super::super::peek::PeekPanelState::new(
@@ -5906,110 +4969,17 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let outcome = state.handle_key(&key, &reg, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(state.peek.is_none());
+        assert!(state.list_focused);
+        assert!(state.peek.is_some());
     }
 
     fn state_with_open_peek() -> DashboardState {
-        // PeekPanelState::new seeds focus from load_vim_mode(); pin off so
-        // older tests that assume a focused reply don't depend on config /
-        // process cache. Vim tests set true and restore themselves.
-        crate::appearance::cache::set_vim_mode(false);
         let mut s = make_state_with_selection();
         s.peek = Some(super::super::peek::PeekPanelState::new(
             DashboardRowId::TopLevel(AgentId(0)),
             peek_fields_for_test("Idle"),
         ));
         s
-    }
-
-    /// Regression: with the peek open but the reply UNFOCUSED (Tab → row
-    /// nav), generic editing chords must NOT leak into the hidden new-session
-    /// dispatch draft behind the panel. Backspace / Delete are consumed
-    /// (`Unchanged`) instead of falling through to the hidden dispatch widget.
-    /// (Ctrl+W is NOT tested here — it's a registry-bound dashboard chord, the
-    /// worktree toggle, so like Ctrl+X it intentionally falls through to fire
-    /// its action with the peek open.)
-    #[test]
-    fn peek_unfocused_editing_chords_do_not_leak_to_dispatch() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        // Hidden new-session draft, caret at END (where Backspace bites;
-        // set_text alone parks it at 0).
-        state.dispatch.set_text("hidden draft");
-        state.dispatch.set_cursor(state.dispatch.text().len());
-        // Tab → unfocus the reply (it becomes a row-nav surface).
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(!state.peek.as_ref().unwrap().focused, "Tab must unfocus");
-
-        for key in [
-            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
-        ] {
-            let outcome = state.handle_key(&key, &reg, &mut effects);
-            assert!(
-                matches!(outcome, InputOutcome::Unchanged),
-                "{key:?} must be consumed (Unchanged) with the peek open, got {outcome:?}",
-            );
-        }
-        assert_eq!(
-            state.dispatch.text(),
-            "hidden draft",
-            "editing chords must NOT leak into the hidden dispatch draft",
-        );
-        assert!(
-            !state.peek.as_ref().unwrap().focused,
-            "consumed editing chords must not grab focus",
-        );
-    }
-
-    /// While the peek panel is open, bare printable keys type into the
-    /// `❯ reply` input (not the hidden dispatch box).
-    #[test]
-    fn peek_typing_edits_reply_buffer() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        for c in ['h', 'i'] {
-            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-            let _ = state.handle_key(&key, &reg, &mut effects);
-        }
-        assert_eq!(state.peek_reply.text(), "hi");
-        // The dispatch (new-session) buffer is untouched.
-        assert!(state.dispatch.text().is_empty());
-    }
-
-    /// Enter with a typed reply emits `DashboardPeekReply` (no attach);
-    /// Ctrl+S ("send + open") sets `attach=true`.
-    #[test]
-    fn peek_enter_with_text_emits_reply() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        state.peek_reply.set_text("ship it");
-        let reg = crate::actions::ActionRegistry::defaults();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        match state.handle_key(&enter, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardPeekReply { text, attach, row }) => {
-                assert_eq!(text, "ship it");
-                assert!(!attach);
-                assert_eq!(row, DashboardRowId::TopLevel(AgentId(0)));
-            }
-            other => panic!("expected DashboardPeekReply, got {other:?}"),
-        }
-
-        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
-        match state.handle_key(&ctrl_s, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardPeekReply { attach, text, .. }) => {
-                assert!(attach, "Ctrl+S must set attach=true (send + open)");
-                assert_eq!(text, "ship it");
-            }
-            other => panic!("expected DashboardPeekReply, got {other:?}"),
-        }
     }
 
     fn peek_test_image() -> crate::prompt_images::PastedImage {
@@ -6047,103 +5017,6 @@ mod tests {
         buf
     }
 
-    /// The Ctrl/Cmd+V chord path attaches a clipboard image to the peek
-    /// reply (image wins over the caption) without leaking into dispatch. Drives
-    /// the real deferred entry point + completion.
-    #[test]
-    fn peek_paste_key_clipboard_image_wins_over_text() {
-        let mut state = state_with_open_peek();
-        cmd_v_image(&mut state, Some("ignored text"));
-        assert_eq!(state.peek_reply.images.len(), 1);
-        let text = state.peek_reply.text();
-        assert!(text.contains("[Image #1]"), "got {text:?}");
-        assert!(
-            !text.contains("ignored text"),
-            "text won over image: {text:?}"
-        );
-        assert!(state.dispatch.images.is_empty() && state.dispatch.text().is_empty());
-    }
-
-    /// In question mode the chord path must not defer/attach a clipboard
-    /// image — the reply is text-only on the wire.
-    #[test]
-    fn peek_paste_key_question_mode_blocks_clipboard_image() {
-        let mut state = state_with_open_peek();
-        if let Some(p) = state.peek.as_mut() {
-            p.focused = true;
-            p.question = Some("Allow?".into());
-            p.options = vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())];
-            p.reject_option = Some(1);
-            p.selected_option = Some(1);
-        }
-        let reg = crate::actions::ActionRegistry::defaults();
-        // Even with a raster on the pasteboard, question mode must not probe.
-        crate::clipboard::set_clipboard_probe_hook(
-            crate::clipboard::ClipboardProbeHook::with_raster(None),
-        );
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &ctrl_v_event(),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        let deferred = deferred_probe_target(&effects).is_some();
-        crate::clipboard::clear_clipboard_probe_hook();
-        assert!(!deferred, "question mode must not defer an image probe");
-        assert!(state.peek_reply.images.is_empty());
-        assert!(!state.peek_reply.text().contains("[Image #"));
-    }
-
-    /// A whitespace-only chord paste inserts no text into the reply. Trimmed-empty
-    /// routes to the FileUrlsThenImage probe (to catch an image-only pasteboard),
-    /// so it defers rather than inserting spaces.
-    #[test]
-    fn peek_paste_key_whitespace_only_is_unchanged() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        crate::clipboard::set_clipboard_probe_hook(
-            crate::clipboard::ClipboardProbeHook::no_raster(Some("   ")),
-        );
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &ctrl_v_event(),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        crate::clipboard::clear_clipboard_probe_hook();
-        assert!(state.peek_reply.text().is_empty());
-    }
-
-    /// An empty-clipboard chord defers a probe (to catch a Finder file-url /
-    /// image-only pasteboard) without inserting text.
-    #[test]
-    fn peek_paste_key_empty_clipboard_defers_probe() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        crate::clipboard::set_clipboard_probe_hook(
-            crate::clipboard::ClipboardProbeHook::no_raster(None),
-        );
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &ctrl_v_event(),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        let target = deferred_probe_target(&effects);
-        crate::clipboard::clear_clipboard_probe_hook();
-        assert!(
-            matches!(
-                target,
-                Some(crate::app::actions::ClipboardPasteTarget::DashboardPeek { .. })
-            ),
-            "empty pbpaste still probes for a file-url / image via the peek target"
-        );
-        assert!(state.peek_reply.text().is_empty());
-    }
-
     #[test]
     fn dashboard_failed_text_read_is_carried_into_deferred_context() {
         let mut state = DashboardState::new();
@@ -6166,242 +5039,13 @@ mod tests {
         assert!(ctx.source.text_read_failed());
     }
 
-    /// A real path-image paste routed through `handle_input`
-    /// attaches an `[Image #N]` chip on the peek reply (not the hidden
-    /// dispatch input), with the source path stripped for a clean chip.
-    #[test]
-    fn peek_path_paste_routes_image_to_reply_not_dispatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let png = write_test_png(dir.path());
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        // Trailing newline skips the clipboard probe so the test is hermetic.
-        let paste = format!("{}\n", png.display());
-        let mut effects = Vec::new();
-        let outcome = state.handle_input_with_paste_provenance(
-            &Event::Paste(paste),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(matches!(outcome, InputOutcome::Changed));
-        let text = state.peek_reply.text();
-        assert!(text.contains("[Image #1]"), "expected chip, got {text:?}");
-        assert!(
-            !text.contains("shot.png"),
-            "chip must not embed the source path, got {text:?}"
-        );
-        assert_eq!(state.peek_reply.images.len(), 1);
-        assert!(
-            state.dispatch.text().is_empty() && state.dispatch.images.is_empty(),
-            "image must not leak into the hidden dispatch input"
-        );
-    }
-
-    /// In question mode the reply is text-only on the wire — a
-    /// path-image paste must NOT become an image chip.
-    #[test]
-    fn peek_question_mode_path_paste_stays_text_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let png = write_test_png(dir.path());
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        if let Some(p) = state.peek.as_mut() {
-            p.focused = true;
-            p.question = Some("Allow?".into());
-            p.options = vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())];
-            p.reject_option = Some(1);
-            p.selected_option = Some(1);
-        }
-        let paste = format!("{}\n", png.display());
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &Event::Paste(paste),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(state.peek_reply.images.is_empty());
-        assert!(!state.peek_reply.text().contains("[Image #"));
-    }
-
-    /// `clear_peek_reply` drops image state with the draft text.
-    #[test]
-    fn clear_peek_reply_clears_images() {
-        let mut state = state_with_open_peek();
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let _ = state.attach_peek_pasted_image(peek_test_image(), &mut effects);
-        assert!(!state.peek_reply.images.is_empty());
-        state.clear_peek_reply();
-        assert!(state.peek_reply.text().is_empty());
-        assert!(state.peek_reply.images.is_empty());
-    }
-
-    /// Enter with an image chip on the reply emits `DashboardPeekReply`
-    /// carrying the chip placeholder text (images drain at dispatch time).
-    #[test]
-    fn peek_enter_with_image_emits_reply() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        let _ = state.attach_peek_pasted_image(peek_test_image(), &mut effects);
-        let reg = crate::actions::ActionRegistry::defaults();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        match state.handle_key(&enter, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardPeekReply { text, attach, .. }) => {
-                assert!(text.contains("[Image #1]"), "got {text:?}");
-                assert!(!attach);
-            }
-            other => panic!("expected DashboardPeekReply, got {other:?}"),
-        }
-        // Action does not drain images — still on the widget until dispatch.
-        assert_eq!(state.peek_reply.images.len(), 1);
-    }
-
-    /// Question/permission feedback is text-only — an image chip
-    /// left on the reply must not leak its `[Image #N]` token into the
-    /// submitted feedback text.
-    #[test]
-    fn peek_question_feedback_strips_image_placeholder() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        state.peek_reply.set_text("no thanks");
-        state.peek_reply.set_cursor(state.peek_reply.text().len());
-        let _ = state.attach_peek_pasted_image(peek_test_image(), &mut effects);
-        assert!(state.peek_reply.text().contains("[Image #1]"));
-        if let Some(p) = state.peek.as_mut() {
-            p.focused = true;
-            p.question = Some("Allow?".into());
-            p.options = vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())];
-            p.reject_option = Some(1);
-            p.selected_option = Some(1);
-            p.request_id = Some(7);
-        }
-        let reg = crate::actions::ActionRegistry::defaults();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        match state.handle_key(&enter, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardPermissionFollowup { text, .. }) => {
-                assert!(!text.contains("[Image #"), "image token leaked: {text:?}");
-                assert!(
-                    text.contains("no thanks"),
-                    "feedback text dropped: {text:?}"
-                );
-            }
-            other => panic!("expected DashboardPermissionFollowup, got {other:?}"),
-        }
-    }
-
-    /// The Ask "Other" fallthrough (image-only draft, no typed text)
-    /// must also strip the `[Image #N]` token from the freeform answer.
-    #[test]
-    fn peek_ask_other_image_only_strips_placeholder() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        let _ = state.attach_peek_pasted_image(peek_test_image(), &mut effects);
-        assert!(state.peek_reply.text().contains("[Image #1]"));
-        if let Some(p) = state.peek.as_mut() {
-            p.focused = true;
-            p.question = Some("Which?".into());
-            p.options = vec![("a".into(), "A".into()), ("other".into(), "Other".into())];
-            p.reject_option = Some(1);
-            p.selected_option = Some(1);
-            p.request_id = None; // Ask tool (not a permission)
-            p.question_id = Some("ask-image-only".into());
-        }
-        let reg = crate::actions::ActionRegistry::defaults();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        match state.handle_key(&enter, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardQuestionAnswer { freeform, .. }) => {
-                assert!(
-                    !freeform.contains("[Image #"),
-                    "image token leaked: {freeform:?}"
-                );
-            }
-            other => panic!("expected DashboardQuestionAnswer, got {other:?}"),
-        }
-    }
-
-    /// Shift+Enter / Alt+Enter insert a newline into the focused peek
-    /// reply (multiline compose) instead of sending — the reply text
-    /// grows and no action is emitted.
-    #[test]
-    fn peek_shift_enter_inserts_newline() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        state.peek_reply.set_text("line one");
-        // Caret at end so the newline appends.
-        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
-        let outcome = state.handle_key(&shift_enter, &reg, &mut effects);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "Shift+Enter must edit the reply, got {outcome:?}",
-        );
-        assert!(
-            state.peek_reply.text().contains('\n'),
-            "Shift+Enter must insert a newline, got {:?}",
-            state.peek_reply.text(),
-        );
-        // Alt+Enter does the same.
-        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
-        let _ = state.handle_key(&alt_enter, &reg, &mut effects);
-        assert_eq!(state.peek_reply.text().matches('\n').count(), 2);
-    }
-
-    /// With multiline_mode on, peek bare Enter inserts a newline; Shift+Enter sends.
-    #[test]
-    fn peek_multiline_mode_swaps_enter() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        state.multiline_mode = true;
-        if let Some(p) = state.peek.as_mut() {
-            p.focused = true;
-        }
-        state.peek_reply.set_text("line one");
-        let reg = crate::actions::ActionRegistry::defaults();
-
-        let bare = state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            matches!(bare, InputOutcome::Changed),
-            "bare Enter in multiline peek must insert newline, got {bare:?}"
-        );
-        assert!(
-            state.peek_reply.text().contains('\n'),
-            "got {:?}",
-            state.peek_reply.text()
-        );
-
-        let shift = state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
-            &reg,
-            &mut effects,
-        );
-        match shift {
-            InputOutcome::Action(Action::DashboardPeekReply {
-                text,
-                attach: false,
-                ..
-            }) => {
-                assert!(text.contains("line one"), "peek reply text: {text:?}");
-            }
-            other => panic!("Shift+Enter in multiline peek must send, got {other:?}"),
-        }
-    }
-
-    /// Enter with an empty reply opens the peeked agent rather than
-    /// sending an empty prompt.
+    /// Enter on a selected row with an empty composer opens that agent.
     #[test]
     fn peek_enter_empty_opens_agent() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         use crate::app::actions::Action;
         let mut state = state_with_open_peek();
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         match state.handle_key(&enter, &reg, &mut effects) {
@@ -6419,6 +5063,7 @@ mod tests {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         use crate::app::actions::Action;
         let mut state = state_with_open_peek();
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         match state.handle_key(&right, &reg, &mut effects) {
@@ -6429,29 +5074,6 @@ mod tests {
         }
     }
 
-    /// Right arrow with a non-empty FOCUSED reply moves the caret within
-    /// the draft instead of opening the agent — the reply text is
-    /// preserved and no attach is emitted.
-    #[test]
-    fn peek_right_arrow_with_text_moves_caret_not_open() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        state.peek_reply.set_text("draft");
-        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
-        let outcome = state.handle_key(&right, &reg, &mut effects);
-        assert!(
-            !matches!(outcome, InputOutcome::Action(Action::DashboardAttach(_))),
-            "Right with a focused non-empty reply must NOT open the agent, got {outcome:?}",
-        );
-        assert_eq!(
-            state.peek_reply.text(),
-            "draft",
-            "Right must leave the reply draft intact",
-        );
-    }
-
     /// Up/Down switch the peeked agent (the panel follows the selection
     /// cursor).
     #[test]
@@ -6459,6 +5081,7 @@ mod tests {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         use crate::app::actions::Action;
         let mut state = state_with_open_peek();
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         // Empty reply → arrows are a navigation surface.
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
@@ -6473,74 +5096,19 @@ mod tests {
         ));
     }
 
-    /// With a non-empty FOCUSED reply, bare Up/Down move the caret
-    /// WITHIN the reply text (multi-line draft) instead of switching the
-    /// peeked agent — they edit, never emit a `DashboardSelect*` action,
-    /// and leave the draft text untouched.
-    #[test]
-    fn peek_arrows_move_caret_when_reply_has_content() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        // Two-line draft (caret at the start after set_text).
-        state.peek_reply.set_text("line one\nline two");
-
-        // Down must NOT switch agents — it moves the caret down a line.
-        let down = state.handle_key(
-            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            !matches!(down, InputOutcome::Action(_)),
-            "Down with reply content must edit the caret, not switch agents, got {down:?}",
-        );
-        // Up likewise stays within the input.
-        let up = state.handle_key(
-            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            !matches!(up, InputOutcome::Action(_)),
-            "Up with reply content must edit the caret, not switch agents, got {up:?}",
-        );
-        // The draft is untouched (caret moves only).
-        assert_eq!(state.peek_reply.text(), "line one\nline two");
-    }
-
-    /// An UNFOCUSED peek (Tab → row nav) keeps Up/Down as agent-switch
-    /// even with reply content — the reply isn't the active surface.
-    #[test]
-    fn peek_arrows_switch_agent_when_unfocused_despite_content() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        state.peek_reply.set_text("a draft");
-        state.peek.as_mut().unwrap().focused = false; // Tab → row nav
-        assert!(matches!(
-            state.handle_key(
-                &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                &reg,
-                &mut effects
-            ),
-            InputOutcome::Action(Action::DashboardSelectNext)
-        ));
-    }
-
-    /// The (peek-less) dispatch input mirrors the peek: with content,
-    /// bare Up/Down move the caret within the text (no `DashboardSelect*`
+    /// The new-session dispatch input: with content, bare Up/Down move the
+    /// caret within the text (no `DashboardSelect*`
     /// emitted); with an EMPTY prompt they navigate the row list (browse
     /// convenience).
     #[test]
-    fn dispatch_arrows_move_caret_with_content_navigate_when_empty() {
+    fn dispatch_arrows_move_caret_with_content_navigate_when_list_focused() {
         use crate::app::actions::Action;
         let reg = crate::actions::ActionRegistry::defaults();
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
 
         // Empty prompt → Up/Down navigate the list.
         let mut empty = make_state_with_selection();
+        empty.list_focused = true;
         assert!(empty.dispatch.text().is_empty());
         assert!(matches!(
             empty.handle_key(
@@ -6581,345 +5149,34 @@ mod tests {
         );
     }
 
-    /// Space closes the peek when the reply is empty (quick toggle) but
-    /// types a space once the user has started composing.
+    /// Changing the selected row leaves the new-session composer and its undo
+    /// history intact.
     #[test]
-    fn peek_space_types_into_reply() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+    fn selection_changes_preserve_new_session_undo() {
         let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        // The peek is tied to selection now, so Space is plain text (no
-        // close) — Esc unselects instead.
-        for c in ['h', 'i'] {
-            let _ = state.handle_key(
-                &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                &reg,
-                &mut effects,
-            );
-        }
-        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
-        let _ = state.handle_key(&space, &reg, &mut effects);
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(state.peek_reply.text(), "hi y");
-        // Peek stays open while the row is selected.
-        assert!(state.peek.is_some());
+        state.dispatch.set_text("new task");
+        state.dispatch.set_cursor(state.dispatch.text().len());
+        state
+            .dispatch
+            .handle_key(&KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        state.focus_row(DashboardRowId::TopLevel(AgentId(9)));
+        state.set_peek(None);
+        assert_eq!(state.dispatch.text(), "new task!");
+        state
+            .dispatch
+            .handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(state.dispatch.text(), "new task");
     }
 
-    /// Esc unselects: with an empty draft it clears the selection and
-    /// focuses the `[+ New Agent]` button (the new-session entry); a
-    /// typed draft is cleared first.
+    /// Typing `@` while a read-only preview is open activates the new-session
+    /// composer file picker, rooted at the launch cwd.
     #[test]
-    fn peek_esc_clears_draft_then_unselects() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        state.peek_reply.set_text("draft");
-        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        // First Esc clears the draft, keeps the peek + selection.
-        let _ = state.handle_key(&esc, &reg, &mut effects);
-        assert!(state.peek_reply.text().is_empty());
-        assert!(state.selected.is_some());
-        // Second Esc unselects → focuses the + New Agent button + closes peek.
-        let _ = state.handle_key(&esc, &reg, &mut effects);
-        assert!(state.peek.is_none());
-        assert!(state.selected.is_none());
-        assert!(state.new_agent_button_focused);
-    }
-
-    /// Ctrl-modified chords are never TYPED into the reply: non-bound
-    /// editing chords (Ctrl+A → caret-to-start) are delegated to the
-    /// widget as edits, while registry-bound dashboard chords (Ctrl+X
-    /// stop, Ctrl+T pin, …) fall through so they keep firing with the
-    /// peek open.
-    #[test]
-    fn peek_ctrl_keys_fall_through_not_typed() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        let _ = state.handle_key(&ctrl_a, &reg, &mut effects);
-        // 'a' must not have been typed into the reply (Ctrl+A is the
-        // caret-to-start editing chord, not text input).
-        assert!(state.peek_reply.text().is_empty());
-
-        // A registry-bound dashboard chord still falls through to its
-        // action with the peek open (Ctrl+T → pin toggle).
-        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
-        assert!(
-            matches!(
-                state.handle_key(&ctrl_t, &reg, &mut effects),
-                InputOutcome::Action(Action::DashboardTogglePin)
-            ),
-            "registry-bound Ctrl+T must keep firing with the peek open",
-        );
-        assert!(state.peek_reply.text().is_empty());
-    }
-
-    /// Ctrl+C clears a reply locally; Ctrl+D bubbles to confirmed global Quit.
-    #[test]
-    fn peek_ctrl_c_clears_reply_and_ctrl_d_bubbles_to_global_quit() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        state.peek_reply.set_text("reply draft");
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(matches!(
-            state.handle_key(&ctrl_c, &reg, &mut effects),
-            InputOutcome::Changed
-        ));
-        assert!(state.peek_reply.text().is_empty());
-        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
-        assert!(matches!(
-            state.handle_key(&ctrl_d, &reg, &mut effects),
-            InputOutcome::Unchanged
-        ));
-        // The peek stays open and nothing was typed.
-        assert!(state.peek.is_some());
-        assert!(state.peek_reply.text().is_empty());
-    }
-
-    /// Question picker flow: no option is selected by default (arrows switch
-    /// agents, Enter opens). A number key selects (and toggles) an option;
-    /// then `↑`/`↓` move within the options (spilling to the prev/next agent
-    /// at the edges) and `Enter` answers the selected option.
-    #[test]
-    fn peek_arrows_navigate_options_and_enter_answers() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = make_state_with_selection();
-        let mut f = peek_fields_for_test("Awaiting your input");
-        f.question = Some("Allow Edit?".into());
-        f.options = vec![
-            ("allow".into(), "Allow".into()),
-            ("deny".into(), "Deny".into()),
-        ];
-        f.request_id = Some(7);
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            f,
-        ));
-        let reg = crate::actions::ActionRegistry::defaults();
-
-        // Default: nothing selected → Down switches to the next agent.
-        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
-        assert!(matches!(
-            state.handle_key(&down, &reg, &mut effects),
-            InputOutcome::Action(Action::DashboardSelectNext)
-        ));
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, None);
-
-        // Pressing `1` selects the first option (and focuses the picker).
-        let one = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
-        assert!(matches!(
-            state.handle_key(&one, &reg, &mut effects),
-            InputOutcome::Changed
-        ));
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(0));
-
-        // Now Down moves within the options to option 1.
-        assert!(matches!(
-            state.handle_key(&down, &reg, &mut effects),
-            InputOutcome::Changed
-        ));
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(1));
-        // Down again at the LAST option spills out to the next agent; the
-        // selection is left unchanged.
-        assert!(matches!(
-            state.handle_key(&down, &reg, &mut effects),
-            InputOutcome::Action(Action::DashboardSelectNext)
-        ));
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(1));
-
-        // Enter answers the selected option (index 1 → "deny").
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        match state.handle_key(&enter, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardPermissionSelect {
-                request_id,
-                option_id,
-                ..
-            }) => {
-                assert_eq!(request_id, 7);
-                assert_eq!(option_id.0.as_ref(), "deny");
-            }
-            other => panic!("expected DashboardPermissionSelect, got {other:?}"),
-        }
-
-        // Up moves back toward the first option.
-        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-        let _ = state.handle_key(&up, &reg, &mut effects);
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(0));
-        // Up again at the FIRST option spills out to the previous row.
-        assert!(matches!(
-            state.handle_key(&up, &reg, &mut effects),
-            InputOutcome::Action(Action::DashboardSelectPrev)
-        ));
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(0));
-
-        // Pressing `1` again toggles the selection off → back to navigation,
-        // where Enter opens the agent in detail.
-        assert!(matches!(
-            state.handle_key(&one, &reg, &mut effects),
-            InputOutcome::Changed
-        ));
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, None);
-        assert!(matches!(
-            state.handle_key(&enter, &reg, &mut effects),
-            InputOutcome::Action(Action::DashboardAttach(_))
-        ));
-    }
-
-    /// Right mirrors Enter on the question-picker navigation surface:
-    /// with the panel focused and NO option selected, a bare Right opens
-    /// the peeked row in detail — just like Enter. Regression guard: the
-    /// `question_mode` block ends in a modal catch-all that returns
-    /// `Unchanged`, so without an explicit Right arm Enter opened but
-    /// Right did nothing (an inconsistent dead key).
-    #[test]
-    fn peek_right_arrow_opens_agent_in_focused_question_picker() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = make_state_with_selection();
-        let mut f = peek_fields_for_test("Awaiting your input");
-        f.question = Some("Allow Edit?".into());
-        f.options = vec![
-            ("allow".into(), "Allow".into()),
-            ("deny".into(), "Deny".into()),
-        ];
-        f.request_id = Some(7);
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            f,
-        ));
-        // Pin focused: PeekPanelState::new seeds from load_vim_mode().
-        state.peek.as_mut().unwrap().focused = true;
-        let reg = crate::actions::ActionRegistry::defaults();
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, None);
-
-        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
-        match state.handle_key(&right, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardAttach(row)) => {
-                assert_eq!(row, DashboardRowId::TopLevel(AgentId(0)));
-            }
-            other => panic!(
-                "Right in the focused question picker must open the agent (DashboardAttach), got {other:?}",
-            ),
-        }
-    }
-
-    /// The reject ("No") option accepts inline free-text feedback:
-    /// typing on it composes a message and `Enter` sends the rejection
-    /// with that feedback. Typing on a non-reject option is consumed.
-    #[test]
-    fn peek_reject_option_accepts_typed_feedback() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = make_state_with_selection();
-        let mut f = peek_fields_for_test("Awaiting your input");
-        f.question = Some("Allow Edit?".into());
-        f.options = vec![
-            ("allow".into(), "Allow".into()),
-            ("reject".into(), "No".into()),
-        ];
-        f.request_id = Some(9);
-        f.reject_option = Some(1);
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            f,
-        ));
-        let reg = crate::actions::ActionRegistry::defaults();
-
-        // With no option selected, typing a letter is consumed — no feedback
-        // composed and it doesn't leak into the reply buffer.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(state.peek_reply.text().is_empty());
-
-        // Select the reject option (index 1 → key `2`), then type feedback.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(1));
-        for c in ['n', 'o', 'p', 'e'] {
-            let _ = state.handle_key(
-                &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                &reg,
-                &mut effects,
-            );
-        }
-        assert_eq!(state.peek_reply.text(), "nope");
-
-        // Enter sends the rejection with the typed feedback.
-        match state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        ) {
-            InputOutcome::Action(Action::DashboardPermissionFollowup {
-                request_id, text, ..
-            }) => {
-                assert_eq!(request_id, 9);
-                assert_eq!(text, "nope");
-            }
-            other => panic!("expected DashboardPermissionFollowup, got {other:?}"),
-        }
-    }
-
-    /// `clear_peek_reply` (used on every lifecycle clear — row change,
-    /// open/close, send) wipes the undo history too, so `Ctrl+Z` can't
-    /// resurrect a draft typed for a DIFFERENT agent onto the newly
-    /// peeked one. Regression for the cross-agent mis-send hole that a
-    /// bare `set_text("")` left open (set_text records an undoable
-    /// `Replace` checkpoint).
-    #[test]
-    fn peek_clear_wipes_undo_so_ctrl_z_cannot_resurrect_draft() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        for c in "secret for A".chars() {
-            let _ = state.handle_key(
-                &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                &reg,
-                &mut effects,
-            );
-        }
-        assert_eq!(state.peek_reply.text(), "secret for A");
-        // Simulate the row-change / lifecycle clear.
-        state.clear_peek_reply();
-        assert!(state.peek_reply.text().is_empty());
-        // Ctrl+Z while the (now different-agent) reply is focused must
-        // NOT bring the old draft back.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            state.peek_reply.text().is_empty(),
-            "undo must not resurrect a cleared cross-agent draft, got {:?}",
-            state.peek_reply.text(),
-        );
-    }
-
-    /// Typing `@` in the peek reply activates the session-less file
-    /// context picker (rooted at the launch cwd, like the dispatch box),
-    /// so the `@` dropdown can stream in and render above the panel.
-    #[test]
-    fn peek_typing_at_activates_file_search() {
+    fn readonly_preview_does_not_retarget_new_session_file_search() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let mut state = state_with_open_peek();
         let reg = crate::actions::ActionRegistry::defaults();
         assert!(
-            state.peek_reply.file_search.context().is_none(),
+            state.dispatch.file_search.context().is_none(),
             "no @-context before typing @",
         );
         for c in ['@', 's', 'r', 'c'] {
@@ -6929,32 +5186,26 @@ mod tests {
                 &mut effects,
             );
         }
-        assert_eq!(state.peek_reply.text(), "@src");
+        assert_eq!(state.dispatch.text(), "@src");
         assert!(
-            state.peek_reply.file_search.context().is_some(),
-            "typing @ must activate the reply's file-search picker",
+            state.dispatch.file_search.context().is_some(),
+            "typing @ must activate the dispatch file-search picker",
         );
     }
 
-    /// Mouse-wheel scrolling over the `@` dropdown must drive the SAME
-    /// picker that is rendered: the peek reply's while the panel is
-    /// open, the dispatch box's otherwise. (Regression: the wheel
-    /// intercept hardcoded `dispatch.file_search`, so scrolling the peek
-    /// dropdown moved the hidden dispatch selection while the visible
-    /// list stayed put.) Uses `context()` as a cheap observable for
-    /// "which picker" — `@`-context is set synchronously, unlike the
-    /// async results `is_visible()` needs.
+    /// Mouse-wheel scrolling over the `@` dropdown keeps driving the
+    /// new-session dispatch picker while a read-only preview is open.
     #[test]
-    fn dropdown_file_search_follows_peek_state() {
-        // Peek open → the picker behind the dropdown is the reply's.
+    fn dropdown_file_search_keeps_new_session_owner_with_readonly_preview() {
+        // Peek open → the visible picker still belongs to dispatch.
         let mut open = state_with_open_peek();
-        open.peek_reply.file_search.update_context("@a", 2);
+        open.dispatch.file_search.update_context("@a", 2);
         assert!(
             open.dropdown_file_search_mut().context().is_some(),
-            "with the peek open, wheel scrolling must target the reply's picker",
+            "with the peek open, wheel scrolling must target the new-session picker",
         );
 
-        // Peek closed → it's the dispatch box's.
+        // Peek closed → the picker remains the dispatch box's.
         let mut closed = DashboardState::new();
         closed.dispatch.file_search.update_context("@b", 2);
         assert!(closed.peek.is_none());
@@ -6964,375 +5215,8 @@ mod tests {
         );
     }
 
-    /// The reply's `@` picker roots LAZILY at the peeked agent's cwd: a
-    /// bare cursor move (navigation) never retargets the daemon (no
-    /// thread churn), and the retarget lands on the first composing
-    /// keystroke, deduped so a same-cwd agent switch is free.
-    #[test]
-    fn peek_reply_file_search_retargets_lazily_on_compose() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        // The render pass records the peeked agent's cwd; simulate it.
-        state.set_peek_reply_target_cwd(Some(PathBuf::from("/work/repo-a")));
-        assert_eq!(state.peek_reply_cwd, None, "daemon not retargeted yet");
-
-        // Bare Down on an EMPTY reply switches agents — must NOT retarget.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(
-            state.peek_reply_cwd, None,
-            "navigation must not spawn a matcher daemon",
-        );
-
-        // First composing keystroke retargets to the recorded cwd.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(
-            state.peek_reply_cwd.as_deref(),
-            Some(Path::new("/work/repo-a")),
-            "first compose must root the picker at the peeked agent's cwd",
-        );
-
-        // Switching to a different-cwd agent retargets once on next compose.
-        state.set_peek_reply_target_cwd(Some(PathBuf::from("/work/repo-b")));
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(
-            state.peek_reply_cwd.as_deref(),
-            Some(Path::new("/work/repo-b")),
-            "a cwd change retargets on the next compose",
-        );
-    }
-
-    /// In question mode the `❯ reply` line is hidden, so a paste must NOT
-    /// silently fill the (invisible) reply buffer unless the reject /
-    /// "Other" free-text option is the selected one. (Regression: paste
-    /// used to land in `peek_reply` regardless and resurface later.)
-    #[test]
-    fn peek_paste_in_question_mode_gated_on_reject_selection() {
-        let mut state = make_state_with_selection();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut f = peek_fields_for_test("Awaiting your input");
-        f.question = Some("Allow Edit?".into());
-        f.options = vec![
-            ("allow".into(), "Allow".into()),
-            ("reject".into(), "No".into()),
-        ];
-        f.request_id = Some(9);
-        f.reject_option = Some(1);
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            f,
-        ));
-
-        // No option selected → paste is dropped (would be invisible).
-        let mut effects = Vec::new();
-        let outcome = state.handle_input_with_paste_provenance(
-            &Event::Paste("ignored".to_string()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(matches!(outcome, InputOutcome::Unchanged));
-        assert!(
-            state.peek_reply.text().is_empty(),
-            "paste must not fill the hidden reply when no reject option is selected",
-        );
-
-        // Select the reject option → paste now lands in the feedback field.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(1));
-        let outcome = state.handle_input_with_paste_provenance(
-            &Event::Paste("real feedback".to_string()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(state.peek_reply.text(), "real feedback");
-    }
-
-    /// The Ask tool (`AskUserQuestion`) is answered from the peek too:
-    /// selecting an option emits `DashboardQuestionAnswer { option_idx }`,
-    /// and the "Other" free-text row emits it with `option_idx: None` +
-    /// the typed text. (Ask questions carry no `request_id`.)
-    #[test]
-    fn peek_ask_question_answer_routing() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
-        let mut state = make_state_with_selection();
-        let mut f = peek_fields_for_test("Awaiting your input");
-        f.question = Some("Which approach?".into());
-        // Two real options + an appended "Other" free-text row.
-        f.options = vec![
-            ("Redis".into(), "Redis".into()),
-            ("In-memory".into(), "In-memory".into()),
-            ("__other__".into(), "Other".into()),
-        ];
-        f.reject_option = Some(2);
-        f.request_id = None;
-        f.question_id = Some("ask-routing".into());
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            f,
-        ));
-        let reg = crate::actions::ActionRegistry::defaults();
-
-        // Select the first option (key `1`), then Enter answers by index.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(0));
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        match state.handle_key(&enter, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardQuestionAnswer {
-                option_idx,
-                freeform,
-                ..
-            }) => {
-                assert_eq!(option_idx, Some(0));
-                assert!(freeform.is_empty());
-            }
-            other => panic!("expected DashboardQuestionAnswer, got {other:?}"),
-        }
-
-        // Select the "Other" row (index 2 → key `3`), type free-text, Enter
-        // → freeform answer.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(state.peek.as_ref().unwrap().selected_option, Some(2));
-        for c in ['s', 'q', 'l'] {
-            let _ = state.handle_key(
-                &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                &reg,
-                &mut effects,
-            );
-        }
-        match state.handle_key(&enter, &reg, &mut effects) {
-            InputOutcome::Action(Action::DashboardQuestionAnswer {
-                option_idx,
-                freeform,
-                ..
-            }) => {
-                assert_eq!(option_idx, None);
-                assert_eq!(freeform, "sql");
-            }
-            other => panic!("expected DashboardQuestionAnswer(Other), got {other:?}"),
-        }
-    }
-
-    /// Tab toggles peek reply focus; unfocused printable re-focuses and types (non-vim).
-    #[test]
-    fn peek_tab_toggles_focus_and_typing_refocuses() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        crate::appearance::cache::set_vim_mode(false);
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        assert!(state.peek.as_ref().unwrap().focused);
-        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        let _ = state.handle_key(&tab, &reg, &mut effects);
-        assert!(!state.peek.as_ref().unwrap().focused, "Tab must unfocus");
-        // Typing while unfocused re-focuses and composes.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            state.peek.as_ref().unwrap().focused,
-            "typing must re-focus the reply"
-        );
-        assert_eq!(state.peek_reply.text(), "y");
-    }
-
-    /// Vim: peek reply starts unfocused; j navigates; Enter focuses (no attach).
-    #[test]
-    fn vim_peek_opens_unfocused_jk_nav_enter_focuses() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        // Fixture pins vim off; re-enable and rebuild so the panel is
-        // born unfocused under vim.
-        crate::appearance::cache::set_vim_mode(true);
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            peek_fields_for_test("Idle"),
-        ));
-        let reg = crate::actions::ActionRegistry::defaults();
-        assert!(
-            !state.peek.as_ref().unwrap().focused,
-            "vim peek must not auto-focus the reply"
-        );
-        let j = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            matches!(j, InputOutcome::Action(Action::DashboardSelectNext)),
-            "vim j on unfocused peek must navigate, got {j:?}"
-        );
-        assert!(
-            state.peek_reply.text().is_empty(),
-            "j must not type into the reply, got {:?}",
-            state.peek_reply.text()
-        );
-        let enter = state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(matches!(enter, InputOutcome::Changed));
-        assert!(
-            state.peek.as_ref().unwrap().focused,
-            "Enter must focus the peek reply in vim mode"
-        );
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(state.peek_reply.text(), "j");
-        crate::appearance::cache::set_vim_mode(false);
-    }
-
-    /// Vim unfocused: `i` focuses without inserting; other printables are swallowed.
-    #[test]
-    fn vim_peek_unfocused_i_focuses_printable_swallowed() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        crate::appearance::cache::set_vim_mode(true);
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            peek_fields_for_test("Idle"),
-        ));
-        let reg = crate::actions::ActionRegistry::defaults();
-        assert!(!state.peek.as_ref().unwrap().focused);
-
-        let x = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            matches!(x, InputOutcome::Unchanged),
-            "vim unfocused printable must be swallowed, got {x:?}"
-        );
-        assert!(
-            !state.peek.as_ref().unwrap().focused,
-            "swallowed key must not focus the reply"
-        );
-        assert!(
-            state.peek_reply.text().is_empty(),
-            "swallowed key must not type, got {:?}",
-            state.peek_reply.text()
-        );
-
-        let i = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(matches!(i, InputOutcome::Changed));
-        assert!(
-            state.peek.as_ref().unwrap().focused,
-            "i must focus the peek reply"
-        );
-        assert!(
-            state.peek_reply.text().is_empty(),
-            "i must not be inserted, got {:?}",
-            state.peek_reply.text()
-        );
-        crate::appearance::cache::set_vim_mode(false);
-    }
-
-    /// Vim: apply_fields row change clears peek reply focus.
-    #[test]
-    fn vim_peek_row_change_unfocuses_reply() {
-        let mut state = state_with_open_peek();
-        crate::appearance::cache::set_vim_mode(true);
-        state.peek.as_mut().unwrap().focused = true;
-        let other = DashboardRowId::TopLevel(AgentId(99));
-        let fields = super::super::peek::PeekFields {
-            label: "other".into(),
-            time_ago: String::new(),
-            response_type: "Idle".into(),
-            last_user_message: None,
-            question: None,
-            options: vec![],
-            request_id: None,
-            question_id: None,
-            reject_option: None,
-        };
-        let changed = state.peek.as_mut().unwrap().apply_fields(other, fields);
-        assert!(changed);
-        assert!(
-            !state.peek.as_ref().unwrap().focused,
-            "vim row change must unfocus the reply"
-        );
-        crate::appearance::cache::set_vim_mode(false);
-    }
-
-    /// Non-registry editing chords reach the reply widget while the
-    /// peek is focused: Ctrl+A moves the caret to the start and Ctrl+K
-    /// kills to end-of-line — the full `PromptWidget` editing surface,
-    /// not the old bare-char-only editor.
-    #[test]
-    fn peek_editing_chords_reach_reply_widget() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        for c in ['a', 'b', 'c'] {
-            let _ = state.handle_key(
-                &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                &reg,
-                &mut effects,
-            );
-        }
-        assert_eq!(state.peek_reply.text(), "abc");
-        // Ctrl+A → caret to line start (consumed by the widget, NOT a
-        // dashboard action and NOT typed).
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
-            &reg,
-            &mut effects,
-        );
-        assert_eq!(state.peek_reply.cursor(), 0, "Ctrl+A must move the caret");
-        // Ctrl+K → kill to end of line.
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            state.peek_reply.text().is_empty(),
-            "Ctrl+K must kill to end of line, got {:?}",
-            state.peek_reply.text(),
-        );
-        // The hidden dispatch input was never touched.
-        assert!(state.dispatch.text().is_empty());
-    }
-
-    /// Drag-selecting text in the dispatch box works like the peek
-    /// reply: Down inside the rect anchors the drag, Drag extends the
+    /// Drag-selecting text in the dispatch box: Down inside the rect anchors
+    /// the drag, Drag extends the
     /// textarea selection, and Up finishes it — Drag/Up are forwarded
     /// even when the pointer leaves the box.
     #[test]
@@ -7371,43 +5255,7 @@ mod tests {
         assert_eq!(
             state.dispatch.textarea.selection_range(),
             Some(0..11),
-            "dispatch drag must extend the textarea selection like the peek reply",
-        );
-    }
-
-    /// A left click inside the recorded reply rect focuses the reply
-    /// input (mirrors the dispatch box's click-to-focus) and routes the
-    /// event to the widget.
-    #[test]
-    fn peek_mouse_click_on_reply_rect_focuses() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let mut state = state_with_open_peek();
-        state.peek.as_mut().unwrap().focused = false;
-        state.peek_reply_rect = Some(Rect::new(2, 10, 40, 1));
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 5,
-            row: 10,
-            modifiers: KeyModifiers::NONE,
-        };
-        let outcome = state.handle_mouse(&click);
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(
-            state.peek.as_ref().unwrap().focused,
-            "a click on the reply rect must focus the reply input",
-        );
-        // A click outside the rect (on no row) leaves focus alone.
-        state.peek.as_mut().unwrap().focused = false;
-        let miss = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 70,
-            row: 20,
-            modifiers: KeyModifiers::NONE,
-        };
-        let _ = state.handle_mouse(&miss);
-        assert!(
-            !state.peek.as_ref().unwrap().focused,
-            "a click outside the reply rect must not grab focus",
+            "dispatch drag must extend the textarea selection",
         );
     }
 
@@ -7514,7 +5362,7 @@ mod tests {
         );
         assert!(
             state.new_agent_button_focused,
-            "Esc-deselect must focus the `[+ New Agent]` button as the new cursor target",
+            "Esc-deselect must focus the `[+ New session]` button as the new cursor target",
         );
     }
 
@@ -7527,6 +5375,7 @@ mod tests {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         use crate::app::actions::Action;
         let mut state = DashboardState::new();
+        state.list_focused = true;
         // Fresh state defaults to button-focused; pin that
         // precondition so a future regression doesn't quietly
         // flip the default away from the button.
@@ -7603,6 +5452,7 @@ mod tests {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         use crate::app::actions::Action;
         let mut state = make_state_with_selection();
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let outcome = state.handle_key(&key, &reg, &mut effects);
@@ -7675,6 +5525,7 @@ mod tests {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         use crate::app::actions::Action;
         let mut state = DashboardState::new();
+        state.list_focused = true;
         assert!(state.new_agent_button_focused);
         let reg = crate::actions::ActionRegistry::defaults();
         let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
@@ -7690,7 +5541,7 @@ mod tests {
     }
 
     /// Full Esc cascade from a focused input with a row selected:
-    /// blur (→ list) → deselect (→ `[+ New Agent]`) → exit. Pins the
+    /// blur (→ list) → deselect (→ `[+ New session]`) → exit. Pins the
     /// tier ordering, catching a regression that would skip any tier.
     #[test]
     fn esc_cascade_blurs_then_deselects_then_exits() {
@@ -7878,7 +5729,6 @@ mod tests {
     #[test]
     fn multiline_mode_empty_bare_enter_is_newline() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        use crate::app::actions::Action;
         let reg = crate::actions::ActionRegistry::defaults();
         let mut state = make_state_with_selection();
         state.multiline_mode = true;
@@ -7899,16 +5749,17 @@ mod tests {
         );
 
         state.dispatch.set_text("");
-        match state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
-            &reg,
-            &mut effects,
-        ) {
-            InputOutcome::Action(Action::DashboardAttach(id)) => {
-                assert_eq!(id, DashboardRowId::TopLevel(AgentId(0)));
-            }
-            other => panic!("empty Shift+Enter in multiline must attach, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                state.handle_key(
+                    &KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                    &reg,
+                    &mut effects,
+                ),
+                InputOutcome::Unchanged
+            ),
+            "empty new-session composer never opens a selected session"
+        );
     }
 
     /// Ctrl+M toggles multiline via SetMultilineMode (same chord as agent).
@@ -8098,7 +5949,7 @@ mod tests {
     }
 
     /// Overview focused: Enter opens the focused row; Esc backs out of
-    /// the selection (focuses `[+ New Agent]`) and STAYS on the list —
+    /// the selection (focuses `[+ New session]`) and STAYS on the list —
     /// it no longer returns to the input (Tab / `i` do that now).
     #[test]
     fn list_focus_enter_opens_and_esc_backs_out() {
@@ -8130,7 +5981,7 @@ mod tests {
     }
 
     /// Regression for the Esc-blur draft-loss path: with the list focused
-    /// (e.g. after Esc unfocuses the input) on the `[+ New Agent]`
+    /// (e.g. after Esc unfocuses the input) on the `[+ New session]`
     /// button, Enter must SEND a typed draft rather than create an empty
     /// session and silently drop it. An empty draft still
     /// creates-with-detail.
@@ -8267,75 +6118,6 @@ mod tests {
         }
     }
 
-    /// Peek reply: Enter on a paste chip expands rather than sending.
-    #[test]
-    fn enter_on_peek_reply_paste_chip_expands() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut effects = Vec::new();
-        state.peek.as_mut().unwrap().focused = true;
-        let pasted = "a\nb\nc";
-        // Peek reply is compact → 2-line threshold; 3 lines still chips.
-        let _ = state.handle_input_with_paste_provenance(
-            &Event::Paste(pasted.to_string()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert_eq!(state.peek_reply.textarea.elements().len(), 1);
-        state.peek_reply.set_cursor(0);
-        let outcome = state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "Enter on peek chip must expand, got {outcome:?}"
-        );
-        assert!(state.peek_reply.textarea.elements().is_empty());
-        assert_eq!(state.peek_reply.text(), pasted);
-    }
-
-    /// Multiline peek still expands paste chips before treating bare Enter
-    /// as a newline (dispatch + agent order).
-    #[test]
-    fn multiline_peek_enter_on_paste_chip_expands() {
-        let mut state = state_with_open_peek();
-        state.multiline_mode = true;
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut effects = Vec::new();
-        state.peek.as_mut().unwrap().focused = true;
-        let pasted = "a\nb\nc";
-        let _ = state.handle_input_with_paste_provenance(
-            &Event::Paste(pasted.to_string()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert_eq!(state.peek_reply.textarea.elements().len(), 1);
-        state.peek_reply.set_cursor(0);
-        let outcome = state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "multiline Enter on peek chip must expand, got {outcome:?}"
-        );
-        assert!(
-            state.peek_reply.textarea.elements().is_empty(),
-            "chip must be inlined, not left as an element"
-        );
-        assert_eq!(state.peek_reply.text(), pasted);
-        assert!(
-            !state.peek_reply.text().contains("\n\n"),
-            "must expand, not insert an extra newline: {:?}",
-            state.peek_reply.text()
-        );
-    }
-
     /// Enter on an image chip still dispatches — dashboard has no image
     /// viewer, so ImagePreview must not swallow the key.
     #[test]
@@ -8381,54 +6163,14 @@ mod tests {
     fn peek_row_change_clears_prompt_click_timer() {
         let mut state = state_with_open_peek();
         state.last_prompt_click = Some(Instant::now());
-        state.clear_peek_reply();
+        state.set_peek(Some(super::super::peek::PeekPanelState::new(
+            DashboardRowId::TopLevel(AgentId(1)),
+            peek_fields_for_test("Idle"),
+        )));
         assert!(
             state.last_prompt_click.is_none(),
-            "row change / clear_peek_reply must clear double-click timer"
+            "row change must clear double-click timer"
         );
-    }
-
-    #[test]
-    fn enter_on_reject_feedback_paste_chip_expands() {
-        let mut state = DashboardState::new();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut f = peek_fields_for_test("Awaiting your input");
-        f.question = Some("Allow Edit?".into());
-        f.options = vec![
-            ("allow".into(), "Allow".into()),
-            ("no".into(), "No, reject".into()),
-        ];
-        f.reject_option = Some(1);
-        f.request_id = Some(7);
-        state.set_peek(Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            f,
-        )));
-        if let Some(p) = state.peek.as_mut() {
-            p.focused = true;
-            p.selected_option = Some(1);
-        }
-        let pasted = "reason line one\nreason line two\nreason line three";
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &Event::Paste(pasted.to_string()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert_eq!(state.peek_reply.textarea.elements().len(), 1);
-        state.peek_reply.set_cursor(0);
-        let outcome = state.handle_key(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "Enter on reject freeform paste chip must expand, got {outcome:?}"
-        );
-        assert!(state.peek_reply.textarea.elements().is_empty());
-        assert_eq!(state.peek_reply.text(), pasted);
     }
 
     #[test]
@@ -8444,142 +6186,6 @@ mod tests {
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert!(state.dispatch.text().is_empty());
-    }
-
-    #[test]
-    fn wrap_host_image_none_paste_not_inserted_into_peek_reply() {
-        let mut state = DashboardState::new();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut effects = Vec::new();
-        state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
-        state.set_peek(Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            peek_fields_for_test("Idle"),
-        )));
-        let outcome = state.handle_input_with_paste_provenance(
-            &Event::Paste(crate::wrap_clipboard_image::MAGIC_NONE.to_string()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(matches!(outcome, InputOutcome::Unchanged));
-        assert!(state.peek_reply.text().is_empty());
-        assert!(state.dispatch.text().is_empty());
-    }
-
-    /// Wrap host-image bracketed paste with peek open must attach to
-    /// `peek_reply`, not the hidden new-session dispatch input.
-    #[test]
-    fn wrap_host_image_paste_with_peek_open_goes_to_reply_not_dispatch() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut effects = Vec::new();
-        let png = test_png_bytes();
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
-        let paste = format!(
-            "{}\nimage/png\n{b64}",
-            crate::wrap_clipboard_image::MAGIC_IMG
-        );
-        let outcome = state.handle_input_with_paste_provenance(
-            &Event::Paste(paste),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(matches!(outcome, InputOutcome::Changed));
-        let text = state.peek_reply.text();
-        assert!(text.contains("[Image #1]"), "got {text:?}");
-        assert_eq!(state.peek_reply.images.len(), 1);
-        assert!(
-            state.dispatch.images.is_empty() && state.dispatch.text().is_empty(),
-            "wrap image must not leak into hidden dispatch"
-        );
-        assert!(
-            state.peek.as_ref().unwrap().focused,
-            "wrap image paste must focus the reply"
-        );
-    }
-
-    /// Question mode is text-only on the wire — wrap host-image must not
-    /// attach to peek reply (or leak into dispatch).
-    #[test]
-    fn wrap_host_image_paste_question_mode_blocks_attach() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut effects = Vec::new();
-        if let Some(p) = state.peek.as_mut() {
-            p.focused = true;
-            p.question = Some("Allow?".into());
-            p.options = vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())];
-            p.reject_option = Some(1);
-            p.selected_option = Some(1);
-        }
-        let png = test_png_bytes();
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
-        let paste = format!(
-            "{}\nimage/png\n{b64}",
-            crate::wrap_clipboard_image::MAGIC_IMG
-        );
-        let outcome = state.handle_input_with_paste_provenance(
-            &Event::Paste(paste),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(matches!(outcome, InputOutcome::Unchanged));
-        assert!(state.peek_reply.images.is_empty());
-        assert!(!state.peek_reply.text().contains("[Image #"));
-        assert!(state.dispatch.images.is_empty() && state.dispatch.text().is_empty());
-    }
-
-    /// A bracketed paste while the peek panel is open lands in the
-    /// peek's `❯ reply` widget — NOT the hidden new-session dispatch
-    /// input. (Regression: terminals with bracketed paste deliver
-    /// Cmd/Ctrl+V as `Event::Paste`, which used to fall through to
-    /// the dispatch arm and silently fill the box behind the
-    /// panel.) A multi-line paste folds into a single `[Pasted: N
-    /// lines]` chip (the reply widget is compact → 2-line threshold)
-    /// while preserving the raw text for the eventual send, and pasting
-    /// focuses the input like the Ctrl/Cmd+V chord does.
-    #[test]
-    fn bracketed_paste_with_peek_open_goes_to_reply() {
-        let mut state = DashboardState::new();
-        let reg = crate::actions::ActionRegistry::defaults();
-        state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
-        state.set_peek(Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            peek_fields_for_test("Idle"),
-        )));
-        // Unfocused (Tab → row nav) — paste must still target the reply
-        // and re-focus it ("pasting implies an intent to reply").
-        state.peek.as_mut().unwrap().focused = false;
-        let mut effects = Vec::new();
-        let outcome = state.handle_input_with_paste_provenance(
-            &Event::Paste("hello\nworld".to_string()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(
-            state.peek_reply.text(),
-            "hello\nworld",
-            "paste must land in the reply with its raw text preserved",
-        );
-        assert_eq!(
-            state.peek_reply.textarea.elements().len(),
-            1,
-            "a 2-line paste must fold into one [Pasted: N lines] chip (compact threshold)",
-        );
-        assert!(
-            state.peek.as_ref().unwrap().focused,
-            "paste must focus the reply input"
-        );
-        assert!(
-            state.dispatch.text().is_empty(),
-            "paste must NOT leak into the hidden dispatch input, got {:?}",
-            state.dispatch.text(),
-        );
     }
 
     /// A pasted image attaches as a clean `[Image #N]` chip with no
@@ -8666,19 +6272,10 @@ mod tests {
 
     /// A `ClipboardPasteContext` for driving `complete_clipboard_attachment_paste`
     /// directly (image-wins Cmd+V: carries the caption, inserts on a no-image
-    /// miss). The peek target stamps the row `state_with_open_peek` peeks.
-    fn completion_ctx(
-        clipboard_text: Option<&str>,
-        peek: bool,
-    ) -> crate::app::actions::ClipboardPasteContext {
+    /// miss).
+    fn completion_ctx(clipboard_text: Option<&str>) -> crate::app::actions::ClipboardPasteContext {
         crate::app::actions::ClipboardPasteContext {
-            target: if peek {
-                crate::app::actions::ClipboardPasteTarget::DashboardPeek {
-                    row: DashboardRowId::TopLevel(AgentId(0)),
-                }
-            } else {
-                crate::app::actions::ClipboardPasteTarget::DashboardDispatch
-            },
+            target: crate::app::actions::ClipboardPasteTarget::DashboardDispatch,
             source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                 text: crate::app::actions::ClipboardTextRead::Success(
                     clipboard_text.map(str::to_owned),
@@ -8686,33 +6283,6 @@ mod tests {
                 tip_showing: false,
             },
         }
-    }
-
-    /// Drive a real Cmd+V that finds a raster (defers), then complete the probe
-    /// with a decoded image — the full shipped deferred image-paste path. The
-    /// caller sets `state` up so `handle_input` routes to the intended surface
-    /// (peek open → reply; peek closed → dispatch).
-    fn cmd_v_image(state: &mut DashboardState, clipboard_text: Option<&str>) {
-        let reg = crate::actions::ActionRegistry::defaults();
-        crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
-            text: clipboard_text.map(str::to_owned),
-            ..crate::clipboard::ClipboardProbeHook::with_raster(None)
-        });
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &ctrl_v_event(),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        let ctx = deferred_probe_ctx(&effects).expect("an image paste must defer a probe");
-        crate::clipboard::clear_clipboard_probe_hook();
-        state.complete_clipboard_attachment_paste(
-            ctx,
-            crate::app::actions::ProbedAttachment::Image(completion_pasted_image()),
-            None,
-            &mut effects,
-        );
     }
 
     #[test]
@@ -8872,61 +6442,6 @@ mod tests {
     }
 
     #[test]
-    fn peek_bracketed_image_paste_defers_probe() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        crate::clipboard::set_clipboard_probe_hook(
-            crate::clipboard::ClipboardProbeHook::with_raster(None),
-        );
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &Event::Paste(String::new()),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        let calls = crate::clipboard::clipboard_probe_call_count();
-        let target = deferred_probe_target(&effects);
-        crate::clipboard::clear_clipboard_probe_hook();
-
-        assert_eq!(calls, 0, "probe must NOT run inline on the event loop");
-        assert!(
-            matches!(
-                target,
-                Some(crate::app::actions::ClipboardPasteTarget::DashboardPeek { .. })
-            ),
-            "a peek-targeted probe effect must be enqueued"
-        );
-        assert!(state.peek_reply.images.is_empty());
-    }
-
-    #[test]
-    fn peek_paste_key_image_defers_probe() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        crate::clipboard::set_clipboard_probe_hook(
-            crate::clipboard::ClipboardProbeHook::with_raster(None),
-        );
-        let mut effects = Vec::new();
-        let _ = state.handle_input_with_paste_provenance(
-            &ctrl_v_event(),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        let calls = crate::clipboard::clipboard_probe_call_count();
-        let target = deferred_probe_target(&effects);
-        crate::clipboard::clear_clipboard_probe_hook();
-
-        assert_eq!(calls, 0, "probe must NOT run inline on the event loop");
-        assert!(matches!(
-            target,
-            Some(crate::app::actions::ClipboardPasteTarget::DashboardPeek { .. })
-        ));
-        assert!(state.peek_reply.images.is_empty());
-    }
-
-    #[test]
     fn dispatch_text_paste_no_raster_stays_synchronous() {
         let mut state = DashboardState::new();
         let reg = crate::actions::ActionRegistry::defaults();
@@ -8973,55 +6488,41 @@ mod tests {
             png.display(),
             after.display()
         );
-        for peek in [false, true] {
-            for entry in 0..3 {
-                let mut state = if peek {
-                    state_with_open_peek()
-                } else {
-                    DashboardState::new()
-                };
-                let mut effects = Vec::new();
-                match entry {
-                    0 => {
-                        state.handle_bracketed_paste(&payload, peek, false, &mut effects);
-                    }
-                    1 => {
-                        state.handle_paste_key_deferred(
-                            crate::app::actions::ClipboardTextRead::Success(Some(payload.clone())),
-                            peek,
-                            &mut effects,
-                        );
-                    }
-                    _ => {
-                        state.paste_probe_in_flight = 1;
-                        let result = state.complete_clipboard_attachment_paste(
-                            completion_ctx(None, peek),
-                            crate::app::actions::ProbedAttachment::NoRaster,
-                            Some(payload.clone()),
-                            &mut effects,
-                        );
-                        assert_eq!(
-                            result,
-                            crate::app::actions::ClipboardPasteCompletion::Handled
-                        );
-                        assert_eq!(state.paste_probe_in_flight, 0);
-                    }
+        for entry in 0..3 {
+            let mut state = DashboardState::new();
+            let mut effects = Vec::new();
+            match entry {
+                0 => {
+                    state.handle_bracketed_paste(&payload, false, &mut effects);
                 }
-                let (target, other) = if peek {
-                    (&state.peek_reply, &state.dispatch)
-                } else {
-                    (&state.dispatch, &state.peek_reply)
-                };
-                assert_eq!(target.images.len(), 1, "peek={peek}, entry={entry}");
-                let text = target.text();
-                let first = text.find("before.txt").unwrap();
-                let image = text.find("[Image #1]").unwrap();
-                let last = text.find("after.txt").unwrap();
-                assert!(first < image && image < last, "{text}");
-                assert!(other.images.is_empty());
-                assert!(other.text().is_empty());
-                assert!(deferred_probe_target(&effects).is_none());
+                1 => {
+                    state.handle_paste_key_deferred(
+                        crate::app::actions::ClipboardTextRead::Success(Some(payload.clone())),
+                        &mut effects,
+                    );
+                }
+                _ => {
+                    state.paste_probe_in_flight = 1;
+                    let result = state.complete_clipboard_attachment_paste(
+                        completion_ctx(None),
+                        crate::app::actions::ProbedAttachment::NoRaster,
+                        Some(payload.clone()),
+                        &mut effects,
+                    );
+                    assert_eq!(
+                        result,
+                        crate::app::actions::ClipboardPasteCompletion::Handled
+                    );
+                    assert_eq!(state.paste_probe_in_flight, 0);
+                }
             }
+            assert_eq!(state.dispatch.images.len(), 1, "entry={entry}");
+            let text = state.dispatch.text();
+            let first = text.find("before.txt").unwrap();
+            let image = text.find("[Image #1]").unwrap();
+            let last = text.find("after.txt").unwrap();
+            assert!(first < image && image < last, "{text}");
+            assert!(deferred_probe_target(&effects).is_none());
         }
     }
 
@@ -9031,38 +6532,25 @@ mod tests {
         let png = write_test_png(dir.path());
         let plain = dir.path().join("keep.txt");
         std::fs::write(&plain, "keep").unwrap();
-        for peek in [false, true] {
-            let mut state = if peek {
-                state_with_open_peek()
-            } else {
-                DashboardState::new()
-            };
-            let target = if peek {
-                &mut state.peek_reply
-            } else {
-                &mut state.dispatch
-            };
-            for _ in 0..crate::views::prompt_widget::PromptWidget::IMAGE_CAP {
-                target.insert_image(completion_pasted_image()).unwrap();
-            }
-            let payload = format!("{}\n{}", png.display(), plain.display());
-            let result = state.insert_dropped_paths(&payload, peek, &mut Vec::new());
-            assert_eq!(
-                result,
-                Some(crate::app::actions::ClipboardPasteCompletion::Handled)
-            );
-            let target = if peek {
-                &state.peek_reply
-            } else {
-                &state.dispatch
-            };
-            assert_eq!(
-                target.images.len(),
-                crate::views::prompt_widget::PromptWidget::IMAGE_CAP
-            );
-            assert!(target.text().contains("keep.txt"));
-            assert!(state.feedback.is_some());
+        let mut state = DashboardState::new();
+        for _ in 0..crate::views::prompt_widget::PromptWidget::IMAGE_CAP {
+            state
+                .dispatch
+                .insert_image(completion_pasted_image())
+                .unwrap();
         }
+        let payload = format!("{}\n{}", png.display(), plain.display());
+        let result = state.insert_dropped_paths(&payload, &mut Vec::new());
+        assert_eq!(
+            result,
+            Some(crate::app::actions::ClipboardPasteCompletion::Handled)
+        );
+        assert_eq!(
+            state.dispatch.images.len(),
+            crate::views::prompt_widget::PromptWidget::IMAGE_CAP
+        );
+        assert!(state.dispatch.text().contains("keep.txt"));
+        assert!(state.feedback.is_some());
     }
 
     #[test]
@@ -9106,7 +6594,7 @@ mod tests {
         let mut state = DashboardState::new();
         let mut effects = Vec::new();
         let completion = state.complete_clipboard_attachment_paste(
-            completion_ctx(Some("caption"), false),
+            completion_ctx(Some("caption")),
             crate::app::actions::ProbedAttachment::Image(completion_pasted_image()),
             None,
             &mut effects,
@@ -9121,24 +6609,6 @@ mod tests {
         assert!(!state.dispatch.text().contains("caption"));
     }
 
-    #[test]
-    fn completion_attaches_image_to_peek() {
-        let mut state = state_with_open_peek();
-        let mut effects = Vec::new();
-        state.complete_clipboard_attachment_paste(
-            completion_ctx(None, true),
-            crate::app::actions::ProbedAttachment::Image(completion_pasted_image()),
-            None,
-            &mut effects,
-        );
-        assert_eq!(state.peek_reply.images.len(), 1);
-        assert!(state.peek_reply.text().contains("[Image #1]"));
-        assert!(
-            state.dispatch.images.is_empty(),
-            "peek completion must not leak into dispatch"
-        );
-    }
-
     /// A no-image miss on an image-wins dispatch Cmd+V inserts the carried
     /// caption instead — deferring the probe must not lose a text-only paste.
     #[test]
@@ -9146,7 +6616,7 @@ mod tests {
         let mut state = DashboardState::new();
         let mut effects = Vec::new();
         let completion = state.complete_clipboard_attachment_paste(
-            completion_ctx(Some("just some text"), false),
+            completion_ctx(Some("just some text")),
             crate::app::actions::ProbedAttachment::NoRaster,
             None,
             &mut effects,
@@ -9176,7 +6646,7 @@ mod tests {
         ] {
             let mut state = DashboardState::new();
             let mut effects = Vec::new();
-            let mut ctx = completion_ctx(None, false);
+            let mut ctx = completion_ctx(None);
             ctx.source = crate::app::actions::ClipboardPasteSource::BracketedDeferred {
                 text: "bracketed text".to_owned(),
             };
@@ -9189,34 +6659,6 @@ mod tests {
         }
     }
 
-    /// A no-image miss on a peek Cmd+V must NOT buffer the caption into the
-    /// hidden reply if the peeked agent raised a question during the probe window
-    /// (the reply is text-only on the wire in question mode).
-    #[test]
-    fn completion_peek_caption_dropped_in_question_mode() {
-        let mut state = state_with_open_peek();
-        let mut effects = Vec::new();
-        state.paste_probe_in_flight = 1;
-        if let Some(p) = state.peek.as_mut() {
-            p.question = Some("Allow?".into());
-        }
-        let completion = state.complete_clipboard_attachment_paste(
-            completion_ctx(Some("some caption"), true),
-            crate::app::actions::ProbedAttachment::NoRaster,
-            None,
-            &mut effects,
-        );
-        assert_eq!(
-            completion,
-            crate::app::actions::ClipboardPasteCompletion::Dropped
-        );
-        assert!(
-            state.peek_reply.text().is_empty(),
-            "the caption must be dropped in question mode, not buffered into the hidden reply"
-        );
-        assert_eq!(state.paste_probe_in_flight, 0);
-    }
-
     #[test]
     fn completion_attaches_file_url_to_dispatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -9224,7 +6666,7 @@ mod tests {
         let mut state = DashboardState::new();
         let mut effects = Vec::new();
         let completion = state.complete_clipboard_attachment_paste(
-            completion_ctx(None, false),
+            completion_ctx(None),
             crate::app::actions::ProbedAttachment::NoRaster,
             Some(png.display().to_string()),
             &mut effects,
@@ -9241,162 +6683,37 @@ mod tests {
         assert!(state.dispatch.text().contains("[Image #1]"));
     }
 
-    /// A peek completion arriving after the panel closed drops the attachment
-    /// instead of inserting into the now-hidden reply buffer.
-    #[test]
-    fn completion_peek_dropped_when_panel_closed() {
-        let mut state = DashboardState::new(); // no peek open
-        let mut effects = Vec::new();
-        state.paste_probe_in_flight = 1;
-        let completion = state.complete_clipboard_attachment_paste(
-            completion_ctx(None, true),
-            crate::app::actions::ProbedAttachment::Image(completion_pasted_image()),
-            None,
-            &mut effects,
-        );
-        assert_eq!(
-            completion,
-            crate::app::actions::ClipboardPasteCompletion::Dropped
-        );
-        assert!(
-            state.peek_reply.images.is_empty(),
-            "a closed peek must not receive the deferred image"
-        );
-        assert_eq!(
-            state.paste_probe_in_flight, 0,
-            "the in-flight count is still decremented so a stashed send can drain"
-        );
-    }
-
-    /// A peek completion arriving after the panel moved to ANOTHER row drops
-    /// the attachment (never lands in a different agent's reply), and a peek
-    /// send stashed for the old row is dropped at drain time — with a toast —
-    /// instead of replying to the newly peeked agent.
-    #[test]
-    fn completion_peek_dropped_when_row_changed() {
-        let mut state = state_with_open_peek(); // peeks TopLevel(AgentId(0))
-        let mut effects = Vec::new();
-        state.paste_probe_in_flight = 1;
-        state.deferred_peek_send = Some(DeferredPeekSend {
-            row: DashboardRowId::TopLevel(AgentId(0)),
-            attach: false,
-        });
-        // The user moves the peek to a different row during the probe window.
-        if let Some(p) = state.peek.as_mut() {
-            p.row = DashboardRowId::TopLevel(AgentId(7));
-        }
-        state.complete_clipboard_attachment_paste(
-            completion_ctx(None, true),
-            crate::app::actions::ProbedAttachment::Image(completion_pasted_image()),
-            None,
-            &mut effects,
-        );
-        assert!(
-            state.peek_reply.images.is_empty(),
-            "a retargeted peek must not receive the deferred image"
-        );
-        assert_eq!(state.paste_probe_in_flight, 0);
-        let actions = state.take_deferred_sends_after_paste();
-        assert!(
-            actions.is_empty(),
-            "the stale peek stash must not reissue to the new row: {actions:?}"
-        );
-        assert!(state.deferred_peek_send.is_none(), "the stash is consumed");
-        assert!(
-            state.feedback.is_some(),
-            "dropping the stashed reply must be announced with a toast"
-        );
-    }
-
-    /// A question arriving on the peeked row mid-probe makes the reply
-    /// text-only: an Image completion for that row must be discarded WITH a
-    /// toast (not silently no-opped by the attach helper's question guard).
-    #[test]
-    fn completion_peek_image_discarded_when_question_arrives() {
-        let mut state = state_with_open_peek();
-        let reg = crate::actions::ActionRegistry::defaults();
-        let mut effects = Vec::new();
-        // Cmd+V in NORMAL mode → the probe defers against the peeked row.
-        crate::clipboard::set_clipboard_probe_hook(
-            crate::clipboard::ClipboardProbeHook::with_raster(None),
-        );
-        let _ = state.handle_input_with_paste_provenance(
-            &ctrl_v_event(),
-            &reg,
-            crate::app::root::PasteProvenance::Terminal,
-            &mut effects,
-        );
-        let ctx = deferred_probe_ctx(&effects).expect("an image paste must defer a probe");
-        crate::clipboard::clear_clipboard_probe_hook();
-        assert_eq!(state.paste_probe_in_flight, 1);
-        // A permission question arrives on the SAME row before completion.
-        if let Some(p) = state.peek.as_mut() {
-            p.question = Some("Allow?".into());
-        }
-        let completion = state.complete_clipboard_attachment_paste(
-            ctx,
-            crate::app::actions::ProbedAttachment::Image(completion_pasted_image()),
-            None,
-            &mut effects,
-        );
-        assert_eq!(
-            completion,
-            crate::app::actions::ClipboardPasteCompletion::Dropped
-        );
-        assert!(
-            state.peek_reply.images.is_empty(),
-            "the image must not attach to a question-mode reply"
-        );
-        assert!(!state.peek_reply.text().contains("[Image #"));
-        assert!(
-            state.feedback.is_some(),
-            "discarding the deferred image must be announced with a toast"
-        );
-        assert_eq!(state.paste_probe_in_flight, 0);
-    }
-
     #[test]
     fn dashboard_unclassified_file_urls_preserve_text_and_source_precedence() {
         use crate::app::actions::{
             ClipboardPasteCompletion, ClipboardPasteSource, ClipboardTextRead, ProbedAttachment,
         };
-        for peek in [false, true] {
-            for original in [
-                ClipboardTextRead::Success(None),
-                ClipboardTextRead::Success(Some(" \t".into())),
-                ClipboardTextRead::Failed,
-                ClipboardTextRead::Success(Some("caption".into())),
-            ] {
-                let mut state = if peek {
-                    state_with_open_peek()
-                } else {
-                    DashboardState::new()
-                };
-                let expected = if original.as_deref() == Some("caption") {
-                    "caption"
-                } else {
-                    "file:///"
-                };
-                let mut ctx = completion_ctx(None, peek);
-                ctx.source = ClipboardPasteSource::ClipboardKey {
-                    text: original,
-                    tip_showing: false,
-                };
-                let result = state.complete_clipboard_attachment_paste(
-                    ctx,
-                    ProbedAttachment::NoRaster,
-                    Some("file:///".into()),
-                    &mut Vec::new(),
-                );
-                assert_eq!(result, ClipboardPasteCompletion::Handled);
-                let target = if peek {
-                    &state.peek_reply
-                } else {
-                    &state.dispatch
-                };
-                assert_eq!(target.text(), expected);
-                assert!(target.images.is_empty());
-            }
+        for original in [
+            ClipboardTextRead::Success(None),
+            ClipboardTextRead::Success(Some(" \t".into())),
+            ClipboardTextRead::Failed,
+            ClipboardTextRead::Success(Some("caption".into())),
+        ] {
+            let mut state = DashboardState::new();
+            let expected = if original.as_deref() == Some("caption") {
+                "caption"
+            } else {
+                "file:///"
+            };
+            let mut ctx = completion_ctx(None);
+            ctx.source = ClipboardPasteSource::ClipboardKey {
+                text: original,
+                tip_showing: false,
+            };
+            let result = state.complete_clipboard_attachment_paste(
+                ctx,
+                ProbedAttachment::NoRaster,
+                Some("file:///".into()),
+                &mut Vec::new(),
+            );
+            assert_eq!(result, ClipboardPasteCompletion::Handled);
+            assert_eq!(state.dispatch.text(), expected);
+            assert!(state.dispatch.images.is_empty());
         }
     }
 
@@ -9410,28 +6727,12 @@ mod tests {
         ] {
             let mut state = DashboardState::new();
             state.complete_clipboard_attachment_paste(
-                completion_ctx(None, false),
+                completion_ctx(None),
                 probe,
                 Some("file:///".into()),
                 &mut Vec::new(),
             );
             assert!(state.dispatch.text().is_empty());
-        }
-        for question in [false, true] {
-            let mut state = state_with_open_peek();
-            let ctx = completion_ctx(None, true);
-            if question {
-                state.peek.as_mut().unwrap().question = Some("Allow?".into());
-            } else {
-                state.peek = None;
-            }
-            state.complete_clipboard_attachment_paste(
-                ctx,
-                ProbedAttachment::NoRaster,
-                Some("file:///".into()),
-                &mut Vec::new(),
-            );
-            assert!(state.peek_reply.text().is_empty());
         }
     }
 
@@ -9443,7 +6744,7 @@ mod tests {
         let mut state = DashboardState::new();
         let mut effects = Vec::new();
         let completion = state.complete_clipboard_attachment_paste(
-            completion_ctx(None, false),
+            completion_ctx(None),
             crate::app::actions::ProbedAttachment::NoRaster,
             Some(uri),
             &mut effects,
@@ -9462,7 +6763,7 @@ mod tests {
         let mut state = DashboardState::new();
         let mut effects = Vec::new();
         let completion = state.complete_clipboard_attachment_paste(
-            completion_ctx(None, false),
+            completion_ctx(None),
             crate::app::actions::ProbedAttachment::ProbeFailed,
             None,
             &mut effects,
@@ -9473,67 +6774,6 @@ mod tests {
             crate::app::actions::ClipboardPasteCompletion::Failed(
                 crate::app::actions::ClipboardPasteFailure::AttachmentRead,
             )
-        );
-    }
-
-    /// Same guard for the file-url completion arm: Finder file-URL chips are
-    /// attachments too and must be discarded loudly in question mode.
-    #[test]
-    fn completion_peek_file_urls_discarded_when_question_arrives() {
-        let dir = tempfile::tempdir().unwrap();
-        let png = write_test_png(dir.path());
-        let mut state = state_with_open_peek();
-        let mut effects = Vec::new();
-        state.paste_probe_in_flight = 1;
-        if let Some(p) = state.peek.as_mut() {
-            p.question = Some("Allow?".into());
-        }
-        state.complete_clipboard_attachment_paste(
-            completion_ctx(None, true),
-            crate::app::actions::ProbedAttachment::NoRaster,
-            Some(png.display().to_string()),
-            &mut effects,
-        );
-        assert!(
-            state.peek_reply.images.is_empty(),
-            "file-url chips must not attach to a question-mode reply"
-        );
-        assert!(
-            state.feedback.is_some(),
-            "discarding the deferred file-url chips must be announced with a toast"
-        );
-        assert_eq!(state.paste_probe_in_flight, 0);
-    }
-
-    /// A peek send stashed in normal mode must NOT reissue once a question
-    /// owns the panel — the reply dispatch would silently queue a prompt and
-    /// wipe the draft behind the dialog. It is dropped with a toast and the
-    /// draft stays in the widget.
-    #[test]
-    fn stashed_peek_reply_dropped_when_question_active() {
-        let mut state = state_with_open_peek(); // peeks TopLevel(AgentId(0))
-        state.peek_reply.set_text("please look");
-        state.deferred_peek_send = Some(DeferredPeekSend {
-            row: DashboardRowId::TopLevel(AgentId(0)),
-            attach: false,
-        });
-        if let Some(p) = state.peek.as_mut() {
-            p.question = Some("Allow?".into());
-        }
-        let actions = state.take_deferred_sends_after_paste();
-        assert!(
-            actions.is_empty(),
-            "the stashed reply must not reissue into question mode: {actions:?}"
-        );
-        assert!(state.deferred_peek_send.is_none(), "the stash is consumed");
-        assert!(
-            state.feedback.is_some(),
-            "dropping the stashed reply must be announced with a toast"
-        );
-        assert_eq!(
-            state.peek_reply.text(),
-            "please look",
-            "the draft stays in the widget for after the question"
         );
     }
 
@@ -9566,6 +6806,89 @@ mod tests {
     }
 
     /// `Ctrl+/` toggles search mode on, then off.
+    #[test]
+    fn search_preserves_new_session_draft_cursor_images_and_undo() {
+        let mut state = DashboardState::new();
+        state.dispatch.set_text("draft");
+        state.dispatch.insert_image(peek_test_image()).unwrap();
+        let before = state.dispatch.text().to_string();
+        state
+            .dispatch
+            .handle_key(&KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        let text = state.dispatch.text().to_string();
+        let cursor = state.dispatch.cursor();
+        let images = state.dispatch.images.len();
+        state.enter_search_mode();
+        let mut effects = Vec::new();
+        let registry = crate::actions::ActionRegistry::defaults();
+        state.handle_input_with_paste_provenance(
+            &Event::Paste("auth".into()),
+            &registry,
+            crate::app::root::PasteProvenance::Terminal,
+            &mut effects,
+        );
+        assert_eq!(state.search_query.text(), "auth");
+        assert_eq!(state.dispatch.text(), text);
+        state.exit_search_mode();
+        assert_eq!(state.dispatch.text(), text);
+        assert_eq!(state.dispatch.cursor(), cursor);
+        assert_eq!(state.dispatch.images.len(), images);
+        state
+            .dispatch
+            .handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(
+            state.dispatch.text(),
+            before,
+            "search must retain the actual composer undo history"
+        );
+        assert_eq!(state.dispatch.images.len(), images);
+        assert!(effects.is_empty());
+    }
+    #[test]
+    fn readonly_preview_keeps_typing_and_paste_in_new_session_composer() {
+        let mut state = state_with_open_peek();
+        state.list_focused = false;
+        state.dispatch.set_text("new task ");
+        state.dispatch.set_cursor(state.dispatch.text().len());
+        let mut fields = peek_fields_for_test("Awaiting your input");
+        fields.question = Some("a pending question".into());
+        state.set_peek(Some(super::super::peek::PeekPanelState::new(
+            DashboardRowId::TopLevel(AgentId(0)),
+            fields,
+        )));
+        let registry = crate::actions::ActionRegistry::defaults();
+        let mut effects = Vec::new();
+        let outcome = state.handle_input_with_paste_provenance(
+            &Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+            &registry,
+            crate::app::root::PasteProvenance::Terminal,
+            &mut effects,
+        );
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(state.dispatch.text(), "new task 1");
+        state.handle_input_with_paste_provenance(
+            &Event::Paste(" more".into()),
+            &registry,
+            crate::app::root::PasteProvenance::X11Primary,
+            &mut effects,
+        );
+        assert_eq!(state.dispatch.text(), "new task 1 more");
+        state.list_focused = true;
+        let outcome = state.handle_input_with_paste_provenance(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &registry,
+            crate::app::root::PasteProvenance::Terminal,
+            &mut effects,
+        );
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::DashboardAttach(_))
+        ));
+        assert!(
+            effects.is_empty(),
+            "preview must neither answer nor submit a reply"
+        );
+    }
     #[test]
     fn ctrl_slash_toggles_search_mode() {
         let mut state = DashboardState::new();
@@ -9607,7 +6930,7 @@ mod tests {
                 &mut effects,
             );
         }
-        assert_eq!(state.dispatch.text(), "auth");
+        assert_eq!(state.search_query.text(), "auth");
         assert!(
             matches!(&state.filter, Filter::Substring(s) if s == "auth"),
             "typing in search mode must update the filter live, got {:?}",
@@ -9627,7 +6950,7 @@ mod tests {
             "Enter must KEEP the filter applied",
         );
         assert!(
-            state.dispatch.text().is_empty(),
+            state.search_query.text().is_empty(),
             "query buffer cleared after confirm",
         );
     }
@@ -9638,8 +6961,8 @@ mod tests {
         let registry = crate::actions::ActionRegistry::defaults();
         let mut effects = Vec::new();
         state.enter_search_mode();
-        state.dispatch.set_text("auth");
-        state.dispatch.set_cursor(0);
+        state.search_query.set_text("auth");
+        state.search_query.set_cursor(0);
         state.filter = Filter::Substring("auth".to_owned());
 
         let outcome = state.handle_input_with_paste_provenance(
@@ -9649,8 +6972,8 @@ mod tests {
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(state.dispatch.text(), "auth");
-        assert_eq!(state.dispatch.cursor(), 1);
+        assert_eq!(state.search_query.text(), "auth");
+        assert_eq!(state.search_query.cursor(), 1);
         assert!(matches!(&state.filter, Filter::Substring(text) if text == "auth"));
     }
 
@@ -9661,7 +6984,7 @@ mod tests {
         let reg = crate::actions::ActionRegistry::defaults();
         let mut effects = Vec::new();
         state.enter_search_mode();
-        state.dispatch.set_text("auth");
+        state.search_query.set_text("auth");
         state.filter = Filter::Substring("auth".into());
         let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let outcome = state.handle_input_with_paste_provenance(
@@ -9676,7 +6999,7 @@ mod tests {
             matches!(state.filter, Filter::None),
             "Esc must clear the filter",
         );
-        assert!(state.dispatch.text().is_empty());
+        assert!(state.search_query.text().is_empty());
     }
 
     /// In search mode, bare letters that are normally nav shortcuts
@@ -9697,7 +7020,7 @@ mod tests {
             );
         }
         assert_eq!(
-            state.dispatch.text(),
+            state.search_query.text(),
             "jk",
             "j/k must type in search mode, not navigate",
         );
@@ -9706,7 +7029,8 @@ mod tests {
     /// edge case 21: Enter on empty input attaches.
     #[test]
     fn enter_with_empty_input_attaches() {
-        let state = make_state_with_selection();
+        let mut state = make_state_with_selection();
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -9717,13 +7041,9 @@ mod tests {
         ));
     }
 
-    /// Single left-click on a row attaches the
-    /// conversation immediately. The previous double-click-required
-    /// design felt unresponsive (user explicitly reported "click
-    /// does not respond or do anything properly"). Mouse handling
-    /// now mirrors click-to-open list semantics from gh-dash / k9s.
+    /// Selection previews without navigation; a second click opens details.
     #[test]
-    fn single_click_on_row_attaches_immediately() {
+    fn single_click_selects_readonly_preview_and_double_click_opens() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
         let mut state = make_state_with_selection();
@@ -9747,12 +7067,11 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         let outcome = state.handle_mouse(&click);
-        match outcome {
-            InputOutcome::Action(Action::DashboardAttach(id)) => {
-                assert_eq!(id, row_id, "click must attach the clicked row, got {id:?}");
-            }
-            other => panic!("expected DashboardAttach on single click, got {other:?}"),
-        }
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(state.list_focused);
+        assert!(
+            matches!(state.handle_mouse(&click), InputOutcome::Action(Action::DashboardAttach(ref id)) if id == &row_id)
+        );
         // The clicked row also becomes selected so a follow-up Esc
         // returns the cursor to where the user clicked.
         assert_eq!(state.selected.as_ref(), Some(&row_id));
@@ -9929,6 +7248,8 @@ mod tests {
     fn section_keys_collapse_expand_and_toggle() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         let key_sec = SectionKey::State(RowState::Working);
         state.focus_section(key_sec);
@@ -10004,6 +7325,8 @@ mod tests {
     fn idle_overflow_enter_and_arrows_toggle_show_all() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         state.focus_idle_overflow();
         assert!(state.selected_idle_overflow);
@@ -10097,7 +7420,7 @@ mod tests {
     }
 
     /// With the list focused and the Idle overflow toggle selected, Esc
-    /// focuses the `[+ New Agent]` button (mirroring the section / row
+    /// focuses the `[+ New session]` button (mirroring the section / row
     /// deselect tiers), rather than exiting.
     #[test]
     fn idle_overflow_esc_focuses_new_agent_button() {
@@ -10144,7 +7467,7 @@ mod tests {
 
     /// `reanchor_selection` drops a stale overflow cursor (the toggle row
     /// vanished because the Idle group is no longer capped) onto the
-    /// `[+ New Agent]` button.
+    /// `[+ New session]` button.
     #[test]
     fn reanchor_clears_stale_idle_overflow_cursor() {
         let mut state = DashboardState::new();
@@ -10159,7 +7482,7 @@ mod tests {
     }
 
     /// With the list focused and a section header selected, Esc focuses
-    /// the `[+ New Agent]` button (mirroring the row-deselect tier),
+    /// the `[+ New session]` button (mirroring the row-deselect tier),
     /// rather than exiting.
     #[test]
     fn section_esc_focuses_new_agent_button() {
@@ -10175,7 +7498,7 @@ mod tests {
         );
         assert!(
             state.new_agent_button_focused,
-            "Esc on a section must focus [+ New Agent]",
+            "Esc on a section must focus [+ New session]",
         );
         assert!(
             state.selected_section.is_none(),
@@ -10466,9 +7789,11 @@ mod tests {
     /// feedback toast like every other key (the invariant) —
     /// the intercept must sit BELOW the handler's toast-clear tier.
     #[test]
-    fn section_keys_clear_pending_toast() {
+    fn section_keys_preserve_actionable_error() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        state.list_focused = true;
         let reg = crate::actions::ActionRegistry::defaults();
         let key_sec = SectionKey::State(RowState::Working);
         state.focus_section(key_sec);
@@ -10480,123 +7805,9 @@ mod tests {
         );
         assert!(state.is_section_collapsed(key_sec), "Left must collapse");
         assert!(
-            state.feedback.is_none(),
-            "a collapse keypress must dismiss the pending toast",
+            state.feedback.as_deref() == Some("boom"),
+            "navigation must preserve actionable error feedback",
         );
-    }
-
-    /// An armed delete confirmation is bound to the row that was selected
-    /// when `Ctrl+X` was pressed — any other key (nav included) must
-    /// disarm it, otherwise the footer's "press again to delete" hint
-    /// lingers while the cursor moves to other agents. The disarm must
-    /// NOT depend on transient feedback (the Ctrl+X arm path plants none).
-    #[test]
-    fn nav_key_disarms_pending_delete_confirm() {
-        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
-        let mut state = DashboardState::new();
-        let reg = crate::actions::ActionRegistry::defaults();
-        state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
-        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
-        assert!(state.feedback.is_none(), "arm path plants no toast");
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            state.delete_confirm.is_none(),
-            "a nav keypress must disarm the pending delete confirm",
-        );
-
-        // Control — Ctrl+X itself preserves the armed confirm so the
-        // dispatcher can observe it and delete.
-        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            state.delete_confirm.is_some(),
-            "Ctrl+X must preserve the armed confirm for the dispatcher",
-        );
-
-        // The actual repro path: peek is open by default for a selected
-        // row, and `handle_peek_key` CONSUMES Up/Down (agent switch) —
-        // the disarm must sit above that intercept or nav keys never
-        // reach it and the footer hint lingers.
-        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            peek_fields_for_test("Idle"),
-        ));
-        let _ = state.handle_key(
-            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &reg,
-            &mut effects,
-        );
-        assert!(
-            state.delete_confirm.is_none(),
-            "a nav keypress consumed by the peek panel must still disarm the confirm",
-        );
-    }
-
-    #[test]
-    fn click_delete_control_arms_then_confirms() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let mut state = DashboardState::new();
-        let id = DashboardRowId::TopLevel(AgentId(0));
-        state
-            .row_delete_rects
-            .push((id.clone(), Rect::new(10, 2, 3, 1)));
-        let click = |col, row| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: col,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
-        // First `[✗]` click only arms — it must not open/attach the session.
-        let first = state.handle_mouse(&click(11, 2));
-        assert!(matches!(first, InputOutcome::Changed), "got {first:?}");
-        assert!(!matches!(
-            first,
-            InputOutcome::Action(Action::DashboardAttach(_))
-        ));
-        assert_eq!(state.armed_delete_row_ref(), Some(&id));
-        // Second click confirms.
-        assert!(matches!(
-            state.handle_mouse(&click(11, 2)),
-            InputOutcome::Action(Action::DashboardDelete)
-        ));
-    }
-
-    #[test]
-    fn focus_change_disarms_delete_confirm() {
-        let mut state = DashboardState::new();
-        let a = DashboardRowId::TopLevel(AgentId(0));
-        let b = DashboardRowId::TopLevel(AgentId(1));
-        state.focus_row(a.clone());
-        state.arm_delete(a.clone());
-        state.focus_row(a.clone());
-        assert_eq!(state.armed_delete_row_ref(), Some(&a));
-        state.focus_row(b);
-        assert!(state.delete_confirm.is_none());
-        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
-        state.focus_new_agent_button();
-        assert!(state.delete_confirm.is_none());
-
-        state.focus_row(a.clone());
-        state.list_focused = true;
-        state.arm_delete(a);
-        state.dispatch_rect = Some(Rect::new(0, 10, 40, 1));
-        let _ = state.handle_mouse(&crossterm::event::MouseEvent {
-            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 2,
-            row: 10,
-            modifiers: KeyModifiers::NONE,
-        });
-        assert!(state.delete_confirm.is_none());
-        assert!(!state.list_focused);
     }
 
     /// An auto-repeat (held) Ctrl+X must not drive the destructive
@@ -10623,7 +7834,7 @@ mod tests {
             ),
             InputOutcome::Unchanged
         ));
-        // A real press still resolves to the stop action.
+        // A real press opens the selected session command surface.
         let press = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         assert!(matches!(
             state.handle_input_with_paste_provenance(
@@ -10632,23 +7843,30 @@ mod tests {
                 crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
-            InputOutcome::Action(Action::DashboardStop)
+            InputOutcome::ActionThenForward(Action::DashboardAttach(_))
         ));
     }
 
-    /// `gc_stale_refs` dropping the selected row (session left the list)
-    /// must also disarm delete, so a later `y` can't delete a phantom row.
     #[test]
-    fn gc_stale_refs_disarms_delete_when_selection_dropped() {
+    fn click_delete_control_requests_confirmation_for_clicked_row() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut state = DashboardState::new();
-        let a = DashboardRowId::TopLevel(AgentId(0));
-        state.focus_row(a.clone());
-        state.arm_delete(a.clone());
-        assert!(state.armed_delete_row_ref().is_some());
-        // The armed row is no longer alive → gc drops selection AND disarms.
-        state.gc_stale_refs(&|_| false);
-        assert!(state.selected.is_none());
-        assert!(state.delete_confirm.is_none(), "stale arm must be cleared");
+        let id = DashboardRowId::TopLevel(AgentId(0));
+        state
+            .row_delete_rects
+            .push((id.clone(), Rect::new(10, 2, 3, 1)));
+        let result = state.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(
+            result,
+            InputOutcome::Action(Action::DashboardDelete)
+        ));
+        assert_eq!(state.selected.as_ref(), Some(&id));
+        assert!(state.list_focused);
     }
 
     /// Section header selected while the LIST is focused — the input is
@@ -10732,34 +7950,35 @@ mod tests {
         assert_eq!(state.dispatch.text(), "l");
     }
 
-    /// vim `l` on peek: unfocused attaches; focused empty reply types `l`.
+    /// Vim `l` attaches from the focused list; in the composer it types.
     #[test]
-    fn vim_l_peek_attach_and_focused_type() {
+    fn vim_l_opens_selected_session_from_list_and_types_in_new_composer() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         use crate::app::actions::Action;
         let reg = crate::actions::ActionRegistry::defaults();
         let l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
 
-        // state_with_open_peek pins vim off for seed focus; enable after.
+        // state_with_open_peek pins vim off for fixture stability; enable it
+        // explicitly for this test.
         let mut state = state_with_open_peek();
         crate::appearance::cache::set_vim_mode(true);
-        state.peek.as_mut().unwrap().focused = false;
+        state.list_focused = true;
         match state.handle_key(&l, &reg, &mut effects) {
             InputOutcome::Action(Action::DashboardAttach(row)) => {
                 assert_eq!(row, DashboardRowId::TopLevel(AgentId(0)));
             }
-            other => panic!("unfocused peek vim `l` must attach, got {other:?}"),
+            other => panic!("list-focused vim `l` must attach, got {other:?}"),
         }
 
         let mut state = state_with_open_peek();
         crate::appearance::cache::set_vim_mode(true);
-        assert!(state.peek.as_ref().unwrap().focused);
+        state.list_focused = false;
         let outcome = state.handle_key(&l, &reg, &mut effects);
-        let reply = state.peek_reply.text().to_string();
+        let reply = state.dispatch.text().to_string();
         crate::appearance::cache::set_vim_mode(false);
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::DashboardAttach(_))),
-            "focused reply vim `l` must not attach, got {outcome:?}",
+            "composer-focused vim `l` must not attach, got {outcome:?}",
         );
         assert_eq!(reply, "l");
     }
@@ -10867,7 +8086,7 @@ mod tests {
     }
 
     /// A selected section header whose section no longer exists (row
-    /// churn removed its last row) is moved to the `[+ New Agent]`
+    /// churn removed its last row) is moved to the `[+ New session]`
     /// button by `reanchor_selection`, so the footer hints and the
     /// collapse keys never act on an invisible header.
     #[test]
@@ -10883,7 +8102,7 @@ mod tests {
         );
         assert!(
             state.new_agent_button_focused,
-            "cursor must move to the [+ New Agent] button",
+            "cursor must move to the [+ New session] button",
         );
     }
 
@@ -10908,6 +8127,8 @@ mod tests {
     #[test]
     fn reanchor_keeps_live_section_cursor() {
         let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        state.list_focused = true;
         state.focus_section(SectionKey::State(RowState::Working));
         let rows = vec![reanchor_test_row(1, RowState::Working)];
         state.reanchor_selection(&rows);
@@ -10926,6 +8147,8 @@ mod tests {
     #[test]
     fn reanchor_moves_collapse_hidden_row_cursor_to_its_header() {
         let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        state.list_focused = true;
         state.set_section_collapsed(SectionKey::State(RowState::Working), true);
         // The row was selected while (say) Idle; it has since started
         // Working — and "Working" is collapsed.
@@ -10949,6 +8172,8 @@ mod tests {
     #[test]
     fn reanchor_moves_collapse_hidden_pinned_row_to_pinned_header() {
         let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        state.list_focused = true;
         state.set_section_collapsed(SectionKey::Pinned, true);
         state.focus_row(DashboardRowId::TopLevel(AgentId(1)));
         let mut row = reanchor_test_row(1, RowState::Idle);
@@ -10968,6 +8193,8 @@ mod tests {
     #[test]
     fn reanchor_moves_collapse_hidden_subagent_to_parent_header() {
         let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        state.list_focused = true;
         state.set_section_collapsed(SectionKey::State(RowState::Working), true);
         let child_id = DashboardRowId::Subagent {
             parent: AgentId(1),
@@ -11895,5 +9122,74 @@ mod tests {
                 .page_flip_entry
                 .is_none()
         );
+    }
+    #[test]
+    fn search_mouse_places_cjk_caret_without_touching_new_session_draft() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::buffer::Buffer;
+        for (column, expected_byte) in [(2, 2), (4, 5)] {
+            let mut state = DashboardState::new();
+            state.dispatch.set_text("draft 保存");
+            state.dispatch.set_cursor(2);
+            state.enter_search_mode();
+            state.search_query.set_text("ab中d");
+            state.search_query.set_cursor("ab中d".len());
+            let area = Rect::new(0, 0, 80, 24);
+            let mut buf = Buffer::empty(area);
+            let registry = ActionRegistry::defaults();
+            super::super::render::render_dashboard(
+                &mut buf,
+                area,
+                &mut state,
+                &mut Default::default(),
+                &registry,
+                None,
+                &[],
+                false,
+                None,
+                None,
+            );
+            let rect = state.search_text_rect.expect("painted search input");
+            state.handle_input_with_paste_provenance(
+                &Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + column,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &registry,
+                crate::app::root::PasteProvenance::Terminal,
+                &mut vec![],
+            );
+            assert_eq!(state.search_query.cursor(), expected_byte);
+            assert_eq!(state.dispatch.text(), "draft 保存");
+            assert_eq!(state.dispatch.cursor(), 2);
+        }
+    }
+
+    #[test]
+    fn empty_composer_does_not_open_or_navigate_the_selected_session() {
+        let registry = ActionRegistry::defaults();
+        let mut state = make_state_with_selection();
+        assert!(!state.list_focused);
+        let original = state.selected.clone();
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            let outcome = state.handle_key(
+                &KeyEvent::new(code, KeyModifiers::NONE),
+                &registry,
+                &mut vec![],
+            );
+            assert!(
+                !matches!(outcome, InputOutcome::Action(_)),
+                "composer owns {code:?}: {outcome:?}"
+            );
+            assert_eq!(state.selected, original);
+        }
     }
 }

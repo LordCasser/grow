@@ -69,6 +69,11 @@ To leave the current session but stay in Grow, use `/home` to return to the welc
 
 A confirmed exit or update restart preserves the original session and child identities, admitted input, TODO/wait relationships, Turn limits, Goal state, and Workflow Run bindings. Resume validates the checkpoint, workspace, routes, and ownership before restoring the unfinished tree. It does not turn a stopped Goal back on or skip a user, permission, or Workflow business wait.
 
+New child Spawn facts record their birth MCP membership. A suspended child from
+an older version that lacks this fact cannot be cold-resumed for execution;
+its history remains readable. Grow does not infer the missing grant from the
+current configuration or copy old in-memory permits.
+
 Suspension is a durable execution boundary, not a copy of process memory. In-flight model transport and external commands may be interrupted. Their recorded output and outcome remain available; unknown side effects require inspection and commands are not automatically replayed. A forced exit or crash without a valid checkpoint cannot promise the same continuation.
 
 The [session-tree contract](../../../../../openspec/specs/session-timeline/spec.md#requirement-suspended-trees-resume-the-original-identities-automatically) defines recovery, and the [exit contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension) defines confirmation and failure handling.
@@ -79,7 +84,7 @@ The [session-tree contract](../../../../../openspec/specs/session-timeline/spec.
 /delete
 ```
 
-Confirms, then permanently removes the session history and returns to the welcome screen. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
+Confirms, then permanently removes the session history and returns to the welcome screen. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), select the session, press `Ctrl+X`, then `D`, and confirm with `Y`. `N` / `Esc` cancels. Repeating `Ctrl+X` only stops work and never deletes history.
 
 ---
 

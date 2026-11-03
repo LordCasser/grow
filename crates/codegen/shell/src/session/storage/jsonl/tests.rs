@@ -1649,6 +1649,7 @@ async fn prepared_session_is_published_once_with_lineage_and_timeline() {
             summary,
             vec![ConversationItem::user("inherited")],
             Default::default(),
+            Default::default(),
             vec![chat_state::TimelineEventKind::SubagentSeed(
                 lineage.subagent_seed.clone(),
             )],
@@ -1685,6 +1686,7 @@ async fn prepared_session_is_published_once_with_lineage_and_timeline() {
             &info,
             duplicate,
             Vec::new(),
+            Default::default(),
             Default::default(),
             Vec::new(),
         )
@@ -1723,6 +1725,7 @@ async fn prepared_session_atomically_publishes_the_exact_prompt_blob_set() {
             Summary::new(&info, default_model_id()).unwrap(),
             surface.clone(),
             blobs,
+            Default::default(),
             Vec::new(),
         )
         .await
@@ -1741,6 +1744,7 @@ async fn prepared_session_atomically_publishes_the_exact_prompt_blob_set() {
             Summary::new(&info, default_model_id()).unwrap(),
             surface,
             Default::default(),
+            Default::default(),
             Vec::new(),
         )
         .await
@@ -1756,6 +1760,357 @@ async fn prepared_session_atomically_publishes_the_exact_prompt_blob_set() {
                 .file_name()
                 .to_string_lossy()
                 .ends_with(".staging"))
+    );
+}
+
+#[tokio::test]
+async fn resume_seed_presentation_rebinds_display_to_the_new_seed() {
+    use crate::session::history::{
+        HistoryContent, HistorySource, SeedPresentation, TextChannel,
+    };
+
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("resume-presentation-source"),
+        cwd: "/source".into(),
+    };
+    let child_info = Info {
+        id: acp::SessionId::new("resume-presentation-child"),
+        cwd: "/child".into(),
+    };
+
+    let mut source_timeline = chat_state::Timeline::from_seed(vec![ConversationItem::user(
+        "model seed body",
+    )])
+    .unwrap();
+    source_timeline
+        .record(chat_state::TimelineEventKind::SessionTitle(
+            chat_state::SessionTitleEvent {
+                title: "source-only title fact".into(),
+                source: chat_state::SessionTitleSource::User,
+            },
+        ))
+        .unwrap();
+    source_timeline
+        .record(chat_state::TimelineEventKind::Messages(
+            chat_state::MessageEvent {
+                cause: chat_state::MessageCause::Assistant,
+                items: vec![
+                    ConversationItem::assistant("active assistant"),
+                    ConversationItem::Reasoning(
+                        sampling_types::synthesized_reasoning_item("active thought"),
+                    ),
+                ],
+                surface: chat_state::SurfaceOp::Append,
+                response_admission: None,
+            },
+        ))
+        .unwrap();
+    let source_ids = source_timeline.surface_ids().to_vec();
+    assert_eq!(source_ids.len(), 3);
+    let initial_surface = source_timeline.surface().to_vec();
+
+    let acp_update = |update, meta| {
+        SessionUpdate::Acp(Box::new(
+            acp::SessionNotification::new(source_info.id.clone(), update).meta(Some(meta)),
+        ))
+    };
+    let user_chunk = acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+        "prepared echo body".to_owned(),
+    )))
+    .meta(Some(
+        serde_json::json!({
+            "messageId": "source-ingress-message",
+            "permissionEvidence": "source-ingress-permit",
+            "promptIndex": 41,
+            "grow/consumedInputEcho": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    ));
+    let user_update = acp_update(
+        acp::SessionUpdate::UserMessageChunk(user_chunk),
+        serde_json::json!({
+            "eventId": "source-user-event-id",
+            "grow/historyCursor": "source-history-cursor",
+            "grow/displayProjectionSource": "source-projection",
+            "grow/displayProjectionRevision": 91,
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let old_inline_update = acp_update(
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+            acp::ContentBlock::Text(acp::TextContent::new("old inline display".to_owned())),
+        )),
+        serde_json::json!({
+            "eventId": "source-old-inline-event-id",
+            "grow/historyCursor": "source-old-inline-cursor",
+            "samplingRequestId": "source-old-inline-request",
+            "samplingAttempt": 19,
+            "responseProjection": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+
+    let active_message = acp_update(
+        acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                "active assistant".to_owned(),
+            )))
+            .meta(Some(
+                serde_json::json!({"displayDecoration": "keep"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )),
+        ),
+        serde_json::json!({
+            "eventId": "source-active-message-event-id",
+            "grow/historyCursor": "source-active-message-cursor",
+            "grow/historyMessageEvent": source_ids[1].event.get(),
+            "grow/historyMessageItem": source_ids[1].item,
+            "samplingRequestId": "source-active-request",
+            "samplingAttempt": 23,
+            "responseProjection": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let active_thought = acp_update(
+        acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+            acp::ContentBlock::Text(acp::TextContent::new("active thought".to_owned())),
+        )),
+        serde_json::json!({
+            "eventId": "source-active-thought-event-id",
+            "grow/historyCursor": "source-active-thought-cursor",
+            "grow/historyMessageEvent": source_ids[2].event.get(),
+            "grow/historyMessageItem": source_ids[2].item,
+            "samplingRequestId": "source-active-thought-request",
+            "samplingAttempt": 29,
+            "responseProjection": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let plan_update = acp_update(
+        acp::SessionUpdate::Plan(acp::Plan::new(Vec::new())),
+        Default::default(),
+    );
+    let mode_update = acp_update(
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("plan"),
+        )),
+        Default::default(),
+    );
+    let route_update = SessionUpdate::Grow(Box::new(
+        crate::extensions::notification::SessionNotification {
+            session_id: source_info.id.clone(),
+            update: crate::extensions::notification::SessionUpdate::ModelChanged {
+                model_id: "source-route".into(),
+                reasoning_effort: Some("high".into()),
+            },
+            meta: Some(serde_json::json!({"eventId": "source-route-event-id"})),
+        },
+    ));
+
+    let presentation = SeedPresentation::for_resume(
+        source_ids.clone(),
+        vec![
+            user_update,
+            old_inline_update,
+            active_message,
+            active_thought,
+            plan_update,
+            mode_update,
+            route_update,
+        ],
+    );
+    let (summary, seed_events) = writer
+        .init_session_with_summary(
+            &child_info,
+            Summary::new(&child_info, default_model_id()).unwrap(),
+            initial_surface,
+            Default::default(),
+            presentation,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary.info.id, child_info.id);
+    let journal_path = writer.timeline_file(&child_info);
+    let journal = std::fs::read_to_string(&journal_path).unwrap();
+    assert_eq!(
+        journal.lines().count(),
+        seed_events.len() + 4,
+        "seed domain event and four allowed presentation facts publish together"
+    );
+    assert!(
+        std::fs::read_dir(writer.session_dir(&child_info).parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".staging"))
+    );
+    drop(writer);
+
+    let reader = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let prepared = read_history(&reader, &child_info).unwrap();
+    let notifications = loaded_child_acp_updates(prepared);
+    let prepared_order = describe_fork_replay(
+        notifications
+            .iter()
+            .map(|notification| notification.update.clone())
+            .collect(),
+    );
+    let expected_order = [
+        "user:prepared echo body",
+        "message:old inline display",
+        "message:active assistant",
+        "thought:active thought",
+    ];
+    assert_eq!(prepared_order, expected_order);
+    assert_ne!(
+        "model seed body",
+        prepared_order[0].strip_prefix("user:").unwrap(),
+        "displayed prepared echo remains distinct from the model-facing seed"
+    );
+
+    let mut streamed = Vec::new();
+    assert_eq!(
+        crate::session::storage::stream_replay_updates_at(
+            child_info.id.0.as_ref(),
+            root.path(),
+            |update| streamed.push(update),
+        )
+        .unwrap(),
+        crate::session::storage::ReplayEmission::Emitted,
+    );
+    assert_eq!(describe_fork_replay(streamed.clone()), expected_order);
+    assert_eq!(describe_fork_replay(streamed), prepared_order);
+
+    let opened = reader.open_session(&child_info).unwrap();
+    let validated = opened
+        .validated_timeline(child_info.id.0.as_ref())
+        .unwrap();
+    let seed_surface = validated.timeline.surface();
+    assert!(matches!(seed_surface[0], ConversationItem::User(_)));
+    assert_eq!(seed_surface[0].text_content(), "model seed body");
+    assert!(matches!(seed_surface[1], ConversationItem::Assistant(_)));
+    assert_eq!(seed_surface[1].text_content(), "active assistant");
+    assert!(matches!(seed_surface[2], ConversationItem::Reasoning(_)));
+    assert_eq!(seed_surface[2].text_content(), "active thought");
+    assert_eq!(assert_message_references_are_seed_owned(&reader, &child_info), 2);
+    let contents = validated
+        .history
+        .sources
+        .iter()
+        .filter_map(|source| match source {
+            HistorySource::Presentation { fact, .. } => Some(&fact.content),
+            HistorySource::Domain { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(contents[0], HistoryContent::User(_)));
+    assert!(matches!(contents[1], HistoryContent::Assistant(_)));
+    assert!(matches!(
+        contents[2],
+        HistoryContent::Message {
+            channel: TextChannel::Assistant,
+            ..
+        }
+    ));
+    assert!(matches!(
+        contents[3],
+        HistoryContent::Message {
+            channel: TextChannel::Reasoning,
+            ..
+        }
+    ));
+    assert!(!validated
+        .timeline
+        .surface()
+        .iter()
+        .any(|item| item.text_content().contains("old inline display")));
+
+    let target_ids = validated.timeline.surface_ids();
+    assert_ne!(source_ids[1], target_ids[1]);
+    assert_ne!(source_ids[2], target_ids[2]);
+    for (notification, target_id) in [(&notifications[2], &target_ids[1]),
+        (&notifications[3], &target_ids[2])]
+    {
+        let meta = notification.meta.as_ref().unwrap();
+        assert_eq!(
+            meta.get("grow/historyMessageEvent").and_then(serde_json::Value::as_u64),
+            Some(target_id.event.get()),
+        );
+        assert_eq!(
+            meta.get("grow/historyMessageItem").and_then(serde_json::Value::as_u64),
+            Some(target_id.item as u64),
+        );
+    }
+    let serialized = serde_json::to_string(&notifications).unwrap();
+    for source_only in [
+        "source-user-event-id",
+        "source-old-inline-event-id",
+        "source-active-message-event-id",
+        "source-active-thought-event-id",
+        "source-history-cursor",
+        "source-old-inline-cursor",
+        "source-active-message-cursor",
+        "source-active-thought-cursor",
+        "source-ingress-message",
+        "source-ingress-permit",
+        "source-old-inline-request",
+        "source-active-request",
+        "source-active-thought-request",
+        "source-route",
+        "source-route-event-id",
+    ] {
+        assert!(!serialized.contains(source_only), "inherited source metadata: {source_only}");
+    }
+    for notification in &notifications {
+        let meta = notification.meta.as_ref().unwrap();
+        assert!(meta.get("eventId").is_none());
+        assert_ne!(
+            meta.get("grow/historyCursor").and_then(serde_json::Value::as_str),
+            Some("source-history-cursor"),
+        );
+        assert!(meta.get("samplingRequestId").is_none());
+        assert!(meta.get("samplingAttempt").is_none());
+        assert!(meta.get("responseProjection").is_none());
+    }
+    let acp::SessionUpdate::UserMessageChunk(user_chunk) = &notifications[0].update else {
+        panic!("prepared echo should remain a user chunk");
+    };
+    let user_chunk_meta = user_chunk.meta.as_ref().unwrap();
+    for ingress_key in [
+        "messageId",
+        "permissionEvidence",
+        "promptIndex",
+        "grow/consumedInputEcho",
+    ] {
+        assert!(user_chunk_meta.get(ingress_key).is_none(), "ingress key {ingress_key}");
+    }
+    let acp::SessionUpdate::AgentMessageChunk(active_chunk) = &notifications[2].update else {
+        panic!("active assistant should be a message chunk");
+    };
+    assert_eq!(
+        active_chunk
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("displayDecoration"))
+            .and_then(serde_json::Value::as_str),
+        Some("keep"),
+        "non-authoritative chunk display metadata is preserved"
     );
 }
 
@@ -3441,102 +3796,62 @@ async fn fork_does_not_inherit_a_suspended_runtime_checkpoint() {
 }
 
 #[tokio::test]
-async fn explicit_delete_preserves_unfinished_runtime_handoff_but_allows_consumed_audit() {
-    for consumed in [false, true] {
+async fn explicit_delete_abandons_independent_runtime_while_ttl_and_writer_guards_remain() {
+    use chat_state::session_runtime::{SessionRuntimeEvent as RuntimeEvent, RuntimeCheckpoint};
+    for phase in ["suspending", "suspended", "restoring", "released"] {
         let temp_dir = TempDir::new().unwrap();
-        let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+        let writer = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
         let info = create_test_info();
-        adapter.init_session(&info, default_model_id()).await.unwrap();
-        let mut timeline = chat_state::Timeline::from_events(
-            adapter.read_timeline_events_sync(&info).unwrap(),
-        )
-        .unwrap();
-        timeline
-            .record(
-            chat_state::TimelineEventKind::Runtime(
-                chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
-                    operation_id: "delete-op".into(),
-                    root_session_id: info.id.0.to_string(),
-                },
-            ),
-        )
-            .unwrap();
-        let settled = timeline
-            .record(
-            chat_state::TimelineEventKind::Runtime(
-                chat_state::session_runtime::SessionRuntimeEvent::CommandsSettled {
-                    operation_id: "delete-op".into(),
-                    commands: Vec::new(),
-                },
-            ),
-        )
-            .unwrap();
-        timeline
-            .record(
-            chat_state::TimelineEventKind::Runtime(
-                chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
-                    operation_id: "delete-op".into(),
-                    checkpoint: Box::new(chat_state::session_runtime::RuntimeCheckpoint {
-                        frontier: settled.seq,
-                        runtime_source_hash: "b".repeat(64),
-                        turn: None,
-                        step: None,
-                    }),
-                },
-            ),
-        )
-            .unwrap();
-        if consumed {
-            timeline
-                .record(
-                chat_state::TimelineEventKind::Runtime(
-                    chat_state::session_runtime::SessionRuntimeEvent::RestorePrepared {
-                        operation_id: "delete-op".into(),
-                        instance_id: "instance-1".into(),
-                    },
-                ),
-            )
-                .unwrap();
-            timeline
-                .record(
-                chat_state::TimelineEventKind::Runtime(
-                    chat_state::session_runtime::SessionRuntimeEvent::Resumed {
-                        operation_id: "delete-op".into(),
-                        instance_id: "instance-1".into(),
-                    },
-                ),
-            )
-                .unwrap();
-            timeline
-                .record(
-                chat_state::TimelineEventKind::Runtime(
-                    chat_state::session_runtime::SessionRuntimeEvent::ExecutionReleased {
-                        operation_id: "delete-op".into(),
-                        instance_id: "instance-1".into(),
-                    },
-                ),
-            )
-                .unwrap();
+        writer.init_session(&info, default_model_id()).await.unwrap();
+        let mut timeline = chat_state::Timeline::default();
+        timeline.record(chat_state::TimelineEventKind::Runtime(RuntimeEvent::SuspendRequested {
+            operation_id: "delete-op".into(), root_session_id: info.id.0.to_string(),
+        })).unwrap();
+        if phase != "suspending" {
+            let settled = timeline.record(chat_state::TimelineEventKind::Runtime(RuntimeEvent::CommandsSettled {
+                operation_id: "delete-op".into(), commands: Vec::new(),
+            })).unwrap();
+            timeline.record(chat_state::TimelineEventKind::Runtime(RuntimeEvent::Checkpoint {
+                operation_id: "delete-op".into(), checkpoint: Box::new(RuntimeCheckpoint {
+                    frontier: settled.seq, runtime_source_hash: "b".repeat(64), turn: None, step: None,
+                }),
+            })).unwrap();
         }
-        for event in timeline.events() {
-            adapter
-                .append_timeline_event_durable(&info, event)
-                .await
-                .unwrap();
+        if matches!(phase, "restoring" | "released") {
+            timeline.record(chat_state::TimelineEventKind::Runtime(RuntimeEvent::RestorePrepared {
+                operation_id: "delete-op".into(), instance_id: "instance-1".into(),
+            })).unwrap();
         }
-        drop(adapter);
-
-        let reopened = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-        let dir = reopened.session_dir(&info);
-        let result = reopened.delete_session(&info).await;
-        if consumed {
-            result.expect("a resumed checkpoint is audit, not live execution ownership");
-            assert!(!dir.exists());
-        } else {
-            let error = result.expect_err("an unconsumed checkpoint protects its source");
-            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        if phase == "released" {
+            timeline.record(chat_state::TimelineEventKind::Runtime(RuntimeEvent::Resumed {
+                operation_id: "delete-op".into(), instance_id: "instance-1".into(),
+            })).unwrap();
+            timeline.record(chat_state::TimelineEventKind::Runtime(RuntimeEvent::ExecutionReleased {
+                operation_id: "delete-op".into(), instance_id: "instance-1".into(),
+            })).unwrap();
+        }
+        for event in timeline.events() { writer.append_timeline_event_durable(&info,event).await.unwrap(); }
+        let mut stale = writer.open_session(&info).unwrap().summary().clone();
+        stale.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        stale.last_active_at = Some(stale.updated_at);
+        writer.write_summary_sync(&info,&stale).unwrap();
+        let dir = writer.session_dir(&info);
+        let before = std::fs::read(dir.join("timeline.jsonl")).unwrap();
+        drop(writer);
+        if phase != "released" {
+            let cleaner = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+            assert_eq!(cleaner.cleanup_stale_sessions_sync(30,None,|_| panic!("TTL cannot abandon {phase}")).unwrap(), (0,0));
             assert!(dir.exists());
         }
+        let owner = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+        assert!(owner.try_acquire_writer_lease(&info).unwrap());
+        let deleting = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+        assert_eq!(deleting.delete_session(&info).await.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(dir.join("timeline.jsonl")).unwrap(), before);
+        drop(owner);
+        deleting.delete_session(&info).await.expect("confirmed permanent delete abandons independent continuation");
+        assert!(!dir.exists(), "{phase}");
+        deleting.delete_session(&info).await.expect("retry remains idempotent");
     }
 }
 
@@ -7017,6 +7332,7 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
                     resumed_from: None,
                     parent_prompt_id: None,
                     capability_mode: None,
+                    birth_mcp_servers: Some(Default::default()),
                     permission_mode: None,
                     effective_permission_mode: None,
                     workflow_run_id: None,
@@ -7291,6 +7607,7 @@ async fn cleanup_retains_spawn_when_child_source_is_missing() {
                 resumed_from: None,
                 parent_prompt_id: None,
                 capability_mode: None,
+                birth_mcp_servers: Some(Default::default()),
                 permission_mode: None,
                 effective_permission_mode: None,
                 workflow_run_id: None,
@@ -7374,6 +7691,7 @@ async fn cleanup_reclaims_three_level_chain_with_root_summary_and_direct_seed() 
             resumed_from: None,
             parent_prompt_id: None,
             capability_mode: None,
+            birth_mcp_servers: Some(Default::default()),
             permission_mode: None,
             effective_permission_mode: None,
             workflow_run_id: None,
@@ -8046,4 +8364,173 @@ async fn ttl_discovery_budget_exhaustion_preserves_every_candidate() {
     assert!(!sessions.join(RECLAIM_GATE_FILE).exists());
     assert!(cleaner.opened_sessions.lock().unwrap().is_empty());
     assert!(cleaner.writer_leases.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn independent_fork_delete_preserves_the_other_history_in_any_cwd() {
+    for same_cwd in [false, true] {
+        for delete_fork in [true, false] {
+            let root = TempDir::new().unwrap();
+            let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let source = Info { id: acp::SessionId::new("independent-source"), cwd: "/source".into() };
+            let fork = Info { id: acp::SessionId::new("independent-fork"),
+                cwd: if same_cwd { source.cwd.clone() } else { "/fork".into() } };
+            writer.init_session(&source, default_model_id()).await.unwrap();
+            append_timeline_seed(&writer, &source, vec![ConversationItem::user("independent history")]).await;
+            writer.copy_session_data(&source, &fork, CopySessionOptions {
+                parent_session_id: Some(source.id.0.to_string()), ..Default::default()
+            }).await.unwrap();
+            assert_eq!(writer.load_summary(&fork).await.unwrap().parent_session_id.as_deref(), Some(source.id.0.as_ref()));
+            drop(writer);
+            let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let (target, survivor) = if delete_fork { (&fork, &source) } else { (&source, &fork) };
+            deleting.delete_session_by_id_sync(target.id.0.as_ref(), None)
+                .expect("fork ancestry alone is not a canonical recovery dependency").unwrap();
+            assert!(!deleting.session_dir(target).exists());
+            let loaded = deleting.load_session(survivor).await.unwrap();
+            assert_eq!(loaded.summary.info.id, survivor.id);
+            assert_eq!(loaded_surface(&loaded.timeline_events)[0].text_content(), "independent history");
+        }
+    }
+}
+
+#[tokio::test]
+async fn independent_fork_delete_rejects_incoming_spawn_before_child_seed() {
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let parent = Info { id: acp::SessionId::new("incoming-spawn-parent"), cwd: "/parent".into() };
+    let child = Info { id: acp::SessionId::new("incoming-spawn-child"), cwd: "/child".into() };
+    for info in [&parent, &child] { writer.init_session(info, default_model_id()).await.unwrap(); }
+    assert!(writer.load_summary(&child).await.unwrap().parent_session_id.is_none());
+    let mut timeline = chat_state::Timeline::default();
+    let spawn = timeline.record(chat_state::TimelineEventKind::Subagent(
+        chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
+            subagent_id: "incoming-task".into(), child_session_id: child.id.0.to_string(),
+            origin_tool_call_id: None, security_parent_session_id: parent.id.0.to_string(),
+            parent_step_id: None, subagent_type: "worker".into(), description: "pending child birth".into(),
+            prompt: "run".into(), execution_recipe: serde_json::json!({}),
+            context_source: chat_state::SubagentContextSource::New, source_ref: None,
+            context_normalized: false, resumed_from: None, parent_prompt_id: None,
+            capability_mode: None, permission_mode: None, effective_permission_mode: None,
+            birth_mcp_servers: Some(Default::default()),
+            workflow_run_id: None, goal_id: None, goal_definition_revision: None,
+            surface_completion: false, child_cwd: child.cwd.clone(), worktree_path: None,
+            effective_model_id: "model".into(), model_transport_key: sampling_types::ModelImageInputKey::new("model","responses","test"),
+            reasoning_effort: None,
+        })))).unwrap();
+    writer.append_timeline_event_durable(&parent, &spawn).await.unwrap();
+    drop(writer);
+    let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = deleting.delete_session_by_id_sync(child.id.0.as_ref(), None)
+        .expect_err("incoming canonical Spawn protects the child before Seed commits");
+    assert!(error.to_string().contains(parent.id.0.as_ref()), "{error}");
+    assert!(deleting.session_dir(&parent).exists());
+    assert!(deleting.session_dir(&child).exists());
+}
+
+#[tokio::test]
+async fn explicit_delete_is_independent_of_sampling_observation_budget() {
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    let opened = writer.open_session(&info).unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    for index in 0..300u16 {
+        let body = index.to_be_bytes();
+        let hash = blake3::hash(&body).to_hex().to_string();
+        crate::session::persistence::write_immutable_blob_to_directory(opened.directory(),
+            &Path::new("artifacts/sampling").join(format!("{hash}.bin")), &body).unwrap();
+        let event = timeline.record(chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+            scope: "sampling_evidence".into(), name: "response".into(), turn: None, step: None,
+            data: Some(serde_json::json!({"owner":{"request_id":format!("request-{index}")},
+                "kind":"response","metadata":{},"bytes":2,"chunks":[{"blake3":hash,"bytes":2}]})),
+        })).unwrap();
+        writer.append_timeline_event_durable(&info, &event).await.unwrap();
+    }
+    crate::session::sampling_evidence::verify(opened.directory(), &timeline).unwrap();
+    let error = opened.bounded_validated_timeline(info.id.0.as_ref()).err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert!(error.to_string().contains("sampling evidence"), "{error}");
+    drop(opened);
+    drop(writer);
+    let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    deleting.delete_session_by_id_sync(info.id.0.as_ref(), None)
+        .expect("explicit delete is not an observational sampling read").unwrap();
+    assert!(!deleting.session_dir(&info).exists());
+}
+
+#[tokio::test]
+async fn explicit_delete_is_independent_of_journal_observation_budget() {
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    append_timeline_seed(&writer, &info,
+        vec![ConversationItem::user("x".repeat(BOUNDED_VALIDATION_MAX_BYTES as usize + 1))]).await;
+    let opened = writer.open_session(&info).unwrap();
+    let error = opened.bounded_validated_timeline(info.id.0.as_ref()).err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    drop(opened);
+    drop(writer);
+    let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    deleting.delete_session_by_id_sync(info.id.0.as_ref(), None)
+        .expect("valid large journal remains explicitly deletable").unwrap();
+    assert!(!deleting.session_dir(&info).exists());
+}
+
+#[tokio::test]
+async fn explicit_delete_does_not_require_a_historical_sampling_body() {
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline.record(chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+        scope: "sampling_evidence".into(), name: "response".into(), turn: None, step: None,
+        data: Some(serde_json::json!({"owner":{"request_id":"missing-body"},"kind":"response","metadata":{},
+            "bytes":1,"chunks":[{"blake3":blake3::hash(b"x").to_hex().to_string(),"bytes":1}]})),
+    })).unwrap();
+    writer.append_timeline_event_durable(&info, &event).await.unwrap();
+    let opened = writer.open_session(&info).unwrap();
+    assert!(crate::session::sampling_evidence::verify(opened.directory(), &timeline).is_err());
+    drop(opened);
+    drop(writer);
+    let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    deleting.delete_session_by_id_sync(info.id.0.as_ref(), None).unwrap().unwrap();
+    assert!(!deleting.session_dir(&info).exists());
+}
+
+#[tokio::test]
+async fn explicit_delete_refuses_invalid_committed_journal_evidence() {
+    for causal_corruption in [false, true] {
+        let root = TempDir::new().unwrap();
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = create_test_info();
+        writer.init_session(&info, default_model_id()).await.unwrap();
+        append_timeline_seed(&writer, &info, vec![ConversationItem::user("keep-history")]).await;
+        let path = writer.timeline_file(&info);
+        drop(writer);
+        if causal_corruption {
+            let invalid = chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended {
+                id: chat_state::TurnId(1), outcome: "completed".into(), duration_ms: 1, tool_count: 0,
+                terminal: chat_state::TurnTerminal { source: chat_state::TurnTerminalSource::Host,
+                    stop_reason: "end_turn".into(), completion_kind: "completed".into() },
+                cancellation_category: None, details: None,
+            });
+            rewrite_first_domain_record(&path, |event| {
+                for (key, value) in serde_json::to_value(invalid).unwrap().as_object().unwrap() {
+                    event[key] = value.clone();
+                }
+            });
+        } else {
+            let bytes = std::fs::read_to_string(&path).unwrap().replacen("keep-history", "tampered-history", 1);
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        assert!(deleting.delete_session_by_id_sync(info.id.0.as_ref(), None).is_err());
+        assert!(deleting.session_dir(&info).exists());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 }

@@ -1,0 +1,19 @@
+## 不变量
+三处编辑在原有owner中处理，不抽公共编辑框架。malformed_tool_exchange_ranges一次在原始slice判定全局工具身份；范围递增且不重叠，可能相邻。不能边替换边重新判定：一个坏Assistant内仍会扫描全部call，原始slice中的有效ID也会影响后续重复ID判定。
+
+## 隔离区间的原位应用
+
+先从原始slice生成全部`(range, replacement)`，replacement继续调用现有quarantined_tool_exchange，保留原证据JSON、警示文案及私有reasoning排除规则。然后用一次retain_mut原位应用，不另分配N项ConversationItem输出数组：以递增原始访问坐标为准，每次callback都递增（包括丢弃项）；range.start处将当前项替换为该证据并保留，同时记下skip_until=range.end；同一区间余项丢弃，区间外元素保留。next range.start可以等于上一个skip_until，不能按压实后的Vec坐标推进。
+
+范围性质由现有生成算法保证：每个Assistant最多生成一段，向前只扩展紧邻Reasoning/BackendToolCall，向后只扩展紧邻ToolResult；这些扩展不会越过另一个Assistant。因此区间递增、不重叠且非空，无需新范围校验、合并规则或fallback。空ranges直接返回，健康路径不重建也不做第二次retain扫描。
+
+全部证据在修改前生成，retain_mut只移动/替换拥有的普通会话值，不引入I/O或新的可返回错误。与旧反向splice相比，旧值释放顺序会改变，但成功后的完整结构、证据顺序和区间计数不变；原始Timeline事实与后续durable ACK边界不受此局部候选编辑影响。复杂度为O(N+K+证据生成成本)。额外空间仍包括K项计划和全部生成证据，不能称零分配；节省的是第二个N项ConversationItem数组。
+
+## 其余两处编辑
+
+repair_dangling_tool_calls现有repairs已按插入点递增；保留它原有的连续ToolResult边界，用owned iterator一次合并合成项，空计划直接返回。不要趁此统一它与has_dangling_tool_calls对attached Model SkillLoad metadata的不同扫描边界；repair_history原pipeline的前置normalize_model_skill_results顺序保持不变。
+
+dedup_duplicate_tool_results仍逐Assistant紧邻run判定最后出现者；收集要删的原坐标，统一sort_unstable一次，再用递增原访问坐标retain，不在其他run或真实消息边界间去重。删除坐标本来各异，不需新增去重规则。该路径为O(N+K log K)，消除逐次Vec::remove造成的重复后缀搬移，不应宣称排序也为线性。strip_displaced_tool_results已经单次retain，保持原样。
+
+## 验证
+Tier2：保留旧reverse-splice/remove oracle，在相同输入上比较完整JSON和计数/报告。零/单/多损坏、相邻与间隔范围、私有reasoning和BackendToolCall前缀、相同ID跨run、重复result last-wins、SkillLoad metadata、Unicode/媒体内容及二次幂等。规模128/512/2048/8192，K0/1/16/64及随N比例增长，clone/setup在计时外，原始样本/预热/计时范围明确；只声称修复内核成本。既有Timeline旧repair兼容验证和poisoned-history replay保留。

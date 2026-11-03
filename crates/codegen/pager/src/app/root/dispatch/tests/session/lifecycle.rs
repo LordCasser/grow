@@ -1,5 +1,6 @@
 //! Tests for session create, exit, trust, startup actions, worktree creation, and cloud lifecycle.
 use super::*;
+use crate::app::root::InputOutcome;
 /// Simulate a release-stamped build so folder-trust is active (a local/dev
 /// build auto-trusts and persists nothing). Mirrors this module's raw env idiom.
 fn simulate_release_build() {
@@ -1412,7 +1413,7 @@ fn delete_session_action_emits_delete_effect() {
         [Effect::DeleteSession {
             session_id,
             cwd,
-            after: AfterSessionDelete::Stay,
+            after: AfterSessionDelete::Stay, ..
         }] if session_id == "s1" && cwd == "/repo"
     ));
 }
@@ -1426,41 +1427,26 @@ fn delete_current_session_confirm_emits_effect() {
         a.session.cwd = std::path::PathBuf::from("/repo");
     }
     assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
-    assert!(matches!(
-        app.agents[&AgentId(0)]
-            .question_view
-            .as_ref()
-            .unwrap()
-            .local_kind,
-        Some(crate::views::question_view::LocalQuestionKind::DeleteCurrentSession)
-    ));
-    assert!(
-        dispatch(
-            Action::DeleteCurrentSessionAnswered { confirmed: false },
-            &mut app,
-        )
-        .is_empty()
+    assert!(app.session_deletion.is_some());
+    dispatch(Action::CancelSessionDelete, &mut app);
+    assert!(dispatch(Action::ConfirmSessionDelete, &mut app).is_empty());
+    dispatch(Action::DeleteCurrentSession, &mut app);
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
+    assert_eq!(
+        effects.len(),
+        1,
+        "backend preflight owns cancellation: {effects:?}"
     );
-    let effects = dispatch(
-        Action::DeleteCurrentSessionAnswered { confirmed: true },
-        &mut app,
-    );
-    assert!(
-        matches!(
-            effects.first(),
-            Some(Effect::CancelTurn {
-                cancel_subagents: true,
-                ..
-            })
-        ),
-        "must cancel the turn/subagents before delete, got {effects:?}"
-    );
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CancelTurn { .. } | Effect::KillBgTask { .. }
+    )));
     assert!(
         matches!(
             effects.last(),
             Some(Effect::DeleteSession {
                 session_id,
-                after: AfterSessionDelete::Welcome,
+                after: AfterSessionDelete::Stay,
                 ..
             }) if session_id == "sess-current"
         ),
@@ -1475,6 +1461,7 @@ fn delete_current_session_complete_welcome_and_guard() {
         Some(acp::SessionId::new("sess-a"));
     let effects = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &("sess-a")),
             session_id: "sess-a".into(),
             after: AfterSessionDelete::Welcome,
         },
@@ -1498,6 +1485,7 @@ fn delete_current_session_complete_welcome_and_guard() {
     app.active_view = ActiveView::Agent(other);
     let effects = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &("sess-a")),
             session_id: "sess-a".into(),
             after: AfterSessionDelete::Welcome,
         },
@@ -1952,8 +1940,6 @@ fn set_plan_mode_on_from_off_emits_switch_behavior() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
-    let mut input_effects: Vec<Effect> = Vec::new();
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app();
@@ -1984,6 +1970,7 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
             &[],
             false,
             None,
+            None,
         );
     };
     render(&mut app);
@@ -1991,25 +1978,9 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
         app.dashboard.as_ref().unwrap().peek.is_some(),
         "peek must auto-open for the selected row",
     );
-    let ctrl_x = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
-    for _ in 0..2 {
-        let outcome = app
-            .dashboard
-            .as_mut()
-            .unwrap()
-            .handle_input_with_paste_provenance(
-                &ctrl_x,
-                &app.registry,
-                PasteProvenance::Terminal,
-                &mut input_effects,
-            );
-        match outcome {
-            crate::app::root::InputOutcome::Action(crate::app::actions::Action::DashboardStop) => {
-                let _ = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
-            }
-            other => panic!("Ctrl+X must produce DashboardStop, got {other:?}"),
-        }
-    }
+    dispatch(Action::DashboardDelete, &mut app);
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
+    assert!(matches!(effects.as_slice(), [Effect::DeleteSession { .. }]));
     let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = &first else {
         panic!("first row should be top-level");
     };
@@ -2021,6 +1992,7 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
         .to_string();
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &(session_id)),
             session_id,
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },
@@ -2046,85 +2018,6 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
         Some(second),
         "peek must follow the selection onto the next row",
     );
-}
-/// Regression — the same Ctrl+X double-press path driven
-/// END-TO-END through `DashboardState::handle_input` (which the
-/// existing `dashboard_stop_double_press_closes_top_level` test
-/// bypasses by calling `dispatch_dashboard_stop` directly).
-///
-/// Without the fix, the second `handle_input` call
-/// runs the top-of-`handle_key` toast/confirm clear BEFORE the
-/// registry resolves the key to `DashboardStop`, wiping the
-/// just-armed `stop_confirm`. The dispatcher then sees a fresh
-/// state and re-arms instead of closing. The session never closes
-/// no matter how many times the user presses Ctrl+X.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {
-    let mut input_effects: Vec<Effect> = Vec::new();
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    let mut app = test_app();
-    let _ = dispatch_new_session_inner(&mut app, None);
-    let _ = dispatch_new_session_inner(&mut app, None);
-    open_dashboard(&mut app);
-    let target = *app.agents.keys().next().unwrap();
-    app.agents.get_mut(&target).unwrap().session.session_id = Some(acp::SessionId::new("s-target"));
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
-    }
-    let ctrl_x = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
-    let outcome1 = app
-        .dashboard
-        .as_mut()
-        .unwrap()
-        .handle_input_with_paste_provenance(
-            &ctrl_x,
-            &app.registry,
-            PasteProvenance::Terminal,
-            &mut input_effects,
-        );
-    match outcome1 {
-        crate::app::root::InputOutcome::Action(crate::app::actions::Action::DashboardStop) => {
-            let _ = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
-        }
-        other => panic!("first Ctrl+X must produce DashboardStop, got {other:?}"),
-    }
-    assert!(
-        app.dashboard.as_ref().unwrap().delete_confirm.is_some(),
-        "first Ctrl+X must arm delete_confirm"
-    );
-    let outcome2 = app
-        .dashboard
-        .as_mut()
-        .unwrap()
-        .handle_input_with_paste_provenance(
-            &ctrl_x,
-            &app.registry,
-            PasteProvenance::Terminal,
-            &mut input_effects,
-        );
-    match outcome2 {
-        crate::app::root::InputOutcome::Action(crate::app::actions::Action::DashboardStop) => {
-            let effects = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
-            assert!(matches!(effects.last(), Some(Effect::DeleteSession { .. })));
-        }
-        other => panic!("second Ctrl+X must produce DashboardStop, got {other:?}"),
-    }
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
-    let session_id = app.agents[&target]
-        .session
-        .session_id
-        .as_ref()
-        .expect("session id")
-        .to_string();
-    let _ = dispatch_task_result(
-        crate::app::actions::TaskResult::DeleteSessionComplete {
-            session_id,
-            after: crate::app::actions::AfterSessionDelete::Dashboard,
-        },
-        &mut app,
-    );
-    assert!(!app.agents.contains_key(&target));
 }
 /// Top-level resolver round-trip via real AgentView.
 #[test]
@@ -2170,4 +2063,217 @@ fn session_id_resolver_round_trip_subagent() {
     );
     let back = resolver.to_persisted(&live).expect("must reverse");
     assert_eq!(back, pid);
+}
+
+#[test]
+fn dashboard_commands_stop_and_delete_have_independent_confirmations() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    open_dashboard(&mut app);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    let prefix = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    let InputOutcome::ActionThenForward(action) = app.handle_input(&prefix) else {
+        panic!("attach selected session");
+    };
+    dispatch(action, &mut app);
+    assert!(matches!(app.handle_input(&prefix), InputOutcome::Changed));
+    let InputOutcome::Action(Action::StopSessionWork) = app.handle_input(&prefix) else {
+        panic!("stop only");
+    };
+    assert!(dispatch(Action::StopSessionWork, &mut app).is_empty());
+    assert!(app.agents.contains_key(&id));
+    assert!(app.session_deletion.is_none());
+    app.handle_input(&prefix);
+    let InputOutcome::Action(Action::DeleteCurrentSession) = app.handle_input(&Event::Key(
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    )) else {
+        panic!("explicit delete command");
+    };
+    dispatch(Action::DeleteCurrentSession, &mut app);
+    assert!(app.session_deletion.is_some());
+    // Unrelated letters and a held confirm never fall through to a composer.
+    let draft = app.agents[&id].prompt.text().to_string();
+    app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(app.agents[&id].prompt.text(), draft);
+    let mut held = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    held.kind = crossterm::event::KeyEventKind::Repeat;
+    assert!(matches!(
+        app.handle_input(&Event::Key(held)),
+        InputOutcome::Changed
+    ));
+    assert!(app.session_deletion.is_some());
+    let InputOutcome::Action(Action::ConfirmSessionDelete) = app.handle_input(&Event::Key(
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+    )) else {
+        panic!("explicit confirmation");
+    };
+    assert!(matches!(
+        dispatch(Action::ConfirmSessionDelete, &mut app).as_slice(),
+        [Effect::DeleteSession { .. }]
+    ));
+}
+
+#[test]
+fn session_deletion_confirmation_keeps_original_target_after_focus_changes() {
+    let mut app = test_app_with_agent();
+    let original = AgentId(0);
+    app.agents
+        .get_mut(&original)
+        .unwrap()
+        .prompt
+        .set_text("keep original draft");
+    dispatch(Action::DeleteCurrentSession, &mut app);
+    let bindings = session_delete_bindings(&app, "test-session");
+    let peer = AgentId(1);
+    let peer_session = make_test_agent_session(&app, peer, "peer-session");
+    app.agents
+        .insert(peer, AgentView::new(peer_session, ScrollbackState::new()));
+    app.active_view = ActiveView::Agent(peer);
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::DeleteSession { session_id, bindings: actual, after: crate::app::actions::AfterSessionDelete::Stay, .. }] if session_id == "test-session" && actual == &bindings)
+    );
+    assert_eq!(app.agents[&original].prompt.text(), "keep original draft");
+    dispatch(
+        Action::TaskComplete(TaskResult::DeleteSessionComplete {
+            session_id: "test-session".into(),
+            bindings,
+            after: crate::app::actions::AfterSessionDelete::Stay,
+        }),
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&original));
+    assert_eq!(app.active_view, ActiveView::Agent(peer));
+    assert!(dispatch(Action::ConfirmSessionDelete, &mut app).is_empty());
+}
+
+#[test]
+fn session_deletion_confirmation_rejects_rebound_or_new_local_writers() {
+    for same_session in [false, true] {
+        let mut app = test_app_with_agent();
+        dispatch(Action::DeleteCurrentSession, &mut app);
+        app.agents.get_mut(&AgentId(0)).unwrap().unbind_session_id();
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .bind_session_id(acp::SessionId::new(if same_session {
+                "test-session"
+            } else {
+                "replacement"
+            }));
+        assert!(dispatch(Action::ConfirmSessionDelete, &mut app).is_empty());
+        assert!(app.agents.contains_key(&AgentId(0)));
+        assert!(app.session_deletion.is_none());
+    }
+    let mut app = test_app_with_agent();
+    dispatch(Action::DeleteCurrentSession, &mut app);
+    let new_owner = AgentId(1);
+    let session = make_test_agent_session(&app, new_owner, "test-session");
+    app.agents
+        .insert(new_owner, AgentView::new(session, ScrollbackState::new()));
+    assert!(dispatch(Action::ConfirmSessionDelete, &mut app).is_empty());
+    assert_eq!(app.agents.len(), 2);
+}
+
+#[test]
+fn session_deletion_modal_is_persistent_visible_and_clickable_on_small_terminals() {
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let mut app = test_app_with_agent();
+    dispatch(Action::DeleteCurrentSession, &mut app);
+    // Prefix expiry and time maintenance cannot dismiss or confirm this modal.
+    app.maintain_ui(Instant::now() + std::time::Duration::from_secs(10));
+    assert!(app.session_deletion.is_some());
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+    app.session_deletion
+        .as_mut()
+        .unwrap()
+        .render(&mut buf, Rect::new(0, 0, 80, 24));
+    let lines: Vec<String> = (0..24)
+        .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect())
+        .collect();
+    assert!(lines.iter().any(|line| line.contains("test-session")));
+    assert!(lines.iter().any(|line| line.contains("Cannot be undone")));
+    let (row, column) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(y, line)| {
+            line.find("Y Delete permanently")
+                .map(|x| (y as u16, x as u16))
+        })
+        .expect("visible confirm button");
+    assert!(matches!(
+        app.handle_input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE
+        })),
+        InputOutcome::Action(Action::ConfirmSessionDelete)
+    ));
+    assert!(matches!(
+        dispatch(Action::ConfirmSessionDelete, &mut app).as_slice(),
+        [Effect::DeleteSession { .. }]
+    ));
+}
+
+#[test]
+fn session_commands_busy_close_or_delete_requires_stop_first() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+    assert!(dispatch(Action::CloseCurrentSession, &mut app).is_empty());
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    assert!(app.session_deletion.is_none());
+}
+
+#[test]
+fn session_deletion_and_exit_preserve_global_resize_state() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let child = AgentView::new(
+        make_test_agent_session(&app, AgentId(8), "resize-child"),
+        ScrollbackState::new(),
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .subagent_views
+        .insert("resize-child".into(), Box::new(child));
+    app.current_ui.compact_mode = false;
+    app.last_known_terminal_rows = 60;
+    app.apply_effective_compact();
+    app.agents.get_mut(&id).unwrap().terminal_size_stale = false;
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .subagent_views
+        .get_mut("resize-child")
+        .unwrap()
+        .terminal_size_stale = false;
+    dispatch(Action::DeleteCurrentSession, &mut app);
+    assert!(app.session_deletion.is_some());
+    app.handle_input(&Event::Resize(80, 18));
+    assert_eq!(app.last_known_terminal_rows, 18);
+    assert!(app.appearance.prompt.compact);
+    assert!(app.agents[&id].terminal_size_stale);
+    assert!(app.agents[&id].subagent_views["resize-child"].terminal_size_stale);
+    assert!(app.session_deletion.is_some());
+    let quit = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+    app.handle_input(&quit);
+    let InputOutcome::Action(action) = app.handle_input(&quit) else {
+        panic!("quit owns confirmation");
+    };
+    dispatch(action, &mut app);
+    assert!(app.exit_suspension.is_some());
+    app.handle_input(&Event::Resize(120, 60));
+    assert_eq!(app.last_known_terminal_rows, 60);
+    assert!(!app.appearance.prompt.compact);
 }

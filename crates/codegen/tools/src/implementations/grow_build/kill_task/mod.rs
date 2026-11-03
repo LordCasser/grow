@@ -1,7 +1,7 @@
 //! `kill_task` tool — new architecture (`Tool` trait).
 //!
-//! Terminates a running background task. Reads the `Terminal` resource
-//! from Resources to access the terminal backend.
+//! Cancels an owned command or child through the injected session-bound backend.
+//! The terminal-only entry shares outcome formatting without accessing children.
 
 pub mod terminal_command;
 pub use terminal_command::KillTerminalCommandTool;
@@ -9,7 +9,9 @@ pub use terminal_command::KillTerminalCommandTool;
 use crate::computer::types::KillOutcome;
 use crate::implementations::grow_build::task::TaskTool;
 use crate::implementations::grow_build::task::backend::SubagentBackendResource;
-use crate::implementations::grow_build::task::types::SubagentCancelOutcome;
+use crate::implementations::grow_build::task::types::{
+    SubagentCancelOutcome, SubagentObservationError,
+};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::Terminal;
 use crate::types::template_renderer::TemplateRenderer;
@@ -24,24 +26,126 @@ use tool_types::{KillTaskOutput, KillTaskResult, KillTaskToolInput};
 #[derive(Debug, Default)]
 pub struct KillTaskTool;
 
-/// Format a "not found" response for kill_task.
-async fn not_found_response(
-    task_id: &str,
-    terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
-) -> KillTaskOutput {
-    let known = terminal.list_tasks().await;
+#[derive(Clone, Copy)]
+pub(super) enum KillTaskScope {
+    TerminalOnly,
+    TerminalOrSubagent,
+}
+
+type TerminalHandle = std::sync::Arc<dyn crate::computer::types::TerminalBackend>;
+
+/// Format a "not found" response using terminal task IDs when available.
+async fn not_found_response(task_id: &str, terminal: Option<&TerminalHandle>) -> KillTaskOutput {
+    let known = match terminal {
+        Some(terminal) => terminal.list_tasks().await,
+        None => Vec::new(),
+    };
     let msg = if known.is_empty() {
-        format!(
-            "Task or subagent {task_id} not found. No background tasks or subagents exist in this session.",
-        )
+        format!("Cancellation target {task_id} not found.",)
     } else {
         let ids: Vec<&str> = known.iter().map(|t| t.task_id.as_str()).collect();
         format!(
-            "Task or subagent {task_id} not found. Known bash task IDs: [{}]",
+            "Cancellation target {task_id} not found. Known bash task IDs: [{}]",
             ids.join(", ")
         )
     };
     KillTaskOutput::TaskNotFound(msg)
+}
+
+async fn cancel_subagent(
+    task_id: &str,
+    backend: SubagentBackendResource,
+    terminal: Option<&TerminalHandle>,
+) -> Result<KillTaskOutput, tool_runtime::ToolError> {
+    let outcome = backend
+        .backend()
+        .cancel(task_id)
+        .await
+        .map_err(|error| match error {
+            SubagentObservationError::Unauthorized => tool_runtime::ToolError::custom(
+                "unauthorized",
+                "Subagent cancellation was not authorized",
+            ),
+            error => {
+                tool_runtime::ToolError::custom("subagent_observation_failed", error.to_string())
+            }
+        })?;
+
+    Ok(match outcome {
+        SubagentCancelOutcome::Cancelled => KillTaskOutput::Result(KillTaskResult {
+            task_id: task_id.to_owned(),
+            outcome: "killed".to_string(),
+            message: "Subagent cancellation initiated".to_string(),
+        }),
+        SubagentCancelOutcome::AlreadyFinished { status } => {
+            KillTaskOutput::Result(KillTaskResult {
+                task_id: task_id.to_owned(),
+                outcome: "already_exited".to_string(),
+                message: format!("Subagent already {status}"),
+            })
+        }
+        SubagentCancelOutcome::NotFound => not_found_response(task_id, terminal).await,
+        SubagentCancelOutcome::Unauthorized => {
+            return Err(tool_runtime::ToolError::custom(
+                "unauthorized",
+                "Subagent cancellation was not authorized",
+            ));
+        }
+    })
+}
+
+pub(super) async fn run_scoped_kill_task(
+    ctx: tool_runtime::ToolCallContext,
+    input: KillTaskToolInput,
+    scope: KillTaskScope,
+) -> Result<KillTaskOutput, tool_runtime::ToolError> {
+    use crate::types::tool_metadata::shared_resources;
+
+    let resources = shared_resources(&ctx)?;
+    let (terminal, subagent_backend) = {
+        let resources = resources.lock().await;
+        match scope {
+            KillTaskScope::TerminalOnly => (Some(resources.require::<Terminal>()?.0.clone()), None),
+            KillTaskScope::TerminalOrSubagent => {
+                let terminal = resources
+                    .get::<Terminal>()
+                    .map(|terminal| terminal.0.clone());
+                let backend = resources.get::<SubagentBackendResource>().cloned();
+                if terminal.is_none() && backend.is_none() {
+                    resources.require::<Terminal>()?;
+                }
+                (terminal, backend)
+            }
+        }
+    };
+
+    if let Some(terminal) = terminal.as_ref() {
+        match terminal.kill_task(&input.task_id).await {
+            KillOutcome::Killed => {
+                return Ok(KillTaskOutput::Result(KillTaskResult {
+                    task_id: input.task_id,
+                    outcome: "killed".to_string(),
+                    message: "Task was terminated successfully".to_string(),
+                }));
+            }
+            KillOutcome::AlreadyExited => {
+                return Ok(KillTaskOutput::Result(KillTaskResult {
+                    task_id: input.task_id,
+                    outcome: "already_exited".to_string(),
+                    message: "Task had already completed".to_string(),
+                }));
+            }
+            KillOutcome::NotFound if matches!(scope, KillTaskScope::TerminalOnly) => {
+                return Ok(not_found_response(&input.task_id, Some(terminal)).await);
+            }
+            KillOutcome::NotFound => {}
+        }
+    }
+
+    let Some(backend) = subagent_backend else {
+        return Ok(not_found_response(&input.task_id, terminal.as_ref()).await);
+    };
+    cancel_subagent(&input.task_id, backend, terminal.as_ref()).await
 }
 
 impl crate::types::tool_metadata::ToolMetadata for KillTaskTool {
@@ -167,77 +271,7 @@ impl tool_runtime::Tool for KillTaskTool {
         ctx: tool_runtime::ToolCallContext,
         input: KillTaskToolInput,
     ) -> Result<KillTaskOutput, tool_runtime::ToolError> {
-        use crate::types::tool_metadata::shared_resources;
-        let resources = shared_resources(&ctx)?;
-
-        let terminal;
-        {
-            let res = resources.lock().await;
-            terminal = res.require::<Terminal>()?.0.clone();
-        }
-
-        match terminal.kill_task(&input.task_id).await {
-            KillOutcome::Killed => Ok(KillTaskOutput::Result(KillTaskResult {
-                task_id: input.task_id.clone(),
-                outcome: "killed".to_string(),
-                message: "Task was terminated successfully".to_string(),
-            })),
-            KillOutcome::AlreadyExited => Ok(KillTaskOutput::Result(KillTaskResult {
-                task_id: input.task_id.clone(),
-                outcome: "already_exited".to_string(),
-                message: "Task had already completed".to_string(),
-            })),
-            KillOutcome::NotFound => {
-                // Try subagent cancel via backend
-                let backend = {
-                    resources
-                        .lock()
-                        .await
-                        .get::<SubagentBackendResource>()
-                        .cloned()
-                };
-                if let Some(backend) = backend {
-                    let outcome =
-                        backend
-                            .backend()
-                            .cancel(&input.task_id)
-                            .await
-                            .map_err(|error| {
-                                tool_runtime::ToolError::custom(
-                                    "subagent_observation_failed",
-                                    error.to_string(),
-                                )
-                            })?;
-                    return Ok(match outcome {
-                        SubagentCancelOutcome::Cancelled => {
-                            KillTaskOutput::Result(KillTaskResult {
-                                task_id: input.task_id.clone(),
-                                outcome: "killed".to_string(),
-                                message: "Subagent cancellation initiated".to_string(),
-                            })
-                        }
-                        SubagentCancelOutcome::AlreadyFinished { status } => {
-                            KillTaskOutput::Result(KillTaskResult {
-                                task_id: input.task_id.clone(),
-                                outcome: "already_exited".to_string(),
-                                message: format!("Subagent already {status}"),
-                            })
-                        }
-                        SubagentCancelOutcome::NotFound => {
-                            not_found_response(&input.task_id, &terminal).await
-                        }
-                        SubagentCancelOutcome::Unauthorized => {
-                            return Err(tool_runtime::ToolError::custom(
-                                "unauthorized",
-                                "Subagent cancellation was not authorized",
-                            ));
-                        }
-                    });
-                }
-
-                Ok(not_found_response(&input.task_id, &terminal).await)
-            }
-        }
+        run_scoped_kill_task(ctx, input, KillTaskScope::TerminalOrSubagent).await
     }
 }
 
@@ -572,7 +606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kill_task_not_found_includes_discoverability() {
+    async fn kill_task_not_found_does_not_claim_the_child_inventory_is_empty() {
         let resources = resources_with_terminal(KO::NotFound);
         let tool = KillTaskTool;
 
@@ -589,8 +623,8 @@ mod tests {
         match result {
             KillTaskOutput::TaskNotFound(msg) => {
                 assert!(
-                    msg.contains("No background tasks or subagents exist"),
-                    "Current path must include discoverability text, got: {msg}"
+                    msg == "Cancellation target task-abc not found.",
+                    "a single-ID miss must not claim the child inventory is empty: {msg}"
                 );
             }
             other => panic!("Expected TaskNotFound, got {:?}", other),
@@ -615,6 +649,30 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
         resources.insert(SubagentBackendResource(Arc::new(ChannelBackend::new(tx))));
 
+        (resources, rx)
+    }
+
+    fn resources_with_subagent_only() -> (
+        Resources,
+        tokio::sync::mpsc::UnboundedReceiver<SubagentEvent>,
+    ) {
+        let mut resources = Resources::new();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+        resources.insert(SubagentBackendResource(Arc::new(ChannelBackend::new(tx))));
+        (resources, rx)
+    }
+
+    fn resources_with_terminal_and_backend(
+        terminal_outcome: KO,
+    ) -> (
+        Resources,
+        tokio::sync::mpsc::UnboundedReceiver<SubagentEvent>,
+    ) {
+        let (mut resources, rx) = resources_with_subagent_only();
+        let terminal: Arc<dyn TerminalBackend> = Arc::new(MockTerminal {
+            outcome: terminal_outcome,
+        });
+        resources.insert(Terminal(terminal));
         (resources, rx)
     }
 
@@ -663,6 +721,37 @@ mod tests {
                 );
             }
             other => panic!("Expected Result(killed), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_task_cancels_authorized_child_without_terminal() {
+        let (resources, mut cancel_rx) = resources_with_subagent_only();
+        let shared = resources.into_shared();
+        let responder = tokio::spawn(async move {
+            let req = unwrap_cancel(cancel_rx.recv().await.unwrap());
+            req.respond_to
+                .send(SubagentCancelOutcome::Cancelled)
+                .unwrap();
+        });
+
+        let result = tool_runtime::Tool::run(
+            &KillTaskTool,
+            test_ctx_with_call_id(shared, "test-call"),
+            KillTaskToolInput {
+                task_id: "sub-only".into(),
+            },
+        )
+        .await
+        .unwrap();
+        responder.await.unwrap();
+
+        match result {
+            KillTaskOutput::Result(result) => {
+                assert_eq!(result.task_id, "sub-only");
+                assert_eq!(result.outcome, "killed");
+            }
+            other => panic!("Expected Result(killed), got {other:?}"),
         }
     }
 
@@ -735,5 +824,67 @@ mod tests {
             }
             other => panic!("Expected TaskNotFound, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn kill_task_preserves_foreign_child_rejection() {
+        let (resources, mut cancel_rx) = resources_with_subagent_only();
+        let shared = resources.into_shared();
+        let responder = tokio::spawn(async move {
+            let req = unwrap_cancel(cancel_rx.recv().await.unwrap());
+            req.respond_to
+                .send(SubagentCancelOutcome::Unauthorized)
+                .unwrap();
+        });
+
+        let error = tool_runtime::Tool::run(
+            &KillTaskTool,
+            test_ctx_with_call_id(shared, "test-call"),
+            KillTaskToolInput {
+                task_id: "foreign-child".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        responder.await.unwrap();
+
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("code")),
+            Some(&serde_json::Value::String("unauthorized".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_task_terminal_match_takes_priority_over_same_child_id() {
+        let (resources, mut cancel_rx) = resources_with_terminal_and_backend(KO::Killed);
+        let shared = resources.into_shared();
+        let child_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_cancelled_for_responder = child_cancelled.clone();
+        let responder = tokio::spawn(async move {
+            if let Some(SubagentEvent::Cancel(req)) = cancel_rx.recv().await {
+                child_cancelled_for_responder.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = req.respond_to.send(SubagentCancelOutcome::Cancelled);
+            }
+        });
+
+        let result = tool_runtime::Tool::run(
+            &KillTaskTool,
+            test_ctx_with_call_id(shared, "test-call"),
+            KillTaskToolInput {
+                task_id: "shared-id".into(),
+            },
+        )
+        .await
+        .unwrap();
+        responder.abort();
+
+        match result {
+            KillTaskOutput::Result(result) => assert_eq!(result.outcome, "killed"),
+            other => panic!("Expected terminal Result(killed), got {other:?}"),
+        }
+        assert!(!child_cancelled.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

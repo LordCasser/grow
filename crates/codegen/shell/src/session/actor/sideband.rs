@@ -56,6 +56,265 @@ pub(crate) struct SidebandRun {
 }
 
 impl SessionActor {
+    /// Freeze the acknowledged Surface and select existing image descriptions
+    /// on its copy. Each consumer retains its own history and budget projection.
+    pub(super) async fn freeze_sideband_surface(
+        &self,
+    ) -> Result<chat_state::TimelineMaterialization, String> {
+        let _image_projection = tokio::select! {
+            biased;
+            _ = self.sideband_cancel.cancelled() => {
+                return Err("sideband context cancelled".into());
+            }
+            guard = self.image_projection_gate.read() => guard,
+        };
+        let mut materialized = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await
+            .ok_or("chat-state actor is unavailable")?;
+        let surface = &mut materialized.surface;
+        // Primary owns conversion. Prefer its acknowledged descriptions even
+        // when this prepared route has no negative capability entry.
+        for group in sampling_types::conversation::conversation_image_groups(surface) {
+            if let Some(description) =
+                sampling_types::conversation::item_image_description(&surface[group.item_index])
+                    .map(str::to_owned)
+            {
+                sampling_types::conversation::replace_item_images_with_text(
+                    &mut surface[group.item_index],
+                    &description,
+                );
+            }
+        }
+        Ok(materialized)
+    }
+
+    /// Recover only media actually retained in the consumer's request. The
+    /// immutable snapshot supplies provenance even if foreground history moves.
+    pub(super) async fn recover_sideband_images(
+        &self,
+        items: &mut [sampling_types::ConversationItem],
+        frozen: (
+            &[sampling_types::ConversationItem],
+            &[chat_state::SurfaceId],
+            u64,
+        ),
+        image_key: &sampling_types::ModelImageInputKey,
+    ) -> Result<(), String> {
+        use sampling_types::conversation::{
+            conversation_image_groups, replace_item_images_with_text,
+        };
+        let requested = conversation_image_groups(items);
+        if requested.is_empty() {
+            return Ok(());
+        }
+        let _image_projection = tokio::select! {
+            biased;
+            _ = self.sideband_cancel.cancelled() => return Err("sideband context cancelled".into()),
+            guard = self.image_projection_gate.write() => guard,
+        };
+        let sources = conversation_image_groups(frozen.0);
+        let mut groups = Vec::with_capacity(requested.len());
+        let mut end = sources.len();
+        // Portable consumers retain an ordered suffix/subsequence. Match from
+        // the end so identical images in an omitted older turn are not treated
+        // as selected sources or described needlessly.
+        for group in requested.iter().rev() {
+            let index = sources[..end]
+                .iter()
+                .rposition(|source| {
+                    source.fingerprint == group.fingerprint
+                        && source.source == group.source
+                        && source.source_text == group.source_text
+                        && source.tool_call.as_ref().map(|call| &call.tool_call_id)
+                            == group.tool_call.as_ref().map(|call| &call.tool_call_id)
+                })
+                .ok_or("selected image source is absent from frozen context")?;
+            groups.push(sources[index].clone());
+            end = index;
+        }
+        groups.reverse();
+        let operation_id = uuid::Uuid::now_v7().simple().to_string();
+        let prompt_id = self.current_prompt_id.lock().ok().and_then(|id| id.clone());
+        use crate::extensions::notification::{ImageRecoveryOperationState, SessionUpdate};
+        self.send_grow_notification(SessionUpdate::ImageRecoveryOperation {
+            operation_id: operation_id.clone(),
+            prompt_id: prompt_id.clone(),
+            state: ImageRecoveryOperationState::Started {
+                message: "Preparing image recovery…".into(),
+            },
+        })
+        .await;
+        let shadows = tokio::select! {
+            biased;
+            _ = self.sideband_cancel.cancelled() => None,
+            shadows = self.describe_frozen_image_groups(
+                frozen.1, frozen.2, &groups,
+                image_key, &operation_id, prompt_id.as_deref(),
+            ) => Some(shadows),
+        };
+        let mut converted = 0;
+        if let Some(shadows) = &shadows {
+            for (group, source) in requested.iter().zip(&groups) {
+                if let Some(shadow) = shadows
+                    .iter()
+                    .find(|shadow| shadow.source == frozen.1[source.item_index])
+                {
+                    replace_item_images_with_text(
+                        &mut items[group.item_index],
+                        &shadow.replacement,
+                    );
+                    converted += group.image_count();
+                }
+            }
+        }
+        let complete = conversation_image_groups(items).is_empty();
+        self.send_grow_notification(SessionUpdate::ImageRecoveryOperation {
+            operation_id,
+            prompt_id,
+            state: if complete {
+                ImageRecoveryOperationState::Completed {
+                    message: format!(
+                        "Converted {converted} image{}",
+                        if converted == 1 { "" } else { "s" }
+                    ),
+                }
+            } else {
+                ImageRecoveryOperationState::Failed {
+                    message: if shadows.is_none() {
+                        "Image recovery cancelled"
+                    } else {
+                        "Image description unavailable"
+                    }
+                    .into(),
+                }
+            },
+        })
+        .await;
+        if complete {
+            Ok(())
+        } else {
+            Err("image description unavailable".into())
+        }
+    }
+
+    pub(super) async fn prepare_sideband_images(
+        &self,
+        items: &mut [sampling_types::ConversationItem],
+        frozen: (
+            &[sampling_types::ConversationItem],
+            &[chat_state::SurfaceId],
+            u64,
+        ),
+        image_key: &sampling_types::ModelImageInputKey,
+    ) -> Result<(), String> {
+        if self.model_image_input_is_unsupported(image_key).await {
+            self.recover_sideband_images(items, frozen, image_key)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// One capability recovery, distinct from consumer-specific overload retry.
+    /// Reuse the exact last attempt selection; never recapture live history.
+    pub(super) async fn collect_sideband_with_image_recovery(
+        &self,
+        run: &mut SidebandRun,
+        client: &sampler::SamplingClient,
+        request: &mut ConversationRequest,
+        frozen: (
+            &[sampling_types::ConversationItem],
+            &[chat_state::SurfaceId],
+            u64,
+        ),
+        image_key: &sampling_types::ModelImageInputKey,
+    ) -> Result<Result<ConversationResponse, sampling_types::SamplingError>, SidebandRunError> {
+        let result = run
+            .run_provider(client.conversation_collect(request.clone()))
+            .await?;
+        let Err(error) = &result else {
+            return Ok(result);
+        };
+        let image_count = sampling_types::conversation::conversation_image_groups(&request.items)
+            .iter()
+            .map(|group| group.image_count())
+            .sum();
+        let info = sampler::SamplingErrorInfo::from(error);
+        if !matches!(info.kind, sampler::SamplingErrorKind::Api)
+            || !sampling_types::is_unconditional_image_input_unsupported(
+                info.status_code,
+                &info.message,
+                image_count,
+            )
+        {
+            return Ok(result);
+        }
+        self.settle_sideband_attempt_incomplete(run).await?;
+        self.record_unsupported_model_image_input(image_key.clone())
+            .await
+            .map_err(|error| SidebandRunError::Persistence(error.to_string()))?;
+        let memory_flush = matches!(run.timeline.events().first().map(|event| &event.kind),
+            Some(chat_state::SidebandEventKind::Request(request)) if request.purpose == chat_state::SidebandPurpose::MemoryFlush);
+        if memory_flush && !self.memory.is_enabled() {
+            run.fail(
+                chat_state::SidebandOutcome::Cancelled,
+                "memory was disabled before image recovery",
+            )
+            .await?;
+            return Err(SidebandRunError::Admission("memory is disabled".into()));
+        }
+        if let Err(detail) = self
+            .recover_sideband_images(&mut request.items, frozen, image_key)
+            .await
+        {
+            run.fail(chat_state::SidebandOutcome::Failed, &detail)
+                .await?;
+            return Err(SidebandRunError::Admission(detail));
+        }
+        let previous = run
+            .timeline
+            .events()
+            .iter()
+            .rev()
+            .find_map(|event| {
+                if let chat_state::SidebandEventKind::Attempt(attempt) = &event.kind {
+                    Some(attempt.clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or(chat_state::SidebandError::AttemptWithoutRequest)?;
+        let manifest = previous.assembly_manifest;
+        if let Err(error) = run
+            .attempt_selected(
+                request,
+                client.api_backend(),
+                previous.input_refs,
+                manifest.source_revision,
+                manifest.context_surface_ids,
+                manifest.selected_surface_ids,
+                &manifest.strategy,
+                Some(info.message),
+            )
+            .await
+        {
+            run.fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                .await?;
+            return Err(error);
+        }
+        if memory_flush && !self.memory.is_enabled() {
+            run.fail(
+                chat_state::SidebandOutcome::Cancelled,
+                "memory was disabled before flush recovery admission",
+            )
+            .await?;
+            return Err(SidebandRunError::Admission("memory is disabled".into()));
+        }
+        run.run_provider(client.conversation_collect(request.clone()))
+            .await
+    }
+
     /// Atomically close Sideband writer admission before the final activity
     /// drain. The same gate guards activity acquisition in `begin_sideband`,
     /// so the final idle observation cannot race a late nested writer.

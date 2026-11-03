@@ -1,8 +1,9 @@
 use super::*;
 
 impl SessionActor {
-    /// Hash the exact source axes needed to decide whether this runtime can be
-    /// restored. Only the digest is persisted; credentials and prompt text
+    /// Record a diagnostic fingerprint of the checkpoint's runtime sources.
+    /// Execution admission uses their independent authorities, not digest equality.
+    /// Only the digest is persisted; credentials and prompt text
     /// remain in memory while the canonical value is hashed.
     pub(in crate::session::actor) async fn runtime_source_hash(&self) -> Result<String, String> {
         let (definition, tool_config, authored_capability_tools, selector, plugin, role_prompt) = {
@@ -22,7 +23,12 @@ impl SessionActor {
                 agent.role_prompt().map(str::to_owned),
             )
         };
-        let project_rules = self.agent.borrow().agents_md_section();
+        let (conversation, _) = self
+            .chat_state_handle
+            .get_conversation_with_revision()
+            .await
+            .ok_or("chat state stopped before runtime source projection")?;
+        let project_rules = effective_project_instructions(&conversation);
         let hook_registry = serde_json::to_value(self.hooks.registry.borrow().as_deref())
             .map_err(|error| error.to_string())?;
         let client_hooks = self

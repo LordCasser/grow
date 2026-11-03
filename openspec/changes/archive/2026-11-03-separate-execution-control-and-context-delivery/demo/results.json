@@ -1,0 +1,304 @@
+{
+  "model": "passive-message-delivery bounded transition system",
+  "scope": "message proof, durable receipt/consumption, execution boundary, request dispatch and recovery",
+  "exploration": {
+    "max_depth": 7,
+    "initial_configurations": 144,
+    "states": 24658,
+    "transitions_checked": 98953,
+    "actions_reached": [
+      "admit_user_steer_then_soft_preempt",
+      "behavior_revoked_after_consumed",
+      "behavior_revoked_at_boundary",
+      "budget_revoked_after_consumed",
+      "budget_revoked_at_boundary",
+      "cancel_exact_owner",
+      "cancel_exact_owner_waits_for_tool_settlement",
+      "cancel_finishes_to_idle",
+      "candidate_authorizes_same_turn_successor",
+      "close_to_idle_no_wake",
+      "commit_consumed_ack_lost",
+      "commit_consumed_exact_input",
+      "commit_parent_interrupt_then_interrupt",
+      "commit_received",
+      "commit_received_ack_lost",
+      "crash",
+      "dispatch_exact_committed_surface",
+      "dispatch_without_pending_context",
+      "fork_inherits_terminal_as_history_only",
+      "gate_denies_before_consumption",
+      "held_fifo_denies_idle_admission",
+      "ignore_inherited_terminal_as_local_sync",
+      "irreversible_final_close",
+      "ordinary_admission_starts_turn",
+      "received_write_fails_before_commit",
+      "reconcile_consumed_ack",
+      "reconcile_live_missing_received",
+      "reconcile_received_ack",
+      "recover_missing_received",
+      "reject_same_identity_conflicting_payload",
+      "request_enters_tool_batch",
+      "request_produces_final_candidate",
+      "restore_without_synthetic_turn",
+      "retry_same_identity_same_payload",
+      "snapshot_final_candidate_ids",
+      "submit_malformed_proof",
+      "suspend_preserving_pending",
+      "terminal_valid",
+      "tool_batch_completes_new_safe_boundary",
+      "tool_batch_settles_then_canceling"
+    ],
+    "counterexample": null
+  },
+  "named_scenarios": [
+    {
+      "name": "terminal_received_consumed_then_dispatched",
+      "trace": [
+        "terminal_valid(m1)",
+        "commit_received(m1)",
+        "request_enters_tool_batch",
+        "tool_batch_completes_new_safe_boundary",
+        "commit_consumed_exact_input(m1)",
+        "dispatch_exact_committed_surface"
+      ]
+    },
+    {
+      "name": "identity_replay_conflict_and_same_text_distinct_ids",
+      "trace": [
+        "terminal_valid(m1)",
+        "commit_received(m1)",
+        "retry_same_identity_same_payload(m1)",
+        "terminal_valid(m2)",
+        "commit_received(m2)",
+        "reject_same_identity_conflicting_payload(m2)"
+      ]
+    },
+    {
+      "name": "precommit_failure_vs_commit_ack_lost",
+      "trace": [
+        "terminal_valid(m1)",
+        "received_write_fails_before_commit(m1)",
+        "commit_received_ack_lost(m1)",
+        "reconcile_received_ack(m1)"
+      ]
+    },
+    {
+      "name": "replacement_writer_recovers_missing_receipt",
+      "trace": [
+        "restore_without_synthetic_turn",
+        "recover_missing_received(m1)"
+      ]
+    },
+    {
+      "name": "boundary_frontier_reconciles_terminal_before_dispatch",
+      "trace": [
+        "terminal_valid(m1)",
+        "ordinary admission freezes terminal obligation",
+        "dispatch denied while Received missing",
+        "live reconciliation",
+        "Consumed",
+        "dispatch"
+      ]
+    },
+    {
+      "name": "candidate_snapshot_then_later_receipt_joins_next_boundary",
+      "trace": [
+        "snapshot_final_candidate_ids(m1)",
+        "candidate_authorizes_same_turn_successor",
+        "Received(m2) after snapshot",
+        "consume_and_dispatch(m1)",
+        "tool batch",
+        "next safe boundary",
+        "consume(m2)"
+      ]
+    },
+    {
+      "name": "irreversible_close_then_late_receipt_waits",
+      "trace": [
+        "snapshot_final_candidate_ids(empty)",
+        "irreversible_final_close",
+        "close_to_idle_no_wake",
+        "commit_received(m1)"
+      ]
+    },
+    {
+      "name": "budget_and_fifo_gates",
+      "trace": [
+        "budget=0 boundary -> gate_denies_before_consumption",
+        "held FIFO idle -> deny ordinary admission"
+      ]
+    },
+    {
+      "name": "behavior_revocation_before_and_after_consumed",
+      "trace": [
+        "revoke before consume -> pending receipt retained",
+        "separate trace: commit Consumed + exact input",
+        "revoke before dispatch -> publication remains but request is denied"
+      ]
+    },
+    {
+      "name": "consumed_ack_lost_blocks_dispatch_until_reconciled",
+      "trace": [
+        "commit_consumed_ack_lost(m1)",
+        "dispatch denied",
+        "reconcile_consumed_ack(m1)",
+        "dispatch_exact_committed_surface"
+      ]
+    },
+    {
+      "name": "candidate_successor_still_waits_for_consumed_ack",
+      "trace": [
+        "snapshot m1 candidate",
+        "authorize same-Turn successor",
+        "commit Consumed with ACK lost",
+        "dispatch denied",
+        "reconcile",
+        "dispatch"
+      ]
+    },
+    {
+      "name": "tool_cancel_settles_cooperatively_and_final_cancel_wins",
+      "trace": [
+        "request -> tool",
+        "request exact-owner cancellation",
+        "tool settles -> canceling",
+        "separate final-candidate trace: snapshot -> cancel -> idle, receipt pending"
+      ]
+    },
+    {
+      "name": "cancel_suspend_restore_and_fork_history",
+      "trace": [
+        "pending receipt",
+        "cancel",
+        "suspend",
+        "restore to idle without wake",
+        "fork inherited history has no local receipt"
+      ]
+    },
+    {
+      "name": "explicit_steer_and_tool_batch_boundary",
+      "trace": [
+        "explicit steer -> soft preempt",
+        "request",
+        "tool batch completes",
+        "safe boundary"
+      ]
+    },
+    {
+      "name": "malformed_proof_rejected_and_text_is_not_permission",
+      "trace": [
+        "submit_malformed_proof(m1)",
+        "consultation payload retained as evidence only"
+      ]
+    },
+    {
+      "name": "fair_eligible_boundary_drain_witness",
+      "trace": [
+        "terminal",
+        "Received",
+        "safe boundary",
+        "Consumed",
+        "dispatch"
+      ]
+    }
+  ],
+  "mutation_counterexamples": {
+    "passive_autowake": {
+      "invariant": "passive context requested a synthetic idle Turn",
+      "trace": [
+        "terminal_valid(m1)",
+        "commit_received(m1)"
+      ]
+    },
+    "passive_preemption_or_tool_cancel": {
+      "invariant": "passive context requested preemption or tool cancellation",
+      "trace": [
+        "ordinary_admission_starts_turn",
+        "terminal_valid(m1)",
+        "dispatch_exact_committed_surface",
+        "commit_received(m1)"
+      ]
+    },
+    "dispatch_before_consumed_ack": {
+      "invariant": "provider request includes input without confirmed durable Consumed",
+      "trace": [
+        "terminal_valid(m1)",
+        "commit_received(m1)",
+        "ordinary_admission_starts_turn",
+        "dispatch_exact_committed_surface"
+      ]
+    },
+    "omit_boundary_eligible_context": {
+      "invariant": "provider request omitted a terminal obligation or receipt frozen at its safe boundary",
+      "trace": [
+        "terminal_valid(m1)",
+        "commit_received(m1)",
+        "ordinary_admission_starts_turn",
+        "dispatch_exact_committed_surface"
+      ]
+    },
+    "bypass_unreceived_terminal_obligation": {
+      "invariant": "provider request omitted a terminal obligation or receipt frozen at its safe boundary",
+      "trace": [
+        "terminal_valid(m1)",
+        "ordinary_admission_starts_turn",
+        "dispatch_exact_committed_surface"
+      ]
+    },
+    "fork_recreation": {
+      "invariant": "fork acquired source-owned delivery authority or pending work",
+      "trace": [
+        "terminal_valid(m1)",
+        "fork_inherits_terminal_as_history_only",
+        "recover_missing_received(m1)"
+      ]
+    },
+    "continuation_without_budget": {
+      "invariant": "continuation was granted without remaining budget",
+      "trace": [
+        "ordinary_admission_starts_turn",
+        "terminal_valid(m1)",
+        "dispatch_exact_committed_surface",
+        "request_produces_final_candidate",
+        "snapshot_final_candidate_ids",
+        "candidate_authorizes_same_turn_successor"
+      ]
+    },
+    "repeat_consumption": {
+      "invariant": "stable receipt identity was consumed more than once",
+      "trace": [
+        "terminal_valid(m1)",
+        "commit_received(m1)",
+        "ordinary_admission_starts_turn",
+        "commit_consumed_exact_input(m1)",
+        "commit_consumed_exact_input(m1)"
+      ]
+    },
+    "malformed_proof_acceptance": {
+      "invariant": "successful terminal lacks a valid structured source/owner proof",
+      "trace": [
+        "submit_malformed_proof(m1)"
+      ]
+    },
+    "permission_from_consultation_text": {
+      "invariant": "consultation prose created human permission evidence",
+      "trace": [
+        "terminal_valid(m1)",
+        "commit_received(m1)"
+      ]
+    }
+  },
+  "model_findings_for_plan": [
+    "An authorized boundary freezes both new-contract successful terminal obligations and already-Received IDs. Dispatch waits for every frozen obligation to reach Received, Consumed, and confirmed ACK; an existing terminal with missing Received cannot be skipped.",
+    "A tentative final-response candidate snapshot and irreversible final close are distinct transitions. If m1 is in the candidate snapshot and authorizes same-Turn continuation, m2 received afterward can join a later normal safe boundary; if close wins with no eligible candidate, later receipts remain pending without a wake.",
+    "The candidate snapshot is not a durable minimum-turn latch. Receipt identities are selected at ordinary safe boundaries and remain subject to owner, budget, Behavior and cancellation gates.",
+    "Consumed ACK uncertainty blocks dispatch until authoritative reconciliation confirms the durable commit; it does not justify consuming again.",
+    "Runtime budget/Behavior revocation before Consumed leaves the obligation pending. Revocation after Consumed preserves the committed Surface but prevents dispatch under the closed owner. Cancellation during a tool batch waits for the batch to settle; cancellation during final decision defeats candidate continuation."
+  ],
+  "limitations": [
+    "This model does not prove the Rust implementation, filesystem persistence, actor integration, provider behavior or multi-writer linearizability.",
+    "Exploration covers 144 enumerated starting configurations to depth 7 and two distinct identities with identical payload text; it makes no infinite-liveness claim.",
+    "The state machine abstracts timing, payload bytes, actual journal encoding and provider internals.",
+    "Only one explicit fair finishing trace demonstrates drain progress when an eligible boundary is scheduled."
+  ]
+}

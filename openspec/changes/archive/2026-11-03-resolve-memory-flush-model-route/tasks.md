@@ -1,0 +1,3 @@
+- [x] 显式 flush_model 解析完整 sampler route，更新调用测试。
+- [x] 验证跨 endpoint/backend 与无效别名，不向错误 provider 发请求。
+- [x] 更新开发者说明，严格校验并归档。

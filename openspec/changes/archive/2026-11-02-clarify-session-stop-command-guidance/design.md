@@ -1,0 +1,1 @@
+只读投影复用 classify_top_level，不新增状态或控制分支。CloseSession 优先于 Working，避免把 close 重试显示为 stop；turn/compact 显示 Stop turn，其他 Working 显示 Stop session work，NeedsInput 显示 Session busy，Idle 显示 Close session。不改变输入行为。Tier 0：核对对应 dispatcher 与现有活动投影/关闭用例，并执行真实终端组合旅程。

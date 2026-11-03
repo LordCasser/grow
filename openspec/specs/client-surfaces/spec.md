@@ -667,14 +667,15 @@ The shared drop classifier SHALL retain at most 50,000,000 encoded image bytes p
 - **THEN** preserve all entries in source order, without charging path text as image bytes.
 
 ### Requirement: Dashboard preserves mixed drop paths
-Dashboard dispatch and peek SHALL insert recognized image and ordinary-file drop entries in source order for bracketed paste, paste-key text, and deferred file URL completion.
+
+Dashboard's explicit new-session composer SHALL insert recognized image and ordinary-file drop entries in source order for bracketed paste, paste-key text, and deferred file URL completion. Selection and read-only preview SHALL NOT become clipboard recipients or answer pending interactions. Search query SHALL remain a separate text-only owner.
 
 #### Scenario: Image and ordinary file share a paste
 - **WHEN** a recognized batch contains an image and an ordinary file path
-- **THEN** attach the image and insert the ordinary path as text in the same target, without dropping that path through image-only filtering.
+- **THEN** attach the image and insert the ordinary path as text in the new-session composer, without dropping that path through image-only filtering.
 
 #### Scenario: Image cap does not suppress file text
-- **WHEN** the target rejects an image because its attachment cap is reached and the batch also contains an ordinary path
+- **WHEN** the new-session composer rejects an image because its attachment cap is reached and the batch also contains an ordinary path
 - **THEN** keep the existing image rejection feedback and still insert the ordinary path.
 
 #### Scenario: Explicit file URL cannot be loaded as an image
@@ -682,8 +683,8 @@ Dashboard dispatch and peek SHALL insert recognized image and ordinary-file drop
 - **THEN** insert that path as text and report successful handling without adding an image attachment.
 
 #### Scenario: Question and stale target guards
-- **WHEN** a peek is in question mode or a deferred target has become stale
-- **THEN** preserve existing text-only admission and deferred discard rules rather than routing mixed entries into the hidden reply.
+- **WHEN** a selected read-only preview has a pending Question or changes while a composer clipboard probe is in flight
+- **THEN** completion remains bound to the original new-session composer, never answers the preview's question, and preserves the existing discard rules if that actual composer target became stale; search admits query text without attachments.
 
 ### Requirement: Deferred file URLs survive classification miss
 Agent and Dashboard clipboard completion SHALL preserve non-empty unclassified file URLs as text after a successful no-raster probe when the source has no non-whitespace original text.
@@ -4494,6 +4495,21 @@ After a leader publishes readiness, ACP initialization SHALL be able to progress
 - **WHEN** leader cancellation arrives before a blocking watcher constructor returns
 - **THEN** LocalSet startup returns without waiting for the constructor, while its blocking task retains ownership and drops any returned watcher when registration returns
 
+#### Scenario: SessionActor starts while project discovery registration is pending
+
+- **WHEN** a new SessionActor is spawned and its project discovery watcher is still registering filesystem watches
+- **THEN** the actor continues initialization and processes its install-coordination command while registration runs outside the LocalSet; the blocking owner retains the watcher, performs later native refreshes, and drops it when session cancellation is observed
+
+#### Scenario: Session runtime shuts down while project watcher registration is blocked
+
+- **WHEN** a session's native project-discovery registration is blocked and session teardown has received its persistence writer acknowledgement
+- **THEN** the dedicated session runtime and writer close without waiting for the native call; the host runtime retains the blocking worker and watcher owner until the call returns, then drops the watcher on that host blocking worker
+
+#### Scenario: Host runtime shuts down while the project watcher is idle
+
+- **WHEN** the host runtime begins shutdown while the native watcher worker is waiting for a change and the session observer has not been cancelled
+- **THEN** a host-runtime guardian is dropped and cancels the native worker; the worker drops its watcher on its blocking thread and the session observer can finish without requiring another filesystem event
+
 #### Scenario: Stdio agent finishes before skills registration
 
 - **WHEN** the stdio agent I/O task completes while skills watcher registration remains blocked
@@ -4518,6 +4534,16 @@ After a leader publishes readiness, ACP initialization SHALL be able to progress
 
 - **WHEN** cancellation, a watcher registration error, or gateway completion ends the in-process worker after gateway polling starts
 - **THEN** the worker flushes live session actors before returning, and any still-running blocking registration task retains and drops its eventual watcher result when the OS call returns
+
+Dynamic session watch registration and release SHALL also execute outside the LocalSet, under one ordered blocking owner that retains and finally drops the watcher. LocalSet cancellation SHALL stop awaiting that owner promptly without claiming the native operation was cancelled. Closing the dynamic update channel SHALL NOT revoke independent global watches. Existing startup reconciliation SHALL wait for the initially queued cwd interests to be established.
+
+#### Scenario: Dynamic registration overlaps protocol work
+- **WHEN** a native watch or unwatch for a session path is blocked
+- **THEN** unrelated ACP work continues, the update order remains intact and cancellation does not transfer native Drop back to the LocalSet.
+
+#### Scenario: Dynamic update sender is closed
+- **WHEN** no further session path updates can arrive while the runtime remains active
+- **THEN** independent global and explicit watches remain owned until runtime cancellation.
 
 ### Requirement: Cancellation markers do not infer the actor
 Pager 的共用取消标记 SHALL 显示中性的 `Turn cancelled` 及耗时，不根据 `cancelled` stop reason 或本地 cancelling 状态声称用户发起了取消。
@@ -4605,3 +4631,289 @@ Plan 审批与预览 SHALL 根据实际可用宽度排列操作提示与点击�
 #### Scenario: Send comments from an ordinary preview
 - **WHEN** 用户从普通计划预览发送批注
 - **THEN** 提示说明普通消息发送或排队，不宣称计划已进入修订或决定已接纳。
+
+### Requirement: Deferred child history precedes resumed live presentation
+
+After a root session resume, Pager SHALL restore a deferred child's existing transcript before applying its first live transcript update or terminal presentation. A live Thinking, assistant message, tool record or completion footer SHALL NOT prevent later access to the child's task prompt and previous execution records. Replay and control-only restoration SHALL retain deferred loading, and already-restored children SHALL NOT replay their history again while that transcript remains resident.
+
+#### Scenario: Live child output arrives before first open
+- **WHEN** a child has deferred history after root resume and its live Thinking, assistant or tool output arrives before the user opens it
+- **THEN** its task prompt and previous execution records precede the new output, and reopening shows each record once.
+
+#### Scenario: Child finishes before first open
+- **WHEN** a deferred child receives a live child terminal or turn-completed notification before first open
+- **THEN** existing history is restored before terminal presentation, with no missing prompt or execution records and no repeated completion footer on open.
+
+#### Scenario: Only restoration facts arrive
+- **WHEN** root replay and child control restoration complete without child live transcript updates
+- **THEN** child transcript loading remains deferred until first open.
+
+### Requirement: Session command prefixes survive dashboard attachment
+
+Pager SHALL route the first Ctrl+X to the session command prefix in ordinary, Dashboard-attached and child details, and in the Dashboard list for its explicitly selected target. Supported model, Agent, effort, permission and Behavior continuations SHALL retain availability and exact target identity. Opening the prefix SHALL NOT cancel execution or arm closure/deletion. A repeated prefix SHALL only stop work on the explicit session target; idle state SHALL NOT upgrade this action to close or permanent deletion. Children SHALL NOT stop or close their parent. Visible hints SHALL describe the actual target and action.
+
+#### Scenario: Configure an attached root
+- **WHEN** the user presses Ctrl+X followed by a supported configuration letter in ordinary/attached detail or the Dashboard list with a local selected session
+- **THEN** the selector targets that session without changing next-session defaults, cancellation or draft insertion.
+
+#### Scenario: Repeat the prefix to stop or close
+- **WHEN** the prefix is repeated on a busy or idle target
+- **THEN** busy work uses the existing stop path and idle state never triggers close/delete; closing requires the separate explicit C command and runtime acknowledgement.
+
+#### Scenario: Child configuration
+- **WHEN** the target is a child or no configurable local session is selected
+- **THEN** the child retains its own scope, or the unavailable operation is explained without applying it to a parent/new-session default.
+
+#### Scenario: Prefix expires or is cancelled
+- **WHEN** the prefix expires, is cancelled or completed by another command
+- **THEN** it cannot authorize a later stop/close/delete and the next prefix starts a fresh window.
+
+### Requirement: Dashboard stop covers the selected session activity
+
+A confirmed Dashboard Stop session work action on a busy local root SHALL target the activity that makes that row busy, including a foreground-idle root with running ordinary children, an active Goal or a manageable active Workflow. It SHALL cancel ordinary children through the existing session cancellation path, pause an active Goal, and stop active manageable Workflows through their existing host control keyed by run identity. It SHALL preserve unrelated roots and drafts, SHALL NOT enter control text into the model prompt queue, and SHALL wait for authoritative activity updates before allowing deletion. Unavailable controls SHALL NOT be reported as successfully stopped.
+
+#### Scenario: Only background children remain
+- **WHEN** the selected root foreground is idle but ordinary children are running and the user confirms Stop session work
+- **THEN** the existing cancellation path targets that root and its ordinary children, without arming deletion.
+
+#### Scenario: Active Goal at an idle boundary
+- **WHEN** only the selected root's Goal keeps the row Working
+- **THEN** the stop action sends its existing pause control and retains the row until authoritative state changes.
+
+#### Scenario: Workflow owns the background work
+- **WHEN** a selected root has an active manageable Workflow and an idle foreground
+- **THEN** the stop action stops that exact run through host control, preserving the composer and unrelated runs in other roots.
+
+#### Scenario: Work has not settled yet
+- **WHEN** cancellation or pause/stop has been requested but the row remains Working
+- **THEN** repeated stop cannot confirm deletion or manufacture an idle state.
+
+### Requirement: Session close retires runtime before its local view
+
+Confirmed close of a bound session SHALL use the existing terminal session-close control and retire its local view only after successful acknowledgement. Closing SHALL retain the saved history and checkpoint the latest local draft through the existing draft owner. Failure SHALL retain the target identity and an actionable retry without claiming success. Async results SHALL apply only to the requesting AgentId, session identity and binding epoch. The final local session SHALL be closable with Dashboard or Welcome as the remaining surface. A busy detail SHALL stop its foreground or background activity before closing; an in-flight startup SHALL retain its original owner until its identity is known.
+
+#### Scenario: Close the last idle session
+- **WHEN** the user confirms closing the only local bound session
+- **THEN** the existing runtime close is requested, the local view remains until confirmation, and success leaves Dashboard or Welcome without deleting history.
+
+#### Scenario: Closure is not confirmed
+- **WHEN** the runtime close fails or its transport response is unavailable
+- **THEN** the page retains its original identity and closing state for an explicit retry; no successful close is shown.
+
+#### Scenario: Late response belongs to a replaced binding
+- **WHEN** a close response arrives after the view has rebound to another session or binding epoch
+- **THEN** it cannot remove or change the replacement view.
+
+#### Scenario: Background work is still active
+- **WHEN** an idle foreground still owns running children, Goal or Workflow work
+- **THEN** the confirmed detail stop uses the existing activity controls and does not drop its view as if work had settled.
+
+### Requirement: Exit suspension uses runtime ownership rather than visible pages
+
+Pager SHALL ask the runtime to confirm suspension before exit even when Welcome or only viewer pages remain. A startup without confirmed session identity SHALL retain its owner and show an actionable unconfirmed exit. A leader SHALL derive and overwrite the requesting connection's scope from its existing session drivers; one client's exit SHALL NOT suspend another client's roots or reuse another client's pending exit. Standalone process exit SHALL cover all its roots. Confirmation SHALL cover a concurrently closing root's writer through the existing lifecycle transaction and suspension deadline. Global Quit input SHALL cancel any interrupted command prefix. Pending exit SHALL block new user admission while retaining resize and the existing retry/force actions; startup replay SHALL NOT swallow those actions. Leader startup requests SHALL settle registration before that connection can confirm exit.
+
+#### Scenario: Visible pages do not establish runtime emptiness
+- **WHEN** Quit is confirmed from Welcome or a viewer-only surface
+- **THEN** runtime confirmation is requested before Quit; local view flags cannot skip it.
+
+#### Scenario: Startup identity is not known yet
+- **WHEN** Quit is confirmed while session creation or fork/load startup has no confirmed identity
+- **THEN** the startup owner remains and exit is unconfirmed with an explicit retry; the process does not exit as if no runtime existed.
+
+#### Scenario: Two clients request exit
+- **WHEN** clients with distinct driver roots request exit, including overlapping in-flight requests
+- **THEN** each request covers only its authoritative scope and has its own pending owner; forged client scope is overwritten by the leader.
+
+#### Scenario: Runtime close is draining
+- **WHEN** a root has left the resident map but its close still owns a writer
+- **THEN** exit cannot succeed until the existing lifecycle transaction proves that writer has settled, and failure retains the existing retry/force flow.
+
+#### Scenario: Quit interrupts a command prefix
+- **WHEN** the user opens Ctrl+X guidance and then presses global Quit
+- **THEN** the old prefix cannot make a later Ctrl+X confirm closing the session.
+
+#### Scenario: A host notification turn changes the viewer projection
+- **WHEN** a locally owned parent receives a child completion and its host-started Turn is projected as a viewer while another child remains active, then the user confirms Quit with two Ctrl+D presses
+- **THEN** the first press preserves work, the second requests runtime tree suspension, and Quit is emitted only after the required durable boundary and writer retirement; the viewer projection never skips suspension or authorizes child cancellation.
+
+### Requirement: Session deletion reconciles runtime and local views on every outcome
+
+Delete SHALL preflight canonical eligibility inside the existing session lifecycle transaction before retiring a resident runtime, then revalidate under the existing writer/quarantine transaction. A predictable refusal SHALL preserve the runtime. Errors SHALL distinguish a preserved binding from one invalidated by teardown; absence of a trustworthy response SHALL remain unknown. Pager SHALL retain the original binding only when preservation is confirmed; invalidated/unknown outcomes SHALL release that stale binding while retaining undeleted history and recoverable drafts, so explicit resume performs a real load. Success SHALL require an affirmative server acknowledgement and retire matching local views for every after policy, including Stay. Unrelated views, drafts and picker state SHALL be preserved; navigation SHALL never remain on a removed view. Frontend delete SHALL NOT issue independent cancellation before backend preflight.
+
+#### Scenario: Predictable deletion refusal
+- **WHEN** canonical references or invalid target evidence reject preflight
+- **THEN** no Cancel/Shutdown is issued and the original bound runtime remains usable with the refusal visible.
+
+#### Scenario: New facts cause refusal after teardown
+- **WHEN** facts committed during shutdown make final deletion ineligible
+- **THEN** history remains, the response identifies binding invalidation, and Pager permits explicit resume rather than focusing the old dead binding.
+
+#### Scenario: Delete transport outcome is unknown
+- **WHEN** delete has no trustworthy acknowledgement or preservation fact
+- **THEN** Pager does not claim deletion or keep presenting the old binding as live; it preserves recoverable local content and can reconcile through resume.
+
+#### Scenario: Stay deletion matches a local view
+- **WHEN** successful after=Stay deletion targets a locally open session
+- **THEN** matching views retire, unrelated active views and picker state remain, and an active deleted view gets a valid remaining surface.
+
+#### Scenario: Deletion response arrives after replacement
+- **WHEN** a deletion response arrives after the original AgentId/binding epoch has been replaced, including a fresh binding to the same logical session id
+- **THEN** that response cannot retire the replacement page or unregister its active identity.
+
+### Requirement: Failed fork startup has a recoverable local destination
+
+Initial fork failure SHALL retire an unbound empty placeholder and return to its surviving source only when that failed page is still foreground, preserving Dashboard attachment when applicable. A background failure SHALL NOT steal focus. Unsubmitted directives or drafts SHALL remain recoverable in an explicitly failed, closable draft view after startup/loading state clears. A late initial failure SHALL NOT overwrite a bound session. Worktree-fork startup failure SHALL use the same ownership rules. Failure cleanup SHALL NOT delete source history or assume an unacknowledged copy was never committed. Parent presentation SHALL distinguish a fork request from confirmed completion.
+
+#### Scenario: Empty fork request fails
+- **WHEN** an initial unbound fork fails without unsubmitted input
+- **THEN** its placeholder retires and the foreground returns to the surviving source or a valid remaining surface.
+
+#### Scenario: Unsent directive exists
+- **WHEN** a failed fork owns an unsubmitted directive or draft
+- **THEN** that content is retained without automatic execution, loading flags clear, and the failed draft can be closed through the normal draft checkpoint boundary.
+
+#### Scenario: Failure is late
+- **WHEN** the user is on another page or the original view has acquired a real binding
+- **THEN** an empty background placeholder may retire without moving focus, and a bound replacement is preserved.
+
+#### Scenario: Failed draft is removed from Dashboard
+- **WHEN** a settled failed draft has no session id and its Dashboard removal is confirmed
+- **THEN** the local view retires through draft checkpointing without sending a storage deletion.
+
+### Requirement: Loading history preserves session navigation
+
+While history replay is incomplete, Pager SHALL keep registered Dashboard navigation and previous/next session actions available, including attached frame navigation clicks. Navigation SHALL retain the loading owner without admitting editing, prompts, or session control commands. Completion SHALL update its own page; failure of a temporary load page SHALL retire that owner through draft checkpointing and apply its original return surface only if still foreground.
+
+#### Scenario: Navigate while a session loads
+- **WHEN** a loading session receives registered Dashboard/previous/next navigation or an attached frame navigation click
+- **THEN** navigation proceeds while replay and its draft remain owned by the original page.
+
+#### Scenario: Background load fails
+- **WHEN** the user has navigated elsewhere before a temporary load page fails
+- **THEN** the failed page retires without moving the current focus or discarding its retained draft.
+
+#### Scenario: Ordinary input during replay
+- **WHEN** text, paste, prompt submission, or Ctrl+X session commands arrive during replay
+- **THEN** no input is admitted and the draft is unchanged.
+
+### Requirement: Fork startup failure retains request identity after its source view closes
+
+Retiring a source view SHALL NOT reclassify an in-flight fork as ordinary session creation. Initial startup failure SHALL retain the fork request's unsubmitted input using its existing pending fork identity even when its local source reference no longer exists. A bound replacement SHALL remain protected from initial failure.
+
+#### Scenario: Source closes before worktree fork failure
+- **WHEN** the source page closes before its unbound worktree fork reports startup failure
+- **THEN** the directive is retained in the failed draft without automatic execution or source resurrection.
+
+#### Scenario: Copy succeeds but initial replay fails
+- **WHEN** a copied fork fails its initial history load before submitting its directive
+- **THEN** its unsent content remains in a failed draft and cleanup does not delete the durable copy.
+
+### Requirement: Session editing is independent of Dashboard entry
+
+Ordinary and Dashboard-opened session details SHALL use the same AgentView editing, pane navigation, prompt paging and local interaction rules. Dashboard metadata SHALL affect only explicit navigation/chrome. Dashboard SHALL NOT add Esc/Left/q backout ahead of the normal session handler. Minimal mode retains its actual capability limits.
+
+#### Scenario: Open the same session through Dashboard
+- **WHEN** an ordinary or Dashboard-opened session receives editing, paging, Esc/Left or interaction input
+- **THEN** the same session/child owner and normal behavior apply without changing or discarding its draft.
+
+### Requirement: Dashboard overview does not own implicit reply input
+
+Dashboard selection SHALL drive read-only preview without retargeting an editable reply or answering interactions. Opening/replying/handling pending work SHALL enter the existing session-owned view. New session input SHALL remain explicitly labelled and independent of row selection. Search query and new-session draft SHALL have separate ownership, preserving text, undo and attachments when entering/leaving search. Single-click selection SHALL preview only; Enter or a double click in the list SHALL open details. While the new-session composer owns focus, an empty draft SHALL NOT redirect Enter or arrow input to the selected session.
+
+#### Scenario: Select and search while a new-session draft exists
+- **WHEN** the user moves rows or enters/exits search
+- **THEN** no draft is erased, submitted or retargeted and search text never becomes a prompt.
+
+#### Scenario: Empty composer and pointer selection
+- **WHEN** the composer owns focus with an empty draft, or the user single-clicks a list row
+- **THEN** editing does not open the selected session and single-click only selects a read-only preview; list Enter/double-click explicitly opens details.
+
+#### Scenario: Handle a pending interaction
+- **WHEN** a selected root/child requires permission, Question or Plan input and the user opens it
+- **THEN** its real session interaction handles the exact request; overview selection does not answer or reject it.
+
+### Requirement: Session management actions have explicit independent consequences
+
+Return, Stop session work, Close session and Delete history SHALL remain distinct actions with named target and consequences. Close SHALL retain the existing runtime acknowledgement boundary. Permanent deletion SHALL require a separate target-bound confirmation and retain canonical/writer protections. Prefix timers or state changes SHALL NOT authorize a different action.
+
+#### Scenario: Session settles between stopping and another key
+- **WHEN** a busy target becomes idle before a repeated stop key
+- **THEN** no close or delete is authorized.
+
+#### Scenario: Confirm deletion while selection changes
+- **WHEN** selection or binding changes after opening a deletion confirmation
+- **THEN** confirmation cannot delete an unintended replacement or newly selected target.
+
+### Requirement: Session cycling is stable and independent of overview filters
+
+Previous/next session SHALL use stable open-session order, independent of Dashboard filter, grouping, live activity and transient preview. Overview SHALL use stable identity order by default, with state/directory grouping as explicit options; it SHALL distinguish execution activity from source/residency and distinguish keyboard focus, hover and current session. Narrow layouts SHALL preserve target, primary actions and input ownership.
+
+#### Scenario: Current session is hidden by an overview filter
+- **WHEN** the user cycles from a session absent from the filtered overview
+- **THEN** another open session remains reachable in the stable open-session order.
+
+#### Scenario: Activity changes while navigating
+- **WHEN** runtime updates change activity or timestamps
+- **THEN** the next/previous session order and focused target remain stable.
+
+### Requirement: Shared TUI text layout preserves grapheme boundaries
+
+Pager 与 Minimal 共用的内置文本换行、字符串宽度截断和搜索显示列映射 SHALL 使用与 Ratatui 相同的完整字素显示宽度。自动拆分长词及截断 SHALL 保留完整字素；原有分词、样式、软折行 joiner 与源文本关系 SHALL 保留。单个字素比可用列数更宽时 SHALL 保留为不可分的片段，由现有绘制边界裁剪。本要求覆盖字素完整位于文本 span 内的输入，不改变跨 span 的字素归属、textwrap 自定义 callback、终端的模糊宽度策略或字体。
+
+#### Scenario: Mixed Chinese and composed symbols wrap
+- **WHEN** 中文和英文中混有变体选择符 emoji、ZWJ emoji 或组合音标并在窄列宽换行
+- **THEN** 可以容纳的输出行不超出可用显示列数，换行不拆开字素，按 joiner 重建可恢复源文本。
+
+#### Scenario: Truncation preserves a complete symbol
+- **WHEN** 共享字符串截断的宽度边界落在多码点字素内
+- **THEN** 保留完整前缀字素并预留省略号宽度，结果不超过预算且不残留孤立的变体选择符或 ZWJ。
+
+#### Scenario: Search follows a composed symbol
+- **WHEN** 搜索匹配位于组合符号之后
+- **THEN** 高亮的显示列与实际绘制列一致，搜索字节范围换行与正文使用相同断点。
+
+证据入口：`crates/codegen/pager-render/src/render/wrapping.rs` 的 `wrap_ranges_trim`、`word_wrap_line_with_joiners`、`byte_offset_to_display_col`；`crates/codegen/pager-render/src/render/line_utils.rs` 的 `byte_offset_at_width`、`truncate_str` 及回归测试。
+
+### Requirement: Completed child transcripts release reconstructible resident state
+
+Pager SHALL release a finished, idle, unselected child's resident transcript, tool tracking and associated render resources when no replay/reload or viewer/interaction owner requires them. It SHALL retain canonical history, child identity, control generation, draft and interaction ownership, and live deduplication highwaters. Normal and Minimal SHALL share this lifecycle. Reopening SHALL reconstruct the transcript through the existing history projector. A failed history read SHALL remain visible and retryable without accepting a partial loaded state or preventing later history restoration.
+
+#### Scenario: Sequential children finish
+- **WHEN** many children finish sequentially without being selected
+- **THEN** their transcript payloads and tool tracking are released while task metadata and durable history remain available.
+
+#### Scenario: Selected completed child is left
+- **WHEN** a selected child finishes and the user subsequently leaves its view
+- **THEN** its visible transcript is retained until the selection is left, after which its reconstructible heavy state is released.
+
+#### Scenario: Child is reopened repeatedly
+- **WHEN** an unloaded child is opened, left and opened again
+- **THEN** each open restores the task and execution history once, without losing current control identity, draft or terminal state.
+
+#### Scenario: History read fails and recovers
+- **WHEN** an unloaded child's history read fails and its original history later becomes readable
+- **THEN** the failure is shown without marking history loaded, and another open restores the original history without duplicate partial content.
+
+#### Scenario: Late presentation follows reclamation
+- **WHEN** a late child notification arrives after reclamation
+- **THEN** retained highwaters reject duplicates, and any accepted live presentation restores prior history before appending new content; a failed read does not block a later successful restoration.
+
+#### Scenario: A presentation owner is still active
+- **WHEN** a child is running, selected, reloading, or still has a viewer or transport interaction owning its presentation
+- **THEN** reclamation does not discard that owner's state or response responsibility.
+
+#### Scenario: Background task history is reconstructed
+- **WHEN** a child with background task lifecycle rows is reclaimed and reopened
+- **THEN** its original task prompt, start and terminal rows are restored once through the shared presentation reducers, entry links target the reconstructed rows, and existing stdout, cancellation and task state owners are preserved rather than replaced by history.
+
+### Requirement: Canonical tool metadata versions its closed vocabulary
+
+Canonical `grow/tool` metadata SHALL identify its closed kind and namespace vocabulary with one shared version. The subagent enumeration, status and wait kinds SHALL be emitted as version 6, distinct from the version 5 vocabulary shipped in v2.5.5. The checked-in schema and published interface notes SHALL describe the emitted vocabulary. Metadata SHALL remain descriptive and SHALL NOT grant tool authority.
+
+#### Scenario: A subagent observation tool is presented
+- **WHEN** canonical metadata is constructed for list_subagent, get_subagent_status or wait_subagent
+- **THEN** it emits version 6 and the corresponding subagent_list, subagent_status or subagent_wait kind through the existing shared envelope.
+
+#### Scenario: A closed vocabulary changes
+- **WHEN** a new kind is added to the public metadata vocabulary
+- **THEN** the emitted shared version and checked-in schema advance together; a stale schema fails the existing regression instead of silently accepting drift.

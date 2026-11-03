@@ -1,0 +1,5 @@
+- [x] Read the archived session-timeline contract, audit evidence, and coordinator ownership paths.
+- [x] Define unique identity accounting and preserve existing retirement/finalization owners.
+- [x] Add ChannelBackend regressions for retirement backpressure, overlap deduplication, admission after retirement, and duplicate IDs after completed-cache eviction.
+- [x] Coordinate and run the precise Rust test filter after the shared build slot is available.
+- [x] Record final verification evidence for parent integration and archive review.

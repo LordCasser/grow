@@ -1,0 +1,4 @@
+- [x] 用生产 prompt 组合入口复现工具观察提示遗漏。
+- [x] 调整既有 prompt 层归属并更新说明，保留稳定 head。
+- [x] 验证真实工具名、缺失能力和 Full/Extend、主/子 audience 组合。
+- [x] 完成相关回归与 strict 验证后归档，再核对全量与 archive。

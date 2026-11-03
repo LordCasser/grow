@@ -1,6 +1,3 @@
-/// Truncation threshold, matching the shell's large-prompt limit.
-pub const LARGE_PROMPT_THRESHOLD: usize = 25_000;
-
 /// Wrap a user message in the canonical `<user_query>` envelope.
 pub fn user_query(user_message: &str) -> String {
     format!(
@@ -12,23 +9,11 @@ pub fn user_query(user_message: &str) -> String {
 
 /// Wrap interjection text as a synthetic user message with a mid-turn note.
 /// No deferral instruction: the model decides how to weigh it against
-/// in-flight work. Output is byte-identical to the shell's historical format.
+/// in-flight work. Preserve admitted text; request admission owns context limits.
 pub fn format_interjection(text: String) -> String {
-    let truncated = if text.len() > LARGE_PROMPT_THRESHOLD {
-        let end = text
-            .char_indices()
-            .take_while(|(i, _)| *i < LARGE_PROMPT_THRESHOLD)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(text.len());
-        format!("{}... [truncated]", &text[..end])
-    } else {
-        text
-    };
-
     format!(
         "The user sent a message while you were working:\n{}",
-        user_query(&truncated)
+        user_query(&text)
     )
 }
 
@@ -45,11 +30,22 @@ mod tests {
     }
 
     #[test]
-    fn truncates_at_utf8_boundary() {
-        let s = "é".repeat(LARGE_PROMPT_THRESHOLD);
-        let out = format_interjection(s);
-        assert!(out.contains("... [truncated]"));
-        assert!(out.len() < LARGE_PROMPT_THRESHOLD + 200);
+    fn preserves_long_utf8_text_and_trailing_guidance() {
+        let text = format!(
+            "{}\nMIDDLE_GUIDANCE\n{}\nTAIL_GUIDANCE",
+            "设计🎉".repeat(3_000),
+            "é".repeat(25_000)
+        );
+        let out = format_interjection(text.clone());
+        assert!(out.contains("MIDDLE_GUIDANCE"));
+        assert!(out.ends_with("TAIL_GUIDANCE\n</user_query>"));
+        assert_eq!(
+            out,
+            format!(
+                "The user sent a message while you were working:\n{}",
+                user_query(&text)
+            )
+        );
     }
 
     #[test]

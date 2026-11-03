@@ -1171,10 +1171,20 @@ fn handle_session_notification_inner(
                 .get(&child_session_id)
                 .is_some_and(|info| info.child_updates_replayed);
             if !agent.session.loading_replay && !child_updates_replayed {
-                if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
-                    crate::app::subagent::replay_inherited_updates(child_view, &child_session_id);
-                }
-                if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
+                let replayed =
+                    agent
+                        .subagent_views
+                        .get_mut(&child_session_id)
+                        .is_some_and(|child_view| {
+                            crate::app::subagent::replay_inherited_updates(
+                                child_view,
+                                &child_session_id,
+                            )
+                            .is_some()
+                        });
+                if replayed
+                    && let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id)
+                {
                     info.child_updates_replayed = true;
                 }
             }
@@ -1305,6 +1315,9 @@ fn handle_session_notification_inner(
                 duration_ms = duration_ms,
                 "Subagent finished"
             );
+            if !meta.is_replay && !agent.session.loading_replay {
+                crate::app::subagent::ensure_subagent_child_replayed(agent, &child_session_id);
+            }
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
             agent.clear_transport_interactions_for_session(&child_session_id);
             let info_ref = agent.session.subagent_sessions.get(&child_session_id);
@@ -1372,9 +1385,15 @@ fn handle_session_notification_inner(
                 info.last_progress_at = std::time::Instant::now();
             }
             let resuming = agent.session.loading_replay;
+            let live_history_ready = !meta.is_replay
+                && agent
+                    .session
+                    .subagent_sessions
+                    .get(&child_session_id)
+                    .is_some_and(|info| info.child_updates_replayed);
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                 child_view.session.state = AgentState::Idle;
-                if !resuming {
+                if live_history_ready || (!resuming && meta.is_replay) {
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
             }
@@ -1821,6 +1840,27 @@ pub(super) fn handle_child_session_notification(
     envelope_prompt_id: Option<String>,
     agent: &mut AgentView,
 ) -> bool {
+    if !is_replay
+        && matches!(
+            &update,
+            GrowSessionUpdate::HookExecution { .. }
+                | GrowSessionUpdate::UiNotice(_)
+                | GrowSessionUpdate::ImageRecoveryOperation { .. }
+                | GrowSessionUpdate::TurnCompleted { .. }
+                | GrowSessionUpdate::AutoCompactStarted { .. }
+                | GrowSessionUpdate::AutoCompactCompleted { .. }
+                | GrowSessionUpdate::AutoCompactFailed { .. }
+                | GrowSessionUpdate::AutoCompactCancelled { .. }
+                | GrowSessionUpdate::RetryState(_)
+                | GrowSessionUpdate::MemoryFlushCompleted { .. }
+                | GrowSessionUpdate::MemoryDreamCompleted { .. }
+                | GrowSessionUpdate::MemorySessionSaved { .. }
+        )
+    {
+        if !crate::app::subagent::ensure_subagent_child_replayed(agent, child_sid) {
+            return true;
+        }
+    }
     let changed = match update {
         update @ GrowSessionUpdate::HookExecution { .. } => agent
             .subagent_views

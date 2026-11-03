@@ -103,11 +103,11 @@ impl MvpAgent {
         self.remove_session_terminal(id, SessionLiveState::DeadFailed);
         Ok(true)
     }
-    pub(crate) async fn teardown_live_session_before_delete(
+    /// Caller holds the target lifecycle guard through preflight and storage deletion.
+    pub(crate) async fn teardown_live_session_before_delete_locked(
         &self,
         id: &acp::SessionId,
-    ) -> Result<SessionLifecycleGuard<'_>, String> {
-        let lifecycle = self.lock_session_lifecycle(id).await;
+    ) -> Result<(), String> {
         // Release the map borrow before take_session mutably borrows it below.
         let handle = self.sessions.borrow().get(id).cloned();
         if let Some(handle) = handle {
@@ -129,7 +129,7 @@ impl MvpAgent {
             SessionLiveState::Completed
         };
         self.remove_session_terminal(id, final_state);
-        Ok(lifecycle)
+        Ok(())
     }
     /// The funnel for a handle leaving `self.sessions` (the spawn-path insert
     /// reaps any displaced handle the same way): reaps its child-process tree
@@ -200,6 +200,78 @@ impl MvpAgent {
         };
         self.remove_session_terminal(id, final_state);
         Ok(true)
+    }
+    /// Caller holds the load's lifecycle guard. Only an unpublished cold-load
+    /// candidate may use this path; logical work and prepared owners survive.
+    pub(super) async fn retire_failed_restore_candidate(
+        &self,
+        candidate: &SessionHandle,
+    ) -> Result<bool, String> {
+        let id = &candidate.info.id;
+        let matches = self
+            .sessions
+            .borrow()
+            .get(id)
+            .is_some_and(|current| current.cmd_tx.same_channel(&candidate.cmd_tx));
+        if !matches {
+            return Ok(false);
+        }
+        let failed_candidate = self
+            .resident_resources
+            .borrow()
+            .get(id)
+            .is_some_and(|resources| resources.failed_suspended_restore);
+        if failed_candidate && candidate.cmd_tx.is_closed() {
+            self.detach_failed_restore_candidate(id);
+            self.drain_old_session_thread(id).await?;
+            self.resident_resources.borrow_mut().remove(id);
+            return Ok(true);
+        }
+        let runtime = candidate.chat_state_handle.runtime_state().await?;
+        if runtime.phase != chat_state::session_runtime::RuntimePhase::Suspended {
+            if let Some(resources) = self.resident_resources.borrow_mut().get_mut(id) {
+                resources.failed_suspended_restore = false;
+            }
+            return Ok(false);
+        }
+        self.resident_resources
+            .borrow_mut()
+            .entry(id.clone())
+            .or_default()
+            .failed_suspended_restore = true;
+        let operation_id = runtime.operation_id.ok_or("suspension operation missing")?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        candidate
+            .cmd_tx
+            .send(SessionCommand::RetireSuspendedRuntime {
+                operation_id,
+                deadline,
+                respond_to,
+            })
+            .map_err(|_| "temporary restore owner closed before retirement")?;
+        tokio::time::timeout_at(deadline, response)
+            .await
+            .map_err(|_| "temporary restore writer retirement is not confirmed")?
+            .map_err(|_| "temporary restore retirement acknowledgement was lost")??;
+        // Leave residency immediately after the retirement ACK. The retained
+        // thread remains the writer owner even if this wait is cancelled.
+        self.detach_failed_restore_candidate(id);
+        self.drain_old_session_thread(id).await?;
+        self.resident_resources.borrow_mut().remove(id);
+        Ok(true)
+    }
+    fn detach_failed_restore_candidate(&self, id: &acp::SessionId) {
+        if self.take_session(id).is_none() {
+            return;
+        }
+        // Keep the retirement cause until the thread is reaped, including a
+        // panic after ACK and cancellation of the load's drain waiter.
+        self.set_session_live_state(id, SessionLiveState::Dormant);
+        if let Some(ops) = self.workspace_ops.borrow().as_ref() {
+            ops.end_local_session(id.0.as_ref());
+        }
+        self.record_roster_delta(id, SessionLiveState::Dormant);
     }
     /// Record the coarse lifecycle state for a session.
     pub(super) fn set_session_live_state(&self, id: &acp::SessionId, state: SessionLiveState) {
@@ -453,7 +525,18 @@ impl MvpAgent {
                 .remove(&id)
                 .map(|thread| SessionThreadExit::from_join(thread.join()))
                 .unwrap_or(SessionThreadExit::Absent);
-            if was_resident || exit == SessionThreadExit::Panicked {
+            let failed_restore = self
+                .resident_resources
+                .borrow()
+                .get(&id)
+                .is_some_and(|resources| resources.failed_suspended_restore);
+            if failed_restore {
+                // A cancelled failed-load cleanup can lose the retirement ACK.
+                // This unused checkpoint still has no logical teardown to run.
+                self.detach_failed_restore_candidate(&id);
+                self.resident_resources.borrow_mut().remove(&id);
+                self.session_live_state.borrow_mut().remove(&id);
+            } else if was_resident || exit == SessionThreadExit::Panicked {
                 tracing::warn!(
                     session_id = %id.0,
                     ?exit,

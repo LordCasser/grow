@@ -26,7 +26,7 @@ mod prompt;
 mod queue;
 mod rewind;
 mod router;
-mod session;
+pub(crate) mod session;
 mod settings;
 mod status;
 mod task_result;

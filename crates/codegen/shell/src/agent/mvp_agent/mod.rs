@@ -404,6 +404,10 @@ const IDLE_UNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 /// removal.
 #[derive(Default)]
 struct ResidentResources {
+    /// This incarnation was created by a failed cold load and still owns only
+    /// an unused Suspended checkpoint. Cancellation must not turn its later
+    /// physical exit into logical child teardown.
+    failed_suspended_restore: bool,
     config_watch: Option<crate::config::watcher::SessionConfigWatchRegistration>,
     /// Strong ref pinning the code-nav index; the manager holds only a `Weak`.
     codebase_index: Option<std::sync::Arc<codebase_graph::IndexManagerHandle>>,
@@ -593,9 +597,10 @@ pub struct MvpAgent {
     /// once (on the first `spawn_and_register_session`). See
     /// `ensure_session_supervisor`.
     supervisor_started: std::cell::Cell<bool>,
+    /// One pending exit per leader connection; None owns the standalone process.
+    exit_suspend: RefCell<HashMap<Option<u64>, PendingSuspendExit>>,
     /// Local tasks holding a raw reference to this agent. Aborted before any
     /// agent fields are dropped, including on an abrupt leader generation exit.
-    exit_suspend: RefCell<Option<PendingSuspendExit>>,
     owned_local_tasks: RefCell<Vec<tokio::task::JoinHandle<()>>>,
     /// Test-only spy recording every terminal roster delta `(session_id,
     /// final_state)` emitted by `record_roster_delta` (reap → `DeadFailed`,

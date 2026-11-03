@@ -324,6 +324,31 @@ impl SessionControlSnapshot {
     }
 }
 
+/// The last desired role, including a transition waiting for its Step boundary.
+/// Control layers are append-only authorities; Surface rewind does not select
+/// an earlier Agent. A retirement without replacement removes the desired role.
+pub(crate) fn desired_agent_role_context(events: &[chat_state::TimelineEvent]) -> Option<String> {
+    for event in events.iter().rev() {
+        if let chat_state::TimelineEventKind::Control(control) = &event.kind {
+            if let Some(context) = control
+                .model_contexts
+                .iter()
+                .rev()
+                .find(|context| context.layer == chat_state::ControlContextLayer::AgentRole)
+            {
+                return Some(context.item.text_content());
+            }
+            if control
+                .retired_context_layers
+                .contains(&chat_state::ControlContextLayer::AgentRole)
+            {
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// Render one append-only model context item for an Agent transition.
 ///
 /// Agent identity and its rendered role are committed in the same Control

@@ -108,6 +108,9 @@ pub(super) fn project_call_access(
         | ToolInput::Grep(_)
         | ToolInput::ListDir(_)
         | ToolInput::TaskOutput(_)
+        | ToolInput::SubagentList(_)
+        | ToolInput::SubagentStatus(_)
+        | ToolInput::SubagentWait(_)
         | ToolInput::MemorySearch(_)
         | ToolInput::MemoryGet(_)
         | ToolInput::ContextRecall(_)
@@ -700,15 +703,30 @@ pub(super) async fn write_plan_artifact_async(
     .map_err(std::io::Error::other)?
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static PLAN_ARTIFACT_READ_BARRIER: std::cell::RefCell<Option<(
+        tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>,
+    )>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(super) async fn read_plan_artifact_async(
     session: std::sync::Arc<crate::session::storage::ContainedDirectory>,
     hash: String,
 ) -> std::io::Result<String> {
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         crate::session::behavior::read_plan_artifact(&session, &hash)
     })
     .await
-    .map_err(std::io::Error::other)?
+    .map_err(std::io::Error::other)?;
+    #[cfg(test)]
+    if let Some((ready, release)) =
+        PLAN_ARTIFACT_READ_BARRIER.with(|probe| probe.borrow_mut().take())
+    {
+        let _ = ready.send(());
+        let _ = release.await;
+    }
+    result
 }
 
 #[cfg(test)]

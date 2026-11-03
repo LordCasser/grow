@@ -96,6 +96,10 @@ pub fn draw_live(
     terminal: &mut PagerTerminal,
     frame_stamp: pager::motion::FrameStamp,
 ) {
+    if minimal_api::session_deletion_open(app) {
+        minimal_api::draw_session_deletion(app, terminal);
+        return;
+    }
     let force_todos = minimal_api::minimal_show_todos(app);
     let auth_hint = crate::startup::minimal_startup_hint(minimal_api::app_trust_state(app));
     let pending_hint = minimal_pending_hint(minimal_api::app_pending_action(app));

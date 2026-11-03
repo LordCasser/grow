@@ -180,6 +180,8 @@ pub struct ToolContext {
     /// Resolved name of the `BackgroundTaskAction` tool in the current toolset.
     /// Used to format durable completion notifications with the correct tool name.
     pub task_output_tool_name: Option<String>,
+    /// Resolved dedicated subagent result/wait tool.
+    pub subagent_wait_tool_name: Option<String>,
     /// Shared Goal wait-race marker inherited by subagents. It does not own
     /// notification admission; the session actor's durable inbox does.
     pub goal_loop_active_gate: Arc<std::sync::atomic::AtomicBool>,
@@ -193,6 +195,10 @@ pub struct ToolContext {
     /// contexts without one (subagents, defaults). Spawn sites enroll children
     /// into it; enrolled children are killed when the session closes.
     pub process_scope: Option<ProcessScope>,
+    /// Runtime that owns blocking project-discovery watcher work. Production
+    /// session threads inherit the caller's host runtime so native registration
+    /// cannot delay the dedicated session runtime's shutdown.
+    pub(crate) watcher_runtime: Option<tokio::runtime::Handle>,
     /// Shared storage-domain admission gate inherited by child sessions.
     pub(crate) storage_admission: Option<Arc<crate::session::storage_admission::StorageAdmission>>,
 }
@@ -244,11 +250,13 @@ impl ToolContext {
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             task_output_tool_name: None,
+            subagent_wait_tool_name: None,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
             sampling_output_delivery: sampler::OutputDelivery::Irreversible,
             process_scope: None,
+            watcher_runtime: None,
             storage_admission: None,
         }
     }
@@ -279,11 +287,13 @@ impl ToolContext {
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             task_output_tool_name: None,
+            subagent_wait_tool_name: None,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
             sampling_output_delivery: sampler::OutputDelivery::Irreversible,
             process_scope: None,
+            watcher_runtime: None,
             storage_admission: None,
         }
     }
@@ -367,11 +377,13 @@ mod tests {
                 is_turn_active: None,
                 unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 task_output_tool_name: None,
+                subagent_wait_tool_name: None,
                 goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 blocking_wait_depth: Arc::new(BlockingWaitState::new()),
                 task_output_token_budget: None,
                 sampling_output_delivery: sampler::OutputDelivery::Irreversible,
                 process_scope: None,
+                watcher_runtime: None,
                 storage_admission: None,
             }
         }

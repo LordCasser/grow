@@ -1,5 +1,5 @@
 use super::super::SessionActor;
-use super::support::build_actor;
+use super::support::{build_actor, record_test_model_route};
 
 #[tokio::test(flavor = "current_thread")]
 async fn late_observation_after_unknown_result_preserves_the_original_call_on_resume() {
@@ -10,6 +10,7 @@ async fn late_observation_after_unknown_result_preserves_the_original_call_on_re
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            record_test_model_route(&actor).await;
             actor
                 .chat_state_handle
                 .push_response_durably(vec![ConversationItem::assistant_tool_calls(vec![
@@ -87,6 +88,7 @@ async fn runtime_source_hash_is_64_hex() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            record_test_model_route(&actor).await;
             let hash = actor
                 .runtime_source_hash()
                 .await
@@ -98,12 +100,12 @@ async fn runtime_source_hash_is_64_hex() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn restore_source_drift_and_foreign_operation_leave_the_checkpoint_closed() {
+async fn restore_route_drift_and_foreign_operation_leave_the_checkpoint_closed() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            record_test_model_route(&actor).await;
             let node = request_and_checkpoint(&actor, "original-operation").await;
-            let before = actor.chat_state_handle.timeline_events().await.unwrap();
             let (completion_tx, mut completion_rx) = tokio::sync::mpsc::unbounded_channel();
 
             let foreign = actor
@@ -111,6 +113,39 @@ async fn restore_source_drift_and_foreign_operation_leave_the_checkpoint_closed(
                 .await
                 .unwrap_err();
             assert!(foreign.contains("does not own"), "{foreign}");
+            let route = actor.model_route.snapshot();
+            let mut changed = route.sampling_config.clone();
+            changed.base_url.push_str("/another-destination");
+            let original_transport = sampling_types::model_image_input_key_from_parts(
+                &route.sampling_config.model,
+                &route.sampling_config.api_backend,
+                &route.sampling_config.base_url,
+                &route.sampling_config.query_params,
+            );
+            let changed_transport = sampling_types::model_image_input_key_from_parts(
+                &changed.model,
+                &changed.api_backend,
+                &changed.base_url,
+                &changed.query_params,
+            );
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(crate::session::persistence::model_change_event(
+                    &route.model_id,
+                    &route.model_id,
+                    changed.reasoning_effort,
+                    changed.reasoning_effort,
+                    &changed.model,
+                    &changed.model,
+                    &original_transport,
+                    &changed_transport,
+                    "cold_load_catalog_rebind",
+                    None,
+                ))
+                .await
+                .unwrap();
+            actor.model_route.replace(route.model_id, changed);
+            let before = actor.chat_state_handle.timeline_events().await.unwrap();
             let drift = actor
                 .prepare_runtime_restore("original-operation", "instance", completion_tx)
                 .await
@@ -186,6 +221,7 @@ async fn checkpoint_resolves_all_registered_waiters_once_and_suspended_state_is_
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            record_test_model_route(&actor).await;
             let mut receivers = Vec::new();
 
             for _ in 0..3 {
@@ -226,6 +262,7 @@ async fn dropping_a_waiter_does_not_cancel_the_suspension_owner() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            record_test_model_route(&actor).await;
             actor
                 .chat_state_handle
                 .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(

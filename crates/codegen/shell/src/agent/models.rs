@@ -676,6 +676,56 @@ impl ModelsManager {
         ))
     }
 
+    /// Resolve a persisted model key against its saved route. Keep the original
+    /// key when it still denotes that exact selectable route; otherwise follow
+    /// only an exact selectable route under another key.
+    pub(crate) fn select_persisted_transport_model(
+        &self,
+        preferred: &ModelId,
+        expected: &sampling_types::ModelImageInputKey,
+        effort: Option<ReasoningEffort>,
+    ) -> Option<ModelId> {
+        let state = self.inner.catalog.read();
+        let matches_route = |entry: &ModelEntry| {
+            if entry.info.hidden
+                || !entry.info.user_selectable
+                || effort.is_some_and(|effort| {
+                    !entry
+                        .info
+                        .reasoning_efforts
+                        .iter()
+                        .any(|option| option.value == effort)
+                })
+            {
+                return false;
+            }
+            let config = sampling_config_for_model(
+                entry,
+                resolve_credentials(entry),
+                state.cfg.endpoints.alpha_test_key.clone(),
+            );
+            sampling_types::model_image_input_key_from_parts(
+                &config.model,
+                &config.api_backend,
+                &config.base_url,
+                &config.query_params,
+            ) == *expected
+        };
+        if state
+            .models
+            .get(preferred.0.as_ref())
+            .is_some_and(|entry| matches_route(entry))
+        {
+            return Some(preferred.clone());
+        }
+        let mut ids = state.models.keys().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.into_iter().find_map(|id| {
+            let entry = &state.models[id];
+            matches_route(entry).then(|| ModelId::new(id.clone()))
+        })
+    }
+
     pub fn allowlist_excludes_all(&self) -> bool {
         self.inner.catalog.read().allowlist_excludes_all
     }

@@ -1,7 +1,9 @@
 //! Agent Dashboard — top-level overview of every session in flight.
 //!
-//! Centralised, agent-native list of every top-level agent and its subagents,
-//! grouped by state, with peek, attach, and dispatch affordances.
+//! Centralized overview of top-level sessions and their subagents, with
+//! stable session identity, read-only preview, attach, and new-session
+//! composition. Open order is the default; state and directory groupings are
+//! optional overview arrangements.
 //!
 //! Owned by `AppView::dashboard` (`Option<DashboardState>`); active only when
 //! `app.active_view == ActiveView::AgentDashboard`. State survives the user
@@ -15,14 +17,12 @@
 //! - [`row`] — `DashboardRow`, `build_rows()`, classifiers, sort.
 //! - [`layout`] — pure rect computation.
 //! - [`render`] — `Widget`-style rendering routine.
-//! - [`peek`] — peek panel state + rendering.
+//! - [`peek`] — read-only preview fields and rendering.
 //!
 //! ## Lifetime
 //!
-//! Rows are rebuilt every render frame off `app.agents` — no caching. The
-//! per-row sort key (state + last_change_at) is recomputed each frame; for
-//! a single pager process with single-digit numbers of agents this is
-//! free.
+//! Rows are rebuilt every render frame from `app.agents`; the Overview
+//! reflects current session state without caching row data.
 
 pub mod layout;
 pub mod peek;
@@ -32,10 +32,7 @@ pub mod row;
 pub mod state;
 
 pub use render::render_dashboard;
-pub use render::{
-    DashboardOverlayChrome, HeaderPromoCta, popup_rect, render_dashboard_session_header,
-    render_dashboard_session_overlay, render_popup_overlay,
-};
+pub use render::{DashboardOverlayChrome, HeaderPromoCta, render_dashboard_session_header};
 pub use row::{
     DashboardRow, RowBadge, build_rows, build_rows_with_roster, classify_subagent,
     classify_top_level, roster_activity_to_state, sort_rows,
@@ -47,33 +44,12 @@ pub use state::{
     parse_row_state_token,
 };
 
-/// Top-level agents visible in the dashboard's row list, in the
-/// exact order [`render_dashboard`] paints them. Used by the
-/// session overlay's cycle (the `[‹]` / `[›]` chips and
-/// `dispatch_dashboard_overlay_cycle`) so "previous" / "next"
-/// follow what the user actually sees instead of the agent map's
-/// insertion order. Subagent rows and `… N more` placeholders
-/// are skipped — only attachable top-level rows show up.
+/// Stable detail-cycle order from `IndexMap` residency. Overview filters,
+/// grouping, pinning, and activity do not affect which open session is next.
 pub fn overlay_cycle_order(
-    state: &DashboardState,
     agents: &indexmap::IndexMap<crate::app::session::AgentId, crate::app::agent_view::AgentView>,
 ) -> Vec<crate::app::session::AgentId> {
-    let home = render::cached_home();
-    let rows = build_rows(
-        agents,
-        &state.pinned,
-        &state.reorder,
-        None,
-        state.grouping,
-        &state.filter,
-        home,
-    );
-    rows.iter()
-        .filter_map(|r| match &r.id {
-            DashboardRowId::TopLevel(id) if !r.is_more_placeholder => Some(*id),
-            _ => None,
-        })
-        .collect()
+    agents.keys().copied().collect()
 }
 
 /// Whether the dashboard feature is enabled.

@@ -28,7 +28,7 @@ pub mod field {
 pub const TOOL_META_KEY: &str = "grow/tool";
 /// Version of the canonical tool `_meta` contract. Bump on any breaking change
 /// to keys or value shapes so consumers can adapt.
-pub const TOOL_META_VERSION: u32 = 5;
+pub const TOOL_META_VERSION: u32 = 6;
 impl ToolKind {
     /// Unified, harness-independent display label for this semantic kind. A pure
     /// function of the kind, so equivalent tools across toolsets share it
@@ -50,6 +50,9 @@ impl ToolKind {
             ToolKind::Plan => "Plan",
             ToolKind::WebFetch => "Web Fetch",
             ToolKind::BackgroundTaskAction => "Background Task",
+            ToolKind::SubagentList => "List Subagents",
+            ToolKind::SubagentStatus => "Subagent Status",
+            ToolKind::SubagentWait => "Wait for Subagents",
             ToolKind::KillTaskAction => "Kill Task",
             ToolKind::Skill => "Skill",
             ToolKind::MemorySearch => "Memory Search",
@@ -85,7 +88,7 @@ pub struct ToolIdentity {
 ///
 /// ```json
 /// "grow/tool": {
-///   "version": 3,
+///   "version": 6,
 ///   "name": "read_file",
 ///   "kind": "read",
 ///   "namespace": "grow",
@@ -283,5 +286,25 @@ mod tests {
         let t = &o[TOOL_META_KEY];
         assert_eq!(t["kind"], "execute");
         assert!(t.get("input").is_none(), "absent input omitted");
+    }
+
+    #[test]
+    fn subagent_observation_vocabulary_uses_version_six() {
+        for (name, kind, wire_kind) in [
+            ("list_subagent", ToolKind::SubagentList, "subagent_list"),
+            (
+                "get_subagent_status",
+                ToolKind::SubagentStatus,
+                "subagent_status",
+            ),
+            ("wait_subagent", ToolKind::SubagentWait, "subagent_wait"),
+        ] {
+            let meta = CanonicalToolMeta::new(name, &identity(kind, ToolAccess::Read), None);
+            let wire = serde_json::to_value(meta).unwrap();
+            assert_eq!(wire["version"], 6);
+            assert_eq!(wire["kind"], wire_kind);
+            assert_eq!(wire["name"], name);
+            assert_eq!(wire["max_access"], "read");
+        }
     }
 }

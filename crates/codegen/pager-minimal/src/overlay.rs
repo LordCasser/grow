@@ -151,7 +151,11 @@ pub fn sync_viewport(
     }
     let width = terminal.viewport_area().width;
 
-    let target = compute_target(app, term_h, width, frame);
+    let target = if minimal_api::session_deletion_open(app) {
+        app_modal_target(3, term_h)
+    } else {
+        compute_target(app, term_h, width, frame)
+    };
 
     let cur = terminal.viewport_area();
     if cur.height == target {

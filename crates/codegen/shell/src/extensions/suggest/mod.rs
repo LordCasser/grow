@@ -166,9 +166,9 @@ struct SuggestPromptRequest {
     /// override, or `grow-build-0.1` when its catalog offers it). One tier
     /// of the shell-side resolution in
     /// `prompt_suggest::effective_suggest_model`: env > config.toml > remote
-    /// > this hint > `grow-build-0.1` default, catalog-guarded (a
-    /// non-sampleable effective model skips the request; the session model
-    /// is never used).
+    /// > this hint > `grow-build-0.1` default. The effective selector must
+    /// resolve through the provider catalog; unavailable selectors skip the
+    /// request, and the session model is never used.
     #[serde(default)]
     model: Option<String>,
 }

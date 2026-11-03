@@ -579,7 +579,7 @@ impl MvpAgent {
             workspace_ops: RefCell::new(None),
             session_live_state: RefCell::new(HashMap::new()),
             supervisor_started: std::cell::Cell::new(false),
-            exit_suspend: RefCell::new(None),
+            exit_suspend: RefCell::new(HashMap::new()),
             owned_local_tasks: RefCell::new(Vec::new()),
             #[cfg(test)]
             roster_delta_spy: RefCell::new(Vec::new()),
@@ -964,35 +964,33 @@ impl MvpAgent {
             .list_running(parent_session_id)
             .await
     }
-    pub(crate) async fn inspect_subagent(
-        &self,
-        parent_session_id: &str,
-        subagent_id: &str,
-    ) -> Result<Option<
-        tools::implementations::grow_build::task::types::SubagentInspection,
-    >, tools::implementations::grow_build::task::types::SubagentObservationError> {
-        tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
-            self.subagent_event_tx.clone(),
-            parent_session_id.to_owned(),
-        )
-            .inspect(subagent_id)
-            .await
-    }
-    pub(crate) async fn query_subagent(
+    pub(crate) async fn observe_subagent(
         &self,
         parent_session_id: &str,
         subagent_id: &str,
         block: bool,
-        timeout_ms: Option<u64>,
-    ) -> Result<Option<
-        tools::implementations::grow_build::task::types::SubagentSnapshot,
-    >, tools::implementations::grow_build::task::types::SubagentObservationError> {
-        tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
-            self.subagent_event_tx.clone(),
-            parent_session_id.to_owned(),
-        )
-            .query(subagent_id, block, timeout_ms)
-            .await
+        timeout_ms: u64,
+    ) -> Result<Option<tools::implementations::grow_build::task::types::SubagentInspection>,
+        tools::implementations::grow_build::task::types::SubagentObservationError> {
+        use tools::implementations::grow_build::task::types::SubagentObservationError;
+        let budget = std::time::Duration::from_millis(if block { timeout_ms.min(30_000) } else { 5_000 });
+        let deadline = tokio::time::Instant::now() + budget;
+        let source_state = self.control_session_handle(&acp::SessionId::new(parent_session_id))
+            .map(|handle| handle.chat_state_handle.clone());
+        let backend = crate::agent::subagent::observation::backend(
+            self.subagent_event_tx.clone(), parent_session_id.to_owned(), source_state,
+        );
+        tokio::time::timeout_at(deadline, async {
+            let Some(mut inspection) = backend.inspect(subagent_id).await? else { return Ok(None); };
+            while block && inspection.snapshot.is_running() && tokio::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match backend.query(subagent_id, true, Some(remaining.as_millis() as u64)).await? {
+                    Some(snapshot) => inspection.snapshot = snapshot,
+                    None => return Err(SubagentObservationError::Unavailable),
+                }
+            }
+            Ok(Some(inspection))
+        }).await.map_err(|_| SubagentObservationError::TimedOut)?
     }
     /// List all background tasks for a session.
     /// Routes through the session's tool bridge to the TerminalBackend.
@@ -1675,6 +1673,14 @@ impl MvpAgent {
                 persisted_agent_name,
             )
         };
+        if matches!(&timeline_bootstrap, crate::session::TimelineBootstrap::Existing { timeline, .. }
+            if timeline.runtime_lifecycle().phase != chat_state::session_runtime::RuntimePhase::Running)
+        {
+            let expected = persisted_agent_name.ok_or_else(|| acp::Error::invalid_params().data("Suspended session has no original Agent identity."))?;
+            if !agent_definition.matches_selector_identity(expected) {
+                return Err(acp::Error::invalid_params().data(format!("Suspended session Agent `{expected}` is unavailable; a default or different plugin cannot replace it.")));
+            }
+        }
         if !agent_definition.is_primary_agent_eligible() {
             let issues = agent_definition
                 .primary_agent_issues()

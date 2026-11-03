@@ -149,7 +149,7 @@ async fn incremental_dispatch_surfaces_fast_tool_before_slow_sibling() {
     stream.push(Box::pin(async move {
         tokio::time::sleep(Duration::from_millis(80)).await;
         slow_flag.store(true, Ordering::SeqCst);
-        (1usize, "get_task_output")
+        (1usize, "get_command_output")
     }));
 
     let mut completion_order = Vec::new();
@@ -168,7 +168,7 @@ async fn incremental_dispatch_surfaces_fast_tool_before_slow_sibling() {
 
     assert_eq!(completion_order.len(), 2);
     assert_eq!(completion_order[0], (0, "grep"));
-    assert_eq!(completion_order[1], (1, "get_task_output"));
+    assert_eq!(completion_order[1], (1, "get_command_output"));
     assert!(fast_done.load(Ordering::SeqCst));
     assert!(slow_done.load(Ordering::SeqCst));
 }

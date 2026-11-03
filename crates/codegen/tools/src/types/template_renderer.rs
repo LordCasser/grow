@@ -488,7 +488,7 @@ mod tests {
         // Regression: an execute tool WITHOUT `is_background` in its schema
         // (for example a foreground-only terminal tool) seeds `params.execute` from its
         // real fields only. `param_for_kind` must report the missing field as
-        // absent so `get_task_output` doesn't tell the model to
+        // absent so `get_command_output` doesn't tell the model to
         // pass `is_background=true` to a tool that has no such field.
         let foreground_only_bash = make_renderer(
             &[(ToolKind::Execute, "bash")],
@@ -666,11 +666,14 @@ mod tests {
 
     #[test]
     fn render_background_task_action_kind() {
-        let r = make_renderer(&[(ToolKind::BackgroundTaskAction, "get_task_output")], &[]);
+        let r = make_renderer(
+            &[(ToolKind::BackgroundTaskAction, "get_command_output")],
+            &[],
+        );
         let result = r
             .render("${{ tools.by_kind.background_task_action }}")
             .unwrap();
-        assert_eq!(result, "get_task_output");
+        assert_eq!(result, "get_command_output");
     }
 
     #[test]

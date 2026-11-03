@@ -337,6 +337,7 @@ impl SessionActor {
                     | chat_state::NotificationSource::PlanHandoff { .. }
                     | chat_state::NotificationSource::ParentMessage { .. }
                     | chat_state::NotificationSource::AgentReply { .. }
+                    | chat_state::NotificationSource::InquiryAnswered { .. }
                     | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                     chat_state::NotificationSource::TaskCompleted { task_id, .. } => Some(task_id),
                     chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
@@ -795,7 +796,7 @@ impl SessionActor {
             // at admission. An autonomous notification turn must first commit its
             // queued primary receipt; later arrivals belong after it in Surface.
             if notification_ids.is_empty() {
-                self.drain_active_notifications().await;
+                self.drain_active_notifications().await?;
             }
             if matches!(&origin, super::super::PromptOrigin::User) {
                 ::diagnostics::unified_log::info(
@@ -989,7 +990,7 @@ impl SessionActor {
                         })?;
                 }
                 if !notification_ids.is_empty() {
-                    self.drain_active_notifications().await;
+                    self.drain_active_notifications().await?;
                 }
                 if !admitted_notification_task_ids.is_empty() {
                     let ids = admitted_notification_task_ids
@@ -1036,10 +1037,17 @@ impl SessionActor {
                 None => Err("host-routed input lost its durable Turn reservation".into()),
             };
             if let Err(error) = handled {
-                execution = Err(crate::session::commands::fatal_turn_boundary_error(
+                let mut boundary_error = crate::session::commands::fatal_turn_boundary_error(
                     "input_terminal",
                     format!("unmodeled input was not durably completed: {error}"),
-                ));
+                );
+                if let Err(original) = &execution {
+                    boundary_error
+                        .data
+                        .as_mut()
+                        .expect("boundary error has data")["cause"] = serde_json::json!(original);
+                }
+                execution = Err(boundary_error);
             }
         }
         let turn_duration_ms = turn_timer

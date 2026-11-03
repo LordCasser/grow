@@ -4,17 +4,15 @@ use super::ctx::{
     sync_sleep_inhibitor, with_active_agent, with_scrollback,
 };
 use super::dashboard::{
-    dispatch_dashboard_attach, dispatch_dashboard_begin_rename, dispatch_dashboard_change_location,
-    dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
-    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_delete,
-    dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
+    dispatch_close_current_session, dispatch_dashboard_attach, dispatch_dashboard_begin_rename,
+    dispatch_dashboard_change_location, dispatch_dashboard_commit_rename,
+    dispatch_dashboard_confirm_worktree, dispatch_dashboard_create_new_agent_with_detail,
+    dispatch_dashboard_delete, dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
     dispatch_dashboard_open_location_picker, dispatch_dashboard_open_shortcuts_help,
-    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit,
-    dispatch_dashboard_overlay_stop, dispatch_dashboard_peek_reply,
-    dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
-    dispatch_dashboard_question_answer, dispatch_dashboard_reorder, dispatch_dashboard_select,
-    dispatch_dashboard_stop, dispatch_dashboard_toggle_grouping, dispatch_dashboard_toggle_pin,
-    dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard, dispatch_open_dashboard,
+    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit, dispatch_dashboard_reorder,
+    dispatch_dashboard_select, dispatch_dashboard_stop, dispatch_dashboard_toggle_grouping,
+    dispatch_dashboard_toggle_pin, dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard,
+    dispatch_open_dashboard, dispatch_stop_session_work,
 };
 use super::interject::dispatch_interject;
 use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_jump_show_picker};
@@ -49,9 +47,9 @@ use super::session::fork::{
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
-    dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
-    dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
-    dispatch_trust_folder, open_delete_current_session_question, open_new_session_question,
+    dispatch_exit_session, dispatch_new_session, dispatch_new_session_inner,
+    dispatch_new_session_with_id, dispatch_new_worktree_session, dispatch_trust_folder,
+    open_delete_current_session_question, open_new_session_question,
 };
 use super::session::list::{
     dispatch_fetch_session_list, refresh_pending_picker_after_owner_switch,
@@ -223,9 +221,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ChooseNewSessionMode => open_new_session_question(app),
         Action::ExitSession | Action::ExitSessionConfirmed => dispatch_exit_session(app),
         Action::DeleteCurrentSession => open_delete_current_session_question(app),
-        Action::DeleteCurrentSessionAnswered { confirmed } => {
-            dispatch_delete_current_session_answered(app, confirmed)
-        }
         Action::NewWorktreeSession {
             load_session_id,
             label,
@@ -1151,7 +1146,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             }
             app.show_toast("Deleting session\u{2026}");
+            let bindings = super::session::modal::session_delete_bindings(app, &session_id);
             vec![Effect::DeleteSession {
+                bindings,
                 session_id,
                 cwd,
                 after: crate::app::actions::AfterSessionDelete::Stay,
@@ -1283,7 +1280,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardStop => dispatch_dashboard_stop(app),
         Action::DashboardDelete => dispatch_dashboard_delete(app),
         Action::DashboardCycleMode => vec![],
-        Action::DashboardPeekCycleMode => vec![],
         Action::DashboardToggleGrouping => dispatch_dashboard_toggle_grouping(app),
         Action::DashboardSetFilter(value) => {
             if let Some(d) = app.dashboard.as_mut() {
@@ -1305,7 +1301,13 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardOverlayExit => dispatch_dashboard_overlay_exit(app),
         Action::DashboardOverlayPrev => dispatch_dashboard_overlay_cycle(app, -1),
         Action::DashboardOverlayNext => dispatch_dashboard_overlay_cycle(app, 1),
-        Action::DashboardOverlayStop => dispatch_dashboard_overlay_stop(app),
+        Action::StopSessionWork => dispatch_stop_session_work(app),
+        Action::CloseCurrentSession => dispatch_close_current_session(app),
+        Action::ConfirmSessionDelete => super::session::deletion::confirm(app),
+        Action::CancelSessionDelete => {
+            app.session_deletion = None;
+            vec![]
+        }
         Action::DashboardToggleWorktree => dispatch_dashboard_toggle_worktree(app),
         Action::DashboardOpenShortcutsHelp => {
             dispatch_dashboard_open_shortcuts_help(app);
@@ -1340,25 +1342,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardChangeLocation { input } => dispatch_dashboard_change_location(app, input),
         Action::DashboardConfirmWorktree { label } => {
             dispatch_dashboard_confirm_worktree(app, label)
-        }
-        Action::DashboardPermissionSelect {
-            row,
-            request_id,
-            option_id,
-        } => dispatch_dashboard_permission_select(app, row, request_id, option_id),
-        Action::DashboardPermissionFollowup {
-            row,
-            request_id,
-            text,
-        } => dispatch_dashboard_permission_followup(app, row, request_id, text),
-        Action::DashboardQuestionAnswer {
-            row,
-            tool_call_id,
-            option_idx,
-            freeform,
-        } => dispatch_dashboard_question_answer(app, row, tool_call_id, option_idx, freeform),
-        Action::DashboardPeekReply { row, text, attach } => {
-            dispatch_dashboard_peek_reply(app, row, text, attach)
         }
         Action::TaskComplete(result) => dispatch_task_result(result, app),
         Action::ToggleGoalDetail => {
@@ -1408,31 +1391,37 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
 }
 
 fn begin_exit_suspension(app: &mut AppView, restart_for_update: bool, retry: bool) -> Vec<Effect> {
-    if !app
-        .agents
-        .values()
-        .any(|agent| agent.session.session_id.is_some() && !agent.session.attached_as_viewer)
-    {
-        if restart_for_update {
-            app.restart_for_update = true;
-        }
-        let mut effects = unregister_all_active_sessions(app);
-        effects.push(Effect::Quit);
-        return effects;
-    }
+    // Host notification turns also set attached_as_viewer. Only the runtime
+    // can prove that this process has no work left to suspend before exit.
     if let Some(exit) = app.exit_suspension.as_ref()
         && (!retry || matches!(&exit.phase, crate::app::root::ExitSuspensionPhase::Pending))
     {
         return vec![];
     }
     let exit_id = uuid::Uuid::now_v7().to_string();
+    let starting = app.agents.values().any(|agent| {
+        agent.session.loading_replay
+            || agent.session.prompt_history_loading
+            || (agent.session.session_id.is_none() && agent.session.state.is_busy())
+    });
     app.exit_suspension = Some(crate::app::root::ExitSuspension {
         exit_id: exit_id.clone(),
-        phase: crate::app::root::ExitSuspensionPhase::Pending,
+        phase: if starting {
+            crate::app::root::ExitSuspensionPhase::Unconfirmed {
+                error: "Session startup is still pending; retry exit after startup completes"
+                    .into(),
+            }
+        } else {
+            crate::app::root::ExitSuspensionPhase::Pending
+        },
         restart_for_update,
         deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
     });
-    vec![Effect::SuspendForExit { exit_id }]
+    if starting {
+        vec![]
+    } else {
+        vec![Effect::SuspendForExit { exit_id }]
+    }
 }
 pub(super) fn dispatch_action_result(
     app: &mut AppView,

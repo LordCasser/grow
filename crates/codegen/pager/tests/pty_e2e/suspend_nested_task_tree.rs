@@ -24,6 +24,351 @@ async fn concurrent_cold_resume_claims_one_root_without_replaying_tree_work() {
     run_nested_tree_recovery(false, true).await;
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; requires a built Pager binary"]
+async fn ctrl_d_notification_turn_suspends_and_resumes_background_child() {
+    run_background_notification_recovery(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; requires a built Pager binary"]
+async fn minimal_ctrl_d_notification_turn_suspends_and_resumes_background_child() {
+    run_background_notification_recovery(true).await;
+}
+
+async fn run_background_notification_recovery(minimal: bool) {
+    use chat_state::session_runtime::RuntimePhase;
+    use pager_pty_harness::{InferenceEndpoint as Endpoint, InferenceRequestMatcher as Matcher};
+
+    let content = ContentController::start()
+        .await
+        .expect("start mock content");
+    content.seed_llm_config().expect("seed mock provider");
+    // Endpoint-specific scripts distinguish parent and child requests while
+    // both run concurrently; their wire model remains the same mock model.
+    std::fs::write(
+        content.home().join(".grow/config.toml"),
+        format!(
+            r#"[models]
+default = "mock/parent"
+[provider.mock.options]
+base_url = "{}"
+[provider.mock.models.parent]
+model = "test-model"
+api_backend = "responses"
+context_window = 128000
+[provider.mock.models.child]
+model = "test-model"
+api_backend = "chat_completions"
+context_window = 128000
+[subagents]
+enabled = true
+permission_mode = "always-approve"
+"#,
+            content.url()
+        ),
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let b_started = project.path().join("b-started");
+    let a_release = project.path().join("a-release");
+    let b_release = project.path().join("b-release");
+    let spawn = |description: &str| {
+        json!({
+            "prompt": description, "description": description,
+            "subagent_type": "general-purpose", "background": true,
+            "capability_mode": "all", "model": "mock/child"
+        })
+        .to_string()
+    };
+    let _spawn_b = content.expect_response(
+        "spawn background B",
+        Matcher::foreground(Endpoint::Responses),
+        ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
+            "Delegate B",
+            "call_background_b",
+            "spawn_subagent",
+            &spawn("Run background B"),
+            "test-model",
+        )),
+    );
+    let spawn_a = content.expect_response_blocked(
+        "spawn A after B starts",
+        Matcher::foreground(Endpoint::Responses),
+        ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
+            "Delegate A",
+            "call_background_a",
+            "spawn_subagent",
+            &spawn("Run background A"),
+            "test-model",
+        )),
+    );
+    let _parent_idle = content.expect_response(
+        "parent settles before A completes",
+        Matcher::foreground(Endpoint::Responses),
+        ScriptedResponse::sse(sse::responses_api_script_exact("PARENT_IDLE", "test-model")),
+    );
+    let mut notification = content.expect_response_blocked(
+        "parent child-completion notification",
+        Matcher::foreground(Endpoint::Responses),
+        ScriptedResponse::sse(sse::responses_api_script_exact(
+            "NOTIFICATION_RUNNING",
+            "test-model",
+        )),
+    );
+    let command_b = format!(
+        "printf 'started\\n' >> {}; while [ ! -e {} ]; do /bin/sleep 0.05; done",
+        shell_quote(&b_started),
+        shell_quote(&b_release),
+    );
+    let command_a = format!(
+        "while [ ! -e {} ]; do /bin/sleep 0.05; done",
+        shell_quote(&a_release),
+    );
+    let mut command_scripts = Vec::new();
+    for (call, command) in [("call_command_b", command_b), ("call_command_a", command_a)] {
+        command_scripts.push(content.expect_response(
+            call,
+            Matcher::foreground(Endpoint::ChatCompletions),
+            ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
+                call,
+                "run_terminal_command",
+                &json!({ "command": command, "description": call }).to_string(),
+            )),
+        ));
+    }
+    let _a_complete = content.expect_response(
+        "A completes",
+        Matcher::foreground(Endpoint::ChatCompletions),
+        ScriptedResponse::sse(sse::chat_completion_script_exact(
+            "CHILD_A_DONE",
+            "test-model",
+        )),
+    );
+    content.set_response("BACKGROUND_RESUMED_RESULT");
+
+    let binary = pager_binary().unwrap();
+    let mut args = vec!["--permission-mode", "always-approve", "--trust"];
+    if minimal {
+        args.push("--minimal");
+    }
+    let mut first = PtyHarness::spawn_with_content_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &args,
+        Some(project.path()),
+    )
+    .unwrap();
+    first
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
+        .unwrap();
+    const PROMPT: &str = "Run background A and B with model mock/child";
+    first.inject_keys(format!("{PROMPT}\r").as_bytes()).unwrap();
+    poll_for(Duration::from_secs(45), || {
+        first.update(Duration::from_millis(30));
+        b_started.exists().then_some(())
+    })
+    .unwrap_or_else(|| {
+        let log = std::fs::read_to_string(content.home().join(".grow/logs/unified.jsonl"))
+            .unwrap_or_default();
+        panic!(
+            "background B did not start; screen:\n{}\nrequests:\n{}\nlog:\n{}",
+            first.screen_contents(),
+            dump_non_system_messages(&content.request_bodies()),
+            log
+        );
+    });
+    spawn_a.release();
+    first
+        .wait_for_text("PARENT_IDLE", Duration::from_secs(45))
+        .unwrap();
+    let root_dir = session_dir_for_prompt(&content, PROMPT);
+    let root_path = root_dir.join("timeline.jsonl");
+    poll_for(Duration::from_secs(10), || {
+        first.update(Duration::from_millis(30));
+        let raw = std::fs::read_to_string(&root_path).ok()?;
+        let turns = started_turn_ids(&raw);
+        turns
+            .first()
+            .filter(|id| turn_has_ended(&raw, id))
+            .map(|_| ())
+    })
+    .expect("original user Turn must finish before A wakes the parent");
+    std::fs::write(&a_release, "complete A").unwrap();
+    first
+        .wait_for_text("NOTIFICATION_RUNNING", Duration::from_secs(45))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), notification.wait_blocked())
+        .await
+        .expect("notification response reached its terminal gate");
+    let root_before = std::fs::read_to_string(&root_path).unwrap();
+    let (b_id, _) = spawn_for_tool_call(&root_before, "call_background_b").unwrap();
+    let (a_id, _) = spawn_for_tool_call(&root_before, "call_background_a").unwrap();
+    let b_task = subagent_id_for_tool_call(&root_before, "call_background_b").unwrap();
+    let b_path = session_dir_by_id(&content, &b_id).join("timeline.jsonl");
+    let b_before = std::fs::read_to_string(&b_path).unwrap();
+    let b_turns = started_turn_ids(&b_before);
+    assert_eq!(b_turns.len(), 1);
+    assert!(!turn_has_ended(&b_before, &b_turns[0]));
+    let notification_turn = parsed_timeline(&root_before)
+        .find_map(|event| {
+            (event.pointer("/event/state")?.as_str()? == "started"
+                && event.pointer("/event/identity/origin")?.as_str()? == "subagent_completed")
+                .then(|| {
+                    event
+                        .pointer("/event/id")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+        })
+        .expect("parent must be in the child-completion notification Turn");
+    assert!(!turn_has_ended(&root_before, &notification_turn));
+    assert_eq!(subagent_terminal_with_result_count(&root_before, &a_id), 1);
+    assert_eq!(subagent_terminal_count(&root_before, &b_id), 0);
+
+    first.inject_keys(b"\x04").unwrap();
+    first
+        .wait_for_text("again to quit", Duration::from_millis(500))
+        .unwrap();
+    let armed = std::fs::read_to_string(&root_path).unwrap();
+    let runtime_count = |raw: &str| {
+        parsed_timeline(raw)
+            .filter(|event| event["type"] == "runtime")
+            .count()
+    };
+    assert_eq!(
+        runtime_count(&armed),
+        runtime_count(&root_before),
+        "first Ctrl+D must not start suspension"
+    );
+    assert_eq!(
+        read_timeline(&root_path).runtime_lifecycle().phase,
+        RuntimePhase::Running
+    );
+    first.inject_keys(b"\x04").unwrap();
+    assert_eq!(
+        first
+            .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
+            .unwrap(),
+        0
+    );
+    let root_runtime = read_timeline(&root_path).runtime_lifecycle().clone();
+    let b_runtime = read_timeline(&b_path).runtime_lifecycle().clone();
+    assert_eq!(root_runtime.phase, RuntimePhase::Suspended);
+    assert_eq!(b_runtime.phase, RuntimePhase::Suspended);
+    assert_eq!(root_runtime.operation_id, b_runtime.operation_id);
+    assert!(root_runtime.tree.iter().any(
+        |node| node.session_id == b_id && Some(node.checkpoint_seq) == b_runtime.checkpoint_seq
+    ));
+    let root_suspended = std::fs::read_to_string(&root_path).unwrap();
+    let b_suspended = std::fs::read_to_string(&b_path).unwrap();
+    assert!(!turn_has_ended(&root_suspended, &notification_turn));
+    assert!(!turn_has_ended(&b_suspended, &b_turns[0]));
+    assert_eq!(subagent_terminal_count(&root_suspended, &b_id), 0);
+    assert_eq!(
+        interrupted_command_settlement_count(&b_suspended, "call_command_b"),
+        1
+    );
+    drop(first);
+    notification.release();
+
+    args.push("--continue");
+    let mut resumed = PtyHarness::spawn_with_content_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &args,
+        Some(project.path()),
+    )
+    .unwrap();
+    let root_after = poll_for(RESUME_TIMEOUT, || {
+        resumed.update(Duration::from_millis(30));
+        let raw = std::fs::read_to_string(&root_path).ok()?;
+        (turn_has_ended(&raw, &notification_turn)
+            && subagent_terminal_with_result_count(&raw, &b_id) == 1)
+            .then_some(raw)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "background tree did not resume: {}",
+            resumed.screen_contents()
+        )
+    });
+    let b_after = std::fs::read_to_string(&b_path).unwrap();
+    assert_eq!(
+        subagent_id_for_tool_call(&root_after, "call_background_b"),
+        Some(b_task)
+    );
+    assert_eq!(started_turn_ids(&b_after), b_turns);
+    assert!(turn_has_ended_with_outcome(
+        &b_after,
+        &b_turns[0],
+        "completed"
+    ));
+    assert!(turn_has_ended_with_outcome(
+        &root_after,
+        &notification_turn,
+        "completed"
+    ));
+    assert_eq!(subagent_terminal_with_result_count(&root_after, &a_id), 1);
+    for child_id in [&a_id, &b_id] {
+        let terminal = parsed_timeline(&root_after)
+            .find(|event| {
+                event
+                    .pointer("/event/state")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ended")
+                    && event
+                        .pointer("/event/event/child_session_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(child_id.as_str())
+            })
+            .expect("original child has one parent terminal");
+        assert_eq!(
+            terminal
+                .pointer("/event/event/outcome")
+                .and_then(serde_json::Value::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            terminal
+                .pointer("/event/event/result_ref/timeline_id")
+                .and_then(serde_json::Value::as_str),
+            Some(child_id.as_str())
+        );
+    }
+    assert_eq!(consumed_user_input_count(&root_after, PROMPT), 1);
+    for call in ["call_background_a", "call_background_b"] {
+        assert_eq!(
+            json_field_count(&root_after, "origin_tool_call_id", call),
+            1
+        );
+        assert_eq!(tool_result_count(&root_after, call), 1);
+    }
+    assert_eq!(
+        interrupted_command_settlement_count(&b_after, "call_command_b"),
+        1
+    );
+    assert_eq!(interrupted_tool_result_count(&b_after, "call_command_b"), 1);
+    assert_eq!(
+        std::fs::read_to_string(&b_started).unwrap().lines().count(),
+        1
+    );
+    assert_eq!(
+        read_timeline(&b_path).runtime_lifecycle().phase,
+        RuntimePhase::Running
+    );
+    resumed.quit().unwrap();
+}
+
 async fn run_nested_tree_recovery(partial_leaf_release: bool, concurrent_resume: bool) {
     let content = ContentController::start()
         .await

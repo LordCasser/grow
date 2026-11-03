@@ -41,7 +41,9 @@ use tools::implementations::grow_build::task::types::{
     SubagentValidateTypeOutcome,
 };
 use tools::implementations::grow_build::write::WriteTool;
-use tools::implementations::grow_build::{KillTaskTool, TaskOutputTool};
+use tools::implementations::grow_build::{
+    GetSubagentStatusTool, KillTaskTool, ListSubagentTool, WaitSubagentTool,
+};
 use tools::registry::types::ToolConfig;
 use workspace::permission::{ClientType, PermissionEvent, spawn_permission_manager};
 
@@ -349,7 +351,7 @@ async fn make_subagent_fixture_with_replies(
 
     // Tool bridge must know the Bash tool (client name `run_terminal_cmd`).
     // Background bash is disabled: `BashParams::enabled_background` defaults
-    // to true, and `finalize_builder` then requires `get_task_output` +
+    // to true, and `finalize_builder` then requires `get_command_output` +
     // `kill_task` (BackgroundTaskAction/KillTaskAction) to be registered.
     // This test only drives a foreground command, so disabling background is
     // the minimal registration that satisfies the requirement — same shape as
@@ -934,19 +936,26 @@ async fn subagent_task_preserves_delegation_fast_path_and_depth_hard_stop() {
             let task_config = ToolConfig::for_tool::<TaskTool>()
                 .with_name("spawn_subagent")
                 .with_param_rename("run_in_background", "background");
-            let output_config = ToolConfig::for_tool::<TaskOutputTool>()
-                .with_name("get_command_or_subagent_output");
+            let output_config = ToolConfig::for_tool::<WaitSubagentTool>();
             let kill_config =
                 ToolConfig::for_tool::<KillTaskTool>().with_name("kill_command_or_subagent");
             let authored = tools::registry::types::ToolServerConfig {
                 tools: vec![
                     task_config.clone(),
                     output_config.clone(),
+                    ToolConfig::for_tool::<ListSubagentTool>(),
+                    ToolConfig::for_tool::<GetSubagentStatusTool>(),
                     kill_config.clone(),
                 ],
             };
-            *actor.agent.borrow_mut() =
-                test_agent_with_tools(vec![task_config, output_config, kill_config]).await;
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                task_config,
+                output_config,
+                kill_config,
+                ToolConfig::for_tool::<ListSubagentTool>(),
+                ToolConfig::for_tool::<GetSubagentStatusTool>(),
+            ])
+            .await;
             let bridge = actor.agent.borrow().tool_bridge().clone();
             let backend = Arc::new(ImmediateSubagentBackend::default());
             bridge

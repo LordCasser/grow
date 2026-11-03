@@ -558,7 +558,7 @@ impl SessionActor {
             .count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if !self.compaction.memory_flush_enabled {
+        if !self.compaction.memory_flush_enabled || !self.memory.is_enabled() {
             return;
         }
         let last_flush = self
@@ -577,6 +577,9 @@ impl SessionActor {
                 tracing::warn!("pre-compaction memory flush could not freeze Timeline input");
                 return;
             };
+            if !self.memory.is_enabled() {
+                return;
+            }
             if let Some(activity) = self
                 .session_activities
                 .try_start("pre_compaction_memory_flush")
@@ -1846,7 +1849,7 @@ impl SessionActor {
                 let bridge = agent_ref.tool_bridge();
                 let empty = serde_json::json!({});
                 let poll_name = bridge
-                    .render_prompt("${{ tools.by_kind.background_task_action }}", &empty)
+                    .render_prompt("${{ tools.by_kind.subagent_status }}", &empty)
                     .await
                     .filter(|s| !s.is_empty() && !s.contains("by_kind"));
                 let cancel_name = bridge

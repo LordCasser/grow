@@ -1,0 +1,5 @@
+- [x] 确认原始来源差异，证明仅 projectRules 改变。
+- [x] 按用户后续指令备份并离线修复目标 session 文件。
+- [x] 在隔离副本验证 JSONL/Timeline 加载与 source hash 精确匹配；保留未续跑的限制。
+- [x] 移除临时探针，记录后续产品问题，不改生产契约。
+- [x] strict 校验、归档及归档后校验（结果见 verification）。

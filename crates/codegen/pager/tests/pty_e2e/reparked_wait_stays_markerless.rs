@@ -102,7 +102,7 @@ async fn reparked_wait_stays_markerless() {
     let _short_wait_turn = expect_tool_turn(
         &content,
         "call_repark_wait1",
-        "get_command_or_subagent_output",
+        "get_command_output",
         short_wait_args,
     );
 
@@ -128,7 +128,7 @@ async fn reparked_wait_stays_markerless() {
     let _long_wait_turn = expect_tool_turn(
         &content,
         "call_repark_wait2",
-        "get_command_or_subagent_output",
+        "get_command_output",
         long_wait_args,
     );
 

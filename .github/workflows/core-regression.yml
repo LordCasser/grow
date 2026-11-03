@@ -138,6 +138,7 @@ jobs:
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_transcript_pager_restore_no_artifacts::minimal_transcript_pager_restore_no_artifacts
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_config_ui --ignored show_thinking_blocks_toggle_hides_existing_pty::show_thinking_blocks_toggle_hides_existing_pty
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_config_ui --ignored verb_group_fold_expand_collapse_pty::verb_group_fold_expand_collapse_pty
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_shell_tools --ignored edit_merge_parallel_pty::edit_merge_parallel_pty
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_scroll_selection --ignored resize_preserves_scroll_position::resize_preserves_scroll_position
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_scroll_selection --ignored read_tool_header_selection_copies_path_only_pty::read_tool_header_selection_copies_path_only_pty
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_queue --ignored queued_bash_promotion_renders_output_pty::queued_bash_promotion_renders_output_pty
@@ -148,6 +149,8 @@ jobs:
           python3 scripts/run_exact_cargo_test.py --package pager --test leader_pty_e2e --ignored leader_n_clients_shared_session::leader_n_clients_shared_session
           python3 scripts/run_exact_cargo_test.py --package pager --test leader_pty_e2e --ignored leader_attach_during_active_turn::leader_attach_during_active_turn
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::ctrl_d_suspends_and_cold_resumes_root_child_grandchild_tree
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::ctrl_d_notification_turn_suspends_and_resumes_background_child
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::minimal_ctrl_d_notification_turn_suspends_and_resumes_background_child
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::ctrl_d_cold_resume_keeps_the_original_explicit_skill_snapshot
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::minimal_cold_resume_keeps_the_original_explicit_skill_snapshot
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume plan_approval_restored_after_resume

@@ -507,6 +507,7 @@ pub enum ChatStateCommand {
 
     /// Clone the canonical event ledger for recovery/reconciliation logic.
     GetTimelineEvents {
+        from_seq: u64,
         reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
     },
 

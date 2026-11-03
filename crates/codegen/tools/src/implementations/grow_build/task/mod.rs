@@ -97,11 +97,11 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
-        // The task tool can only be used when both get_task_output
-        // (BackgroundTaskAction) and kill_task (KillTaskAction) are present,
-        // so the agent can manage background subagents it spawns.
+        // Spawning requires the dedicated observation lifecycle and cancellation tools.
         Expr::And(vec![
-            Expr::Value(ToolRequirement::tool_kind(ToolKind::BackgroundTaskAction)),
+            Expr::Value(ToolRequirement::tool_kind(ToolKind::SubagentList)),
+            Expr::Value(ToolRequirement::tool_kind(ToolKind::SubagentStatus)),
+            Expr::Value(ToolRequirement::tool_kind(ToolKind::SubagentWait)),
             Expr::Value(ToolRequirement::tool_kind(ToolKind::KillTaskAction)),
         ])
     }
@@ -528,21 +528,17 @@ impl tool_runtime::Tool for TaskTool {
             let res = resources.lock().await;
             let renderer = res.get::<crate::types::template_renderer::TemplateRenderer>();
             let name = renderer
-                .and_then(|renderer| renderer.tool_for_kind(ToolKind::BackgroundTaskAction))
-                .unwrap_or("get_task_output")
+                .and_then(|renderer| renderer.tool_for_kind(ToolKind::SubagentWait))
+                .unwrap_or("wait_subagent")
                 .to_string();
             let param_names = renderer
-                .and_then(|renderer| {
-                    renderer
-                        .param_names()
-                        .remove(&ToolKind::BackgroundTaskAction)
-                })
+                .and_then(|renderer| renderer.param_names().remove(&ToolKind::SubagentWait))
                 .unwrap_or_default();
             (name, param_names)
         };
 
         // 4. Background mode: fire-and-forget via backend.spawn().
-        // Coordinator stores the result for TaskOutputTool polling.
+        // Coordinator stores the result for WaitSubagentTool retrieval.
         // Both transport errors and coordinator rejections are logged so
         // late failures (worktree creation, etc.) remain visible.
         if input.run_in_background {
@@ -1438,14 +1434,11 @@ mod tests {
         let (backend, mut rx) = make_backend();
         let mut resources = resources_for_task(backend);
         resources.insert(crate::types::template_renderer::TemplateRenderer::new(
+            std::collections::HashMap::from([(ToolKind::SubagentWait, "await_result".to_string())]),
             std::collections::HashMap::from([(
-                ToolKind::BackgroundTaskAction,
-                "await_result".to_string(),
-            )]),
-            std::collections::HashMap::from([(
-                ToolKind::BackgroundTaskAction,
+                ToolKind::SubagentWait,
                 std::collections::HashMap::from([
-                    ("task_ids".to_string(), "jobs".to_string()),
+                    ("subagent_ids".to_string(), "jobs".to_string()),
                     ("timeout_ms".to_string(), "max_wait".to_string()),
                 ]),
             )]),

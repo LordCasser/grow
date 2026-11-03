@@ -86,6 +86,22 @@ web_fetch SHALL 在接收解码后的响应正文时执行 max_content_length �
 - **WHEN** cwd 已 unwatch 后创建或重建 .grow
 - **THEN** 不为该 cwd 重新挂载监听。
 
+A config directory notification SHALL reuse the existing directory-identity reconciliation; an unchanged directory entity SHALL NOT cause an unconditional native unwatch/watch cycle. A replacement SHALL still attach the new entity only while an applicable source owner remains.
+
+#### Scenario: Ordinary directory notification
+- **WHEN** an event names an already watched .grow directory whose filesystem identity is unchanged
+- **THEN** the watcher retains that native registration and subsequent config writes remain observable without restarting the watch stream.
+
+On macOS, config observation SHALL use non-recursive directory metadata polling and config.toml-only content comparison at the existing debounce interval so adding/removing project watches does not recreate an FSEvents stream and discard intervening configuration changes. Other watcher purposes and platforms SHALL retain their current event sources. Polling SHALL NOT recursively traverse project contents.
+
+#### Scenario: Configuration changes while another project interest is registered
+- **WHEN** macOS config observation is registering or releasing another project's watch interest while an owned config changes
+- **THEN** that config's final metadata/content change remains observable without resetting its event source; the current project/global reload scope is preserved.
+
+#### Scenario: Same-timestamp atomic config replacement
+- **WHEN** an owned config.toml is replaced with different bytes but the same modification time and length
+- **THEN** macOS observation detects its changed content without hashing unrelated project files.
+
 ### Requirement: Discovery watches follow replacement directories
 项目 discovery watcher SHALL 在已存在的 .grow 及其 seed 目录被替换后继续接收更新；曾注册路径 SHALL 不等于当前目录已被监听。普通文件更新 SHALL 不导致无条件重建全部递归监听。
 

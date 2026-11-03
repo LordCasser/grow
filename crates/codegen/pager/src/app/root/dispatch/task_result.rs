@@ -25,15 +25,15 @@ use super::session::fork::{
     handle_worktree_forked,
 };
 use super::session::lifecycle::{
-    dispatch_exit_session, handle_session_created, handle_session_failed,
-    handle_switch_model_complete, handle_worktree_session_created, handle_worktree_session_failed,
+    handle_session_created, handle_session_failed, handle_switch_model_complete,
+    handle_worktree_session_created, handle_worktree_session_failed,
 };
 use super::session::list::{handle_session_list_failed, handle_session_list_loaded};
 use super::session::load::{
     handle_card_detail_loaded, handle_deep_search_results, handle_session_load_failed,
     handle_session_loaded, handle_session_search_debounce_expired, remove_session_from_pickers,
 };
-use super::session::modal::remove_agent_and_cleanup;
+use super::session::modal::retire_agent_view;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
     apply_session_usage_result, handle_context_info_complete, handle_context_info_failed,
@@ -148,7 +148,7 @@ fn show_clipboard_toast(target: &ClipboardPasteTarget, message: &str, app: &mut 
                 agent.show_toast(message);
             }
         }
-        ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => {
+        ClipboardPasteTarget::DashboardDispatch => {
             if let Some(dashboard) = app.dashboard.as_mut() {
                 dashboard.set_info(message);
             }
@@ -208,12 +208,18 @@ fn apply_clipboard_paste_result(
             .map_or(ClipboardPasteCompletion::Dropped, |agent| {
                 agent.complete_clipboard_attachment_paste(ctx, image, file_urls, &mut effects)
             }),
-        ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => app
-            .dashboard
-            .as_mut()
-            .map_or(ClipboardPasteCompletion::Dropped, |dashboard| {
-                dashboard.complete_clipboard_attachment_paste(ctx, image, file_urls, &mut effects)
-            }),
+        ClipboardPasteTarget::DashboardDispatch => {
+            app.dashboard
+                .as_mut()
+                .map_or(ClipboardPasteCompletion::Dropped, |dashboard| {
+                    dashboard.complete_clipboard_attachment_paste(
+                        ctx,
+                        image,
+                        file_urls,
+                        &mut effects,
+                    )
+                })
+        }
     };
     (completion, effects)
 }
@@ -239,7 +245,7 @@ fn drain_clipboard_target(
             }
             effects
         }
-        ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => {
+        ClipboardPasteTarget::DashboardDispatch => {
             let Some(dashboard) = app.dashboard.as_mut() else {
                 return effects;
             };
@@ -1852,6 +1858,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
             nonce,
         } => handle_session_info_failed(app, agent_id, error, nonce),
+        TaskResult::SessionCloseResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            result,
+        } => super::session::modal::handle_session_close_resolved(
+            app,
+            agent_id,
+            session_id,
+            binding_epoch,
+            result,
+        ),
         TaskResult::RenameSessionComplete { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 let safe = crate::views::session_title::sanitize_display_text(&title);
@@ -1873,23 +1891,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DeleteSessionComplete { session_id, after } => {
+        TaskResult::DeleteSessionComplete {
+            session_id,
+            after,
+            bindings,
+        } => {
             use crate::app::actions::AfterSessionDelete;
             remove_session_from_pickers(app, &session_id);
-            if after == AfterSessionDelete::Stay {
-                app.dashboard_local_sessions
-                    .retain(|entry| entry.session_id != session_id);
-                app.leader_roster
-                    .retain(|entry| entry.session_id != session_id);
-                app.show_toast("Session deleted");
-                return vec![];
-            }
             let sid = acp::SessionId::new(session_id.clone());
-            let to_remove: Vec<_> = app
-                .agents
-                .iter()
-                .filter(|(_, agent)| agent.session.session_id.as_ref() == Some(&sid))
-                .map(|(id, _)| *id)
+            let to_remove: Vec<_> = bindings
+                .into_iter()
+                .filter(|(id, epoch)| {
+                    app.agents.get(id).is_some_and(|agent| {
+                        agent.session.session_id.as_ref() == Some(&sid)
+                            && agent.session_binding_epoch == *epoch
+                    })
+                })
+                .map(|(id, _)| id)
                 .collect();
             let foreground =
                 matches!(app.active_view, ActiveView::Agent(id) if to_remove.contains(&id));
@@ -1903,48 +1921,96 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .chain(std::iter::once(roster_row))
                 .collect();
             let selected = app.dashboard.as_ref().and_then(|d| d.selected.clone());
-            let neighbor = if after == AfterSessionDelete::Dashboard
-                && let Some(sel) = selected.as_ref().filter(|sel| closed_rows.contains(sel))
-            {
-                super::dashboard::dashboard_neighbor_row(app, sel)
-            } else {
-                None
-            };
+            let neighbor =
+                if let Some(sel) = selected.as_ref().filter(|sel| closed_rows.contains(sel)) {
+                    super::dashboard::dashboard_neighbor_row(app, sel)
+                } else {
+                    None
+                };
             app.dashboard_local_sessions
                 .retain(|entry| entry.session_id != session_id);
             app.leader_roster
                 .retain(|entry| entry.session_id != session_id);
             for id in to_remove {
-                remove_agent_and_cleanup(app, id);
+                retire_agent_view(app, id);
             }
-            let mut effects = unregister_session_effect(Some(sid));
-            if after == AfterSessionDelete::Dashboard {
-                if let Some(d) = app.dashboard.as_mut() {
-                    d.delete_confirm = None;
-                    let selected_closed = d
-                        .selected
-                        .as_ref()
-                        .is_some_and(|sel| closed_rows.contains(sel));
-                    match (selected_closed, neighbor) {
-                        (true, Some(n)) => d.focus_row(n),
-                        (true, None) => d.focus_new_agent_button(),
-                        _ => {}
+            let effects = if app
+                .agents
+                .values()
+                .any(|agent| agent.session.session_id.as_ref() == Some(&sid))
+            {
+                vec![]
+            } else {
+                unregister_session_effect(Some(sid))
+            };
+            if let Some(d) = app.dashboard.as_mut() {
+                let selected_closed = d
+                    .selected
+                    .as_ref()
+                    .is_some_and(|sel| closed_rows.contains(sel));
+                if selected_closed {
+                    match neighbor.filter(|row| !closed_rows.contains(row)) {
+                        Some(row) => d.focus_row(row),
+                        None => d.focus_new_agent_button(),
                     }
                 }
+            }
+            if after == AfterSessionDelete::Dashboard {
                 if foreground {
                     super::dashboard::ensure_dashboard_state(app);
                     app.active_view = ActiveView::AgentDashboard;
                 }
             } else if foreground && after == AfterSessionDelete::Welcome {
-                effects.extend(dispatch_exit_session(app));
+                // Local retirement may have focused a peer. Welcome must not
+                // unregister that unrelated peer as /home would.
+                super::ctx::show_welcome(app);
+                app.session_picker_entries = None;
+                app.session_picker_loading = false;
+                app.session_picker_state.selected = 0;
+                app.session_picker_content_results = None;
+                app.session_picker_content_loading = false;
+                app.exit_session_pending = None;
             }
             app.show_toast("Session deleted");
             effects
         }
-        TaskResult::DeleteSessionFailed { session_id, error } => {
+        TaskResult::DeleteSessionFailed {
+            session_id,
+            error,
+            runtime_invalidated,
+            bindings,
+        } => {
             tracing::warn!(session_id = %session_id, error = %error, "session delete failed");
-            app.show_toast(&format!("Couldn't delete session: {error}"));
-            vec![]
+            let mut effects = vec![];
+            if runtime_invalidated != Some(false) {
+                let sid = acp::SessionId::new(session_id.clone());
+                let stale: Vec<_> = bindings
+                    .into_iter()
+                    .filter(|(id, epoch)| {
+                        app.agents.get(id).is_some_and(|agent| {
+                            agent.session.session_id.as_ref() == Some(&sid)
+                                && agent.session_binding_epoch == *epoch
+                        })
+                    })
+                    .map(|(id, _)| id)
+                    .collect();
+                if !stale.is_empty() {
+                    for id in stale {
+                        retire_agent_view(app, id);
+                    }
+                    effects.extend(unregister_session_effect(Some(sid)));
+                }
+            }
+            let reconnect = if runtime_invalidated == Some(false) {
+                ""
+            } else {
+                ". Reopen it with /resume to reconnect"
+            };
+            app.show_typed_toast(
+                NoticeTone::Error,
+                &format!("Couldn't delete session: {error}{reconnect}"),
+            );
+            effects
         }
         TaskResult::ContextInfoComplete {
             agent_id,

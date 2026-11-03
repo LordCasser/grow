@@ -43,6 +43,7 @@ mod finalization;
 mod finalization_failure;
 use finalization_failure::{FinalizationFailure, FinalizationStage};
 mod handle_request;
+pub(crate) mod observation;
 pub(crate) use finalization::reconcile_shell_child;
 pub(crate) use finalization::refresh_finalization_parent;
 pub(crate) mod resolution;
@@ -284,8 +285,8 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
     /// Parent's skills config for the child's SkillManager.
     pub parent_skills_config: agent::prompt::skills::SkillsConfig,
-    /// Resolved name of the `BackgroundTaskAction` tool in the parent's toolset.
-    pub task_output_tool_name: Option<String>,
+    /// Resolved name of the `SubagentWait` tool in the parent's toolset.
+    pub subagent_wait_tool_name: Option<String>,
     /// Parent's live Goal wait-race marker. The completion producer uses it
     /// only to preserve results displaced by steering; Timeline owns delivery.
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
@@ -489,7 +490,7 @@ pub(crate) struct ShellCompletionData {
     completion_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     completion_parent_session_id: Option<String>,
     completion_is_nested: bool,
-    task_output_tool_name: Option<String>,
+    subagent_wait_tool_name: Option<String>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
     diagnostics_tokens: u64,
     spawn_admitted: bool,
@@ -541,7 +542,7 @@ impl ShellCompletionData {
             completion_cmd_tx: ctx.completion_cmd_tx.clone(),
             completion_parent_session_id: Some(ctx.security_parent_session_id.clone()),
             completion_is_nested: ctx.security_parent_session_id != ctx.parent_session_id,
-            task_output_tool_name: ctx.task_output_tool_name.clone(),
+            subagent_wait_tool_name: ctx.subagent_wait_tool_name.clone(),
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
             diagnostics_tokens: 0,
             spawn_admitted: false,
@@ -886,7 +887,7 @@ pub(super) async fn admit_completion_receipt_before_result(
     let summary = tools::implementations::grow_build::task::completion_summary(request, result);
     let body = tools::reminders::task_completion::format_subagent_completion(
         &summary,
-        completion_data.task_output_tool_name.as_deref(),
+        completion_data.subagent_wait_tool_name.as_deref(),
     );
     completion_data.completion_receipt_admitted = admit_subagent_completion_receipt_before(
         cmd_tx,
@@ -1103,6 +1104,7 @@ struct InitialContext {
     prefix_len: Option<usize>,
     conversation: Vec<sampling_types::conversation::ConversationItem>,
     prompt_blobs: crate::session::persistence::ImmutablePromptBlobs,
+    presentation: crate::session::history::SeedPresentation,
     /// True only for a verbatim mirror-fork (parent conversation copied
     /// byte-for-byte before child-only runtime context is applied).
     verbatim_fork: bool,
@@ -1152,6 +1154,7 @@ fn resume_initial_context_with_ref(
         prefix_len: Some(resume_inherited_prefix_len(&conversation)),
         conversation,
         prompt_blobs: Default::default(),
+        presentation: Default::default(),
         verbatim_fork: false,
     }
 }
@@ -1176,6 +1179,7 @@ fn forked_initial_context_with_ref(
         prefix_len: Some(prefix_len),
         conversation,
         prompt_blobs: Default::default(),
+        presentation: Default::default(),
         verbatim_fork: false,
     })
 }
@@ -1231,6 +1235,7 @@ fn verbatim_or_normalize_fork_with_ref(
             prefix_len: Some(prefix_len),
             conversation: items,
             prompt_blobs: Default::default(),
+            presentation: Default::default(),
             verbatim_fork: true,
         });
     }
@@ -1250,6 +1255,7 @@ fn verbatim_or_normalize_fork_with_ref(
         prefix_len: Some(prefix_len),
         conversation,
         prompt_blobs: Default::default(),
+        presentation: Default::default(),
         verbatim_fork: false,
     })
 }
@@ -1332,26 +1338,37 @@ async fn bootstrap_initial_context(
     }
     if let Some(resolved) = resume_source {
         let source = &resolved.data;
-        let materialized = match resolved
-            .session
-            .materialize_timeline(&source.child_session_id)
-        {
-            Ok(materialized) if !materialized.surface.is_empty() => materialized,
-            Ok(_) => {
-                return BootstrapInitialContext::Abort(format!(
-                    "Cannot resume from subagent '{}': source Surface is empty",
-                    source.subagent_id,
-                ));
-            }
+        let timeline = &resolved.validated.timeline;
+        if timeline.surface().is_empty() {
+            return BootstrapInitialContext::Abort(format!(
+                "Cannot resume from subagent '{}': source Surface is empty",
+                source.subagent_id,
+            ));
+        }
+        let conversation = timeline.surface().to_vec();
+        let source_ref = chat_state::TimelineRangeRef {
+            timeline_id: source.child_session_id.clone(),
+            first_seq: 0,
+            last_seq: timeline
+                .events()
+                .last()
+                .expect("nonempty Surface has an event")
+                .seq
+                .get(),
+        };
+        let history = match resolved.validated.history.prepare(
+            &acp::SessionId::new(source.child_session_id.clone()),
+            timeline,
+            None,
+        ) {
+            Ok(history) => history,
             Err(error) => {
                 return BootstrapInitialContext::Abort(format!(
-                    "Cannot resume from subagent '{}': failed to materialize source Timeline: \
-                     {error}",
+                    "Cannot resume from subagent '{}': source history projection failed: {error}",
                     source.subagent_id,
                 ));
             }
         };
-        let conversation = materialized.surface;
         let estimated_tokens = chat_state::estimate_conversation_tokens(&conversation);
         const SAFE_RESUME_PERCENT: u64 = 80;
         let threshold = child_context_window * SAFE_RESUME_PERCENT / 100;
@@ -1371,10 +1388,12 @@ async fn bootstrap_initial_context(
             estimated_tokens,
             "Materialized frozen resume source without publishing the child session"
         );
-        return match freeze_initial_prompt_blobs(
-            resume_initial_context_with_ref(conversation, materialized.input_ref),
-            Some(resolved.session.directory()),
-        ) {
+        let mut context = resume_initial_context_with_ref(conversation, source_ref);
+        context.presentation = crate::session::history::SeedPresentation::for_resume(
+            timeline.surface_ids().to_vec(),
+            history.updates,
+        );
+        return match freeze_initial_prompt_blobs(context, Some(resolved.session.directory())) {
             Ok(context) => BootstrapInitialContext::Ready(context),
             Err(error) => BootstrapInitialContext::Abort(error),
         };
@@ -1386,6 +1405,7 @@ async fn bootstrap_initial_context(
             prefix_len: None,
             conversation: vec![],
             prompt_blobs: Default::default(),
+            presentation: Default::default(),
             verbatim_fork: false,
         });
     }
@@ -1613,9 +1633,9 @@ fn durable_resume_source_for(
     }
     let child = child_session
         .validated_timeline(&spawn.child_session_id)
-        .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?
-        .timeline;
+        .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?;
     child
+        .timeline
         .validate_subagent_result_link(parent_session_id, spawn_seq, spawn, terminal)
         .map_err(|error| DurableResumeSourceError::ResultLink(error.to_string()))?;
     let mut data = resume_source_from_facts(spawn, terminal);
@@ -1623,6 +1643,7 @@ fn durable_resume_source_for(
     Ok(DurableResumeSource {
         data,
         session: child_session,
+        validated: child,
     })
 }
 
@@ -1691,6 +1712,7 @@ fn resume_security_parent_allows(
 struct DurableResumeSource {
     data: ResumeSourceData,
     session: crate::session::storage::jsonl::OpenedSession,
+    validated: crate::session::storage::jsonl::ValidatedTimeline,
 }
 
 impl std::ops::Deref for DurableResumeSource {
@@ -1771,6 +1793,27 @@ fn resume_source_from_timeline(
 ///
 /// Returns `None` when there is no parent pool or `inheritance` is
 /// [`McpInheritance::None`] (avoids an empty import call downstream).
+/// One transport sample supplies both the parent's ceiling check and the
+/// child's durable creation grant. A second live read could admit a replacement.
+fn freeze_child_mcp_grant(
+    pool: &mut crate::session::mcp_servers::SharedMcpPool,
+    ceiling: Option<&crate::session::subagent_capability::DelegableCapabilityCeiling>,
+) {
+    pool.freeze_current_clients();
+    if let Some(ceiling) = ceiling {
+        let allowed = pool
+            .client_bindings()
+            .into_iter()
+            .filter_map(|(server, client_id)| {
+                ceiling
+                    .permits_mcp_binding(&server, client_id)
+                    .then_some(server)
+            })
+            .collect::<Vec<_>>();
+        pool.restrict_to_servers(allowed);
+    }
+}
+
 fn resolve_inherited_mcp_pool(
     parent_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     inheritance: &agent::config::McpInheritance,
@@ -2396,6 +2439,18 @@ fn progress_tick_should_emit(
 ) -> bool {
     cur != prev || heartbeat_due
 }
+fn progress_from_signals(signals: &crate::session::signals::SessionSignals) -> SubagentProgress {
+    SubagentProgress {
+        turn_count: signals.turn_count,
+        tool_call_count: signals.tool_call_count,
+        tokens_used: signals.context_tokens_used,
+        context_window_tokens: signals.context_window_tokens,
+        context_usage_pct: signals.context_window_usage,
+        tools_used: signals.tools_used.clone(),
+        error_count: signals.error_count,
+    }
+}
+
 /// Spawn a background task that periodically emits `SubagentProgress`
 /// notifications on the parent session's notification channel.
 ///
@@ -2423,25 +2478,29 @@ fn spawn_progress_publisher(
         let mut last_signature: ProgressSignature = (0, 0, 0, 0, 0);
         let mut last_emit_at = tokio::time::Instant::now();
         let heartbeat_max = tokio::time::Duration::from_secs(8);
+        let mut delivery: Option<oneshot::Receiver<_>> = None;
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => break,
+                _ = async { delivery.as_mut().unwrap().await }, if delivery.is_some() => {
+                    delivery = None;
+                    continue;
+                }
                 _ = interval.tick() => {}
             }
-            let signals = match signals_handle.snapshot().await {
-                Some(s) => s,
-                None => break,
+            let signals = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => break,
+                signals = signals_handle.snapshot() => match signals {
+                    Some(signals) => signals,
+                    None => break,
+                },
             };
             if let Ok(mut latest) = progress_snapshot.write() {
-                *latest = Some(SubagentProgress {
-                    turn_count: signals.turn_count,
-                    tool_call_count: signals.tool_call_count,
-                    tokens_used: signals.context_tokens_used,
-                    context_window_tokens: signals.context_window_tokens,
-                    context_usage_pct: signals.context_window_usage,
-                    tools_used: signals.tools_used.clone(),
-                    error_count: signals.error_count,
-                });
+                *latest = Some(progress_from_signals(&signals));
+            }
+            if delivery.is_some() {
+                continue;
             }
             let sig: ProgressSignature = (
                 signals.turn_count,
@@ -2481,18 +2540,17 @@ fn spawn_progress_publisher(
             if let Some(params) = params {
                 let ext_notification =
                     acp::ExtNotification::new("grow/session_notification", params.into());
-                let completed = gateway.forward_with_completion(ext_notification);
-                tokio::select! {
-                    _ = cancel_token.cancelled() => break,
-                    _ = completed => {}
-                }
+                delivery = Some(gateway.forward_with_completion(ext_notification));
             }
         }
     });
 }
 #[cfg(test)]
 mod progress_publisher_tests {
-    use super::{ProgressSignature, progress_tick_should_emit, spawn_progress_publisher};
+    use super::{
+        ProgressSignature, SessionNotification, SessionUpdate, progress_tick_should_emit,
+        spawn_progress_publisher,
+    };
     use std::sync::Arc;
     const BASE: ProgressSignature = (3, 7, 12, 0, 30_000);
     #[test]
@@ -2510,16 +2568,58 @@ mod progress_publisher_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stalled_gateway_keeps_only_one_progress_delivery() {
+    async fn cancellation_releases_progress_owner_while_signals_actor_is_unresponsive() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (signals, stalled_actor) = crate::session::signals::SessionSignalsActor::new();
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let progress = Arc::new(std::sync::RwLock::new(None));
+                let weak = Arc::downgrade(&progress);
+                spawn_progress_publisher(
+                    signals,
+                    progress.clone(),
+                    acp_transport::AcpAgentGatewaySender::new(gateway_tx),
+                    "parent".into(),
+                    "subagent".into(),
+                    "child".into(),
+                    std::time::Instant::now(),
+                    cancel.clone(),
+                );
+                tokio::task::yield_now().await;
+                tokio::time::advance(std::time::Duration::from_secs(2)).await;
+                tokio::task::yield_now().await;
+                assert!(progress.read().unwrap().is_none());
+                drop(progress);
+                assert!(
+                    weak.upgrade().is_some(),
+                    "publisher owns the pending snapshot wait"
+                );
+                cancel.cancel();
+                tokio::task::yield_now().await;
+                assert!(
+                    weak.upgrade().is_none(),
+                    "cancellation must release the publisher without a signals ACK"
+                );
+                assert!(gateway_rx.try_recv().is_err());
+                // Keep the receiver alive until after the cancellation assertions.
+                drop(stalled_actor);
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_gateway_keeps_local_progress_current_with_one_delivery() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let signals = crate::session::signals::SessionSignalsHandle::new();
                 let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
                 let gateway = acp_transport::AcpAgentGatewaySender::new(gateway_tx);
                 let cancel = tokio_util::sync::CancellationToken::new();
+                let progress = Arc::new(std::sync::RwLock::new(None));
                 spawn_progress_publisher(
                     signals.clone(),
-                    Arc::new(std::sync::RwLock::new(None)),
+                    progress.clone(),
                     gateway,
                     "parent".into(),
                     "subagent".into(),
@@ -2532,12 +2632,38 @@ mod progress_publisher_tests {
                 tokio::time::advance(std::time::Duration::from_secs(2)).await;
                 tokio::task::yield_now().await;
                 let first = gateway_rx.recv().await.unwrap();
+                assert_eq!(progress.read().unwrap().as_ref().unwrap().turn_count, 1);
                 signals.increment_turn();
                 tokio::time::advance(std::time::Duration::from_secs(6)).await;
+                signals.snapshot().await.unwrap();
                 tokio::task::yield_now().await;
+                assert_eq!(progress.read().unwrap().as_ref().unwrap().turn_count, 2);
                 assert!(gateway_rx.try_recv().is_err());
+                let acp_transport::AcpClientMessage::ExtNotification(first) = first else {
+                    panic!("expected progress notification");
+                };
+                first.response_tx.send(Ok(())).unwrap();
+                tokio::task::yield_now().await;
+                tokio::time::advance(std::time::Duration::from_secs(2)).await;
+                let acp_transport::AcpClientMessage::ExtNotification(mut second) =
+                    gateway_rx.recv().await.unwrap()
+                else {
+                    panic!("expected latest progress notification");
+                };
+                let notification: SessionNotification =
+                    serde_json::from_str(second.request.params.get()).unwrap();
+                assert!(matches!(
+                    notification.update,
+                    SessionUpdate::SubagentProgress { turn_count: 2, .. }
+                ));
                 cancel.cancel();
-                drop(first);
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    second.response_tx.closed(),
+                )
+                .await
+                .expect("cancelled publisher must release its pending delivery");
+                assert!(second.response_tx.is_closed());
             })
             .await;
     }
@@ -3159,7 +3285,11 @@ fn result_from_inspection(
                 0,
                 None,
             ),
-            Some(SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. }) => {
+            Some(
+                SubagentSnapshotStatus::Initializing
+                | SubagentSnapshotStatus::Running { .. }
+                | SubagentSnapshotStatus::RunningProgressUnavailable,
+            ) => {
                 unreachable!("running inspections are filtered before recovery")
             }
             None => (

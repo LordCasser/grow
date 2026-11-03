@@ -2,6 +2,7 @@
 use super::*;
 use crate::app::root::InputOutcome;
 use crate::app::root::dispatch::queue::maybe_drain_queue;
+use crate::app::root::dispatch::session::lifecycle::dispatch_exit_session;
 #[test]
 fn resolve_location_input_expands_and_joins() {
     let cwd = PathBuf::from("/work/dir");
@@ -323,7 +324,7 @@ fn dashboard_toggle_worktree_outside_git_repo_is_noop_with_toast() {
         "a toast must explain why the toggle is unavailable",
     );
 }
-/// `[+ New Agent]` with worktree mode armed opens the worktree-label
+/// `[+ New session]` with worktree mode armed opens the worktree-label
 /// dialog instead of creating a plain session (no prompt stashed).
 #[test]
 fn dashboard_create_new_agent_with_worktree_mode_opens_dialog() {
@@ -393,7 +394,7 @@ fn dashboard_dispatch_with_worktree_mode_stashes_prompt_and_opens_dialog() {
     );
 }
 /// Confirming the worktree dialog with `attach` set (Ctrl+S / the
-/// `[+ New Agent]` button) creates a worktree session, replays the stashed
+/// `[+ New session]` button) creates a worktree session, replays the stashed
 /// prompt, and opens the new agent as the dashboard's detail view.
 #[test]
 fn dashboard_confirm_worktree_creates_session_with_prompt() {
@@ -781,111 +782,6 @@ fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
         entry.images.len(),
         1,
         "the dispatched prompt carries the pasted image"
-    );
-}
-/// Per-surface stashes: a dispatch send AND a peek reply stashed during the
-/// same probe window must both survive (the old single slot let the second
-/// stash silently overwrite the first) and both re-issue on completion —
-/// dispatch first, then peek.
-#[test]
-fn dashboard_second_stash_does_not_overwrite_first() {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    let mut app = test_app_with_agent();
-    app.project_picker_shown = true;
-    open_dashboard(&mut app);
-    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
-    let fields = crate::views::dashboard::peek::compute_peek_fields(
-        &row,
-        &app.agents,
-        std::time::Instant::now(),
-    )
-    .expect("agent must be peekable");
-    if let Some(d) = app.dashboard.as_mut() {
-        d.focus_row(row.clone());
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            row.clone(),
-            fields,
-        ));
-        d.dispatch.set_text("spawn a fixer");
-        d.peek_reply.set_text("please look");
-    }
-    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook::with_raster(
-        None,
-    ));
-    let mut input_effects: Vec<Effect> = Vec::new();
-    {
-        let reg = crate::actions::ActionRegistry::defaults();
-        let d = app.dashboard.as_mut().unwrap();
-        let _ = d.handle_input_with_paste_provenance(
-            &Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
-            &reg,
-            PasteProvenance::Terminal,
-            &mut input_effects,
-        );
-    }
-    let ctx = input_effects
-        .iter()
-        .find_map(|e| match e {
-            Effect::ProbeClipboardAttachment { ctx, .. } => Some(ctx.clone()),
-            _ => None,
-        })
-        .expect("Cmd+V of an image must defer a probe");
-    crate::clipboard::clear_clipboard_probe_hook();
-    let effects = dispatch(
-        Action::DashboardDispatch {
-            text: "spawn a fixer".into(),
-            attach: false,
-        },
-        &mut app,
-    );
-    assert!(effects.is_empty());
-    let effects = dispatch(
-        Action::DashboardPeekReply {
-            row: row.clone(),
-            text: "please look".into(),
-            attach: false,
-        },
-        &mut app,
-    );
-    assert!(effects.is_empty());
-    {
-        let d = app.dashboard.as_ref().unwrap();
-        assert!(
-            d.deferred_dispatch_send.is_some() && d.deferred_peek_send.is_some(),
-            "each surface keeps its own stash"
-        );
-    }
-    let before = app.agents.len();
-    let pasted = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
-        data: vec![1, 2, 3],
-        mime_type: "image/png".into(),
-    });
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ClipboardAttachmentProbed {
-            ctx,
-            image: crate::app::actions::ProbedAttachment::Image(pasted),
-            file_urls: None,
-        }),
-        &mut app,
-    );
-    let d = app.dashboard.as_ref().unwrap();
-    assert!(d.deferred_dispatch_send.is_none() && d.deferred_peek_send.is_none());
-    assert_eq!(
-        app.agents.len(),
-        before + 1,
-        "the stashed dispatch spawned its session"
-    );
-    let reply_sent = effects.iter().any(|e| {
-        matches!(
-            e,
-            Effect::SendPromptBlocks { agent_id, images, .. }
-                if *agent_id == AgentId(0)
-                    && !images.is_empty()
-        )
-    });
-    assert!(
-        reply_sent,
-        "the stashed peek reply must reach the peeked agent with the image; effects = {effects:?}"
     );
 }
 /// Leader-mode independence: opening the dashboard works even when NOT in
@@ -1554,7 +1450,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     );
     assert!(agent.session.effective_plan_mode());
 }
-/// The `[+ New Agent]` button path (`DashboardCreateNewAgentWithDetail`,
+/// The `[+ New session]` button path (`DashboardCreateNewAgentWithDetail`,
 /// no queued prompt) applies the same staged model + mode as the dispatch
 /// path: the model id threads into `CreateSession`, the effort is stashed
 /// as a deferred switch, and plan mode is deferred + optimistic.
@@ -2150,7 +2046,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
 /// pressing Enter on its row.
 ///
 /// Opening from an agent now lands in NEW-SESSION mode (the
-/// `[+ New Agent]` button focused, no row selected) so typing +
+/// `[+ New session]` button focused, no row selected) so typing +
 /// Enter dispatches a brand new agent. Previously the dashboard
 /// pre-seeded `selected` to the came-from agent, which armed reply
 /// mode and trapped the user replying to that one agent.
@@ -2175,14 +2071,14 @@ fn dashboard_open_does_not_auto_attach_to_focused_agent() {
     );
     assert!(
         d.new_agent_button_focused,
-        "open must default to the `[+ New Agent]` button (new-session mode)",
+        "open must default to the `[+ New session]` button (new-session mode)",
     );
     assert!(
         d.list_focused,
         "open with agents must list-focus for navigation",
     );
 }
-/// Open with ≥1 agent → overview list focused (nav mode); `[+ New Agent]`
+/// Open with ≥1 agent → overview list focused (nav mode); `[+ New session]`
 /// stays the cursor target so no row is pre-selected (no silent reply mode).
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
@@ -2257,7 +2153,7 @@ fn dashboard_dispatch_after_open_from_agent_spawns_new_sessions() {
         "rapid dispatch must keep spawning new agents",
     );
 }
-/// Opening from Welcome leaves the `[+ New Agent]`
+/// Opening from Welcome leaves the `[+ New session]`
 /// button as the default focus. Previously the dashboard
 /// seeded selection to the first agent so Enter would attach
 /// without navigating; with the button taking that role,
@@ -2282,7 +2178,7 @@ fn dashboard_open_from_welcome_focuses_new_agent_button() {
     );
     assert!(
         d.new_agent_button_focused,
-        "the `[+ New Agent]` button must be focused as the default",
+        "the `[+ New session]` button must be focused as the default",
     );
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -2349,6 +2245,21 @@ fn insert_second_agent(app: &mut AppView) -> AgentId {
     app.agents.insert(id, agent);
     mark_agent_nonempty(app, id);
     id
+}
+
+#[test]
+fn dashboard_overlay_exit_clears_session_command_prefix() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    app.agents.get_mut(&id).unwrap().leader_key_started_at = Some(Instant::now());
+    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    assert!(app.agents[&id].leader_key_started_at.is_none());
+    assert_eq!(app.active_view, ActiveView::AgentDashboard);
 }
 /// Multi-agent: Ctrl+\ out of the dashboard restores the agent we left,
 /// not insertion-order first (empty older sessions under leader mode).
@@ -2486,80 +2397,189 @@ fn dashboard_overlay_exit_returns_to_dashboard() {
     assert!(matches!(app.active_view, ActiveView::AgentDashboard));
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
 }
-/// Overlay Ctrl+X (confirmed second press) — `DashboardOverlayStop`
-/// closes the attached session and lands on the DASHBOARD, not on
-/// the fallback agent the generic close path would pick while the
-/// closed agent is the active view.
+/// Runtime acknowledgement, not the confirmation key, retires the view.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_overlay_stop_closes_session_and_returns_to_dashboard() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
-    let id2 = AgentId(1);
-    let session2 = make_test_agent_session(&app, id2, "second");
-    let mut agent2 = AgentView::new(session2, ScrollbackState::new());
-    agent2.generated_session_title = Some("Second".into());
-    app.agents.insert(id2, agent2);
+    let peer = insert_second_agent(&mut app);
     open_dashboard(&mut app);
     let id = AgentId(0);
-    let _ = dispatch_dashboard_attach(
+    dispatch_dashboard_attach(
         &mut app,
         crate::views::dashboard::DashboardRowId::TopLevel(id),
     );
-    assert!(matches!(app.active_view, ActiveView::Agent(a) if a == id));
-    let effects = dispatch_dashboard_overlay_stop(&mut app);
-    assert!(
-        matches!(app.active_view, ActiveView::AgentDashboard),
-        "confirmed overlay stop must land on the dashboard, got {:?}",
-        app.active_view,
+    let effects = dispatch_close_current_session(&mut app);
+    let [
+        Effect::CloseSession {
+            agent_id,
+            session_id,
+            binding_epoch,
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected runtime close, got {effects:?}");
+    };
+    let (agent_id, session_id, binding_epoch) = (*agent_id, session_id.clone(), *binding_epoch);
+    assert_eq!(app.active_view, ActiveView::Agent(id));
+    assert!(app.agents.contains_key(&id));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionCloseResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            result: Ok(()),
+        }),
+        &mut app,
     );
+    assert_eq!(app.active_view, ActiveView::AgentDashboard);
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
-    assert!(
-        !app.agents.contains_key(&id),
-        "the attached session must be closed",
-    );
+    assert!(!app.agents.contains_key(&id));
+    assert!(app.agents.contains_key(&peer));
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::UnregisterActiveSession { .. })),
-        "close must unregister the session from the leader roster",
+            .any(|e| matches!(e, Effect::UnregisterActiveSession { .. }))
     );
     assert_eq!(
         app.dashboard.as_ref().unwrap().feedback.as_deref(),
-        Some("Session closed"),
+        Some("Session closed")
     );
 }
-/// Overlay stop on the ONLY session: the close is refused (same
-/// guard as session close), but the user still lands on the
-/// dashboard with the refusal toast surfaced there — the session
-/// itself survives.
+
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_overlay_stop_only_session_refused_lands_on_dashboard() {
+fn dashboard_overlay_stop_closes_last_session_only_after_ack() {
     let mut app = test_app_with_agent();
-    mark_agent_nonempty(&mut app, AgentId(0));
-    open_dashboard(&mut app);
     let id = AgentId(0);
-    let _ = dispatch_dashboard_attach(
+    mark_agent_nonempty(&mut app, id);
+    open_dashboard(&mut app);
+    dispatch_dashboard_attach(
         &mut app,
         crate::views::dashboard::DashboardRowId::TopLevel(id),
     );
-    let effects = dispatch_dashboard_overlay_stop(&mut app);
-    assert!(effects.is_empty(), "refused close must produce no effects");
-    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
-    assert!(
-        app.agents.contains_key(&id),
-        "the only session must survive the refused close",
+    let effects = dispatch_close_current_session(&mut app);
+    let [
+        Effect::CloseSession {
+            agent_id,
+            session_id,
+            binding_epoch,
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(app.agents.len(), 1);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCloseResolved {
+            agent_id: *agent_id,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            result: Ok(()),
+        }),
+        &mut app,
     );
+    assert!(app.agents.is_empty());
+    assert_eq!(app.active_view, ActiveView::AgentDashboard);
+    assert!(app.dashboard.as_ref().unwrap().selected.is_none());
+}
+
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_close_failure_retains_binding_and_retry_does_not_delete() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    mark_agent_nonempty(&mut app, id);
+    open_dashboard(&mut app);
+    dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_text("unsent draft");
+    let effects = dispatch_close_current_session(&mut app);
+    let [
+        Effect::CloseSession {
+            session_id,
+            binding_epoch,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("{effects:?}");
+    };
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCloseResolved {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            result: Err("writer still exiting".into()),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.active_view, ActiveView::Agent(id));
+    assert_eq!(app.agents[&id].prompt.text(), "unsent draft");
+    assert!(!app.agents[&id].session.state.is_idle());
     assert!(
-        app.dashboard
+        app.agents[&id]
+            .toast
             .as_ref()
             .unwrap()
-            .feedback
-            .as_deref()
-            .is_some_and(|t| t.contains("Cannot close")),
-        "the refusal toast must surface on the dashboard",
+            .0
+            .contains("Retry close")
     );
+    dispatch_dashboard_overlay_exit(&mut app);
+    dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    let retry = dispatch_close_current_session(&mut app);
+    assert!(matches!(retry.as_slice(), [Effect::CloseSession { .. }]));
+}
+
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_close_late_ack_cannot_retire_rebound_view() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    mark_agent_nonempty(&mut app, id);
+    open_dashboard(&mut app);
+    dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    let effects = dispatch_close_current_session(&mut app);
+    let [
+        Effect::CloseSession {
+            session_id,
+            binding_epoch,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("{effects:?}");
+    };
+    // ABA: even the same logical id can now belong to a new binding.
+    app.agents.get_mut(&id).unwrap().unbind_session_id();
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id(session_id.clone());
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCloseResolved {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert!(app.agents.contains_key(&id));
+    assert_eq!(app.active_view, ActiveView::Agent(id));
 }
 /// The close confirm is armed while idle, but a turn can start
 /// inside the 2s window (queue drain, a sent prompt). The
@@ -2581,7 +2601,7 @@ fn dashboard_overlay_stop_busy_agent_cancels_instead_of_closing() {
         crate::views::dashboard::DashboardRowId::TopLevel(id),
     );
     app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
-    let effects = dispatch_dashboard_overlay_stop(&mut app);
+    let effects = dispatch_stop_session_work(&mut app);
     assert!(
         effects
             .iter()
@@ -2625,7 +2645,7 @@ fn dashboard_overlay_stop_compact_running_cancels() {
         started_at: std::time::Instant::now(),
     };
     app.agents.get_mut(&id).unwrap().session.session_id = Some(acp::SessionId::new("sess-compact"));
-    let effects = dispatch_dashboard_overlay_stop(&mut app);
+    let effects = dispatch_stop_session_work(&mut app);
     assert!(
         app.agents.contains_key(&id),
         "stop during /compact must not close the session",
@@ -2654,61 +2674,52 @@ fn dashboard_overlay_stop_compact_running_cancels() {
 /// left alone.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_overlay_mouse_exit_and_cycle_disarm_pending_stop() {
-    use crate::app::root::PendingAction;
-    let arm = |app: &mut AppView| {
-        app.pending_action = Some(PendingAction::new(
-            Action::DashboardOverlayStop,
-            crate::key!('x', CONTROL),
-            "close this session",
-        ));
-    };
+fn dashboard_mouse_navigation_clears_root_and_child_command_prefixes() {
     let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let peer = insert_second_agent(&mut app);
     open_dashboard(&mut app);
-    let _ = dispatch_dashboard_attach(
+    dispatch_dashboard_attach(
         &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
     );
-    arm(&mut app);
-    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    app.agents.get_mut(&id).unwrap().leader_key_started_at = Some(Instant::now());
+    let child = AgentView::new(
+        make_test_agent_session(&app, AgentId(9), "prefix-child"),
+        ScrollbackState::new(),
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .subagent_views
+        .insert("prefix-child".into(), Box::new(child));
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.active_subagent = Some("prefix-child".into());
+        agent
+            .subagent_views
+            .get_mut("prefix-child")
+            .unwrap()
+            .leader_key_started_at = Some(Instant::now());
+    }
+    dispatch_dashboard_overlay_exit(&mut app);
+    assert!(app.agents[&id].leader_key_started_at.is_none());
     assert!(
-        app.pending_action.is_none(),
-        "mouse overlay exit must disarm the pending stop",
+        app.agents[&id].subagent_views["prefix-child"]
+            .leader_key_started_at
+            .is_none()
     );
-    let mut app = test_app_with_agent();
-    mark_agent_nonempty(&mut app, AgentId(0));
-    let id2 = AgentId(1);
-    let session2 = make_test_agent_session(&app, id2, "second");
-    let mut agent2 = AgentView::new(session2, ScrollbackState::new());
-    agent2.generated_session_title = Some("Second".into());
-    app.agents.insert(id2, agent2);
-    open_dashboard(&mut app);
-    let _ = dispatch_dashboard_attach(
+    dispatch_dashboard_attach(
         &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
     );
-    arm(&mut app);
-    let _ = dispatch_dashboard_overlay_cycle(&mut app, 1);
-    assert!(
-        app.pending_action.is_none(),
-        "cycling to another agent must disarm the pending stop",
-    );
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let _ = dispatch_dashboard_attach(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-    );
-    app.pending_action = Some(PendingAction::new(
-        Action::Quit,
-        crate::key!('q', CONTROL),
-        "quit",
-    ));
-    let _ = dispatch_dashboard_overlay_exit(&mut app);
-    assert!(
-        app.pending_action.is_some(),
-        "an unrelated pending action must NOT be cleared by overlay exit",
-    );
+    app.agents.get_mut(&id).unwrap().leader_key_started_at = Some(Instant::now());
+    dispatch_dashboard_overlay_cycle(&mut app, 1);
+    assert_eq!(app.active_view, ActiveView::Agent(peer));
+    assert!(app.agents[&id].leader_key_started_at.is_none());
+    app.agents.get_mut(&peer).unwrap().leader_key_started_at = Some(Instant::now());
+    switch_to_agent(&mut app, id, SwitchCause::Picker);
+    assert!(app.agents[&peer].leader_key_started_at.is_none());
 }
 /// `DashboardOverlayPrev` / `DashboardOverlayNext`
 /// cycle through the agent map in insertion order, wrapping at
@@ -2744,7 +2755,7 @@ fn dashboard_overlay_cycle_wraps_through_agents() {
 /// can clear the filter to reach the other agent.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_overlay_cycle_respects_filter() {
+fn dashboard_overlay_cycle_ignores_overview_filter() {
     let mut app = test_app_with_agent();
     let id2 = AgentId(1);
     let session2 = make_test_agent_session(&app, id2, "filtered-out");
@@ -2763,8 +2774,8 @@ fn dashboard_overlay_cycle_respects_filter() {
     let _ = dispatch_dashboard_overlay_cycle(&mut app, 1);
     assert_eq!(
         app.dashboard.as_ref().unwrap().attached_agent,
-        Some(id1),
-        "cycle through a filter that hides all rows must NOT walk",
+        Some(id2),
+        "overview filtering must not change open-session navigation",
     );
 }
 /// `overlay_cycle_order` returns top-level agents in the
@@ -2779,7 +2790,7 @@ fn dashboard_overlay_cycle_respects_filter() {
 /// group ordering.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_overlay_cycle_order_matches_visible_rows() {
+fn dashboard_overlay_cycle_order_is_open_order_even_after_pinning() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
     let id2 = AgentId(1);
@@ -2793,12 +2804,11 @@ fn dashboard_overlay_cycle_order_matches_visible_rows() {
     agent3.generated_session_title = Some("Agent 3".into());
     app.agents.insert(id3, agent3);
     open_dashboard(&mut app);
-    let d = app.dashboard.as_ref().unwrap();
-    let order = crate::views::dashboard::overlay_cycle_order(d, &app.agents);
+    let order = crate::views::dashboard::overlay_cycle_order(&app.agents);
     assert_eq!(
         order,
-        vec![AgentId(2), AgentId(1), AgentId(0)],
-        "cycle order must match visible row order (most-recently-active first)",
+        vec![AgentId(0), AgentId(1), AgentId(2)],
+        "cycle order follows open-session insertion order",
     );
     if let Some(d) = app.dashboard.as_mut() {
         d.pinned
@@ -2806,12 +2816,11 @@ fn dashboard_overlay_cycle_order_matches_visible_rows() {
                 0,
             )));
     }
-    let d = app.dashboard.as_ref().unwrap();
-    let order = crate::views::dashboard::overlay_cycle_order(d, &app.agents);
+    let order = crate::views::dashboard::overlay_cycle_order(&app.agents);
     assert_eq!(
         order,
-        vec![AgentId(0), AgentId(2), AgentId(1)],
-        "pinned rows must lead the cycle order, just like the visible list",
+        vec![AgentId(0), AgentId(1), AgentId(2)],
+        "pinning changes only the overview",
     );
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -2832,9 +2841,8 @@ fn dashboard_overlay_cycle_anchors_on_visible_agent_not_stale_attach() {
     agent3.generated_session_title = Some("Agent 3".into());
     app.agents.insert(id3, agent3);
     open_dashboard(&mut app);
-    let d = app.dashboard.as_ref().unwrap();
-    let order = crate::views::dashboard::overlay_cycle_order(d, &app.agents);
-    assert_eq!(order, vec![AgentId(2), AgentId(1), AgentId(0)]);
+    let order = crate::views::dashboard::overlay_cycle_order(&app.agents);
+    assert_eq!(order, vec![AgentId(0), AgentId(1), AgentId(2)]);
     let _ = dispatch_dashboard_attach(
         &mut app,
         crate::views::dashboard::DashboardRowId::TopLevel(order[0]),
@@ -3100,7 +3108,7 @@ fn dashboard_overlay_cycle_non_overlay_noop_when_dashboard_disabled() {
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_overlay_cycle_non_overlay_noop_when_current_agent_hidden() {
+fn dashboard_overlay_cycle_keeps_blank_current_agent_reachable() {
     let mut app = test_app_with_agent();
     let current = AgentId(0);
     let id1 = AgentId(1);
@@ -3115,23 +3123,22 @@ fn dashboard_overlay_cycle_non_overlay_noop_when_current_agent_hidden() {
     app.agents.insert(id2, agent2);
     app.active_view = ActiveView::Agent(current);
     ensure_dashboard_state(&mut app);
-    let order =
-        crate::views::dashboard::overlay_cycle_order(app.dashboard.as_ref().unwrap(), &app.agents);
+    let order = crate::views::dashboard::overlay_cycle_order(&app.agents);
     assert_eq!(
         order,
-        vec![id2, id1],
-        "precondition: the empty current agent is hidden from the visible order",
+        vec![current, id1, id2],
+        "precondition: blank open sessions are included",
     );
     let _ = dispatch_dashboard_overlay_cycle(&mut app, 1);
     assert!(
-        matches!(app.active_view, ActiveView::Agent(a) if a == current),
-        "cycle must not jump to a random row when the current agent is filtered out, got {:?}",
+        matches!(app.active_view, ActiveView::Agent(a) if a == id1),
+        "cycle follows stable open order even for a blank current agent, got {:?}",
         app.active_view,
     );
     assert_eq!(
         app.dashboard.as_ref().and_then(|d| d.attached_agent),
-        None,
-        "a filtered-out current agent must not attach overlay chrome",
+        Some(id1),
+        "a real switch opens the neighboring session",
     );
 }
 /// End-to-end rename flow: begin rename ->
@@ -3323,6 +3330,7 @@ fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: true,
             caption: Some(CAPTION),
         }),
+        None,
     );
     assert!(
         state.pinned_promo_cta_live,
@@ -3378,6 +3386,7 @@ fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: true,
             caption: None,
         }),
+        None,
     );
     assert!(state.pinned_promo_cta_live);
     let rect = state
@@ -3406,6 +3415,7 @@ fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: false,
             caption: Some(CAPTION),
         }),
+        None,
     );
     assert!(!state.pinned_promo_cta_live);
     let rect = state
@@ -3441,6 +3451,7 @@ fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
+        None,
         None,
     );
     assert!(state.promo_cta_hit.rect.is_none());
@@ -3552,9 +3563,9 @@ fn dashboard_stop_double_press_deletes_top_level() {
     if let Some(d) = app.dashboard.as_mut() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
     }
-    let _ = dispatch_dashboard_stop(&mut app);
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
-    let effects = dispatch_dashboard_stop(&mut app);
+    let _ = dispatch_dashboard_delete(&mut app);
+    assert!(app.session_deletion.is_some());
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
     assert!(matches!(
         effects.last(),
         Some(crate::app::actions::Effect::DeleteSession { .. })
@@ -3582,8 +3593,8 @@ fn dashboard_stop_moves_selection_down_one() {
     if let Some(d) = app.dashboard.as_mut() {
         d.focus_row(first.clone());
     }
-    let _ = dispatch_dashboard_stop(&mut app);
-    let effects = dispatch_dashboard_stop(&mut app);
+    let _ = dispatch_dashboard_delete(&mut app);
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
     let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = &first else {
         panic!("first row should be top-level");
     };
@@ -3602,6 +3613,7 @@ fn dashboard_stop_moves_selection_down_one() {
     );
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &(session_id)),
             session_id,
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },
@@ -3631,8 +3643,8 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     if let Some(d) = app.dashboard.as_mut() {
         d.focus_row(last.clone());
     }
-    let _ = dispatch_dashboard_stop(&mut app);
-    let effects = dispatch_dashboard_stop(&mut app);
+    let _ = dispatch_dashboard_delete(&mut app);
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
     let crate::views::dashboard::DashboardRowId::TopLevel(last_id) = &last else {
         panic!("last row should be top-level");
     };
@@ -3648,6 +3660,7 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     ));
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &(session_id)),
             session_id,
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },
@@ -3655,38 +3668,6 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     );
     assert!(!app.agents.contains_key(last_id));
     assert_eq!(app.dashboard.as_ref().unwrap().selected, Some(prev));
-}
-/// First Ctrl+X must NOT plant transient feedback. The
-/// dispatch-input placeholder is reserved for the user's typing
-/// target — the footer's `ShortcutsBar::with_pending` already
-/// surfaces the "press Ctrl+X again to close this session"
-/// hint via `delete_confirm` and is the canonical place for it.
-/// Two copies of the same hint in two different surfaces
-/// confused the user (the prompt one stole visual weight).
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_stop_does_not_plant_feedback() {
-    let mut app = test_app();
-    let _ = dispatch_new_session_inner(&mut app, None);
-    let _ = dispatch_new_session_inner(&mut app, None);
-    open_dashboard(&mut app);
-    let target = *app.agents.keys().next().unwrap();
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
-    }
-    let _ = dispatch_dashboard_stop(&mut app);
-    let d = app.dashboard.as_ref().unwrap();
-    assert!(
-        d.delete_confirm.is_some(),
-        "first Ctrl+X on an idle row must arm delete_confirm (footer reads from this)",
-    );
-    assert!(
-        d.feedback.is_none(),
-        "first Ctrl+X must NOT set feedback — the footer hint is the \
-             canonical surface; toast in the dispatch input is duplication. \
-             Got: {:?}",
-        d.feedback,
-    );
 }
 /// `DashboardOpenShortcutsHelp` builds the modal state on
 /// `DashboardState`. Subsequent presses while the modal is
@@ -3795,7 +3776,7 @@ fn dashboard_focus_new_agent_button_action_clears_selection() {
     );
 }
 /// Up-arrow on the FIRST row hands focus over to the
-/// `[+ New Agent]` button — the button behaves as a virtual
+/// `[+ New session]` button — the button behaves as a virtual
 /// row at index -1 so the user can walk straight off the top
 /// of the list onto it without an extra Esc.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -3847,6 +3828,7 @@ fn dashboard_down_arrow_on_button_selects_first_focusable() {
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
         d.focus_new_agent_button();
+        d.grouping = crate::views::dashboard::Grouping::State;
     }
     let _ = dispatch(Action::DashboardSelectNext, &mut app);
     let d = app.dashboard.as_ref().unwrap();
@@ -4028,30 +4010,6 @@ fn extract_recent_lines_strips_ansi() {
     );
     assert!(out[0].contains("evil"));
 }
-/// A press > 2s after the first re-arms (does NOT close).
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_stop_double_press_after_2s_rearms() {
-    use std::time::{Duration, Instant};
-    let mut app = test_app();
-    let _ = dispatch_new_session_inner(&mut app, None);
-    let _ = dispatch_new_session_inner(&mut app, None);
-    open_dashboard(&mut app);
-    let target = *app.agents.keys().next().unwrap();
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
-    }
-    let _ = dispatch_dashboard_stop(&mut app);
-    if let Some(d) = app.dashboard.as_mut()
-        && let Some((_row, at)) = d.delete_confirm.as_mut()
-    {
-        *at = Instant::now() - Duration::from_secs(3);
-    }
-    let before_count = app.agents.len();
-    let _ = dispatch_dashboard_stop(&mut app);
-    assert_eq!(app.agents.len(), before_count);
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
-}
 /// Subagent Ctrl+X bypasses confirm and emits KillSubagent.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
@@ -4075,7 +4033,6 @@ fn dashboard_stop_subagent_emits_kill_subagent_effect() {
         effects.as_slice(),
         [Effect::KillSubagent { subagent_id, .. }] if subagent_id == "sa-xyz"
     ));
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
@@ -4087,6 +4044,7 @@ fn dashboard_delete_complete_returns_from_foreground_agent() {
     app.active_view = ActiveView::Agent(id);
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
+            bindings: session_delete_bindings(&app, &("sess-dash")),
             session_id: "sess-dash".into(),
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },
@@ -4110,10 +4068,9 @@ fn dashboard_stop_busy_roster_toasts_without_arming() {
     }
     assert!(dispatch_dashboard_stop(&mut app).is_empty());
     let d = app.dashboard.as_ref().unwrap();
-    assert!(d.delete_confirm.is_none());
     assert_eq!(
         d.feedback.as_deref(),
-        Some("Stop the session before deleting"),
+        Some("Open the session before stopping its work"),
     );
 }
 /// A busy top-level row: Ctrl+X cancels the turn and never arms delete.
@@ -4138,10 +4095,6 @@ fn dashboard_stop_busy_top_level_cancels_without_arming() {
         matches!(effects.as_slice(), [Effect::CancelTurn { .. }]),
         "busy top-level Ctrl+X must cancel the turn, got {effects:?}",
     );
-    assert!(
-        app.dashboard.as_ref().unwrap().delete_confirm.is_none(),
-        "busy top-level Ctrl+X must NOT arm delete",
-    );
     let effects = dispatch_dashboard_stop(&mut app);
     assert!(
         !effects
@@ -4150,6 +4103,156 @@ fn dashboard_stop_busy_top_level_cancels_without_arming() {
         "a busy row must never emit DeleteSession, got {effects:?}",
     );
     assert!(app.agents.contains_key(&target), "busy row must survive");
+}
+
+fn dashboard_stop_key(app: &mut AppView) -> Vec<Effect> {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let key = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    let mut effects = Vec::new();
+    if app.active_view == ActiveView::AgentDashboard {
+        let InputOutcome::ActionThenForward(action) = app.handle_input(&key) else {
+            panic!("overview opens the selected session");
+        };
+        effects.extend(dispatch(action, app));
+    }
+    assert!(matches!(app.handle_input(&key), InputOutcome::Changed));
+    let InputOutcome::Action(Action::StopSessionWork) = app.handle_input(&key) else {
+        panic!("repeat prefix stops work");
+    };
+    effects.extend(dispatch(Action::StopSessionWork, app));
+    effects
+}
+
+#[test]
+fn dashboard_stop_key_cancels_idle_root_children_and_pauses_its_goal() {
+    for with_goal in [false, true] {
+        let mut app = test_app_with_agent();
+        let target = AgentId(0);
+        let peer = insert_second_agent(&mut app);
+        app.agents
+            .get_mut(&peer)
+            .unwrap()
+            .prompt
+            .set_text("peer draft");
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.session.subagent_sessions.insert(
+            "stop-child".into(),
+            make_test_subagent("stop-child", "stop-task"),
+        );
+        if with_goal {
+            agent.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
+        }
+        open_dashboard(&mut app);
+        app.dashboard
+            .as_mut()
+            .unwrap()
+            .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(target));
+        for _ in 0..2 {
+            let effects = dashboard_stop_key(&mut app);
+            assert!(
+                matches!(effects.as_slice(), [Effect::CancelTurn { session_id, cancel_subagents: true, pause_goal, .. }]
+                if session_id.0.as_ref() == "test-session" && *pause_goal == with_goal),
+                "{effects:?}"
+            );
+        }
+        assert_eq!(app.agents[&peer].prompt.text(), "peer draft");
+        assert!(app.agents[&target].session.state.is_idle());
+    }
+}
+
+#[test]
+fn dashboard_stop_key_pauses_a_goal_without_a_foreground_turn() {
+    let mut app = test_app_with_agent();
+    let target = AgentId(0);
+    app.agents.get_mut(&target).unwrap().session.goal_state =
+        Some(crate::app::session::GoalDisplayState::test_stub());
+    open_dashboard(&mut app);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    let effects = dashboard_stop_key(&mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::ExecuteSlashCommand { agent_id, session_id, request }]
+        if *agent_id == target && session_id.0.as_ref() == "test-session" && request.command == "/goal pause"),
+        "{effects:?}"
+    );
+    assert_eq!(
+        crate::views::dashboard::classify_top_level(&app.agents[&target]),
+        crate::views::dashboard::RowState::Working
+    );
+}
+
+#[test]
+fn dashboard_stop_key_stops_active_workflow_through_its_run_identity() {
+    let mut app = test_app_with_agent();
+    let target = AgentId(0);
+    app.agents
+        .get_mut(&target)
+        .unwrap()
+        .prompt
+        .set_text("root draft");
+    app.agents
+        .get_mut(&target)
+        .unwrap()
+        .session
+        .workflow_runs
+        .push(crate::app::session::WorkflowRunSnapshot {
+            run_id: "wf-stop-id".into(),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
+            name: "display-name".into(),
+            objective: "work".into(),
+            status: "active".into(),
+            management_available: true,
+            phases: vec![],
+            current_phase: None,
+            agents: vec![],
+            agent_budget: None,
+            agents_used: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            active_agents: 0,
+            elapsed_ms: 0,
+            received_at: Instant::now(),
+            pause_message: None,
+            result_summary: None,
+        });
+    let mut terminal = app.agents[&target].session.workflow_runs[0].clone();
+    terminal.run_id = "wf-terminal".into();
+    terminal.status = "complete".into();
+    app.agents
+        .get_mut(&target)
+        .unwrap()
+        .session
+        .workflow_runs
+        .push(terminal);
+    open_dashboard(&mut app);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    let effects = dashboard_stop_key(&mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::ExecuteSlashCommand { agent_id, session_id, request }]
+        if *agent_id == target && session_id.0.as_ref() == "test-session" && request.command == "/workflow-run stop wf-stop-id"),
+        "{effects:?}"
+    );
+    assert_eq!(app.agents[&target].prompt.text(), "root draft");
+    assert_eq!(
+        app.agents[&target].session.workflow_runs[0].status,
+        "active"
+    );
+    app.agents.get_mut(&target).unwrap().session.workflow_runs[0].management_available = false;
+    assert!(dashboard_stop_key(&mut app).is_empty());
+    assert_eq!(
+        app.agents[&target]
+            .toast
+            .as_ref()
+            .map(|(message, _)| message.as_str()),
+        Some("Stop controls are unavailable; open session details")
+    );
 }
 /// A row that's `Working` only due to background work (turn idle, a
 /// scheduled `/loop` live): Ctrl+X stops the background work rather than
@@ -4197,7 +4300,6 @@ fn dashboard_stop_bg_work_row_stops_without_arming() {
         "must not delete a bg-work row, got {effects:?}",
     );
     let d = app.dashboard.as_ref().unwrap();
-    assert!(d.delete_confirm.is_none(), "must not arm delete");
     assert!(d.feedback.is_none(), "stopped work, so no feedback");
 }
 /// A row that's `Working` only because of a queued (unsent) prompt: Ctrl+X
@@ -4232,7 +4334,6 @@ fn dashboard_stop_queued_prompt_row_drops_queue_without_arming() {
         "the queued prompt must be dropped",
     );
     let d = app.dashboard.as_ref().unwrap();
-    assert!(d.delete_confirm.is_none(), "must not arm delete");
     assert!(d.feedback.is_none(), "dropped the queue, so no feedback");
 }
 /// The `y` / second-`[✗]` confirm re-checks deletability: a row that
@@ -4253,720 +4354,56 @@ fn dashboard_delete_confirm_rechecks_settled_row() {
     if let Some(d) = app.dashboard.as_mut() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
     }
-    let _ = dispatch_dashboard_stop(&mut app);
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
+    let _ = dispatch_dashboard_delete(&mut app);
+    assert!(app.session_deletion.is_some());
     app.agents.get_mut(&target).unwrap().session.state = AgentState::TurnRunning;
-    let effects = dispatch_dashboard_delete(&mut app);
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
     assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::DeleteSession { .. })),
         "a row that went busy between gestures must not delete, got {effects:?}",
     );
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().feedback.as_deref(),
-        Some("Stop the session before deleting"),
-    );
+    assert!(app.session_deletion.is_none());
 }
-/// A row with no session id toasts instead of emitting a delete.
+/// A settled local draft retires without emitting a storage deletion.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_delete_top_level_without_session_id_toasts() {
+fn dashboard_delete_without_history_keeps_local_draft() {
     let mut app = test_app();
     let _ = dispatch_new_session_inner(&mut app, None);
     let _ = dispatch_new_session_inner(&mut app, None);
     let target = *app.agents.keys().next().unwrap();
     app.agents.get_mut(&target).unwrap().session.session_id = None;
+    app.agents
+        .get_mut(&target)
+        .unwrap()
+        .session
+        .finish_command();
+    app.agents.get_mut(&target).unwrap().mark_turn_finished();
+    app.agents
+        .get_mut(&target)
+        .unwrap()
+        .session
+        .prompt_history_loading = false;
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
     }
-    let _ = dispatch_dashboard_stop(&mut app);
-    let effects = dispatch_dashboard_stop(&mut app);
+    let _ = dispatch_dashboard_delete(&mut app);
+    let effects = dispatch(Action::ConfirmSessionDelete, &mut app);
     assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::DeleteSession { .. })),
         "a row without a session id must not delete, got {effects:?}",
     );
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().feedback.as_deref(),
-        Some("No session history to delete"),
-    );
-}
-/// Happy path — matching ids → no panic, queue popped.
-/// Also assert the response was actually sent through
-/// the oneshot (not just popped). A regression that pops without
-/// sending the response would otherwise slip through this test.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_permission_select_happy_path() {
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    let mut rx = push_synthetic_permission(agent, 42, vec![("allow", "Allow")]);
-    open_dashboard(&mut app);
-    let _ = dispatch_dashboard_permission_select(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        42,
-        acp::PermissionOptionId::new(std::sync::Arc::from("allow")),
-    );
-    assert!(app.agents[&AgentId(0)].permission_queue.is_empty());
-    let resp = rx
-        .try_recv()
-        .expect("response oneshot must have a value after dispatch");
-    let resp = resp.expect("response must be Ok(RequestPermissionResponse)");
-    match resp.outcome {
-        acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome {
-            option_id,
-            ..
-        }) => {
-            assert_eq!(
-                option_id.0.as_ref(),
-                "allow",
-                "selected option_id must round-trip"
-            );
-        }
-        other => panic!("expected Selected outcome, got {other:?}"),
-    }
-}
-/// Stale request_id — refuses, sets toast, clears peek.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_permission_select_drops_stale_request() {
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    let _rx = push_synthetic_permission(agent, 99, vec![("allow", "Allow")]);
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            crate::views::dashboard::peek::PeekFields {
-                label: "label".into(),
-                time_ago: String::new(),
-                response_type: "Awaiting your input".into(),
-                last_user_message: None,
-                question: Some("q?".into()),
-                options: vec![("allow".into(), "Allow".into())],
-                request_id: Some(123),
-                question_id: None,
-                reject_option: None,
-            },
-        ));
-    }
-    let _ = dispatch_dashboard_permission_select(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        123,
-        acp::PermissionOptionId::new(std::sync::Arc::from("allow")),
-    );
-    assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
-    let d = app.dashboard.as_ref().unwrap();
-    assert!(d.peek.is_none(), "peek must be closed");
-    assert!(d.feedback.is_some(), "feedback must surface the mismatch");
-}
-/// Missing row — toasts, closes peek, returns no effects.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_permission_select_for_missing_row_clears_peek() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(99)),
-            crate::views::dashboard::peek::PeekFields {
-                label: "label".into(),
-                time_ago: String::new(),
-                response_type: "Idle".into(),
-                last_user_message: None,
-                question: None,
-                options: Vec::new(),
-                request_id: None,
-                question_id: None,
-                reject_option: None,
-            },
-        ));
-    }
-    let effects = dispatch_dashboard_permission_select(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(99)),
-        1,
-        acp::PermissionOptionId::new(std::sync::Arc::from("allow")),
-    );
-    assert!(effects.is_empty());
-    let d = app.dashboard.as_ref().unwrap();
-    assert!(d.peek.is_none());
-    assert!(d.feedback.is_some());
-}
-/// Peek reply to an IDLE agent sends immediately: the prompt drains
-/// (one `SendPrompt` effect), the turn starts, and the reply draft
-/// is cleared.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_reply_to_idle_agent_sends() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
-            0,
-        )));
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            crate::views::dashboard::peek::PeekFields {
-                label: "label".into(),
-                time_ago: String::new(),
-                response_type: "Idle".into(),
-                last_user_message: None,
-                question: None,
-                options: Vec::new(),
-                request_id: None,
-                question_id: None,
-                reject_option: None,
-            },
-        ));
-        d.peek_reply.set_text("please continue");
-    }
-    let effects = dispatch_dashboard_peek_reply(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        "please continue".into(),
-        false,
-    );
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "please continue"));
-    assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
-    assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 0);
-    assert!(app.dashboard.as_ref().unwrap().peek_reply.text().is_empty());
-}
-/// Peek reply to a RUNNING agent queues the prompt (no effect) so it
-/// drains after the current turn; the draft is still cleared.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_reply_to_running_agent_queues() {
-    let mut app = test_app_with_agent();
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.session.state = AgentState::TurnRunning;
-        agent
-            .scrollback
-            .push_block(RenderBlock::user_prompt("current turn"));
-        agent.scrollback.prepare_layout(80, 24);
-        let current = agent.scrollback.len().saturating_sub(1);
-        agent.scrollback.set_selected(Some(current));
-        agent.scrollback.scroll_to_entry_top(current);
-        agent.scrollback.enable_follow_with_preserve();
-    }
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
-            0,
-        )));
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            crate::views::dashboard::peek::PeekFields {
-                label: "label".into(),
-                time_ago: String::new(),
-                response_type: "Running\u{2026}".into(),
-                last_user_message: None,
-                question: None,
-                options: Vec::new(),
-                request_id: None,
-                question_id: None,
-                reject_option: None,
-            },
-        ));
-        d.peek_reply.set_text("after this");
-        d.begin_peek_viewport(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            &mut app.agents,
-        );
-    }
-    let effects = dispatch_dashboard_peek_reply(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        "after this".into(),
-        false,
-    );
-    assert!(effects.is_empty());
-    assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 1);
-    assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
-    let dashboard = app.dashboard.as_ref().unwrap();
-    assert!(dashboard.peek_reply.text().is_empty());
-    assert!(
-        dashboard
-            .peek_viewport
-            .as_ref()
-            .unwrap()
-            .page_flip_entry
-            .is_none(),
-        "a blocked drain must not claim the current turn as the queued reply"
-    );
-}
-/// Peek reply with an attached image drains into the queued
-/// prompt and idle agents send `SendPromptBlocks` (not text-only).
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_reply_with_image_sends_blocks() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let reply_text = {
-        let d = app.dashboard.as_mut().unwrap();
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
-            0,
-        )));
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            crate::views::dashboard::peek::PeekFields {
-                label: "label".into(),
-                time_ago: String::new(),
-                response_type: "Idle".into(),
-                last_user_message: None,
-                question: None,
-                options: Vec::new(),
-                request_id: None,
-                question_id: None,
-                reject_option: None,
-            },
-        ));
-        let img = crate::prompt_images::PastedImage {
-            element_id: ratatui_textarea::ElementId::from_raw(0),
-            display_number: 0,
-            mime_type: "image/png".into(),
-            dimensions: Some((10, 10)),
-            byte_len: 16,
-            encoded_bytes: Some(vec![0u8; 16].into()),
-            source_path: None,
-            staged_temp_path: None,
-            session_image_path: None,
-            preview: crate::prompt_images::PromptImagePreview::default(),
-        };
-        d.peek_reply.insert_image(img).unwrap();
-        d.peek_reply.text().to_string()
-    };
-    let effects = dispatch_dashboard_peek_reply(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        reply_text,
-        false,
-    );
-    assert_eq!(effects.len(), 1);
-    assert!(
-        matches!(&effects[0], Effect::SendPromptBlocks { .. }),
-        "image reply must send blocks, got {:?}",
-        effects[0]
-    );
-    assert!(app.dashboard.as_ref().unwrap().peek_reply.text().is_empty());
-    assert!(app.dashboard.as_ref().unwrap().peek_reply.images.is_empty());
-}
-/// Regression: whitespace around a peek-reply image chip must not
-/// desync chip ranges from the stored text (panicked on rewind restore).
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_reply_image_with_whitespace_survives_rewind_restore() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let reply_text = {
-        let d = app.dashboard.as_mut().unwrap();
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
-            0,
-        )));
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            crate::views::dashboard::peek::PeekFields {
-                label: "label".into(),
-                time_ago: String::new(),
-                response_type: "Idle".into(),
-                last_user_message: None,
-                question: None,
-                options: Vec::new(),
-                request_id: None,
-                question_id: None,
-                reject_option: None,
-            },
-        ));
-        d.peek_reply.set_text("   ");
-        d.peek_reply.set_cursor(3);
-        let img = crate::prompt_images::PastedImage {
-            element_id: ratatui_textarea::ElementId::from_raw(0),
-            display_number: 0,
-            mime_type: "image/png".into(),
-            dimensions: Some((10, 10)),
-            byte_len: 16,
-            encoded_bytes: Some(vec![0u8; 16].into()),
-            source_path: None,
-            staged_temp_path: None,
-            session_image_path: None,
-            preview: crate::prompt_images::PromptImagePreview::default(),
-        };
-        d.peek_reply.insert_image(img).unwrap();
-        d.peek_reply.text().to_string()
-    };
-    let _ = dispatch_dashboard_peek_reply(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        reply_text,
-        false,
-    );
-    let stashed = app.agents[&AgentId(0)]
-        .session
-        .in_flight_prompt
-        .clone()
-        .expect("idle send sets in_flight_prompt");
-    for chip in &stashed.chip_elements {
-        assert!(
-            chip.range.end <= stashed.text.len(),
-            "chip range {:?} out of bounds for stored text {:?} (len {})",
-            chip.range,
-            stashed.text,
-            stashed.text.len()
-        );
-    }
-    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    agent.prompt.set_text(&stashed.text);
-    agent.prompt.restore_chip_elements(&stashed.chip_elements);
-    agent.prompt.set_images(stashed.images);
-    assert!(agent.prompt.text().contains("[Image #1]"));
-    assert_eq!(agent.prompt.images.len(), 1);
-}
-/// Image on peek reply is preserved on the queued entry when
-/// the agent is mid-turn.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_reply_with_image_queues_images() {
-    let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
-    open_dashboard(&mut app);
-    let reply_text = {
-        let d = app.dashboard.as_mut().unwrap();
-        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
-            0,
-        )));
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            crate::views::dashboard::peek::PeekFields {
-                label: "label".into(),
-                time_ago: String::new(),
-                response_type: "Running\u{2026}".into(),
-                last_user_message: None,
-                question: None,
-                options: Vec::new(),
-                request_id: None,
-                question_id: None,
-                reject_option: None,
-            },
-        ));
-        let img = crate::prompt_images::PastedImage {
-            element_id: ratatui_textarea::ElementId::from_raw(0),
-            display_number: 0,
-            mime_type: "image/png".into(),
-            dimensions: Some((10, 10)),
-            byte_len: 16,
-            encoded_bytes: Some(vec![0u8; 16].into()),
-            source_path: None,
-            staged_temp_path: None,
-            session_image_path: None,
-            preview: crate::prompt_images::PromptImagePreview::default(),
-        };
-        d.peek_reply.insert_image(img).unwrap();
-        d.peek_reply.text().to_string()
-    };
-    let effects = dispatch_dashboard_peek_reply(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        reply_text,
-        false,
-    );
-    assert!(effects.is_empty());
-    let queued = app.agents[&AgentId(0)]
-        .session
-        .pending_prompts
-        .front()
-        .expect("queued prompt");
-    assert_eq!(queued.images.len(), 1);
-    assert!(
-        !queued.chip_elements.is_empty(),
-        "peek send must snapshot chips for cancel-restore"
-    );
-    assert!(app.dashboard.as_ref().unwrap().peek_reply.images.is_empty());
-}
-/// Replying to a subagent row is rejected with a toast (subagents are
-/// driven by their parent turn).
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_reply_to_subagent_toasts() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let effects = dispatch_dashboard_peek_reply(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::Subagent {
-            parent: AgentId(0),
-            child_session_id: "child-1".to_string(),
-        },
-        "hi".into(),
-        false,
-    );
-    assert!(effects.is_empty());
-    assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 0);
-    assert!(app.dashboard.as_ref().unwrap().feedback.is_some());
-}
-/// Peek "No, type to add feedback" path: resolves the front
-/// permission with the `RejectOnce` option and attaches the typed
-/// text as `followup_message` meta.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_permission_followup_rejects_with_message() {
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    let mut rx = push_synthetic_permission(agent, 5, vec![("allow", "Allow"), ("reject", "No")]);
-    open_dashboard(&mut app);
-    let effects = dispatch_dashboard_permission_followup(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        5,
-        "do it differently".into(),
-    );
-    assert!(effects.is_empty());
-    let resp = rx.try_recv().expect("response sent").expect("ok");
-    match resp.outcome {
-        acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome {
-            option_id,
-            ..
-        }) => {
-            assert_eq!(
-                option_id.0.as_ref(),
-                "reject",
-                "must pick the RejectOnce option"
-            );
-        }
-        other => panic!("expected Selected(reject), got {other:?}"),
-    }
-    let meta = resp.meta.expect("followup meta present");
-    assert_eq!(
-        meta.get("followup_message").and_then(|v| v.as_str()),
-        Some("do it differently"),
-    );
-    assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 0);
-}
-/// Peek answering of the Ask tool (`AskUserQuestion`): selecting an
-/// option sends the ext-response and clears the question view.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_question_answer_sends_and_clears() {
-    use crate::views::prompt_widget::StashedPrompt;
-    use crate::views::question_view::QuestionViewState;
-    use tools::implementations::grow_build::ask_user_question::{
-        AskUserQuestionMode, Question, QuestionOption,
-    };
-    let mut app = test_app_with_agent();
-    let opt = |label: &str| QuestionOption {
-        label: label.to_string(),
-        description: String::new(),
-        preview: None,
-        id: None,
-    };
-    let question = Question {
-        question: "Which DB?".to_string(),
-        options: vec![opt("Redis"), opt("Postgres")],
-        multi_select: Some(false),
-        id: None,
-    };
-    let (tx, mut rx) = tokio::sync::oneshot::channel();
-    let qv = QuestionViewState::with_response_tx(
-        Some("test-session".to_owned()),
-        "tc-1".to_string(),
-        vec![question],
-        StashedPrompt::default(),
-        Some(tx),
-        AskUserQuestionMode::Default,
-    );
-    app.agents
-        .get_mut(&AgentId(0))
-        .unwrap()
-        .replace_question_view(Some(qv));
-    open_dashboard(&mut app);
-    let effects = dispatch_dashboard_question_answer(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        "tc-1".to_string(),
-        Some(1),
-        String::new(),
-    );
-    assert!(effects.is_empty());
-    assert!(rx.try_recv().is_ok(), "ext-response must be sent");
-    assert!(app.agents[&AgentId(0)].question_view.is_none());
-}
-/// A multi-question Ask form is walked one question at a time in the
-/// peek: answering advances to the next question (no submit yet) and
-/// resets the panel's per-question draft; the last answer submits.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_question_answer_walks_multiple_questions() {
-    use crate::views::dashboard::peek::{PeekPanelState, compute_peek_fields};
-    use crate::views::prompt_widget::StashedPrompt;
-    use crate::views::question_view::QuestionViewState;
-    use tools::implementations::grow_build::ask_user_question::{
-        AskUserQuestionMode, Question, QuestionOption,
-    };
-    let mut app = test_app_with_agent();
-    let opt = |label: &str| QuestionOption {
-        label: label.to_string(),
-        description: String::new(),
-        preview: None,
-        id: None,
-    };
-    let q1 = Question {
-        question: "Which DB?".to_string(),
-        options: vec![opt("Redis"), opt("Postgres")],
-        multi_select: Some(false),
-        id: None,
-    };
-    let q2 = Question {
-        question: "Which cache?".to_string(),
-        options: vec![opt("LRU"), opt("LFU")],
-        multi_select: Some(false),
-        id: None,
-    };
-    let (tx, mut rx) = tokio::sync::oneshot::channel();
-    let qv = QuestionViewState::with_response_tx(
-        Some("test-session".to_owned()),
-        "tc-1".to_string(),
-        vec![q1, q2],
-        StashedPrompt::default(),
-        Some(tx),
-        AskUserQuestionMode::Default,
-    );
-    app.agents
-        .get_mut(&AgentId(0))
-        .unwrap()
-        .replace_question_view(Some(qv));
-    open_dashboard(&mut app);
-    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
-    let fields =
-        compute_peek_fields(&row, &app.agents, std::time::Instant::now()).expect("ask surfaced");
-    assert!(fields.question.as_deref().unwrap().starts_with("(1/2)"));
-    assert!(fields.request_id.is_none());
-    assert_eq!(fields.reject_option, Some(2));
-    if let Some(d) = app.dashboard.as_mut() {
-        let mut p = PeekPanelState::new(row.clone(), fields);
-        p.selected_option = Some(1);
-        d.peek = Some(p);
-        d.peek_reply.set_text("stale draft");
-    }
-    let effects = dispatch_dashboard_question_answer(
-        &mut app,
-        row.clone(),
-        "tc-1".to_string(),
-        Some(1),
-        String::new(),
-    );
-    assert!(effects.is_empty());
-    assert!(
-        rx.try_recv().is_err(),
-        "must not submit until the last question"
-    );
-    let qv = app.agents[&AgentId(0)].question_view.as_ref().unwrap();
-    assert_eq!(qv.active_tab, 1, "advanced to the second question");
-    let d = app.dashboard.as_ref().unwrap();
-    assert_eq!(d.peek.as_ref().unwrap().selected_option, None);
-    assert!(d.peek_reply.text().is_empty());
-    let effects = dispatch_dashboard_question_answer(
-        &mut app,
-        row,
-        "tc-1".to_string(),
-        Some(0),
-        String::new(),
-    );
-    assert!(effects.is_empty());
-    assert!(rx.try_recv().is_ok(), "ext-response sent after last answer");
-    assert!(app.agents[&AgentId(0)].question_view.is_none());
-    assert!(app.dashboard.as_ref().unwrap().peek.is_none());
-}
-/// Single-entry question answering: `dispatch_dashboard_question_answer`
-/// refuses subagent rows — no effects, no response consumption — because
-/// the child's question answers only inside its fullscreen view.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_question_answer_refuses_subagent_rows() {
-    use crate::views::prompt_widget::StashedPrompt;
-    use crate::views::question_view::QuestionViewState;
-    use tools::implementations::grow_build::ask_user_question::{
-        AskUserQuestionMode, Question, QuestionOption,
-    };
-    let mut app = test_app_with_agent();
-    let parent = AgentId(0);
-    let child_sid = "child-1";
-    let question = Question {
-        question: "Which DB?".to_string(),
-        options: vec![QuestionOption {
-            label: "Redis".to_string(),
-            description: String::new(),
-            preview: None,
-            id: None,
-        }],
-        multi_select: Some(false),
-        id: None,
-    };
-    let (tx, mut rx) = tokio::sync::oneshot::channel();
-    let mut child = AgentView::new(
-        make_test_agent_session(&app, AgentId(1), child_sid),
-        ScrollbackState::new(),
-    );
-    child.replace_question_view(Some(QuestionViewState::with_response_tx(
-        Some(child_sid.to_string()),
-        "tc-child".to_string(),
-        vec![question],
-        StashedPrompt::default(),
-        Some(tx),
-        AskUserQuestionMode::Default,
-    )));
-    app.agents
-        .get_mut(&parent)
-        .unwrap()
-        .insert_subagent_view(child_sid.to_string(), Box::new(child));
-    app.agents
-        .get_mut(&parent)
-        .unwrap()
-        .session
-        .subagent_sessions
-        .insert(child_sid.to_string(), make_test_subagent(child_sid, "sa-1"));
-    open_dashboard(&mut app);
-
-    let effects = dispatch_dashboard_question_answer(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::Subagent {
-            parent,
-            child_session_id: child_sid.to_string(),
-        },
-        "tc-child".to_string(),
-        Some(0),
-        String::new(),
-    );
-    assert!(effects.is_empty(), "refused dispatch must emit no effects");
-    assert!(
-        matches!(
-            rx.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ),
-        "the child's parked response must NOT be consumed by the refused dispatch"
-    );
-    let child_view = app.agents[&parent].subagent_views.get(child_sid).unwrap();
-    assert!(
-        child_view.question_view.is_some(),
-        "the child question must stay parked for the fullscreen answering entry"
-    );
-    let toast = app
-        .dashboard
-        .as_ref()
-        .and_then(|d| d.feedback.as_ref())
-        .expect("the refusal should surface error feedback");
-    assert!(
-        toast.message.contains("Open the subagent"),
-        "got: {toast:?}"
-    );
+    assert!(app.agents.contains_key(&target));
+    assert!(app.session_deletion.is_none());
 }
 /// The peek panel auto-opens when a row is selected (replacing the
 /// new-session input) and closes when the selection clears (e.g. the
-/// `[+ New Agent]` button is focused).
+/// `[+ New session]` button is focused).
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_peek_auto_opens_for_selected_row() {
@@ -4994,6 +4431,7 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         &[],
         false,
         None,
+        None,
     );
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_some(),
@@ -5011,64 +4449,11 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         &[],
         false,
         None,
+        None,
     );
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_none(),
         "peek must close when no row is selected",
-    );
-}
-/// End-to-end: a multi-line peek reply grows the peek box. Rendering
-/// the dashboard with a 3-line `peek_reply` draft produces a TALLER
-/// dispatch (peek) rect than the same dashboard with a single-line
-/// draft — the box sizes to the reply content (Shift+Enter newlines).
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_box_grows_for_multiline_reply() {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    let reg = crate::actions::ActionRegistry::defaults();
-    let area = Rect::new(0, 0, 80, 40);
-    let box_height_for = |reply_text: &str| -> u16 {
-        let mut app = test_app_with_agent();
-        mark_agent_nonempty(&mut app, AgentId(0));
-        open_dashboard(&mut app);
-        app.dashboard.as_mut().unwrap().focus_row(
-            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-        );
-        let render = |app: &mut AppView| {
-            let mut buf = Buffer::empty(area);
-            let _ = crate::views::dashboard::render_dashboard(
-                &mut buf,
-                area,
-                app.dashboard.as_mut().unwrap(),
-                &mut app.agents,
-                &reg,
-                None,
-                &[],
-                false,
-                None,
-            );
-        };
-        render(&mut app);
-        app.dashboard
-            .as_mut()
-            .unwrap()
-            .peek_reply
-            .set_text(reply_text);
-        render(&mut app);
-        app.dashboard
-            .as_ref()
-            .unwrap()
-            .peek_reply_rect
-            .expect("peek reply rect recorded after render")
-            .height
-    };
-    let single = box_height_for("one line");
-    let multi = box_height_for("line one\nline two\nline three");
-    assert_eq!(single, 1, "single-line reply occupies one row");
-    assert!(
-        multi > single,
-        "multi-line reply must grow the peek reply area, single={single} multi={multi}",
     );
 }
 /// Empty (no-real-turn) local sessions are hidden from the dashboard:
@@ -5204,4 +4589,228 @@ fn dashboard_attach_build_roster_row_keeps_disk_resume() {
         ),
         "expected Build disk resume with roster cwd, got {effects:?}"
     );
+}
+
+#[test]
+fn dashboard_overlay_stop_preserves_root_until_background_activity_settles() {
+    for with_goal in [false, true] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .subagent_sessions
+            .insert(
+                "close-child".into(),
+                make_test_subagent("close-child", "close-task"),
+            );
+        if with_goal {
+            app.agents.get_mut(&id).unwrap().session.goal_state =
+                Some(crate::app::session::GoalDisplayState::test_stub());
+        }
+        open_dashboard(&mut app);
+        dispatch_dashboard_attach(
+            &mut app,
+            crate::views::dashboard::DashboardRowId::TopLevel(id),
+        );
+        let effects = dispatch_stop_session_work(&mut app);
+        assert!(
+            matches!(effects.as_slice(), [Effect::CancelTurn { cancel_subagents: true, pause_goal, .. }] if *pause_goal == with_goal)
+        );
+        assert!(app.agents.contains_key(&id));
+        assert_eq!(app.active_view, ActiveView::Agent(id));
+    }
+}
+
+#[test]
+fn dashboard_close_ack_keeps_welcome_if_the_user_already_left_the_detail() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    mark_agent_nonempty(&mut app, id);
+    open_dashboard(&mut app);
+    dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    let effects = dispatch_close_current_session(&mut app);
+    let [
+        Effect::CloseSession {
+            agent_id,
+            session_id,
+            binding_epoch,
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("{effects:?}");
+    };
+    dispatch_exit_session(&mut app);
+    assert_eq!(app.active_view, ActiveView::Welcome);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCloseResolved {
+            agent_id: *agent_id,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.active_view, ActiveView::Welcome);
+    assert!(app.agents.is_empty());
+}
+
+#[test]
+fn dashboard_readonly_preview_and_new_session_input_are_separate_surfaces() {
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    open_dashboard(&mut app);
+    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
+    app.dashboard.as_mut().unwrap().focus_row(row);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 120, 50));
+    let registry = crate::actions::ActionRegistry::defaults();
+    crate::views::dashboard::render_dashboard(
+        &mut buf,
+        Rect::new(0, 0, 120, 50),
+        app.dashboard.as_mut().unwrap(),
+        &mut app.agents,
+        &registry,
+        None,
+        &[],
+        false,
+        None,
+        None,
+    );
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(dashboard.peek.is_some());
+    assert!(
+        dashboard.dispatch_rect.is_some(),
+        "new-session composer remains visible with preview"
+    );
+    let text = buf
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("read-only"));
+}
+
+#[test]
+fn dashboard_source_current_and_keyboard_focus_are_distinct_at_eighty_columns() {
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().display_name = Some("审查会话管理".into());
+    open_dashboard(&mut app);
+    let state = app.dashboard.as_mut().unwrap();
+    state.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    state.list_focused = false;
+    state.dispatch.set_text("新会话草稿");
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(area);
+    let registry = crate::actions::ActionRegistry::defaults();
+    crate::views::dashboard::render_dashboard(
+        &mut buf,
+        area,
+        state,
+        &mut app.agents,
+        &registry,
+        None,
+        &[],
+        false,
+        None,
+        Some(id),
+    );
+    let text = buf
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.replace(' ', "").contains("审查会话管理"));
+    assert!(text.contains("Idle · This window · current"));
+    assert!(text.contains("New session"));
+    assert!(text.replace(' ', "").contains("新会话草稿"));
+    let (_, row) = state.row_rects.first().expect("session row");
+    assert_ne!(
+        buf[(row.x, row.y)].symbol(),
+        crate::glyphs::selection_bar(),
+        "selection behind the editor must not claim keyboard focus"
+    );
+}
+
+#[test]
+fn dashboard_child_command_prefix_stop_never_targets_the_parent() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let child_sid = "prefix-child";
+    let child = AgentView::new(
+        make_test_agent_session(&app, AgentId(8), child_sid),
+        ScrollbackState::new(),
+    );
+    let info = make_test_subagent(child_sid, "child-task");
+    let child_task = info.subagent_id.to_string();
+    let root = app.agents.get_mut(&root_id).unwrap();
+    root.session.state = AgentState::TurnRunning;
+    root.session
+        .subagent_sessions
+        .insert(child_sid.into(), info);
+    root.subagent_views
+        .insert(child_sid.into(), Box::new(child));
+    root.active_subagent = Some(child_sid.into());
+    let prefix = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert!(matches!(app.handle_input(&prefix), InputOutcome::Changed));
+    assert!(app.agents[&root_id].leader_key_started_at.is_none());
+    assert!(matches!(
+        app.handle_input(&prefix),
+        InputOutcome::Action(Action::StopSessionWork)
+    ));
+    let effects = dispatch(Action::StopSessionWork, &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::KillSubagent { session_id, subagent_id }] if session_id.0.as_ref() == "test-session" && subagent_id == &child_task)
+    );
+    assert!(app.agents[&root_id].session.state.is_turn_running());
+    app.agents
+        .get_mut(&root_id)
+        .unwrap()
+        .session
+        .subagent_sessions
+        .get_mut(child_sid)
+        .unwrap()
+        .finished = true;
+    assert!(
+        dispatch(Action::StopSessionWork, &mut app).is_empty(),
+        "idle child stop must not act on its running parent"
+    );
+}
+
+#[test]
+fn dashboard_child_scrollback_escape_cancels_prefix_before_returning_to_parent() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let mut child = AgentView::new(
+        make_test_agent_session(&app, AgentId(8), "prefix-child"),
+        ScrollbackState::new(),
+    );
+    child.active_pane = crate::app::agent_view::AgentPane::Scrollback;
+    let root = app.agents.get_mut(&root_id).unwrap();
+    root.subagent_views
+        .insert("prefix-child".into(), Box::new(child));
+    root.active_subagent = Some("prefix-child".into());
+    let prefix = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_input(&prefix);
+    app.handle_input(&esc);
+    assert_eq!(
+        app.agents[&root_id].active_subagent.as_deref(),
+        Some("prefix-child")
+    );
+    assert!(
+        app.agents[&root_id].subagent_views["prefix-child"]
+            .leader_key_started_at
+            .is_none()
+    );
+    app.handle_input(&esc);
+    assert!(app.agents[&root_id].active_subagent.is_none());
 }

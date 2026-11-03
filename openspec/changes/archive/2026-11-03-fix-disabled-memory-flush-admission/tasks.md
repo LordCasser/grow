@@ -1,0 +1,4 @@
+- [x] Gate pre-compaction flush before and after snapshot capture on current memory state.
+- [x] Gate memory flush before lock acquisition, before provider work, and before accepting an on-disk write after a provider response.
+- [x] Add actor regressions for memory off before manual/background/error compaction, during image snapshot wait, before provider dispatch, and after provider acceptance.
+- [x] Run targeted actor tests and strict OpenSpec validation.

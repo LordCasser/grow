@@ -1078,8 +1078,10 @@ impl ChatStateActor {
             ChatStateCommand::GetCompletedHookProjections { reply } => {
                 let _ = reply.send(self.state.timeline.completed_hook_projections());
             }
-            ChatStateCommand::GetTimelineEvents { reply } => {
-                let _ = reply.send(self.state.timeline.events().to_vec());
+            ChatStateCommand::GetTimelineEvents { from_seq, reply } => {
+                let events = self.state.timeline.events();
+                let start = events.partition_point(|event| event.seq.get() < from_seq);
+                let _ = reply.send(events[start..].to_vec());
             }
             ChatStateCommand::GetPlanningState { reply } => {
                 let _ = reply.send(self.state.timeline.planning_snapshot().cloned());

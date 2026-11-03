@@ -1967,19 +1967,6 @@
     }
 
     #[test]
-    fn text_without_image_chips_strips_only_images() {
-        let mut pw = PromptWidget::new();
-        pw.set_text("hello world");
-        assert_eq!(pw.text_without_image_chips(), "hello world");
-        pw.insert_image(test_image()).unwrap();
-        pw.insert_image(test_image()).unwrap();
-        assert!(pw.text().contains("[Image #1]") && pw.text().contains("[Image #2]"));
-        let stripped = pw.text_without_image_chips();
-        assert!(!stripped.contains("[Image #"), "got {stripped:?}");
-        assert!(stripped.contains("hello world"), "got {stripped:?}");
-    }
-
-    #[test]
     fn insert_image_leaves_trailing_space() {
         let mut pw = PromptWidget::new();
         pw.insert_image(test_image()).unwrap();

@@ -8,7 +8,9 @@ use tool_types::planning::{
 use tools::implementations::grow_build::todo::runtime::{
     LocalPlanProjection, PlanningAction, PlanningCommand,
 };
-use tools::implementations::grow_build::todo::{TodoPriority, TodoStatus, TodoWriteInput};
+use tools::implementations::grow_build::todo::{
+    TodoPriority, TodoStatus, TodoWriteInput, review_binding,
+};
 
 const PLANNING_DELIVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const PLANNING_DELIVERY_MAX_BACKOFF: Duration = Duration::from_secs(2);
@@ -41,13 +43,14 @@ impl SessionActor {
             .collect();
         let links: Vec<_> = plan.links.iter().rev().take(12).map(|link| json!({
             "task_id":link.id,"step_id":link.parent_step_id,"child_session_id":link.child_session_id,
-            "terminal":link.terminal,"required":link.required,"result_ref":link.result_id,
+            "terminal":link.terminal,"required":link.required,
+            "review_binding":review_binding(&plan, link),
             "pending_source_revision":link.pending_source_revision,
         })).collect();
         let replans: Vec<_> = plan.replans.iter().filter(|change| !matches!(change.progress, ReplanProgress::Handled{..}|ReplanProgress::Unapplied{..}))
             .take(12).map(|change| json!({"id":change.id,"source_revision":change.source_revision,"progress":change.progress})).collect();
         Ok(Some(format!(
-            "Current local work (guidance, not permission). Use todo_write to inspect or change the complete local plan.\n{}",
+            "Current local work (guidance, not permission). Use todo_write with {{\"todos\":[]}} to inspect responsibilities. Copy review_binding fields into actions[].review.review and add decision, reason and verificationRefs; do not guess resultId from a task ID or sequence number.\n{}",
             json!({
                 "session_id":plan.session_id,"scope_id":plan.scope_id,"revision":plan.revision,
                 "timeline_seq":snapshot.seq,"steps":steps,"step_count":plan.steps.len(),
@@ -789,6 +792,12 @@ impl SessionActor {
                         .ok_or_else(|| {
                             "review does not name a locally delegated task".to_string()
                         })?;
+                    if link.result_id != review.result_id {
+                        return Err(format!(
+                            "review resultId does not match the delegated result; review binding: {}",
+                            review_binding(&plan, link),
+                        ));
+                    }
                     if review.decision == ReviewDecision::Released {
                         if review
                             .reason
@@ -797,10 +806,7 @@ impl SessionActor {
                         {
                             return Err("releasing a required deliverable needs a reason".into());
                         }
-                    } else if !link.terminal
-                        || link.result_id.is_none()
-                        || link.result_id != review.result_id
-                    {
+                    } else if !link.terminal || link.result_id.is_none() {
                         return Err("review requires the exact delivered terminal result".into());
                     }
                     if review.reviewed_source_revision > plan.revision {

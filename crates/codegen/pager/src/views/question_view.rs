@@ -119,7 +119,6 @@ pub enum LocalQuestionKind {
         target: crate::app::actions::DoctorFixTarget,
         plan: Box<crate::diagnostics::FixPlan>,
     },
-    DeleteCurrentSession,
 }
 
 // ── State ──────────────────────────────────────────────────────────────

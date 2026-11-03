@@ -1,0 +1,5 @@
+- [x] 加入退出观察与 reap 前组收尾，保持已有返回结果和 PID 复用边界。
+- [x] 运行 bounded 后代回归、terminal 全组及相关取消回归。
+- [x] 删除临时 probe，同步开发说明和资源调查证据。
+- [x] Update developer guidance and release notes for process-group cleanup and terminal/child cancellation boundaries.
+- [x] strict 校验、归档与全量 archive 复核。

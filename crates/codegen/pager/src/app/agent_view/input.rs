@@ -73,6 +73,18 @@ impl AgentView {
         Some(InputOutcome::Action(Action::SetBehaviorMode(mode)))
     }
 
+    /// A command prefix belongs to the currently visible session only.
+    pub(crate) fn clear_session_commands(&mut self) {
+        self.leader_key_started_at = None;
+        if let Some(child) = self
+            .active_subagent
+            .as_ref()
+            .and_then(|id| self.subagent_views.get_mut(id))
+        {
+            child.leader_key_started_at = None;
+        }
+    }
+
     pub(crate) fn leader_key_deadline(&self) -> Option<Instant> {
         self.leader_key_started_at
             .map(|started| started + LEADER_KEY_TIMEOUT)
@@ -201,47 +213,17 @@ impl AgentView {
         }
         !self.vim_mode && self.session.state.is_idle()
     }
-    /// Surfaces that own input ahead of the dashboard overlay cascade.
-    /// That cascade runs before `handle_input`, so without this guard Left/Esc
-    /// on an empty prompt would exit the dashboard overlay instead of reaching
-    /// the active modal or image viewer.
     fn modal_owns_input(&self) -> bool {
         self.extensions_modal.is_some()
             || self.active_modal.is_some()
             || self.image_viewer.is_some()
-    }
-    /// Prompt pane focused with an empty draft and no overlay or prompt-local
-    /// sub-state owning keys — the state where a bare Left backs out of the
-    /// dashboard overlay (mirror of the dashboard's Right = open detail). A
-    /// non-empty draft (Left = caret move), scrollback focus (Left = collapse),
-    /// an active history search, and an open `@` file-search dropdown (which
-    /// owns Right/Up/Down picker nav) all fail the guard, leaving those
-    /// behaviours untouched. The dropdown is only open while the draft holds
-    /// an `@` token, so `text().is_empty()` already covers it — the explicit
-    /// check keeps the predicate honest if that coupling ever changes. An open
-    /// modal or media surface ([`Self::modal_owns_input`]) also fails the guard
-    /// so those own Esc/Left rather than the overlay back-out stealing them. An
-    /// open `/jump` picker fails it too, so the picker owns Esc/Left instead of
-    /// being left latent.
-    pub(crate) fn is_empty_focused_prompt(&self) -> bool {
-        self.active_pane == AgentPane::Prompt
-            && self.prompt.text().is_empty()
-            && !self.prompt.history_search.is_active()
-            && !self.prompt.file_search_visible()
-            && self.no_input_overlay_pending()
-            && !self.modal_owns_input()
-            && self.jump_state.is_none()
     }
     pub(crate) fn workflow_runs_newest_first(
         &self,
     ) -> Vec<&crate::app::session::WorkflowRunSnapshot> {
         self.session.workflow_runs.iter().rev().collect()
     }
-    /// No per-pane `Esc` consumer is pending (text selection, link highlight,
-    /// goal detail, rewind overlay, open `/btw` panel, or open `/jump` picker),
-    /// so `Esc` is free to back out of the dashboard overlay rather than
-    /// clear/dismiss one of them first. Shared by both overlay back-out guards
-    /// so a future Esc consumer is added once here.
+    /// No local selection, link or panel owns Esc ahead of normal session policy.
     pub(crate) fn no_esc_consumer_pending(&self) -> bool {
         self.persistent_text_selection.is_none()
             && self.highlighted_link_idx.is_none()
@@ -304,115 +286,6 @@ impl AgentView {
             && self.agents_modal.is_none()
             && self.no_esc_consumer_pending()
             && self.no_input_overlay_pending()
-    }
-    /// Esc on the prompt pane in a dashboard overlay backs out to the dashboard
-    /// list (the prompt-focus mirror of the Left-arrow back-out), but only for an
-    /// empty, Normal-mode composer with no per-pane Esc consumer pending. Beyond
-    /// [`Self::is_empty_focused_prompt`] it also requires `PromptInputMode::Normal`
-    /// (so a Bash/Remember/Feedback empty prompt keeps Esc as its mode-exit,
-    /// matching the full-screen view) and [`Self::no_esc_consumer_pending`] (so
-    /// Esc still clears or dismisses a pending text selection / link highlight /
-    /// goal detail / rewind first — Esc, unlike Left, is their consumer). A
-    /// non-empty draft fails the guard so Esc still arms "press again to clear".
-    /// Used only in the overlay cascade; the full-screen Esc policy (clear /
-    /// rewind while idle; mid-turn cancel or swallow) is untouched.
-    ///
-    /// Also gated to an idle agent (`!is_turn_running() && !is_cancelling()`):
-    /// while a turn is running or cancelling, Esc must fall through to
-    /// [`Self::try_handle_esc_policy`] (running → cancel in minimal / non-vim
-    /// mode, swallow in vim mode; cancelling → retry CancelTurn), not detach
-    /// to the dashboard. Detach mid-turn stays on
-    /// Ctrl+\ / Left.
-    pub(crate) fn overlay_esc_backs_out_from_prompt(&self) -> bool {
-        self.is_empty_focused_prompt()
-            && self.prompt_input_mode == PromptInputMode::Normal
-            && self.no_esc_consumer_pending()
-            && !self.session.state.is_turn_running()
-            && !self.session.state.is_cancelling()
-    }
-    /// True when a pending plan / Q&A overlay is at its top navigation state
-    /// (nothing left for `Esc` to clear), so the next `Esc` backs out of the
-    /// dashboard overlay instead of dead-ending. Graduated: earlier presses
-    /// keep their in-overlay meaning. Dashboard-overlay only; the overlay
-    /// stays pending (no answer sent).
-    pub(crate) fn overlay_esc_backs_out(&self) -> bool {
-        use crate::views::question_view::{LocalQuestionKind, QuestionFocus};
-        if !self.in_dashboard_overlay {
-            return false;
-        }
-        if self.modal_owns_input() {
-            return false;
-        }
-        if self.plan_approval_view.is_some() {
-            return self.plan_overlay_at_back_out_top();
-        }
-        if let Some(qv) = self.question_view.as_ref() {
-            return self.active_pane != AgentPane::Scrollback
-                && qv.focus == QuestionFocus::Navigation
-                && qv.active_tab == 0
-                && !matches!(qv.local_kind, Some(LocalQuestionKind::ProjectSelect { .. }))
-                && !qv.active_tab_has_selection();
-        }
-        false
-    }
-    /// Whether the pending plan-approval overlay is at a state where `Esc` /
-    /// `Left` have nothing else to do, so they back out to the dashboard:
-    ///   - `Preview` line viewer: no-ops once the input bar, accepted search
-    ///     matcher, and visual selection are all cleared (those consume `Esc`
-    ///     first, keeping the back-out graduated).
-    ///   - `Preview` with no viewer, or empty `Prompt` feedback: one-press
-    ///     exit; a typed draft keeps `Esc`'s step-back behaviour.
-    fn plan_overlay_at_back_out_top(&self) -> bool {
-        use crate::views::plan_approval_view::PlanApprovalFocus;
-        let Some(pav) = self.plan_approval_view.as_ref() else {
-            return false;
-        };
-        match pav.focus {
-            PlanApprovalFocus::Preview => match self.line_viewer.as_ref() {
-                Some(v) => {
-                    v.list_state.input_mode().is_none()
-                        && v.list_state.matcher().is_none()
-                        && !v.list_state.visual_mode
-                }
-                None => self.active_pane != AgentPane::Scrollback,
-            },
-            PlanApprovalFocus::Prompt => {
-                self.line_viewer.is_none()
-                    && self.active_pane != AgentPane::Scrollback
-                    && self.prompt.text().is_empty()
-                    && !self.prompt.file_search_visible()
-            }
-            PlanApprovalFocus::Commenting => false,
-        }
-    }
-    /// True when a pending overlay has no in-overlay use for a bare `Left`, so
-    /// it backs out of the dashboard overlay: the plan line-viewer `Preview`
-    /// and the single-question Q&A navigation surface. Plan feedback (caret
-    /// move) and multi-question Q&A (previous question) keep `Left`.
-    /// Dashboard-overlay only.
-    pub(crate) fn overlay_left_backs_out(&self) -> bool {
-        use crate::views::plan_approval_view::PlanApprovalFocus;
-        use crate::views::question_view::QuestionFocus;
-        if !self.in_dashboard_overlay {
-            return false;
-        }
-        if self.modal_owns_input() {
-            return false;
-        }
-        if let Some(pav) = self.plan_approval_view.as_ref() {
-            return pav.focus == PlanApprovalFocus::Preview
-                && self.line_viewer.as_ref().is_some_and(|v| {
-                    v.list_state.input_mode().is_none()
-                        && v.list_state.matcher().is_none()
-                        && !v.list_state.visual_mode
-                });
-        }
-        if let Some(qv) = self.question_view.as_ref() {
-            return self.active_pane != AgentPane::Scrollback
-                && qv.focus == QuestionFocus::Navigation
-                && qv.questions.len() <= 1;
-        }
-        false
     }
     /// Handle a terminal event when this agent view is active.
     ///
@@ -605,6 +478,7 @@ impl AgentView {
                     .hit_subagent_frame_close
                     .contains(mouse.column, mouse.row)
             {
+                self.clear_session_commands();
                 self.active_subagent = None;
                 return InputOutcome::Changed;
             }
@@ -616,15 +490,17 @@ impl AgentView {
             {
                 return InputOutcome::Changed;
             }
-            let child_in_scrollback = self
-                .subagent_views
-                .get(child_sid)
-                .is_some_and(|c| c.is_bare_scrollback());
+            let child_in_scrollback = self.subagent_views.get(child_sid).is_some_and(|c| {
+                c.is_bare_scrollback()
+                    && c.leader_key_deadline()
+                        .is_none_or(|deadline| deadline <= Instant::now())
+            });
             if child_in_scrollback
                 && let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
                 && (key!('q').matches(key) || key.code == KeyCode::Esc)
             {
+                self.clear_session_commands();
                 self.active_subagent = None;
                 return InputOutcome::Changed;
             }
@@ -1165,9 +1041,26 @@ impl AgentView {
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
         {
-            if let Some(started_at) = self.leader_key_started_at.take() {
-                if started_at.elapsed() > LEADER_KEY_TIMEOUT {
-                    return InputOutcome::Changed;
+            if key.kind == KeyEventKind::Repeat
+                && registry.matches_id(ActionId::SessionCommands, key)
+            {
+                return InputOutcome::Changed;
+            }
+            if self
+                .leader_key_started_at
+                .take()
+                .is_some_and(|started_at| started_at.elapsed() <= LEADER_KEY_TIMEOUT)
+            {
+                if registry.matches_id(ActionId::SessionCommands, key)
+                    || leader_continuation_matches(key, 'x')
+                {
+                    return InputOutcome::Action(Action::StopSessionWork);
+                }
+                if leader_continuation_matches(key, 'c') {
+                    return InputOutcome::Action(Action::CloseCurrentSession);
+                }
+                if leader_continuation_matches(key, 'd') {
+                    return InputOutcome::Action(Action::DeleteCurrentSession);
                 }
                 if leader_continuation_matches(key, 'm') {
                     return self.handle_agent_action(ActionId::ModelPicker);
@@ -1188,7 +1081,7 @@ impl AgentView {
                 // consume the leader so they cannot leak into the composer.
                 return InputOutcome::Changed;
             }
-            if key!('x', CONTROL).matches(key) {
+            if registry.matches_id(ActionId::SessionCommands, key) {
                 self.leader_key_started_at = Some(Instant::now());
                 return InputOutcome::Changed;
             }
@@ -2822,8 +2715,8 @@ mod esc_would_cancel_turn_tests {
 }
 #[cfg(test)]
 mod jump_backout_key_tests {
+    use super::AgentView;
     use super::test_fixtures::make_agent;
-    use super::{AgentPane, AgentView};
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
     use crate::app::root::InputOutcome;
@@ -2859,22 +2752,6 @@ mod jump_backout_key_tests {
         assert!(
             !agent.no_esc_consumer_pending(),
             "an open /jump picker consumes Esc"
-        );
-    }
-    /// The Left-arrow mirror: an open picker fails `is_empty_focused_prompt`
-    /// so the overlay Left back-out defers to the picker's own handling.
-    #[test]
-    fn jump_picker_defeats_empty_focused_prompt() {
-        let mut agent = make_agent();
-        agent.force_active_pane(AgentPane::Prompt);
-        assert!(
-            agent.is_empty_focused_prompt(),
-            "baseline: empty prompt focused"
-        );
-        open_jump(&mut agent);
-        assert!(
-            !agent.is_empty_focused_prompt(),
-            "an open /jump picker owns Esc/Left in the overlay back-out"
         );
     }
     /// `/jump` must not swallow Ctrl+C while `/compact` is running — same

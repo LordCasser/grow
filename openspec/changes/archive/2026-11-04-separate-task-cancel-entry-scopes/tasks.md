@@ -1,0 +1,5 @@
+- [x] Implement the scoped shared cancellation helper and route both existing tool entries through it.
+- [x] Add adversarial tests for terminal-only backend isolation, backend-only child cancellation, foreign-child rejection, already-finished idempotency and terminal-first mixed cancellation.
+- [x] Add and run a real SessionActor `KillTaskTool` dispatch test that verifies durable killed/already-exited receipts and a foreign-child error result.
+- [x] Run targeted tools and shell cancellation-receipt verification; record command results.
+- [x] Run strict OpenSpec validation and update the archived tool-authorization contract when the change is complete.

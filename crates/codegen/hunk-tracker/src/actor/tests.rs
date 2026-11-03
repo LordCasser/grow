@@ -3010,6 +3010,11 @@ async fn test_get_file_hunk_data_full_text_file() {
         !data.hunks.is_empty(),
         "Should have hunks for modified file"
     );
+    assert_eq!(
+        data.hunks[0].patch.as_deref(),
+        Some("@@ -1,2 +1,2 @@\n-baseline content\n+modified content\n line 2\n"),
+        "the actor returns the canonical patch for a Full/Full file"
+    );
 }
 
 /// get_file_hunk_data returns Missing status for non-tracked path
@@ -3071,6 +3076,11 @@ async fn test_get_file_hunk_data_new_file_missing_baseline() {
 
     // Should have a hunk for the new file
     assert!(!data.hunks.is_empty());
+    assert_eq!(
+        data.hunks[0].patch.as_deref(),
+        Some("@@ -1,0 +1,1 @@\n+brand new file\n"),
+        "Missing baseline is formatted as the existing empty old side"
+    );
 }
 
 /// get_file_hunk_data returns Binary status for binary file
@@ -3726,6 +3736,11 @@ async fn test_ui_messaging_deleted_file() {
     assert!(
         data.current.content.is_none(),
         "Missing should have no content"
+    );
+    assert_eq!(
+        data.hunks[0].patch.as_deref(),
+        Some("@@ -1,1 +1,0 @@\n-content\n"),
+        "Missing current content is formatted as the existing empty new side"
     );
 }
 

@@ -24,6 +24,7 @@ use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
+use tool_types::{SubagentDetails, SubagentListScope, SubagentSummary};
 
 use crate::register_resource;
 
@@ -331,7 +332,7 @@ pub struct SubagentResult {
     pub worktree_path: Option<String>,
     /// Set when a blocking subagent exceeded its await budget and was
     /// auto-backgrounded: the child is still running (result via durable notification /
-    /// `get_command_or_subagent_output`), so the tool returns a `task_id` notice
+    /// `wait_subagent`), so the tool returns a `task_id` notice
     /// instead of a completion. Never set for natively backgrounded subagents.
     pub backgrounded: bool,
 }
@@ -381,7 +382,7 @@ impl SubagentResult {
 
 // Query protocol
 
-/// Query sent by `TaskOutputTool` to the shared coordinator actor.
+/// Query sent by `WaitSubagentTool` to the shared coordinator actor.
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct SubagentQueryRequest {
@@ -445,12 +446,14 @@ pub struct SubagentInspection {
 }
 
 impl SubagentSnapshot {
-    /// Whether the child is still in flight (initializing or running) — the
+    /// Whether the child is still in flight (including unavailable progress) — the
     /// shared liveness rule every driver's blocking query loops on.
     pub fn is_running(&self) -> bool {
         matches!(
             self.status,
-            SubagentSnapshotStatus::Running { .. } | SubagentSnapshotStatus::Initializing
+            SubagentSnapshotStatus::Running { .. }
+                | SubagentSnapshotStatus::RunningProgressUnavailable
+                | SubagentSnapshotStatus::Initializing
         )
     }
 }
@@ -485,6 +488,9 @@ pub enum SubagentSnapshotStatus {
         /// Number of errors encountered so far.
         error_count: u32,
     },
+    /// The coordinator confirms this child is active, but no progress sample
+    /// is available yet. No progress counters should be inferred from this.
+    RunningProgressUnavailable,
     /// Execution is checkpointed and awaits an external resume action.
     /// The checkpoint identifies a durable handoff; it does not authorize
     /// the coordinator to start or replay the child.
@@ -583,9 +589,9 @@ pub struct SubagentCompletionSummary {
     /// notification receipt).
     ///
     /// Surfaced inline in completion notifications when the parent agent's
-    /// toolset has no `BackgroundTaskAction` tool. Toolsets
-    /// that DO have a polling tool keep the existing metadata-only line +
-    /// "Use get_task_output(...)" pointer.
+    /// toolset has no `SubagentWait` tool. Toolsets
+    /// that DO have a result tool keep the existing metadata-only line +
+    /// "Use wait_subagent(...)" pointer.
     pub output: Arc<str>,
     pub planning_summary: Option<tool_types::planning::SubagentPlanningSummary>,
 }
@@ -651,6 +657,16 @@ pub struct SubagentInspectRequest {
     pub respond_to: oneshot::Sender<Result<Option<SubagentInspection>, SubagentObservationError>>,
 }
 
+/// One actor round-trip for a batch of metadata-only child status queries.
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentGetStatusesRequest {
+    pub subagent_ids: Vec<String>,
+    pub parent_session_id: Option<String>,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<Vec<Result<Option<SubagentDetails>, SubagentObservationError>>>,
+}
+
 /// Request for all running children owned by one parent session.
 #[derive(Educe)]
 #[educe(Debug)]
@@ -658,6 +674,16 @@ pub struct SubagentListRunningRequest {
     pub parent_session_id: String,
     #[educe(Debug(ignore))]
     pub respond_to: oneshot::Sender<Result<Vec<SubagentInspection>, SubagentObservationError>>,
+}
+
+/// Request for basic subagent lifecycle summaries in one authorized source.
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentListRequest {
+    pub parent_session_id: String,
+    pub scope: SubagentListScope,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<Vec<SubagentSummary>>,
 }
 
 /// Fork/resume provenance retained by the shared coordinator.
@@ -783,6 +809,7 @@ pub enum SubagentEvent {
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
+    ListSubagents(SubagentListRequest),
     /// Cancel a closed session's children and discard its runtime admission state.
     TeardownSession {
         parent_session_id: String,
@@ -798,6 +825,7 @@ pub enum SubagentEvent {
     MarkUsageNotApplied(SubagentMarkUsageNotAppliedRequest),
     RegistryCounts(SubagentRegistryCountsRequest),
     Inspect(SubagentInspectRequest),
+    GetStatuses(SubagentGetStatusesRequest),
     SpawnedRefs(SubagentSpawnedRefsRequest),
     ValidateType(SubagentValidateTypeRequest),
     LoopUnitActive(SubagentLoopUnitActiveRequest),
@@ -829,7 +857,7 @@ register_resource!("grow_build", "SubagentEventSender", SubagentEventSender);
 /// compaction pipeline consumes it through `RunningSubagentSummary`.
 #[derive(Debug, Clone)]
 pub struct ActiveSubagentSummary {
-    /// The subagent's unique ID (same ID used by `get_task_output` / `kill_task`).
+    /// The subagent's unique ID (same ID used by `wait_subagent` / `kill_task`).
     pub subagent_id: String,
     /// The agent type name (e.g. "Explore", "general-purpose", "Plan").
     pub subagent_type: String,

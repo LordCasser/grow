@@ -19,3 +19,7 @@ Child Auto 的不可用、超时和超载都不授权工具，也不转为人工
 Reset 先在 manager 内存中撤销主域和 child 作用域，再在独立任务中通过既有写锁保存最新根状态。Reset 的成功回执等到写入返回；失败向调用方返回 I/O 错误，Shell 发送仅供 UI 的提示。失败后当前进程的撤销仍生效，但磁盘上的旧授权可能在重启后出现。
 
 权限 Sideband 与前台尝试若已在 Goal 预算阈值前准入，各自按已确认的实际用量完整且仅一次结算。累计用量达到阈值后停止新准入；这不是对尚未返回的并行请求做预留式硬上限。详见 [behavior-goal](../../openspec/specs/behavior-goal/spec.md)。
+
+## Child MCP 出生授权
+
+源码入口为 `agent/subagent/mod.rs::freeze_child_mcp_grant`、`handle_request.rs` 与 `mcp/servers.rs::SharedMcpPool` 的冻结Bindings scope。canonical Spawn admission 的同一server/client-ID样本供父ceiling、持久出生名称和actor初始ceiling使用；实际调用继续受live upstream约束，cold恢复按出生名称建立新incarnation。缺出生事实的旧child不会从当前profile补授权。行为以 [出生MCP契约](../../openspec/specs/tool-authorization/spec.md#requirement-cold-child-restore-retains-durable-birth-mcp-membership) 为准。

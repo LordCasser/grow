@@ -780,45 +780,15 @@ pub async fn run_leader(
                 return Ok(());
             };
 
-            let _config_watcher = if let Some(watcher) = config_watcher {
-                // Share ownership between the leader's
-                // long-lived binding and the per-cwd dynamic
-                // registration drain task. `Rc<RefCell<>>` is safe
-                // because both ends live inside the leader's
-                // `LocalSet` — the watcher type is not `Sync`-needed.
-                let watcher = std::rc::Rc::new(std::cell::RefCell::new(watcher));
-
-                // Dynamic registration drain. Lives only
-                // when the recursive_config_watch flag is on AND the
-                // OS watcher started. With the flag
-                // off the channel itself was never created, so
-                // there's no rx to drain and no `PathBuf` ever
-                // queued (no leak).
-                if let Some(mut rx) = config_watcher_path_rx.take() {
-                    while let Ok(update) = rx.try_recv() {
-                        watcher.borrow_mut().apply_session_update(update);
-                    }
-                    let cancel_for_drain = cancel_clone.clone();
-                    let watcher_for_drain = watcher.clone();
-                    tokio::task::spawn_local(async move {
-                        loop {
-                            tokio::select! {
-                                biased;
-                                _ = cancel_for_drain.cancelled() => break,
-                                cwd = rx.recv() => match cwd {
-                                    Some(update) => watcher_for_drain.borrow_mut().apply_session_update(update),
-                                    None => break,
-                                },
-                            }
-                        }
-                    });
-                }
-                Some(watcher)
+            let (config_watch_task, config_ready) = if let Some(watcher) = config_watcher {
+                let (task, ready) = watcher.spawn_session_updates(
+                    config_watcher_path_rx.take(), cancel_clone.clone(),
+                );
+                (Some(task), Some(ready))
             } else {
                 warn!("Config file watcher failed to start; hot-reload disabled");
-                // Close the unavailable consumer rather than buffering session updates.
                 drop(config_watcher_path_rx.take());
-                None
+                (None, None)
             };
 
             let skills_paths = agent_config.skills.paths.clone();
@@ -922,12 +892,22 @@ pub async fn run_leader(
                 }
             });
 
-            let _ = startup_config_update_tx.send(
-                crate::config::reloader::ConfigUpdate::SubagentToggleChanged,
-            );
-            let _ = startup_config_update_tx.send(
-                crate::config::reloader::ConfigUpdate::McpCatalogChanged { project_root: None },
-            );
+            let startup_cancel = cancel_clone.clone();
+            let startup_task = tokio::task::spawn_local(async move {
+                if let Some(ready) = config_ready {
+                    tokio::select! {
+                        biased;
+                        _ = startup_cancel.cancelled() => return,
+                        result = ready => if result.is_err() { return; },
+                    }
+                }
+                let _ = startup_config_update_tx.send(
+                    crate::config::reloader::ConfigUpdate::SubagentToggleChanged,
+                );
+                let _ = startup_config_update_tx.send(
+                    crate::config::reloader::ConfigUpdate::McpCatalogChanged { project_root: None },
+                );
+            });
 
             let Some(skills_watcher) =
                 finish_blocking_registration(skills_registration, &cancel_clone).await?
@@ -954,6 +934,11 @@ pub async fn run_leader(
                 }
             }
 
+            startup_task.abort();
+            if let Some(task) = config_watch_task {
+                task.abort();
+                let _ = task.await;
+            }
             if let Some(task) = skills_task.as_mut() {
                 task.abort();
                 let _ = task.await;

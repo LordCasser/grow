@@ -6,7 +6,7 @@ Grow runs long-lived processes without blocking the conversation. This document 
 
 ## Background Commands
 
-Set `background: true` on the `run_terminal_command` tool to run a command in the background. It returns a task ID immediately; retrieve output with `get_command_or_subagent_output`.
+Set `background: true` on the `run_terminal_command` tool to run a command in the background. It returns a task ID immediately; retrieve output with `get_command_output`.
 
 ### How It Works
 
@@ -17,14 +17,14 @@ Set `background: true` on the `run_terminal_command` tool to run a command in th
 
 ### Getting Output
 
-Use the `get_command_or_subagent_output` tool to check on one or more background commands or subagents:
+Use the `get_command_output` tool to check on one or more background commands:
 
-- `get_command_or_subagent_output(task_ids=["id"])` — current output and status without waiting
-- `get_command_or_subagent_output(task_ids=["id"], timeout_ms=30000)` — wait up to the given milliseconds for completion
+- `get_command_output(task_ids=["id"])` — current output and status without waiting
+- `get_command_output(task_ids=["id"], timeout_ms=30000)` — wait up to the given milliseconds for completion
 
 ### Waiting for Multiple Tasks
 
-Use the same `get_command_or_subagent_output` contract with several task IDs:
+Use the same `get_command_output` contract with several task IDs:
 
 - `task_ids` — the list of task IDs to wait for (maximum 20)
 - `timeout_ms` — a positive maximum wait in milliseconds; omit it or pass `0` for an immediate snapshot
@@ -33,7 +33,7 @@ With a positive timeout, the call returns when every listed task finishes or the
 
 ### Killing Background Tasks
 
-Use `kill_command_or_subagent(task_id)` to terminate a running background task or subagent. The tool sends SIGTERM, then SIGKILL, to shell processes, and sends Cancel and Shutdown to subagents. It reports success if the task was killed or had already exited.
+Use `kill_terminal_command(task_id)` to terminate a background terminal command or monitor. It sends SIGTERM and then SIGKILL to the command process group, or terminates the monitor process. It does not cancel subagents. Use `kill_command_or_subagent(task_id)` for a background task or subagent; subagent cancellation does not require an attached Terminal resource.
 
 ### Common Use Cases
 
@@ -138,7 +138,7 @@ Set `persistent: true` for monitors that should run for the lifetime of the sess
 - Log tailing
 - CI status watching
 
-Stop persistent monitors with `kill_command_or_subagent(task_id)`.
+Stop persistent monitors with `kill_terminal_command(task_id)`.
 
 ### Volume Control
 
@@ -195,7 +195,7 @@ Whenever background work is still running while the agent looks idle — between
 
 It counts running background commands, monitors, scheduled `/loop` tasks, and background subagents, and updates live as each finishes. Any of them can wake the agent for a new turn (commands and subagents on completion, monitors on events, loops on their timer), so the cue stays up until nothing is left. The running counts live only on this status line: completions land in the transcript as a single "Task completed" chip, and "Worked for" markers stay plain — the transcript never repeats or restates the running counts.
 
-While a turn is waiting on background work (a `get_command_or_subagent_output` call with a positive timeout), the status line explains the same input contract used by every running turn:
+While a turn is waiting on background work (a `get_command_output` call with a positive timeout, or a `wait_subagent` call), the status line explains the same input contract used by every running turn:
 
 ```
 ◎ 1 command still running · Enter queues · Ctrl+Enter steers
@@ -251,5 +251,5 @@ Each error or warning appears as a notification in the conversation.
 - **Use `monitor` for real-time event streams** (log tailing, file watching)
 - **Use `scheduler_create` with `recurring: false`** for delayed one-shot tasks
 - **Keep monitor filters tight** — prefer `grep --line-buffered` over raw log streams
-- **Do not use sleep loops** in normal commands to poll — use `get_command_or_subagent_output` with `timeout_ms` instead
+- **Do not use sleep loops** in normal commands to poll — use `get_command_output` with `timeout_ms` instead
 - **Set reasonable poll intervals** — 30s+ for remote APIs to avoid rate limits, shorter for local checks

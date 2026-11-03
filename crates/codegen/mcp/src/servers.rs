@@ -440,6 +440,8 @@ enum McpServerScope {
     All,
     Only(Arc<std::collections::HashSet<McpServerName>>),
     Except(Arc<std::collections::HashSet<McpServerName>>),
+    /// An admitted child's immutable in-process creation grant.
+    Bindings(Arc<HashMap<McpServerName, u64>>),
 }
 
 impl McpServerScope {
@@ -448,16 +450,27 @@ impl McpServerScope {
             Self::All => true,
             Self::Only(servers) => servers.contains(server),
             Self::Except(servers) => !servers.contains(server),
+            Self::Bindings(bindings) => bindings.contains_key(server),
         }
     }
 
     fn restrict_to(&mut self, servers: std::collections::HashSet<McpServerName>) {
-        let allowed = match self {
-            Self::All => servers,
-            Self::Only(current) => current.intersection(&servers).cloned().collect(),
-            Self::Except(excluded) => servers.difference(excluded).cloned().collect(),
+        *self = match self {
+            Self::All => Self::Only(Arc::new(servers)),
+            Self::Only(current) => {
+                Self::Only(Arc::new(current.intersection(&servers).cloned().collect()))
+            }
+            Self::Except(excluded) => {
+                Self::Only(Arc::new(servers.difference(excluded).cloned().collect()))
+            }
+            Self::Bindings(bindings) => Self::Bindings(Arc::new(
+                bindings
+                    .iter()
+                    .filter(|(name, _)| servers.contains(*name))
+                    .map(|(name, id)| (name.clone(), *id))
+                    .collect(),
+            )),
         };
-        *self = Self::Only(Arc::new(allowed));
     }
 
     fn exclude(&mut self, servers: std::collections::HashSet<McpServerName>) {
@@ -468,6 +481,15 @@ impl McpServerScope {
             }
             Self::Except(current) => {
                 *self = Self::Except(Arc::new(current.union(&servers).cloned().collect()));
+            }
+            Self::Bindings(bindings) => {
+                *bindings = Arc::new(
+                    bindings
+                        .iter()
+                        .filter(|(name, _)| !servers.contains(*name))
+                        .map(|(name, id)| (name.clone(), *id))
+                        .collect(),
+                );
             }
         }
     }
@@ -597,6 +619,11 @@ impl SharedMcpEligibility {
             return None;
         }
         let client = self.authority.client(server)?;
+        if let McpServerScope::Bindings(bindings) = &self.scope
+            && bindings.get(server) != Some(&client.client_id())
+        {
+            return None;
+        }
         if let Some(upstream) = self.upstream.as_deref() {
             let upstream_client = upstream.current_client(server)?;
             if upstream_client.client_id() != client.client_id() {
@@ -1285,6 +1312,33 @@ impl SharedMcpPool {
             scope: McpServerScope::All,
             upstream_eligibility: state.inherited_eligibility.clone(),
         }
+    }
+
+    /// Sample the live authority once for a child admission. Later imports
+    /// retain this grant but still intersect it with the live upstream.
+    /// Repeating this in actor setup must not resample a narrower/wider parent.
+    pub fn freeze_current_clients(&mut self) {
+        if matches!(self.scope, McpServerScope::Bindings(_)) {
+            return;
+        }
+        let clients = self.eligibility().current_clients();
+        self.scope = McpServerScope::Bindings(Arc::new(
+            clients
+                .iter()
+                .map(|(name, _, id)| (name.clone(), *id))
+                .collect(),
+        ));
+        self.clients = clients
+            .into_iter()
+            .map(|(name, client, _)| (name, client))
+            .collect();
+    }
+
+    pub fn client_bindings(&self) -> HashMap<McpServerName, u64> {
+        self.clients
+            .iter()
+            .map(|(name, client)| (name.clone(), client.client_id()))
+            .collect()
     }
 
     pub fn get_client(&self, name: &str) -> Option<&Arc<McpClient>> {
@@ -5840,6 +5894,102 @@ mod tests {
         state.owned_clients.clear();
         state.publish_eligibility(std::collections::HashSet::new());
         assert!(!eligibility.contains_server("github"));
+    }
+
+    #[test]
+    fn child_birth_grant_samples_live_authority_and_survives_initialization_races() {
+        let mut parent = McpState::new(vec![]);
+        let original = make_test_client("github");
+        parent
+            .owned_clients
+            .insert("github".into(), original.clone());
+        let mut stale = SharedMcpPool::from_state(&parent);
+        parent.owned_clients.clear();
+        parent.publish_transports();
+        stale.freeze_current_clients();
+        assert!(
+            stale.client_bindings().is_empty(),
+            "the old pool map is not a live grant"
+        );
+
+        parent
+            .owned_clients
+            .insert("github".into(), original.clone());
+        let linear = make_test_client("linear");
+        parent.owned_clients.insert("linear".into(), linear.clone());
+        let mut admitted = SharedMcpPool::from_state(&parent);
+        admitted.freeze_current_clients();
+        let birth = admitted.client_bindings();
+        assert_eq!(
+            birth,
+            HashMap::from([
+                ("github".into(), original.client_id()),
+                ("linear".into(), linear.client_id())
+            ])
+        );
+
+        // Parent changes after the admission sample, before the child imports.
+        parent.owned_clients.clear();
+        parent.publish_transports();
+        admitted.freeze_current_clients();
+        assert_eq!(
+            admitted.client_bindings(),
+            birth,
+            "actor setup must not resample the birth grant"
+        );
+        let mut child = McpState::new(vec![]);
+        child.import_shared_clients(&admitted);
+        assert!(
+            child.shared_client_ids().is_empty(),
+            "the birth grant is intersected with current availability"
+        );
+
+        let replacement = make_test_client("github");
+        parent
+            .owned_clients
+            .insert("github".into(), replacement.clone());
+        parent.owned_clients.insert("linear".into(), linear.clone());
+        parent
+            .owned_clients
+            .insert("added".into(), make_test_client("added"));
+        parent.publish_transports();
+        child.reconcile_inherited_clients();
+        assert_eq!(
+            child.shared_client_ids(),
+            HashMap::from([("linear".into(), linear.client_id())])
+        );
+        assert!(
+            !admitted.eligibility().contains_server("github"),
+            "same-name replacement has no old grant"
+        );
+        assert!(!admitted.eligibility().contains_server("added"));
+
+        let mut restricted = admitted.clone();
+        restricted.restrict_to_servers(["github".into(), "added".into()]);
+        assert!(
+            restricted.eligibility().current_clients().is_empty(),
+            "restrict must retain ID constraints"
+        );
+        let mut excluded = admitted.clone();
+        excluded.exclude_servers(["linear".into()]);
+        assert!(
+            excluded.eligibility().current_clients().is_empty(),
+            "exclude must retain ID constraints"
+        );
+
+        // A cold incarnation deliberately rebinds only durable birth names.
+        let mut cold = SharedMcpPool::from_state(&parent);
+        cold.restrict_to_servers(birth.keys().cloned());
+        cold.freeze_current_clients();
+        let mut restored = McpState::new(vec![]);
+        restored.import_shared_clients(&cold);
+        assert_eq!(
+            restored.shared_client_ids(),
+            HashMap::from([
+                ("github".into(), replacement.client_id()),
+                ("linear".into(), linear.client_id())
+            ])
+        );
     }
 
     #[test]

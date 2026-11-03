@@ -1,0 +1,4 @@
+- [x] Read project instructions, OpenSpec index, session-timeline contract, and inspect live/replay slot allocation.
+- [x] Extend ImageProjection source-coordinate ownership to all existing allocated slots.
+- [x] Add regressions for shadows-only bounds, tool-call slots, carrier slots, out-of-range IDs, and replay.
+- [x] Run the targeted chat-state test and record its result.

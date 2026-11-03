@@ -394,6 +394,7 @@
                 message: "Answering session peer".into(),
                 tone: shell::extensions::notification::UiNoticeTone::Info,
                 details: Some(serde_json::to_string(&shell::coordination::IncomingInquiryAudit {
+                answer_context: None,
                     direction: shell::coordination::InquiryDirection::Peer,
                     source_peer_id: "peer-process".into(),
                     source_session_id: "peer".into(),

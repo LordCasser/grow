@@ -1,0 +1,33 @@
+# Independent review
+
+Result: no remaining production blocker found after the two implementation corrections below. This is a static source and measurement review; the reviewer did not run Cargo. The owner's combined chat-state/Shell library run was still in progress when this record was written. The final content-versus-lifecycle assertion was added after that build began and requires its own final targeted run; this record does not claim the running binary contains it.
+
+Scope was the three storage files compared with the snapshot named by `/tmp/grow-search-prefix-baseline-path.txt`, plus only the consuming replay-suffix method and related comment in Timeline. Other changes to Timeline were excluded.
+
+## Production boundaries
+
+- The worker owns one optional entry, not a per-session cache. `take` transfers its candidate before summary/read/SQLite work. A different key discards it, and any returned error or task failure leaves the worker entry empty. Publication occurs only after SQLite upsert or a successful content-hash skip.
+- Every operation opens a new identity-checked pinned reader and uses its captured length. Reuse hashes every byte of the prior complete prefix from offset zero and requires equal digest and sufficient complete length. The checkpoint excludes incomplete tail bytes. Replacement entities with different bytes rebuild through that same handle; identical bytes establish only the same validated projection, not writer ownership.
+- The shared scanner retains the original bounded line read, line-size check, byte/physical-record budget accounting, version-first decode, checksum, physical/domain sequence and presentation-binding validation, diagnostic line numbering and incomplete-prefix error. Full readers still build their real HistorySnapshot. The projection sink retains Domain events and AppendState without manufacturing a suffix HistorySnapshot.
+- All new physical records are decoded and validated before suffix lifecycle replay. `with_replayed_suffix` consumes its Timeline candidate and uses the same content-before-lifecycle replay path as `from_events`; it does not use live `accept` or clone the historical lifecycle for each suffix event. A failure drops the partially advanced candidate.
+- Complete branch/prompt extraction and existing text limits remain authoritative. No incremental text approximation or mtime/size-only trust was introduced. Bootstrap continues using the full collector and its existing reader admission/budgets.
+
+Review found and the owner corrected two costs: complete text extraction had moved from the old blocking collector onto the async worker; it now runs in the same blocking closure as projection reading. On a prefix miss, the previous owned projection originally remained alive through the full rebuild; it is now dropped before constructing the replacement.
+
+## Adversarial tests
+
+The final tests statically exercise unchanged and legal append reuse, a real compaction replacement, same-size valid rewrite with restored mtime, a shorter file, namespace entity replacement, and a reader captured before a later append. The torn-tail case now also opens a fresh reader whose captured length includes part of the first new physical record, checks that complete_len stays at the old prefix, then completes the record and resumes from that checkpoint.
+
+The mixed suffix deliberately inserts a presentation record before a domain record, giving physical and domain sequences different values. A later same-eventId presentation verifies that the retained AppendState identity set crosses that suffix boundary. Worker-owner coverage alternates two keys, keeps the old SQLite document on malformed input or trigger rejection, withholds the failed candidate, and retries after repair.
+
+The error-order fixture was corrected during review: its duplicate Turn now has a valid next domain sequence, and the invalid suffix is restored after checkpoint construction. It therefore reaches lifecycle validation; a later malformed physical line can prove whole-suffix physical decoding takes precedence. The newly added Control case also distinguishes same-event validation order: revision 7 after revision 7 fails live lifecycle validation, while duplicated retired context layers make replay fail with the exact InvalidControlContext message first. That case would detect replacing replay with live accept. Its local Write trait import is present in the final source after review feedback.
+
+These tests do not establish a new atomic Summary/body snapshot. As before this change, summary loading can use an existing directory capability while the ledger reader freshly validates and pins its entity. An external same-SID directory replacement can therefore cross those reads. This change preserves that boundary; its proof concerns the selected ledger and byte prefix, not a Summary-plus-body transaction.
+
+## Measurement and retention
+
+The timing source and raw samples agree with the recorded medians. Fixture creation, cloning, writes and expected-content construction are outside timing. Reader open, prefix proof/scan, required fold and full text extraction are timed. Every resulting content string is compared with the complete expected extraction. Two warmups and seven samples are reported by middle sorted value. The old collector drops its Timeline before returning; projection cases stop timing before dropping their result. The measurement explicitly discloses this ownership difference and the warm/debug/synthetic, fixed-order, non-Tokio/non-SQLite scope. It is not a decode-only or end-to-end throughput result.
+
+The separate allocator probe counts requested Rust allocation layout sizes, including default realloc/alloc_zeroed paths through its alloc/dealloc implementation. Its fixtures and original Timeline are live before the baseline. The reported 262,776 / 1,050,816 / 4,205,664-byte deltas all return exactly to baseline after projection drop in the raw output. These are requested live allocations, not RSS, fragmentation or payload length. The Domain-only fixtures do not characterize presentation-heavy identity/anchor/receipt maps.
+
+The single retained entry has memory proportional to the last session's full Timeline and AppendState; cardinality one is not a hard byte bound. It may remain resident while the worker is idle. Alternating keys miss. These are the explicit space/performance tradeoffs, not grounds to claim free or constant-time caching. The diagnostic allocator and timing tests are absent from final production/test sources; their reproduction dependencies and source remain under this change.

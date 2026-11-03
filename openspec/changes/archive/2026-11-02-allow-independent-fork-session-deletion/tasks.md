@@ -1,0 +1,4 @@
+- [x] 普通 fork 与 incoming Spawn 回归在旧实现证明失败。
+- [x] 删除资格按 canonical 双向引用判定。
+- [x] 相关存储回归、说明与 strict 校验。
+- [x] 归档与归档后校验。

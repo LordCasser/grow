@@ -1,0 +1,19 @@
+## 归属与边界
+run_worker本来串行await每个key upsert；只在此owner持有Option<(SessionSearchKey, TimelineReadProjection)>，最多一条完整Timeline+AppendState，无文件handle保留，无持久cache格式。key含原id/cwd，root由worker归属固定。cold bootstrap不使用它。
+
+每次仍用StorageAdapter.open_timeline_reader取得身份检查过的固定entity/长度。计算该snapshot的最后完整换行长度；旧checkpoint只认证旧complete_len，不认证torn tail。新handle从0完整hash旧complete_len，完整前缀缩短/hash不同/key不同均full rebuild。同bytes前缀已通过所有schema/checksum/AppendState/Timeline验证；不依赖mtime/inode/size猜测。相同bytes在替换entity中也只是同一合法只读投影，当前handle仍唯一namespace authority。
+
+从既有read_journal_prefix_data提取共享range scanner(start,end,AppendState,hasher,budgets,record sink)，保留每行大小、newline、version-first、checksum、seq/identity和unexpectedEOF规则。原full wrapper依旧start0/default，返回完整HistorySnapshot。search sink只收Domain，不能构造伪完整suffix HistorySnapshot。
+
+scanner完整完成后才逐suffix owned Timeline::with_replayed_suffix（from_events共用），保留旧read_events先物理decode全量再Timeline.fold的错误优先级。cache.take把唯一owned候选移入blocking任务，任何decode/fold/SQLite错误都整项丢弃；不为rollback深clone旧Timeline。SQLite upsert/hashskip成功后才存回entry。下一次retry从全量开始，旧SQLite doc不被坏输入清空。
+
+仍对完整selected-branch transcript/prompt_records执行原正文规则，不做incremental text推断。rewind/compaction/control/SkillLoad等继续由Timeline原fold解释，完整输出上限/Unicode/title hash不变。单entry长期保留完整Timeline+AppendState，需要测保留量，不能称其内存免费；不同session交错会miss，不能宣称全多session负载收益。
+
+## 验证
+差分full vs cached：同key unchanged与append、不同key、title rename、rewind/compaction原文、same-size合法前缀重写、截短、同idnamespace实体替换、capture后append、torn tail跨次补全、bad checksum/schema/seq/lifecycle，以及suffix中较早lifecycle错误+较晚物理错误保留旧优先级。失败后同worker/index重试，DB旧row保留且新candidate不存回。
+
+共享scanner全现有jsonl/search测试与相关Shell库回归。临时probe同fixture128/512/2048，先full构造checkpoint，然后unchanged/追加1turn/keymiss；正文/byte-count完整相等，setup/输入clone在计时外，2warm+7samples，记录源码/raw/median。warm文件/debug，不声称release或端到端；全prefixhash仍O(B)，full-content projection仍O(N)，缓存只省重新decode旧events。
+
+实现核对修正：live accept先lifecycle后content，replay先content后lifecycle，不能拿live accept替代。复用现private accept_replayed，通过消费self的with_replayed_suffix最小入口暴露；from_events也调用同入口，失败丢弃整个candidate。既避免冷路径lifecycle逐条clone退化，也保留content/lifecycle错误优先级；不新增wire或unchecked append。
+
+独立审查修正：完整正文提取继续在同一次spawn_blocking内执行；prefix miss先drop旧candidate再建新fold，避免无意义旧新双驻留。缓存数量为1并不构成字节硬上界；长期保留最后成功session的Domain Timeline和AppendState，无fd，无历史presentation正文。

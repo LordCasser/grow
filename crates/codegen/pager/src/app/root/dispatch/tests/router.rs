@@ -1,5 +1,6 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
+use crate::app::root::InputOutcome;
 
 #[test]
 fn trajectory_launch_uses_the_exact_active_session_id() {
@@ -71,17 +72,155 @@ fn welcome_quit_suspends_a_resident_owned_root_session() {
 }
 
 #[test]
-fn welcome_quit_without_owned_session_quits_immediately() {
+fn welcome_quit_asks_runtime_even_without_visible_owned_pages() {
     let mut app = test_app();
-
     let effects = dispatch(Action::Quit, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SuspendForExit { .. }]
+    ));
+}
 
-    assert!(matches!(effects.last(), Some(Effect::Quit)));
+#[test]
+fn viewer_only_quit_still_asks_runtime_for_ownership() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .attached_as_viewer = true;
+    let effects = dispatch(Action::Quit, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SuspendForExit { .. }]
+    ));
+}
+
+#[test]
+fn notification_turn_viewer_still_suspends_on_double_ctrl_d() {
+    use acp_transport::{AcpArgs, AcpClientMessage};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let agent_id = AgentId(0);
+    let agent = app.agents.get_mut(&agent_id).unwrap();
+    agent.note_self_originated_prompt("user-prompt");
+    agent.session.current_prompt_id = Some("user-prompt".into());
+    assert!(!agent.session.attached_as_viewer);
+
+    let notification_prompt = "notifications-child-completed";
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    crate::app::acp_handler::handle(
+        AcpClientMessage::SessionNotification(AcpArgs {
+            request: acp::SessionNotification::new(
+                acp::SessionId::new("test-session"),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("Review the child result")),
+                )),
+            )
+            .meta(
+                serde_json::json!({ "promptId": notification_prompt })
+                    .as_object()
+                    .cloned(),
+            ),
+            response_tx,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&agent_id];
+    assert!(agent.session.attached_as_viewer);
+    assert_eq!(
+        agent.session.current_prompt_id.as_deref(),
+        Some(notification_prompt)
+    );
+
+    let quit_key = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(!matches!(
+        app.handle_input(&quit_key),
+        InputOutcome::Action(Action::Quit | Action::QuitConfirmed)
+    ));
+    let InputOutcome::Action(action @ (Action::Quit | Action::QuitConfirmed)) =
+        app.handle_input(&quit_key)
+    else {
+        panic!("second Ctrl+D must confirm quit");
+    };
+    let effects = dispatch(action, &mut app);
+    let [Effect::SuspendForExit { exit_id }] = effects.as_slice() else {
+        panic!("notification viewer must suspend its runtime before quit, got {effects:?}");
+    };
+    let effects = dispatch_task_result(
+        TaskResult::ExitSuspensionResolved {
+            exit_id: exit_id.clone(),
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Quit)));
     assert!(
         !effects
             .iter()
-            .any(|effect| matches!(effect, Effect::SuspendForExit { .. }))
+            .any(|effect| matches!(effect, Effect::CancelTurn { .. }))
     );
+}
+
+#[test]
+fn startup_exit_retains_owner_and_can_retry_after_identity_is_confirmed() {
+    for replaying in [false, true] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        if !replaying {
+            agent.unbind_session_id();
+        }
+        agent.session.loading_replay = replaying;
+        agent.session.prompt_history_loading = !replaying;
+        let effects = dispatch(Action::Quit, &mut app);
+        assert!(effects.is_empty());
+        assert!(app.agents.contains_key(&id));
+        assert!(matches!(&app.exit_suspension.as_ref().unwrap().phase,
+            crate::app::root::ExitSuspensionPhase::Unconfirmed { error } if error.contains("startup")));
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.bind_session_id(acp::SessionId::new("startup-completed"));
+        agent.session.loading_replay = false;
+        agent.session.prompt_history_loading = false;
+        let effects = dispatch(Action::RetryExitSuspension, &mut app);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SuspendForExit { .. }]
+        ));
+    }
+}
+
+#[test]
+fn global_quit_interrupts_the_attached_command_prefix() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    mark_agent_nonempty(&mut app, id);
+    dispatch_open_dashboard(&mut app);
+    dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(app.agents[&id].leader_key_deadline().is_some());
+    app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(app.agents[&id].leader_key_deadline().is_none());
+    let outcome = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(!matches!(
+        outcome,
+        InputOutcome::Action(Action::StopSessionWork)
+    ));
+    assert!(app.agents[&id].leader_key_deadline().is_some());
 }
 
 #[test]
@@ -416,9 +555,19 @@ fn send_remember_note_clears_active_ephemeral_tip() {
     );
 }
 #[test]
-fn quit_returns_quit_effect() {
+fn quit_from_empty_surface_waits_for_runtime_confirmation() {
     let mut app = test_app();
     let effects = dispatch(Action::Quit, &mut app);
+    let [Effect::SuspendForExit { exit_id }] = effects.as_slice() else {
+        panic!("{effects:?}");
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ExitSuspensionResolved {
+            exit_id: exit_id.clone(),
+            result: Ok(()),
+        }),
+        &mut app,
+    );
     assert!(matches!(effects.as_slice(), [Effect::Quit]));
 }
 #[test]
@@ -1858,7 +2007,7 @@ fn handle_ask_user_question_does_not_push_system_block_when_displaced_acp_modal(
 fn close_active_agent_no_parent_switches_to_first_surviving_peer() {
     let mut app = three_agent_app();
     switch_to_agent(&mut app, AgentId(1), SwitchCause::Picker);
-    dispatch_sessions_confirm_close(&mut app, AgentId(1));
+    close_session_and_ack(&mut app, AgentId(1));
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(0)));
     assert!(!app.agents.contains_key(&AgentId(1)));
 }
@@ -1867,7 +2016,7 @@ fn close_active_agent_with_dead_parent_falls_back_to_surviving_peer() {
     let mut app = three_agent_app();
     set_forked_from(&mut app, AgentId(2), AgentId(99));
     switch_to_agent(&mut app, AgentId(2), SwitchCause::Picker);
-    dispatch_sessions_confirm_close(&mut app, AgentId(2));
+    close_session_and_ack(&mut app, AgentId(2));
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(0)));
 }
 #[test]
@@ -2307,7 +2456,7 @@ fn mouse_event(
 /// previous click-to-select behaviour as unresponsive.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn mouse_left_click_attaches_immediately() {
+fn mouse_left_click_selects_readonly_preview() {
     let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, MouseButton, MouseEventKind};
     let mut app = test_app_with_agent();
@@ -2323,24 +2472,14 @@ fn mouse_left_click_attaches_immediately() {
         PasteProvenance::Terminal,
         &mut input_effects,
     );
-    match outcome {
-        crate::app::root::InputOutcome::Action(crate::app::actions::Action::DashboardAttach(
-            actual,
-        )) => {
-            assert_eq!(actual, id, "single click must attach the clicked row");
-        }
-        other => panic!("expected DashboardAttach on single click, got {other:?}"),
-    }
+    assert!(matches!(outcome, crate::app::root::InputOutcome::Changed));
+    assert!(d.list_focused);
     assert_eq!(d.selected, Some(id));
 }
-/// Every left-click attaches, including
-/// rapid repeated clicks. The previous design used a 500ms window
-/// to distinguish single (select) from double (attach) click;
-/// the new design makes every click attach so the user's mental
-/// model "click = open" always holds.
+/// A second click opens the explicitly selected session.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn mouse_repeated_click_keeps_attaching() {
+fn mouse_double_click_opens_selected_session() {
     let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, MouseButton, MouseEventKind};
     let mut app = test_app_with_agent();
@@ -2356,12 +2495,8 @@ fn mouse_repeated_click_keeps_attaching() {
         PasteProvenance::Terminal,
         &mut input_effects,
     );
-    match outcome1 {
-        crate::app::root::InputOutcome::Action(crate::app::actions::Action::DashboardAttach(
-            actual,
-        )) => assert_eq!(actual, id),
-        other => panic!("expected DashboardAttach on first click, got {other:?}"),
-    }
+    assert!(matches!(outcome1, crate::app::root::InputOutcome::Changed));
+    assert_eq!(d.selected.as_ref(), Some(&id));
     let outcome2 = d.handle_input_with_paste_provenance(
         &Event::Mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 5)),
         &reg,
@@ -2375,12 +2510,10 @@ fn mouse_repeated_click_keeps_attaching() {
         other => panic!("expected DashboardAttach on second click, got {other:?}"),
     }
 }
-/// Clicks after the previous 500ms-double-click
-/// window also attach (the previous test asserted single-click
-/// behaviour for >500ms-apart clicks; now every click attaches).
+/// An expired double-click gesture starts a new read-only selection.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn mouse_click_after_long_pause_still_attaches() {
+fn mouse_click_after_long_pause_only_selects() {
     let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, MouseButton, MouseEventKind};
     use std::time::{Duration, Instant};
@@ -2406,12 +2539,8 @@ fn mouse_click_after_long_pause_still_attaches() {
         PasteProvenance::Terminal,
         &mut input_effects,
     );
-    match outcome {
-        crate::app::root::InputOutcome::Action(crate::app::actions::Action::DashboardAttach(
-            actual,
-        )) => assert_eq!(actual, id),
-        other => panic!("expected DashboardAttach, got {other:?}"),
-    }
+    assert!(matches!(outcome, crate::app::root::InputOutcome::Changed));
+    assert_eq!(d.selected.as_ref(), Some(&id));
 }
 /// Click on the peek close-button rect closes the peek.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -2571,4 +2700,41 @@ fn announcements_writes_coalesce_until_completion_even_after_failure() {
         assert!(!app.announcement_write_pending);
         assert_eq!(dispatch(Action::AnnouncementsHide, &mut app).len(), 1);
     }
+}
+
+#[test]
+fn pending_exit_blocks_new_input_and_startup_failure_keeps_retry_keys_live() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    dispatch(Action::Quit, &mut app);
+    assert!(!matches!(
+        app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL
+        ))),
+        InputOutcome::Action(Action::NewSession)
+    ));
+    app.handle_input(&Event::Paste("should stay unsent".into()));
+    assert!(app.agents[&AgentId(0)].prompt.text().is_empty());
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .loading_replay = true;
+    dispatch(Action::Quit, &mut app);
+    assert!(matches!(
+        app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE
+        ))),
+        InputOutcome::Action(Action::RetryExitSuspension)
+    ));
+    assert!(matches!(
+        app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE
+        ))),
+        InputOutcome::Action(Action::ForceQuit)
+    ));
 }

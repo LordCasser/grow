@@ -156,14 +156,19 @@ mod tests {
         let cfg = TruncationConfig::default();
         let cap = 300_000;
         assert_eq!(
-            cfg.interpolate_description("capped at {max_wait_ms}", "get_task_output", 40_000, cap),
+            cfg.interpolate_description(
+                "capped at {max_wait_ms}",
+                "get_command_output",
+                40_000,
+                cap
+            ),
             "capped at 300000 (~5 min)"
         );
         let default_cap = tool_types::format_wait_cap_ms(tool_types::MAX_WAIT_BLOCK_MS_DEFAULT);
         assert_eq!(
             TruncationConfig::default().interpolate_description(
                 "capped at {max_wait_ms}",
-                "get_task_output",
+                "get_command_output",
                 40_000,
                 tool_types::MAX_WAIT_BLOCK_MS_DEFAULT,
             ),
@@ -181,7 +186,7 @@ mod tests {
                 "task_ids": {"type": "array", "description": "Task IDs."},
             }
         });
-        cfg.apply_to_schema(&mut schema, "get_task_output", 40_000, cap);
+        cfg.apply_to_schema(&mut schema, "get_command_output", 40_000, cap);
 
         let timeout = &schema["properties"]["timeout_ms"];
         assert_eq!(timeout["description"], "Wait up to 300000 (~5 min).");
@@ -202,7 +207,7 @@ mod tests {
                 "max_wait": {"type": "integer", "description": "Up to {max_wait_ms}."},
             }
         });
-        cfg.apply_to_schema(&mut schema, "get_task_output", 40_000, cap);
+        cfg.apply_to_schema(&mut schema, "get_command_output", 40_000, cap);
 
         assert_eq!(
             schema["properties"]["max_wait"]["description"],
@@ -235,7 +240,7 @@ mod tests {
         let cfg = TruncationConfig::default();
         let cap = 300_000;
         let mut schema = generated.clone();
-        cfg.apply_to_schema(&mut schema, "get_task_output", 40_000, cap);
+        cfg.apply_to_schema(&mut schema, "get_command_output", 40_000, cap);
 
         let bounded = &schema["properties"]["timeout_ms"];
         assert_eq!(bounded["maximum"], serde_json::json!(300_000u64));
@@ -250,7 +255,7 @@ mod tests {
         let mut schema = serde_json::json!({"type": "object"});
         TruncationConfig::default().apply_to_schema(
             &mut schema,
-            "get_task_output",
+            "get_command_output",
             40_000,
             tool_types::MAX_WAIT_BLOCK_MS_DEFAULT,
         );

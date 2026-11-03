@@ -6,7 +6,13 @@ mod model_image;
 pub mod planning;
 mod schema_utils;
 pub mod serde_lenient;
+mod subagent;
 mod task;
+pub use subagent::{
+    GetSubagentStatusInput, GetSubagentStatusOutput, ListSubagentInput, ListSubagentOutput,
+    SubagentDetails, SubagentListScope, SubagentStatistics, SubagentStatus, SubagentSummary,
+    SubagentWaitReason, SubagentWaitResult, WaitSubagentInput, WaitSubagentOutput,
+};
 mod types;
 
 pub use behavior::{

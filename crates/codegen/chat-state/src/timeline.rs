@@ -750,6 +750,11 @@ pub struct SubagentSpawnEvent {
     pub parent_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_mode: Option<String>,
+    /// Connected inherited server membership at birth. None means missing
+    /// evidence; Some(empty) is an authoritative no-MCP creation ceiling.
+    /// Client incarnation IDs are process-local and are never durable grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub birth_mcp_servers: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -865,6 +870,11 @@ pub enum PlanHandoffKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NotificationSource {
+    /// A successful consultation answered by this session, delivered without wakeup.
+    InquiryAnswered {
+        source_session_id: String,
+        inquiry_id: String,
+    },
     /// A non-interrupting opinion, authorized by a receipt in the sender's inbox.
     AgentReply {
         source_session_id: String,
@@ -915,6 +925,10 @@ pub enum NotificationSource {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum NotificationSourceIdentity {
+    InquiryAnswered {
+        source_session_id: String,
+        inquiry_id: String,
+    },
     AgentReply {
         source_session_id: String,
         message_id: String,
@@ -969,6 +983,7 @@ impl NotificationSource {
     }
     fn subject_id(&self) -> &str {
         match self {
+            Self::InquiryAnswered { inquiry_id, .. } => inquiry_id,
             Self::ParentMessage { message_id, .. } | Self::AgentReply { message_id, .. } => {
                 message_id
             }
@@ -996,9 +1011,10 @@ impl NotificationSource {
                 artifact_revision: *artifact_revision,
                 handoff: *handoff,
             },
-            Self::WorkflowHandoff { .. } | Self::ParentMessage { .. } | Self::AgentReply { .. } => {
-                NotificationOwner::Session
-            }
+            Self::WorkflowHandoff { .. }
+            | Self::ParentMessage { .. }
+            | Self::AgentReply { .. }
+            | Self::InquiryAnswered { .. } => NotificationOwner::Session,
         }
     }
 
@@ -1011,13 +1027,21 @@ impl NotificationSource {
             Self::PlanHandoff { .. }
             | Self::WorkflowHandoff { .. }
             | Self::ParentMessage { .. }
-            | Self::AgentReply { .. } => {}
+            | Self::AgentReply { .. }
+            | Self::InquiryAnswered { .. } => {}
         }
         self
     }
 
     fn identity(&self) -> NotificationSourceIdentity {
         match self {
+            Self::InquiryAnswered {
+                source_session_id,
+                inquiry_id,
+            } => NotificationSourceIdentity::InquiryAnswered {
+                source_session_id: source_session_id.clone(),
+                inquiry_id: inquiry_id.clone(),
+            },
             Self::AgentReply {
                 source_session_id,
                 message_id,
@@ -1575,8 +1599,14 @@ pub fn notification_id(
     {
         return Err(TimelineError::InvalidNotification);
     }
-    let identity = serde_json::to_vec(&(owner_session_id, source.identity(), source_version))
-        .map_err(|_| TimelineError::InvalidNotification)?;
+    let identity = if matches!(source, NotificationSource::InquiryAnswered { .. }) {
+        // One consultation has one terminal receipt. Its version binds the
+        // original terminal; a changed terminal cannot allocate another ID.
+        serde_json::to_vec(&(owner_session_id, source.identity()))
+    } else {
+        serde_json::to_vec(&(owner_session_id, source.identity(), source_version))
+    }
+    .map_err(|_| TimelineError::InvalidNotification)?;
     Ok(format!("notification-{}", blake3::hash(&identity).to_hex()))
 }
 
@@ -1791,6 +1821,7 @@ pub struct Timeline {
     runtime: crate::session_runtime::RuntimeLifecycle,
     planning: Option<PlanningSnapshot>,
     events: Vec<TimelineEvent>,
+    last_rewind_seq: Option<EventSeq>,
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
     surface_revision: u64,
@@ -2100,11 +2131,20 @@ impl Timeline {
         &self.runtime
     }
     pub fn from_events(events: Vec<TimelineEvent>) -> Result<Self, TimelineError> {
-        let mut timeline = Self::default();
+        Self::default().with_replayed_suffix(events)
+    }
+
+    /// Extend an owned, validated fold. A failed suffix discards the entire
+    /// candidate, so restoration keeps its content-before-lifecycle checks
+    /// without cloning the historical lifecycle for each accepted event.
+    pub fn with_replayed_suffix(
+        mut self,
+        events: Vec<TimelineEvent>,
+    ) -> Result<Self, TimelineError> {
         for event in events {
-            timeline.accept_replayed(event)?;
+            self.accept_replayed(event)?;
         }
-        Ok(timeline)
+        Ok(self)
     }
 
     pub fn from_seed(items: Vec<ConversationItem>) -> Result<Self, TimelineError> {
@@ -2124,6 +2164,10 @@ impl Timeline {
 
     pub fn events(&self) -> &[TimelineEvent] {
         &self.events
+    }
+
+    pub(crate) fn last_rewind_seq(&self) -> Option<EventSeq> {
+        self.last_rewind_seq
     }
 
     pub fn response_admission(
@@ -2401,7 +2445,13 @@ impl Timeline {
                         ..
                     }) => id.item == 0,
                     TimelineEventKind::ImageProjection(projection) => {
-                        item.is_some_and(|item| item < projection.shadows.len())
+                        let slot_count = projection.shadows.len()
+                            + projection
+                                .tool_calls
+                                .iter()
+                                .map(|tool_call| 1 + tool_call.carrier_sources.len())
+                                .sum::<usize>();
+                        item.is_some_and(|item| item < slot_count)
                     }
                     TimelineEventKind::Control(control) => {
                         item.is_some_and(|item| item < control.model_contexts.len())
@@ -3601,7 +3651,7 @@ impl Timeline {
         Ok(())
     }
 
-    /// Only for a private, fresh restoration fold. An error discards the
+    /// Only for an owned restoration candidate. An error discards the
     /// entire fold; unlike live accept, no prior state needs to be preserved.
     fn accept_replayed(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
         self.validate_header(&event)?;
@@ -3818,6 +3868,15 @@ impl Timeline {
             self.subagent_result_recorded = true;
         }
         self.apply_prompt_coordinate(&event.kind);
+        if matches!(
+            &event.kind,
+            TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Rewind,
+                ..
+            })
+        ) {
+            self.last_rewind_seq = Some(event.seq);
+        }
         self.events.push(event);
     }
 
@@ -3898,6 +3957,7 @@ impl Timeline {
                         self.pending_notifications.insert(id.clone(), notification);
                     }
                     NotificationSource::ParentMessage { .. }
+                    | NotificationSource::InquiryAnswered { .. }
                     | NotificationSource::AgentReply { .. }
                     | NotificationSource::SubagentCompleted { .. }
                     | NotificationSource::PlanHandoff { .. }
@@ -4641,6 +4701,16 @@ impl Timeline {
                     if !self.pending_notifications.contains_key(id) {
                         return Err(TimelineError::NotificationAlreadyConsumed(id.clone()));
                     }
+                }
+                if input.is_none()
+                    && notification_ids.iter().any(|id| {
+                        matches!(
+                            self.pending_notifications[id].source,
+                            NotificationSource::InquiryAnswered { .. }
+                        )
+                    })
+                {
+                    return Err(TimelineError::InvalidNotification);
                 }
                 if notification_ids.iter().any(|id| {
                     matches!(
@@ -7011,6 +7081,17 @@ fn valid_notification_source_version(
     version: &NotificationSourceVersion,
 ) -> bool {
     match (source, version) {
+        (
+            NotificationSource::InquiryAnswered {
+                source_session_id,
+                inquiry_id,
+            },
+            NotificationSourceVersion::Opaque { value },
+        ) => {
+            valid_notification_identifier(source_session_id)
+                && valid_notification_identifier(inquiry_id)
+                && valid_notification_identifier(value)
+        }
         (
             NotificationSource::AgentReply {
                 source_session_id,
@@ -9413,16 +9494,46 @@ mod tests {
         for index in 0..4 {
             record_prompt(&mut timeline, index as u64 + 1, index, "prompt");
         }
+        assert_eq!(timeline.last_rewind_seq(), None);
         let rewound = timeline.rewind_surface(2).unwrap();
         timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        let first_rewind_seq = timeline.events().last().unwrap().seq;
+        assert_eq!(timeline.last_rewind_seq(), Some(first_rewind_seq));
         assert_eq!(timeline.next_prompt_index(), 2);
         record_prompt(&mut timeline, 9, 2, "new branch");
         assert_eq!(timeline.next_prompt_index(), 3);
         let restored = Timeline::from_events(timeline.events().to_vec()).unwrap();
         assert_eq!(restored.next_prompt_index(), 3);
+        assert_eq!(restored.last_rewind_seq(), Some(first_rewind_seq));
+
+        let mut candidate = timeline.clone();
         let rewound = timeline.rewind_surface(0).unwrap();
-        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        let candidate_event = candidate
+            .replace_all(rewound, MessageCause::Rewind)
+            .unwrap();
+        let prepared = timeline.prepare(candidate_event.kind.clone()).unwrap();
+        assert_eq!(timeline.last_rewind_seq(), Some(first_rewind_seq));
+        let second_rewind_seq = prepared.seq;
+        timeline.accept(prepared).unwrap();
         assert_eq!(timeline.next_prompt_index(), 0);
+        assert_eq!(timeline.last_rewind_seq(), Some(second_rewind_seq));
+
+        let invalid = TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: timeline.next_seq(),
+            at_ms: wall_time_ms(),
+            kind: TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Rewind,
+                items: Vec::new(),
+                surface: SurfaceOp::Append,
+                response_admission: None,
+            }),
+        };
+        assert!(timeline.accept(invalid).is_err());
+        assert_eq!(timeline.last_rewind_seq(), Some(second_rewind_seq));
+
+        let restored = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(restored.last_rewind_seq(), Some(second_rewind_seq));
     }
 
     #[test]
@@ -13741,6 +13852,20 @@ mod tests {
             }))
             .unwrap();
 
+        let projection_seq = timeline.events().last().unwrap().seq;
+        assert!(timeline.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 0,
+        }));
+        assert!(timeline.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 1,
+        }));
+        assert!(!timeline.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 2,
+        }));
+
         let surface = timeline.surface()[0].text_content();
         for (index, asset) in assets.iter().enumerate() {
             assert!(!surface.contains(asset));
@@ -13752,6 +13877,16 @@ mod tests {
         image_text_request(&timeline.branch_transcript());
 
         let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        for item in 0..2 {
+            assert!(replayed.owns_surface_id(SurfaceId {
+                event: projection_seq,
+                item,
+            }));
+        }
+        assert!(!replayed.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 2,
+        }));
         assert_eq!(
             serde_json::to_value(replayed.surface()).unwrap(),
             serde_json::to_value(timeline.surface()).unwrap()
@@ -13843,6 +13978,24 @@ mod tests {
             }))
             .unwrap();
 
+        let projection_seq = timeline.events().last().unwrap().seq;
+        assert!(timeline.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 0,
+        }));
+        assert!(timeline.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 1,
+        }));
+        assert!(timeline.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 2,
+        }));
+        assert!(!timeline.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 3,
+        }));
+
         let surface = timeline.surface()[0].text_content();
         assert!(!surface.contains(carrier_path));
         assert!(!surface.contains(tool_path));
@@ -13853,6 +14006,16 @@ mod tests {
         assert!(!branch.contains(tool_path));
 
         let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        for item in 0..3 {
+            assert!(replayed.owns_surface_id(SurfaceId {
+                event: projection_seq,
+                item,
+            }));
+        }
+        assert!(!replayed.owns_surface_id(SurfaceId {
+            event: projection_seq,
+            item: 3,
+        }));
         assert_eq!(
             serde_json::to_value(replayed.surface()).unwrap(),
             serde_json::to_value(timeline.surface()).unwrap()
@@ -14791,6 +14954,7 @@ mod tests {
             resumed_from: None,
             parent_prompt_id: None,
             capability_mode: None,
+            birth_mcp_servers: Some(Default::default()),
             permission_mode: None,
             effective_permission_mode: None,
             workflow_run_id: None,
@@ -15486,6 +15650,63 @@ mod tests {
         assert!(replayed.pending_notifications().is_empty());
         assert_eq!(replayed.surface()[0].text_content(), body);
         assert_eq!(replayed.parent_message_receipts().len(), 1);
+    }
+
+    #[test]
+    fn passive_consultation_consumption_requires_input_and_stable_terminal_identity() {
+        let mut timeline = Timeline::default();
+        let source = NotificationSource::InquiryAnswered {
+            source_session_id: "child".into(),
+            inquiry_id: "inquiry".into(),
+        };
+        let version = NotificationSourceVersion::Opaque {
+            value: "session-1:7".into(),
+        };
+        let body = "Full consultation question and answer";
+        let id = receive_notification(&mut timeline, source.clone(), version.clone(), body);
+        let ordinary = receive_notification(
+            &mut timeline,
+            NotificationSource::TaskCompleted {
+                task_id: "task".into(),
+                task_kind: NotificationTaskKind::Task,
+                owner: NotificationOwner::Session,
+            },
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "task done",
+        );
+        assert_eq!(
+            notification_id("session-1", &source, &version).unwrap(),
+            notification_id(
+                "session-1",
+                &source,
+                &NotificationSourceVersion::Opaque {
+                    value: "session-1:8".into()
+                }
+            )
+            .unwrap()
+        );
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        let consume = |input| {
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                notification_ids: vec![id.clone(), ordinary.clone()],
+                turn,
+                input,
+            })
+        };
+        assert!(timeline.record(consume(None)).is_err());
+        assert_eq!(timeline.pending_notifications().len(), 2);
+        let mut input = ConversationItem::notification_drain(format!("{body}\ntask done"));
+        input.set_prompt_index(0);
+        timeline.record(consume(Some(input))).unwrap();
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert!(replayed.pending_notifications().is_empty());
+        assert_eq!(replayed.surface().len(), 1);
+        assert!(replayed.surface()[0].text_content().contains(body));
+        assert_eq!(
+            replayed.received_notification_id(&source, &version),
+            Some(id.as_str())
+        );
     }
 
     #[test]

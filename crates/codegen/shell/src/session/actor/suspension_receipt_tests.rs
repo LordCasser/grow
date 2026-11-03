@@ -217,6 +217,7 @@ fn suspension_reuses_consumed_normal_completion_receipt() {
 fn suspension_retry_and_timeline_restore_keep_one_command_receipt() {
     with_session_runtime(|| async {
         let (actor, _gateway_rx) = crate::session::actor::tests::support::build_actor().await;
+        crate::session::actor::tests::support::record_test_model_route(&actor).await;
         let command = settled_command();
         let source = command_source(&command);
         let source_version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };

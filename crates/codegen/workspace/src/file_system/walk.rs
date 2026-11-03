@@ -102,12 +102,19 @@ pub(super) fn walk_fs_entries(
             break;
         }
         let path = entry.path().to_path_buf();
-        let is_symlink = std::fs::symlink_metadata(&path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        let metadata = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let (is_symlink, metadata) = match std::fs::symlink_metadata(&path) {
+            Ok(entry_metadata) if entry_metadata.file_type().is_symlink() => {
+                let target_metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                (true, target_metadata)
+            }
+            Ok(entry_metadata) => (false, entry_metadata),
+            Err(_) => match std::fs::metadata(&path) {
+                Ok(metadata) => (false, metadata),
+                Err(_) => continue,
+            },
         };
         entries.push(RawFsEntry {
             name: entry.file_name().to_string_lossy().into_owned(),

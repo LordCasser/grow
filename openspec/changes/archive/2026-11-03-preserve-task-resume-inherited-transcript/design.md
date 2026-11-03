@@ -1,0 +1,9 @@
+## 事实与边界
+new_child→init_session_with_summary只写Seed/SubagentSeed；history projector不从Seed合成用户行。copy_session_data已有source坐标→新Seed Message引用和去除response/cursor绑定的流程。本增量复用其转事实逻辑；ordinary fork既有筛选保持不变，resume只选择消息/思考/工具和UiNotice等观察正文，不继承当前状态投影。
+
+DurableResumeSource保留已核验result link的ValidatedTimeline，不再在bootstrap重读新cut。模型Surface仍只取active branch；UI消息从同一cut的history.prepare取完整已选择分支，所以compaction前正文不会丢失。匹配active Surface的assistant/thought引用新Seed，历史上已不在Surface的正文保留为独立展示事实，不能引用源event ID。新facts与Seed在staging同一原子publish，不在创建后再补写。
+
+继承的用户display echo已经由source projector核验，移除其source consumed-input标记使新child不会要求源Input ledger；不创建Consumed/permission receipt。移除源eventId/cursor和sampling identity，保留可见内容/图片/时间等展示信息。现有child模型上下文/出生权限策略维持本增量前语义，展示事实不能授予许可。
+
+## 验证
+Tier2及独立对抗review：真实公共Spawn/Task resume canonical source→新child→冷读/流式replay，历史prompt/thought/assistant/tool顺序与新prompt先后、只显示一次；新seed reference、无原response/cursor/状态authority；compaction前display仍保留，source journal字节不变。已有double-fork、rewind/strip reasoning与child恢复权限回归保留。

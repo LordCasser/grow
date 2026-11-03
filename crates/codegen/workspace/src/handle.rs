@@ -1738,7 +1738,10 @@ pub(crate) mod tests {
             tools: vec![
                 tc("Grow:read_file", Some(ToolKind::Read)),
                 tc("Grow:run_terminal_cmd", Some(ToolKind::Execute)),
-                tc("Grow:get_task_output", Some(ToolKind::BackgroundTaskAction)),
+                tc(
+                    "Grow:get_command_output",
+                    Some(ToolKind::BackgroundTaskAction),
+                ),
                 tc("Grow:kill_task", Some(ToolKind::KillTaskAction)),
             ],
         }
@@ -2116,7 +2119,7 @@ pub(crate) mod tests {
     /// Isolation matrix #5: a workspace process restart loses tasks (they are
     /// process state — physics), and what's pinned here is the recovery UX:
     /// the same session id recreates cleanly on the fresh process, the task
-    /// table starts empty (loss is visible, not silent), and `get_task_output`
+    /// table starts empty (loss is visible, not silent), and `get_command_output`
     /// for the lost id returns the informative not-found message.
     #[tokio::test]
     async fn restarted_workspace_recreates_session_and_reports_lost_task() {
@@ -2145,13 +2148,13 @@ pub(crate) mod tests {
         let result = session_b
             .toolset()
             .call(
-                "get_task_output",
+                "get_command_output",
                 serde_json::json!({"task_ids": [bg.task_id.clone()]}),
                 "restart-probe",
                 None,
             )
             .await
-            .expect("get_task_output must answer, not error");
+            .expect("get_command_output must answer, not error");
         let tools::types::output::ToolOutput::TaskOutput(
             tool_types::TaskOutputOutput::TaskNotFound(msg),
         ) = &result.output
@@ -2163,7 +2166,7 @@ pub(crate) mod tests {
             "the message must name the lost task id: {msg}"
         );
         assert!(
-            msg.contains("No background tasks or subagents exist in this session"),
+            msg.contains("No background tasks exist in this session"),
             "the message must say the restarted session has no tasks: {msg}"
         );
         session_a.terminal_backend().kill_task(&bg.task_id).await;

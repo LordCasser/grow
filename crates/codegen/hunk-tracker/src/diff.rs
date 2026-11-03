@@ -82,6 +82,29 @@ pub fn generate_hunk_patch(baseline: &str, current: &str, hunk: &Hunk) -> String
     let old_lines: Vec<&str> = baseline.lines().collect();
     let new_lines: Vec<&str> = current.lines().collect();
 
+    generate_hunk_patch_from_lines(&old_lines, &new_lines, hunk)
+}
+
+/// Generate patch fragments for one file query, scanning each side once.
+/// Empty hunk lists return before either input is scanned.
+pub(crate) fn generate_hunk_patches(
+    baseline: &str,
+    current: &str,
+    hunks: &[Arc<Hunk>],
+) -> Vec<String> {
+    if hunks.is_empty() {
+        return Vec::new();
+    }
+
+    let old_lines: Vec<&str> = baseline.lines().collect();
+    let new_lines: Vec<&str> = current.lines().collect();
+    hunks
+        .iter()
+        .map(|hunk| generate_hunk_patch_from_lines(&old_lines, &new_lines, hunk))
+        .collect()
+}
+
+fn generate_hunk_patch_from_lines(old_lines: &[&str], new_lines: &[&str], hunk: &Hunk) -> String {
     let mut output = String::new();
 
     // Calculate context bounds (0-indexed)
@@ -476,6 +499,150 @@ mod tests {
 
     fn agent_source() -> HunkSource {
         HunkSource::AgentEdit { prompt_index: 0 }
+    }
+
+    fn patch_fixture(line_count: usize, hunk_count: usize) -> (String, String, Vec<Hunk>) {
+        let old_lines = (0..line_count)
+            .map(|index| format!("{index:06} {}", "x".repeat(56)))
+            .collect::<Vec<_>>();
+        let mut new_lines = old_lines.clone();
+        let mut hunks = Vec::with_capacity(hunk_count);
+        for index in 0..hunk_count {
+            let line = ((index + 1) * line_count / (hunk_count + 1)).min(line_count - 1);
+            let old_text = format!("{}\n", old_lines[line]);
+            let new_text = format!("{index:06} {}", "y".repeat(56));
+            new_lines[line] = new_text.clone();
+            hunks.push(Hunk {
+                id: HunkId::new(),
+                path: "probe.txt".into(),
+                line_info: HunkLineInfo {
+                    old_start: line + 1,
+                    old_count: 1,
+                    new_start: line + 1,
+                    new_count: 1,
+                },
+                source: agent_source(),
+                old_text: Some(old_text),
+                new_text: format!("{new_text}\n"),
+                patch: None,
+                created_at: chrono::Utc::now(),
+                selected: false,
+            });
+        }
+        (
+            format!("{}\n", old_lines.join("\n")),
+            format!("{}\n", new_lines.join("\n")),
+            hunks,
+        )
+    }
+
+    fn old_generate_hunk_patch(baseline: &str, current: &str, hunk: &Hunk) -> String {
+        let old_lines: Vec<&str> = baseline.lines().collect();
+        let new_lines: Vec<&str> = current.lines().collect();
+        let mut output = String::new();
+        let old_start_idx = hunk.line_info.old_start.saturating_sub(1);
+        let new_start_idx = hunk.line_info.new_start.saturating_sub(1);
+        let context_before_start = old_start_idx.saturating_sub(CONTEXT_LINES);
+        let context_before_end = old_start_idx;
+        let changes_end_new = new_start_idx + hunk.line_info.new_count;
+        let context_after_start = changes_end_new;
+        let context_after_end = (changes_end_new + CONTEXT_LINES).min(new_lines.len());
+        let changes_end_old = old_start_idx + hunk.line_info.old_count;
+        let context_after_start_old = changes_end_old;
+        let context_after_end_old = (changes_end_old + CONTEXT_LINES).min(old_lines.len());
+        let total_old_lines = (context_before_end - context_before_start)
+            + hunk.line_info.old_count
+            + (context_after_end_old - context_after_start_old);
+        let total_new_lines = (context_before_end - context_before_start)
+            + hunk.line_info.new_count
+            + (context_after_end - context_after_start);
+        let header_old_start = context_before_start + 1;
+        let header_new_start = context_before_start + 1;
+        let _ = writeln!(
+            output,
+            "@@ -{},{} +{},{} @@",
+            header_old_start, total_old_lines, header_new_start, total_new_lines
+        );
+        for i in context_before_start..context_before_end {
+            if let Some(line) = old_lines.get(i) {
+                let _ = writeln!(output, " {line}");
+            }
+        }
+        if let Some(old_text) = &hunk.old_text {
+            for line in old_text.lines() {
+                let _ = writeln!(output, "-{line}");
+            }
+        }
+        for line in hunk.new_text.lines() {
+            let _ = writeln!(output, "+{line}");
+        }
+        for i in context_after_start..context_after_end {
+            if let Some(line) = new_lines.get(i) {
+                let _ = writeln!(output, " {line}");
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn generate_hunk_patch_matches_pre_refactor_byte_oracle() {
+        let cases = [
+            (
+                "a\r\nbefore\r\nz\r\n",
+                "a\r\nafter\r\nz\r\n",
+                2,
+                Some("before\r\n"),
+                "after\r\n",
+            ),
+            ("first\n\nlast", "first\n新行\nlast", 2, None, "新行\n"),
+            ("old\n", "", 1, Some("old\n"), ""),
+            ("", "new", 1, None, "new"),
+            ("one\ntwo", "one\ntwo", 2, Some("two"), "two"),
+        ];
+        for (baseline, current, line, old_text, new_text) in cases {
+            let hunk = Hunk {
+                id: HunkId::new(),
+                path: "oracle.txt".into(),
+                line_info: HunkLineInfo {
+                    old_start: line,
+                    old_count: usize::from(old_text.is_some()),
+                    new_start: line,
+                    new_count: usize::from(!new_text.is_empty()),
+                },
+                source: agent_source(),
+                old_text: old_text.map(str::to_owned),
+                new_text: new_text.to_owned(),
+                patch: None,
+                created_at: chrono::Utc::now(),
+                selected: false,
+            };
+            assert_eq!(
+                generate_hunk_patch(baseline, current, &hunk).as_bytes(),
+                old_generate_hunk_patch(baseline, current, &hunk).as_bytes(),
+                "byte output for {baseline:?} -> {current:?}"
+            );
+            assert_eq!(
+                generate_hunk_patches(baseline, current, &[Arc::new(hunk.clone())])[0].as_bytes(),
+                old_generate_hunk_patch(baseline, current, &hunk).as_bytes(),
+                "shared-table byte output for {baseline:?} -> {current:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_hunk_patches_reuses_tables_without_changing_multi_hunk_bytes() {
+        for (line_count, hunk_count) in [(128, 8), (512, 8)] {
+            let (baseline, current, hunks) = patch_fixture(line_count, hunk_count);
+            let hunks = hunks.into_iter().map(Arc::new).collect::<Vec<_>>();
+            let actual = generate_hunk_patches(&baseline, &current, &hunks);
+            let expected = hunks
+                .iter()
+                .map(|hunk| old_generate_hunk_patch(&baseline, &current, hunk))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+
+        assert!(generate_hunk_patches("x\n".repeat(16_000).as_str(), "", &[]).is_empty());
     }
 
     #[test]

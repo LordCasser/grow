@@ -33,16 +33,38 @@ mod tests {
             (ToolKind::List, "list_dir"),
             (ToolKind::Plan, "todo_write"),
             (ToolKind::Skill, "skill"),
-            (
-                ToolKind::BackgroundTaskAction,
-                "get_command_or_subagent_output",
-            ),
+            (ToolKind::BackgroundTaskAction, "get_command_output"),
             (ToolKind::KillTaskAction, "kill_command_or_subagent"),
+            (ToolKind::SubagentList, "list_subagent"),
+            (ToolKind::SubagentStatus, "get_subagent_status"),
+            (ToolKind::SubagentWait, "wait_subagent"),
         ]
         .into_iter()
         .map(|(k, v)| (k, v.to_string()))
         .collect();
         TemplateRenderer::new(tools, HashMap::new())
+    }
+
+    #[test]
+    fn session_subagent_observation_guidance_uses_only_available_tools() {
+        let prompt = default_renderer()
+            .render_with_extra(SESSION_EXTENSIONS_PROMPT, &default_placeholders())
+            .unwrap();
+        assert!(prompt.contains("list_subagent"));
+        assert!(prompt.contains("get_subagent_status"));
+        assert!(prompt.contains("wait_subagent"));
+        assert!(!prompt.contains("task-output tool"));
+
+        let no_observation_tools = TemplateRenderer::new(HashMap::new(), HashMap::new());
+        let prompt = no_observation_tools
+            .render_with_extra(SESSION_EXTENSIONS_PROMPT, &default_placeholders())
+            .unwrap();
+        assert!(!prompt.contains("subagent_observation"));
+        assert!(!prompt.contains("list_subagent"));
+        assert!(!prompt.contains("tools.by_kind.subagent_status"));
+        assert!(!prompt.contains("tools.by_kind.subagent_wait"));
+        assert!(!prompt.contains("get_subagent_status"));
+        assert!(!prompt.contains("wait_subagent"));
     }
 
     fn default_placeholders() -> serde_json::Value {
@@ -162,7 +184,7 @@ mod tests {
             (ToolKind::Plan, "todo_write".to_string()),
             (
                 ToolKind::BackgroundTaskAction,
-                "get_task_output".to_string(),
+                "get_command_output".to_string(),
             ),
         ]
         .into();
@@ -255,7 +277,7 @@ mod tests {
             (ToolKind::Plan, "todo_write".to_string()),
             (
                 ToolKind::BackgroundTaskAction,
-                "get_task_output".to_string(),
+                "get_command_output".to_string(),
             ),
         ]
         .into();

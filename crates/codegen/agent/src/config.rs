@@ -101,10 +101,16 @@ fn task_tool_config() -> ToolConfig {
         .with_name("spawn_subagent")
         .with_param_rename("run_in_background", "background")
 }
-/// Task output tool renamed for clarity:
-/// `get_task_output` → `get_command_or_subagent_output`.
-fn task_output_tool_config() -> ToolConfig {
-    ToolConfig::from(&grow_build::TaskOutputTool).with_name("get_command_or_subagent_output")
+/// Background command output.
+fn command_output_tool_config() -> ToolConfig {
+    ToolConfig::from(&grow_build::GetCommandOutputTool)
+}
+fn subagent_tools() -> [ToolConfig; 3] {
+    [
+        (&grow_build::ListSubagentTool).into(),
+        (&grow_build::GetSubagentStatusTool).into(),
+        (&grow_build::WaitSubagentTool).into(),
+    ]
 }
 /// `kill_task` → `kill_command_or_subagent`.
 fn kill_task_tool_config() -> ToolConfig {
@@ -138,7 +144,7 @@ fn grow_computer_toolset() -> ToolServerConfig {
         (&grow_build::ListDirTool).into(),
         (&grow_build::GrepTool).into(),
         (&grow_build::KillTerminalCommandTool).into(),
-        (&grow_build::GetTerminalCommandOutputTool).into(),
+        (&grow_build::GetCommandOutputTool).into(),
     ];
     ToolServerConfig { tools }
 }
@@ -194,59 +200,59 @@ pub fn toolset_for_preset(preset: &str) -> Option<ToolServerConfig> {
         .or_else(|| registered_toolset_preset(&normalized))
 }
 fn default_grow_build_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::SearchReplaceTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&grow_build::TodoWriteTool).into(),
-            (&grow_build::LoadSkillTool).into(),
-            task_output_tool_config(),
-            task_tool_config(),
-            (&grow_build::SchedulerCreateTool).into(),
-            (&grow_build::SchedulerDeleteTool).into(),
-            (&grow_build::SchedulerListTool).into(),
-            (&grow_build::MonitorTool).into(),
-            (&tools::implementations::context_recall::ContextRecallImpl).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&grow_build::CreateGoalTool).into(),
-            (&grow_build::GetGoalTool).into(),
-            (&grow_build::UpdateGoalTool).into(),
-            (&grow_build::WorkflowTool).into(),
-            (&grow_build::ListActiveSessionsTool).into(),
-            (&grow_build::AskSessionTool).into(),
-        ],
-    }
+    let mut tools = vec![
+        bash_tool_config(),
+        (&grow_build::ReadFileTool).into(),
+        (&grow_build::SearchReplaceTool).into(),
+        (&grow_build::ListDirTool).into(),
+        (&grow_build::GrepTool).into(),
+        kill_task_tool_config(),
+        (&grow_build::TodoWriteTool).into(),
+        (&grow_build::LoadSkillTool).into(),
+        command_output_tool_config(),
+        task_tool_config(),
+        (&grow_build::SchedulerCreateTool).into(),
+        (&grow_build::SchedulerDeleteTool).into(),
+        (&grow_build::SchedulerListTool).into(),
+        (&grow_build::MonitorTool).into(),
+        (&tools::implementations::context_recall::ContextRecallImpl).into(),
+        (&search_tool::SearchTool).into(),
+        (&use_tool::UseTool).into(),
+        (&grow_build::CreateGoalTool).into(),
+        (&grow_build::GetGoalTool).into(),
+        (&grow_build::UpdateGoalTool).into(),
+        (&grow_build::WorkflowTool).into(),
+        (&grow_build::ListActiveSessionsTool).into(),
+        (&grow_build::AskSessionTool).into(),
+    ];
+    tools.extend(subagent_tools());
+    ToolServerConfig { tools }
 }
 fn grow_build_concise_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            (&grow_build_concise::BashConciseTool).into(),
-            (&grow_build_concise::ReadFileConciseTool).into(),
-            (&grow_build_concise::SearchReplaceConciseTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&grow_build::TodoWriteTool).into(),
-            (&grow_build::LoadSkillTool).into(),
-            task_output_tool_config(),
-            (&grow_build::SchedulerCreateTool).into(),
-            (&grow_build::SchedulerDeleteTool).into(),
-            (&grow_build::SchedulerListTool).into(),
-            (&grow_build::MonitorTool).into(),
-            (&tools::implementations::context_recall::ContextRecallImpl).into(),
-            (&grow_build::CreateGoalTool).into(),
-            (&grow_build::GetGoalTool).into(),
-            (&grow_build::UpdateGoalTool).into(),
-            (&grow_build::WorkflowTool).into(),
-            (&grow_build::ListActiveSessionsTool).into(),
-            (&grow_build::AskSessionTool).into(),
-        ],
-    }
+    let mut tools = vec![
+        (&grow_build_concise::BashConciseTool).into(),
+        (&grow_build_concise::ReadFileConciseTool).into(),
+        (&grow_build_concise::SearchReplaceConciseTool).into(),
+        (&grow_build::ListDirTool).into(),
+        (&grow_build::GrepTool).into(),
+        kill_task_tool_config(),
+        (&grow_build::TodoWriteTool).into(),
+        (&grow_build::LoadSkillTool).into(),
+        command_output_tool_config(),
+        (&grow_build::SchedulerCreateTool).into(),
+        (&grow_build::SchedulerDeleteTool).into(),
+        (&grow_build::SchedulerListTool).into(),
+        (&grow_build::MonitorTool).into(),
+        (&tools::implementations::context_recall::ContextRecallImpl).into(),
+        (&grow_build::CreateGoalTool).into(),
+        (&grow_build::GetGoalTool).into(),
+        (&grow_build::UpdateGoalTool).into(),
+        (&grow_build::WorkflowTool).into(),
+        (&grow_build::ListActiveSessionsTool).into(),
+        (&grow_build::AskSessionTool).into(),
+    ];
+    tools.extend(subagent_tools());
+    ToolServerConfig { tools }
 }
 /// Hashline toolset: anchor-based read/edit/search + standard utilities.
 ///
@@ -263,7 +269,7 @@ pub fn grow_build_hashline_toolset(
         kill_task_tool_config(),
         (&grow_build::TodoWriteTool).into(),
         (&grow_build::LoadSkillTool).into(),
-        task_output_tool_config(),
+        command_output_tool_config(),
         task_tool_config(),
         (&grow_build::SchedulerCreateTool).into(),
         (&grow_build::SchedulerDeleteTool).into(),
@@ -277,6 +283,7 @@ pub fn grow_build_hashline_toolset(
         (&grow_build::UpdateGoalTool).into(),
         (&grow_build::WorkflowTool).into(),
     ]);
+    tools.extend(subagent_tools());
     ToolServerConfig { tools }
 }
 /// Tool eligibility ceiling for the **explore** subagent.
@@ -553,6 +560,19 @@ impl AgentDefinition {
             .as_ref()
             .map(|plugin| format!("{plugin}:{}", self.name))
             .unwrap_or_else(|| self.name.clone())
+    }
+
+    /// Match a selector only when its namespace agrees with this definition.
+    pub fn matches_selector_identity(&self, selector: &str) -> bool {
+        match self.plugin_name.as_deref() {
+            Some(plugin) => {
+                selector
+                    .strip_prefix(plugin)
+                    .and_then(|remainder| remainder.strip_prefix(':'))
+                    == Some(self.name.as_str())
+            }
+            None => !selector.contains(':') && selector == self.name,
+        }
     }
 
     /// Whether two resolved definitions produce the same executable Agent
@@ -1443,7 +1463,7 @@ mod tests {
     fn grow_computer_exclusive_ids() -> Vec<String> {
         #[allow(unused_mut)]
         let mut ids: Vec<String> = vec![
-            ToolConfig::from(&grow_build::GetTerminalCommandOutputTool).id,
+            ToolConfig::from(&grow_build::GetCommandOutputTool).id,
             ToolConfig::from(&grow_build::KillTerminalCommandTool).id,
         ];
         ids
@@ -1477,7 +1497,7 @@ mod tests {
         let ids: std::collections::HashSet<&str> = gc.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(
             ids.contains(
-                ToolConfig::from(&grow_build::GetTerminalCommandOutputTool)
+                ToolConfig::from(&grow_build::GetCommandOutputTool)
                     .id
                     .as_str()
             )
@@ -1489,14 +1509,43 @@ mod tests {
                     .as_str()
             )
         );
-        assert!(!ids.contains(ToolConfig::from(&grow_build::TaskOutputTool).id.as_str()));
+        assert!(!ids.contains(ToolConfig::from(&grow_build::ListSubagentTool).id.as_str()));
+        assert!(
+            !ids.contains(
+                ToolConfig::from(&grow_build::GetSubagentStatusTool)
+                    .id
+                    .as_str()
+            )
+        );
+        assert!(!ids.contains(ToolConfig::from(&grow_build::WaitSubagentTool).id.as_str()));
         assert!(!ids.contains(ToolConfig::from(&grow_build::KillTaskTool).id.as_str()));
         assert!(!ids.contains(ToolConfig::from(&grow_build::TaskTool).id.as_str()));
         for t in &gc.tools {
-            if t.id == ToolConfig::from(&grow_build::GetTerminalCommandOutputTool).id
+            if t.id == ToolConfig::from(&grow_build::GetCommandOutputTool).id
                 || t.id == ToolConfig::from(&grow_build::KillTerminalCommandTool).id
             {
                 assert!(t.name_override.is_none(), "tool `{}` must not rename", t.id);
+            }
+        }
+    }
+    #[test]
+    fn grow_build_presets_split_command_and_subagent_observation() {
+        let terminal = ToolConfig::from(&grow_build::GetCommandOutputTool).id;
+        let subagent_tools = [
+            ToolConfig::from(&grow_build::ListSubagentTool).id,
+            ToolConfig::from(&grow_build::GetSubagentStatusTool).id,
+            ToolConfig::from(&grow_build::WaitSubagentTool).id,
+        ];
+        for preset in ["grow-build", "grow-build-concise"] {
+            let ids: std::collections::HashSet<String> = toolset_for_preset(preset)
+                .unwrap()
+                .tools
+                .into_iter()
+                .map(|tool| tool.id)
+                .collect();
+            assert!(ids.contains(&terminal), "{preset} must observe commands");
+            for tool in &subagent_tools {
+                assert!(ids.contains(tool), "{preset} must include {tool}");
             }
         }
     }
@@ -1677,11 +1726,21 @@ You are a test agent.
     fn selector_identity_preserves_plugin_namespace() {
         let native = AgentDefinition::default_grow_build();
         assert_eq!(native.selector_identity(), native.name);
+        assert!(native.matches_selector_identity(&native.name));
+        assert!(!native.matches_selector_identity("quality:reviewer"));
 
         let mut plugin = native.clone();
         plugin.name = "reviewer".into();
         plugin.plugin_name = Some("quality".into());
         assert_eq!(plugin.selector_identity(), "quality:reviewer");
+        assert!(plugin.matches_selector_identity("quality:reviewer"));
+        assert!(!plugin.matches_selector_identity("quality:other"));
+        assert!(!plugin.matches_selector_identity("other:reviewer"));
+        assert!(!plugin.matches_selector_identity("reviewer"));
+
+        let mut colon_named_native = native;
+        colon_named_native.name = "quality:reviewer".into();
+        assert!(!colon_named_native.matches_selector_identity("quality:reviewer"));
     }
 
     #[test]

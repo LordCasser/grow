@@ -16,9 +16,9 @@ const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(1000);
 /// reload's own reads schedule the next reload, a ~1/sec self-sustaining loop.
 /// Dropping `Access` is safe: writes still emit `Modify`/`Create` and chmod
 /// emits `Modify(Metadata)`; only reads are `Access`-only.
-pub struct AccessFilteredWatcher(notify::RecommendedWatcher);
+pub struct AccessFilteredWatcher<W = notify::RecommendedWatcher>(W);
 
-impl notify::Watcher for AccessFilteredWatcher {
+impl<W: notify::Watcher> notify::Watcher for AccessFilteredWatcher<W> {
     fn new<F: notify::EventHandler>(
         mut event_handler: F,
         config: notify::Config,
@@ -26,7 +26,7 @@ impl notify::Watcher for AccessFilteredWatcher {
     where
         Self: Sized,
     {
-        let inner = notify::RecommendedWatcher::new(
+        let inner = W::new(
             move |res: notify::Result<notify::Event>| match &res {
                 Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => {}
                 _ => event_handler.handle_event(res),
@@ -52,7 +52,7 @@ impl notify::Watcher for AccessFilteredWatcher {
     where
         Self: Sized,
     {
-        notify::RecommendedWatcher::kind()
+        W::kind()
     }
 }
 
@@ -64,6 +64,86 @@ fn new_filtered_debouncer<F: notify_debouncer_mini::DebounceEventHandler>(
 ) -> Result<Debouncer<AccessFilteredWatcher>, notify::Error> {
     let config = notify_debouncer_mini::Config::default().with_timeout(timeout);
     new_debouncer_opt::<F, AccessFilteredWatcher>(config, event_handler)
+}
+
+// FSEvents rebuilds its stream for every path mutation. Config directories
+// need stable observation while sessions register/release other paths.
+#[cfg(target_os = "macos")]
+type ConfigWatchBackend = MacConfigWatcher;
+#[cfg(not(target_os = "macos"))]
+type ConfigWatchBackend = notify::RecommendedWatcher;
+type ConfigDebouncer = Debouncer<AccessFilteredWatcher<ConfigWatchBackend>>;
+
+// Directory polling detects new config paths; content hashing is restricted
+// to config.toml, so arbitrary large files in a project cwd are never read.
+#[cfg(target_os = "macos")]
+struct MacConfigWatcher {
+    directories: notify::PollWatcher,
+    files: std::sync::Arc<parking_lot::Mutex<notify::PollWatcher>>,
+}
+
+#[cfg(target_os = "macos")]
+impl notify::Watcher for MacConfigWatcher {
+    fn new<F: notify::EventHandler>(handler: F, config: notify::Config) -> notify::Result<Self> {
+        let handler = std::sync::Arc::new(parking_lot::Mutex::new(handler));
+        let file_handler = handler.clone();
+        let files = std::sync::Arc::new(parking_lot::Mutex::new(notify::PollWatcher::new(
+            move |event| file_handler.lock().handle_event(event),
+            config.with_compare_contents(true),
+        )?));
+        let files_for_discovery = files.clone();
+        let directories = notify::PollWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = &event {
+                    for path in &event.paths {
+                        if path.file_name().is_some_and(|name| name == "config.toml")
+                            && path.is_file()
+                        {
+                            let _ = files_for_discovery
+                                .lock()
+                                .watch(path, RecursiveMode::NonRecursive);
+                        }
+                    }
+                }
+                handler.lock().handle_event(event);
+            },
+            config.with_compare_contents(false),
+        )?;
+        Ok(Self { directories, files })
+    }
+
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+        self.directories.watch(path, mode)?;
+        let config = path.join("config.toml");
+        if config.is_file() {
+            self.files
+                .lock()
+                .watch(&config, RecursiveMode::NonRecursive)?;
+        }
+        Ok(())
+    }
+
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+        // Stop directory discovery first so an in-flight scan cannot reinstall
+        // the content watch after it has been released.
+        self.directories.unwatch(path)?;
+        let _ = self.files.lock().unwatch(&path.join("config.toml"));
+        Ok(())
+    }
+
+    fn kind() -> notify::WatcherKind {
+        notify::WatcherKind::PollWatcher
+    }
+}
+
+fn new_config_debouncer<F: notify_debouncer_mini::DebounceEventHandler>(
+    timeout: Duration,
+    event_handler: F,
+) -> Result<ConfigDebouncer, notify::Error> {
+    let config = notify_debouncer_mini::Config::default()
+        .with_timeout(timeout)
+        .with_notify_config(notify::Config::default().with_poll_interval(timeout));
+    new_debouncer_opt::<F, AccessFilteredWatcher<ConfigWatchBackend>>(config, event_handler)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,13 +222,14 @@ pub struct ConfigFileWatcher {
 
 struct ConfigWatchState {
     // Installed after callback construction; callback holds only a Weak state.
-    debouncer: Option<Debouncer<AccessFilteredWatcher>>,
+    debouncer: Option<ConfigDebouncer>,
     watched_cwds: HashSet<PathBuf>,
     // One registration may consume configs from several repository ancestors.
     // Retain shared directory watches until their last cwd owner unregisters.
     project_roots: HashMap<PathBuf, Vec<PathBuf>>,
     // Global/explicit sources own their parent watches independently of cwds.
     permanent_dirs: Vec<PathBuf>,
+    config_dirs: HashMap<PathBuf, same_file::Handle>,
 }
 
 impl ConfigWatchState {
@@ -159,14 +240,12 @@ impl ConfigWatchState {
         match name {
             Some(".grow") if parent.is_some_and(|p| self.watched_cwds.contains(p)) => {
                 if let Some(debouncer) = &mut self.debouncer {
-                    // A replacement directory must not inherit a watch on the old inode.
-                    let _ = debouncer.watcher().unwatch(path);
-                    if path.is_dir()
-                        && let Err(error) =
-                            debouncer.watcher().watch(path, RecursiveMode::NonRecursive)
-                    {
-                        log_watch_error(&error, "failed to attach project config directory");
-                    }
+                    attach_new_refresh_dirs(
+                        debouncer,
+                        &[(path.to_path_buf(), RecursiveMode::NonRecursive)],
+                        &mut self.config_dirs,
+                        "failed to attach project config directory",
+                    );
                 }
                 Some(ConfigChangeEvent::ProjectConfigChanged {
                     path: path.join("config.toml"),
@@ -213,6 +292,7 @@ impl ConfigFileWatcher {
             debouncer: None,
             watched_cwds: HashSet::new(),
             project_roots: HashMap::new(),
+            config_dirs: HashMap::new(),
             permanent_dirs: std::iter::once(grow_home_buf.clone())
                 .chain(
                     extra_paths
@@ -222,7 +302,7 @@ impl ConfigFileWatcher {
                 .collect(),
         }));
         let weak_state = std::sync::Arc::downgrade(&state);
-        let mut debouncer = new_filtered_debouncer(debounce, move |res: DebounceEventResult| {
+        let mut debouncer = new_config_debouncer(debounce, move |res: DebounceEventResult| {
             let Ok(events) = res else { return };
             let Some(state) = weak_state.upgrade() else {
                 return;
@@ -332,7 +412,16 @@ impl ConfigFileWatcher {
         }
         for root in &roots {
             if state.watched_cwds.insert(root.clone()) {
-                watch_cwd_dirs(state.debouncer.as_mut().expect("initialized watcher"), root);
+                let ConfigWatchState {
+                    debouncer,
+                    config_dirs,
+                    ..
+                } = &mut *state;
+                watch_cwd_dirs(
+                    debouncer.as_mut().expect("initialized watcher"),
+                    root,
+                    config_dirs,
+                );
             }
         }
         state.project_roots.insert(cwd, roots);
@@ -360,6 +449,18 @@ impl ConfigFileWatcher {
             // Release the acquired key even when its old alias no longer exists.
             self.unwatch_registered_path(&previous);
         }
+    }
+
+    /// Keep native watch registration, removal and destruction off async workers.
+    pub fn spawn_session_updates(
+        self,
+        updates: Option<mpsc::UnboundedReceiver<SessionConfigWatchUpdate>>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        spawn_watch_updates(self, updates, cancel, Self::apply_session_update)
     }
 
     /// Release the project config chain previously registered for `cwd` via
@@ -392,13 +493,16 @@ impl ConfigFileWatcher {
             {
                 state.watched_cwds.remove(&root);
                 for path in [&root, &root.join(".grow")] {
-                    if !dirs_contain(&state.permanent_dirs, path)
-                        && let Err(error) = state
-                            .debouncer
-                            .as_mut()
-                            .expect("initialized watcher")
-                            .watcher()
-                            .unwatch(path)
+                    if dirs_contain(&state.permanent_dirs, path) {
+                        continue;
+                    }
+                    state.config_dirs.remove(path);
+                    if let Err(error) = state
+                        .debouncer
+                        .as_mut()
+                        .expect("initialized watcher")
+                        .watcher()
+                        .unwatch(path)
                     {
                         tracing::debug!(error = %error, "failed to unwatch project config directory");
                     }
@@ -416,20 +520,85 @@ impl ConfigFileWatcher {
 ///
 /// If `.grow` is missing, the cwd watch observes its later creation and the
 /// callback attaches the non-recursive directory watch before publishing a reload.
-fn watch_cwd_dirs(debouncer: &mut Debouncer<AccessFilteredWatcher>, cwd: &Path) {
+fn watch_cwd_dirs(
+    debouncer: &mut ConfigDebouncer,
+    cwd: &Path,
+    config_dirs: &mut HashMap<PathBuf, same_file::Handle>,
+) {
     if let Err(e) = debouncer.watcher().watch(cwd, RecursiveMode::NonRecursive) {
         log_watch_error(&e, "failed to watch project cwd (non-recursive)");
     }
-    let grow_dir = cwd.join(".grow");
-    if let Err(e) = debouncer
-        .watcher()
-        .watch(&grow_dir, RecursiveMode::NonRecursive)
-    {
-        log_watch_error(
-            &e,
-            "failed to watch project .grow directory (non-recursive)",
-        );
-    }
+    attach_new_refresh_dirs(
+        debouncer,
+        &[(cwd.join(".grow"), RecursiveMode::NonRecursive)],
+        config_dirs,
+        "failed to watch project .grow directory (non-recursive)",
+    );
+}
+
+fn spawn_watch_updates<W, F>(
+    mut watcher: W,
+    mut updates: Option<mpsc::UnboundedReceiver<SessionConfigWatchUpdate>>,
+    cancel: tokio_util::sync::CancellationToken,
+    mut apply: F,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)
+where
+    W: Send + 'static,
+    F: FnMut(&mut W, SessionConfigWatchUpdate) + Send + 'static,
+{
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let runtime = tokio::runtime::Handle::current();
+    let worker_cancel = cancel.child_token();
+    let observer_guard = worker_cancel.clone().drop_guard();
+    let native_cancel = worker_cancel.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        if let Some(updates) = &mut updates {
+            while let Ok(update) = updates.try_recv() {
+                if native_cancel.is_cancelled() {
+                    return;
+                }
+                apply(&mut watcher, update);
+            }
+        }
+        let _ = ready_tx.send(());
+        loop {
+            let update = runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = native_cancel.cancelled() => None,
+                    update = async {
+                        match &mut updates {
+                            Some(updates) => updates.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => update,
+                }
+            });
+            match update {
+                Some(update) => apply(&mut watcher, update),
+                None if native_cancel.is_cancelled() => break,
+                // A closed resident-interest queue does not revoke global watches.
+                None => updates = None,
+            }
+        }
+        // The native owner is destroyed on this blocking worker, also on unwind.
+    });
+    let observer = tokio::spawn(async move {
+        let _guard = observer_guard;
+        tokio::select! {
+            biased;
+            _ = worker_cancel.cancelled() => {},
+            result = worker => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "config watch worker failed");
+                }
+            },
+        }
+    });
+    (observer, ready_rx)
 }
 
 /// Log a `notify` watch failure, distinguishing the benign
@@ -521,8 +690,8 @@ fn project_grow_refresh_dirs(project_root: &Path) -> Vec<(PathBuf, RecursiveMode
     dirs
 }
 
-fn attach_new_refresh_dirs(
-    debouncer: &mut Debouncer<AccessFilteredWatcher>,
+fn attach_new_refresh_dirs<W: notify::Watcher>(
+    debouncer: &mut Debouncer<W>,
     refresh_dirs: &[(PathBuf, RecursiveMode)],
     refreshed_dirs: &mut HashMap<PathBuf, same_file::Handle>,
     err_msg: &str,
@@ -1088,6 +1257,41 @@ mod late_config_directory_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn config_poll_observes_same_timestamp_atomic_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("home");
+        let project = root.join("project");
+        let grow = project.join(".grow");
+        let config = grow.join("config.toml");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir_all(&grow).unwrap();
+        std::fs::write(&config, "first=1\n").unwrap();
+        let modified = std::fs::metadata(&config).unwrap().modified().unwrap();
+        let (mut watcher, mut events) =
+            ConfigFileWatcher::start(&home, &[], Some(&project), Some(Duration::from_millis(40)))
+                .unwrap();
+        // Register and release another cwd without resetting existing observation.
+        let other = root.join("other");
+        std::fs::create_dir(&other).unwrap();
+        watcher.watch_path(&other);
+        watcher.unwatch_path(&other);
+        let replacement = grow.join("replacement");
+        std::fs::write(&replacement, "other=2\n").unwrap();
+        std::fs::File::open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::rename(replacement, &config).unwrap();
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().modified().unwrap(),
+            modified
+        );
+        expect_project_change(&mut events, &config).await;
+    }
+
     async fn expect_project_change(
         rx: &mut mpsc::UnboundedReceiver<ConfigChangeEvent>,
         path: &Path,
@@ -1341,5 +1545,125 @@ mod session_watch_tests {
         assert!(watcher.state.lock().project_roots.contains_key(&b));
         release(&mut watcher, "one");
         assert!(watcher.state.lock().project_roots.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod dynamic_config_owner_tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    struct Owner {
+        drop_tx: Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>,
+        seen: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self
+                .drop_tx
+                .take()
+                .unwrap()
+                .send(std::thread::current().id());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_native_update_yields_and_cancel_keeps_drop_on_blocking_owner() {
+        for abort in [false, true] {
+            let local_thread = std::thread::current().id();
+            let (drop_tx, drop_rx) = tokio::sync::oneshot::channel();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send(SessionConfigWatchUpdate::Release {
+                session_id: "one".into(),
+            })
+            .unwrap();
+            let cancel = CancellationToken::new();
+            let mut entered_tx = Some(entered_tx);
+            let (task, ready) = spawn_watch_updates(
+                Owner {
+                    drop_tx: Some(drop_tx),
+                    seen: Default::default(),
+                },
+                Some(rx),
+                cancel.clone(),
+                move |_, _| {
+                    let _ = entered_tx.take().unwrap().send(());
+                    let _ = release_rx.recv();
+                },
+            );
+            tokio::time::timeout(Duration::from_secs(2), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            // A runtime-local future and shutdown both progress during native work.
+            tokio::task::yield_now().await;
+            if abort {
+                task.abort();
+            } else {
+                cancel.cancel();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap();
+            if abort {
+                assert!(result.unwrap_err().is_cancelled());
+            } else {
+                result.unwrap();
+            }
+            drop(ready);
+            release_tx.send(()).unwrap();
+            let drop_thread = tokio::time::timeout(Duration::from_secs(2), drop_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(drop_thread, local_thread);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initial_interest_order_precedes_ready_and_queue_close_retains_owner() {
+        let (drop_tx, mut drop_rx) = tokio::sync::oneshot::channel();
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        for id in ["register", "release"] {
+            tx.send(SessionConfigWatchUpdate::Release {
+                session_id: id.into(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        let cancel = CancellationToken::new();
+        let (task, ready) = spawn_watch_updates(
+            Owner {
+                drop_tx: Some(drop_tx),
+                seen: seen.clone(),
+            },
+            Some(rx),
+            cancel.clone(),
+            |owner, update| match update {
+                SessionConfigWatchUpdate::Release { session_id } => {
+                    owner.seen.lock().push(session_id)
+                }
+                _ => unreachable!(),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&*seen.lock(), &["register", "release"]);
+        assert!(matches!(
+            drop_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        cancel.cancel();
+        task.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), drop_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

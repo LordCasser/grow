@@ -458,6 +458,11 @@ pub(crate) enum TimelineBootstrap {
     Fresh {
         session_rules: Option<String>,
     },
+    /// A new task whose inherited context was durably seeded before actor creation.
+    Seeded {
+        timeline: Box<chat_state::Timeline>,
+        history: crate::session::history::HistorySnapshot,
+    },
     Existing {
         timeline: Box<chat_state::Timeline>,
         history: crate::session::history::HistorySnapshot,
@@ -469,9 +474,27 @@ impl TimelineBootstrap {
         matches!(self, Self::Fresh { .. })
     }
 
+    /// A cold load must not lose the evidence needed by the recap idle gate.
+    /// Seeded tasks have their own API activity domain, even with inherited text.
+    pub(super) fn last_api_request_at(&self) -> i64 {
+        match self {
+            Self::Existing { timeline, .. } => timeline
+                .events()
+                .iter()
+                .rev()
+                .find_map(|event| {
+                    matches!(event.kind, chat_state::TimelineEventKind::Request(_))
+                        .then_some(event.at_ms)
+                })
+                .unwrap_or(0),
+            Self::Fresh { .. } | Self::Seeded { .. } => 0,
+        }
+    }
+
     fn label(&self) -> &'static str {
         match self {
             Self::Fresh { .. } => "fresh",
+            Self::Seeded { .. } => "seeded",
             Self::Existing { .. } => "existing",
         }
     }
@@ -886,6 +909,8 @@ pub(crate) async fn spawn_session_actor(
             }
         }
     };
+    let is_new_seed = matches!(&timeline_bootstrap, TimelineBootstrap::Seeded { .. });
+    let restored_last_api_request_at = timeline_bootstrap.last_api_request_at();
     let (
         validated_timeline,
         mut conversation,
@@ -900,7 +925,8 @@ pub(crate) async fn spawn_session_actor(
             std::collections::HashMap::new(),
             crate::session::history::HistorySnapshot::default(),
         ),
-        TimelineBootstrap::Existing { timeline, history } => {
+        TimelineBootstrap::Existing { timeline, history }
+        | TimelineBootstrap::Seeded { timeline, history } => {
             let events = timeline.events();
             crate::session::input_inbox::validate_submitted_payloads(
                 session_directory.as_ref(),
@@ -1534,6 +1560,16 @@ pub(crate) async fn spawn_session_actor(
     let context_window_tokens = context_window_override
         .map(|c| c.get())
         .unwrap_or(sampling_config.context_window);
+    let mut parent_mcp_pool = parent_mcp_pool;
+    if startup_hints.is_subagent
+        && let Some(pool) = parent_mcp_pool.as_mut()
+    {
+        pool.freeze_current_clients();
+    }
+    let initial_mcp_bindings = parent_mcp_pool
+        .as_ref()
+        .map(crate::session::mcp_servers::SharedMcpPool::client_bindings)
+        .unwrap_or_default();
     let inherited_mcp_eligibility = parent_mcp_pool
         .as_ref()
         .map(crate::session::mcp_servers::SharedMcpPool::eligibility);
@@ -1578,6 +1614,7 @@ pub(crate) async fn spawn_session_actor(
         resources_persistence: resources_persistence.clone(),
         resource_domain: std::sync::Arc::new(tools::registry::types::SessionResourceDomain::new()),
         session_env: tool_context.session_env.clone(),
+        chat_state_handle: chat_state_handle.clone(),
         models_manager: models_manager.clone(),
         memory_runtime: std::sync::Arc::new(parking_lot::RwLock::new(memory_backend_for_spec)),
         context_recall_backend,
@@ -1661,7 +1698,7 @@ pub(crate) async fn spawn_session_actor(
             Some(
                 crate::session::subagent_capability::DelegableCapabilityCeiling::new(
                     initial_mode,
-                    bound_mcp_client_ids,
+                    initial_mcp_bindings,
                 ),
             ),
         )
@@ -1703,6 +1740,10 @@ pub(crate) async fn spawn_session_actor(
     let _ = task_output_tool_name.set(resolved_task_output.clone());
     let _ = read_tool_name.set(resolved_read);
     tool_context.task_output_tool_name = resolved_task_output;
+    tool_context.subagent_wait_tool_name = agent
+        .tool_bridge()
+        .tool_for_kind(tools::types::tool::ToolKind::SubagentWait)
+        .await;
     let scheduler_handle_for_handle = {
         let toolset = agent.tool_bridge().toolset();
         let res = toolset.resources.lock().await;
@@ -1722,51 +1763,50 @@ pub(crate) async fn spawn_session_actor(
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
     let system_prompt = agent.system_prompt().to_string();
-    let mut initial_context_changed = false;
-    if is_resumed
-        && !runtime_recovery_gated
+    // New children have a durable seed but have not yet started their task.
+    // Existing tasks, including empty histories, never acquire today's rules here.
+    if is_new_seed
         && !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
-        && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
+        && let Some(reminder) = agent.agents_md_user_reminder()
     {
-        let insert_at = conversation.len().min(1);
         conversation.insert(
-            insert_at,
-            ConversationItem::project_instructions(agents_md_reminder),
+            conversation.len().min(1),
+            ConversationItem::project_instructions(reminder),
         );
-        if let Some(ref mut len) = startup_hints.inherited_prefix_len {
+        if let Some(len) = &mut startup_hints.inherited_prefix_len {
             *len += 1;
         }
-        initial_context_changed = true;
-    }
-    if let Some(section) = agent.agents_md_section()
-        && should_set_classifier_project_instructions(
-            owns_permission_manager,
-            Some(section.as_str()),
-        )
-    {
-        let body = agents_md_classifier_body(&section);
-        if !body.is_empty() {
-            permissions.set_project_instructions(Some(body));
-        }
-    }
-    if initial_context_changed {
-        let (_, source_surface_revision) = chat_state_handle
+        let (_, revision) = chat_state_handle
             .get_conversation_with_revision()
             .await
             .ok_or_else(|| {
                 agent::AgentBuildError::InvalidConfig(
-                    "chat state actor stopped before initial context commit".into(),
+                    "chat state stopped before seed rules commit".into(),
                 )
             })?;
         chat_state_handle
-            .replace_context_durably(conversation, source_surface_revision)
+            .replace_context_durably(conversation.clone(), revision)
             .await
             .map_err(|error| {
                 agent::AgentBuildError::InvalidConfig(format!(
-                    "initial context was not durably recorded: {error}"
+                    "seed rules were not durably recorded: {error}"
                 ))
             })?;
+    }
+    // Restoring a task preserves its effective rules, including their absence.
+    // A new task's deferred prefix will commit the current disk rules before use.
+    let project_rules = if is_resumed {
+        effective_project_instructions(&conversation)
+    } else {
+        agent.agents_md_section()
+    };
+    if should_set_classifier_project_instructions(owns_permission_manager, project_rules.as_deref())
+    {
+        let body = agents_md_classifier_body(project_rules.as_deref().unwrap());
+        if !body.is_empty() {
+            permissions.set_project_instructions(Some(body));
+        }
     }
     let (signals_handle, signals_actor) = crate::session::signals::SessionSignalsActor::new();
     tokio::spawn(signals_actor.run());
@@ -2610,6 +2650,7 @@ pub(crate) async fn spawn_session_actor(
         session_activities: SessionActivityTracker::new(),
         coordination_inquiries: std::cell::RefCell::new(std::collections::VecDeque::new()),
         coordination_inquiry_active: std::cell::Cell::new(false),
+        coordination_answer_next_seq: std::cell::Cell::new(0),
         mcp_dispatcher_worker: TaskSlot::new(),
         mcp_initialization_worker: TaskSlot::new(),
         project_discovery_worker: TaskSlot::new(),
@@ -2668,6 +2709,7 @@ pub(crate) async fn spawn_session_actor(
         idle_flush_timeout: memory_config
             .as_ref()
             .and_then(|mc| mc.flush.idle_timeout_secs)
+            .filter(|&seconds| seconds > 0)
             .map(std::time::Duration::from_secs),
         dream_check_timeout: memory_config
             .as_ref()
@@ -2743,7 +2785,7 @@ pub(crate) async fn spawn_session_actor(
         idle_prompt_extension: Some(IdlePromptExtension::new(weak.clone())),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
-        last_api_request_at: std::sync::atomic::AtomicI64::new(0),
+        last_api_request_at: std::sync::atomic::AtomicI64::new(restored_last_api_request_at),
         hooks: HookSessionState {
             registry: std::cell::RefCell::new(built_hook_registry),
             client_hooks: std::cell::RefCell::new(client_hooks),
@@ -2816,6 +2858,14 @@ pub(crate) async fn spawn_session_actor(
                     "failed to close interrupted coordination inquiries: {error}"
                 )))
             })?;
+        session
+            .reconcile_coordination_answers()
+            .await
+            .map_err(|error| {
+                agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                    "failed to synchronize consultation context: {error}"
+                )))
+            })?;
     }
     session
         .restore_pending_human_inputs()
@@ -2834,6 +2884,13 @@ pub(crate) async fn spawn_session_actor(
                     "initial model context was not durably recorded: {error}"
                 )))
             })?;
+        true
+    } else {
+        false
+    };
+    // Seeded children start a new execution lineage too. Their inherited
+    // Surface does not supply this child's actual provider route authority.
+    if initialized_fresh_context || is_new_seed {
         let route = session.model_route.snapshot();
         let sampling = &route.sampling_config;
         let transport = sampling_types::model_image_input_key_from_parts(
@@ -2862,10 +2919,7 @@ pub(crate) async fn spawn_session_actor(
                     "initial model route was not durably recorded: {error}"
                 )))
             })?;
-        true
-    } else {
-        false
-    };
+    }
     // The selected Agent snapshot is not a mutable role transition until the
     // checkpointed runtime tree has passed restoration validation.
     if !runtime_recovery_gated && (persisted_control_revision == 0 || is_resumed) {
@@ -3718,6 +3772,10 @@ pub(crate) async fn spawn_session_on_thread(
     max_turns: Option<usize>,
     on_thread_spawned: Option<&dyn Fn(SessionThread)>,
 ) -> Result<(SessionHandle, SessionThread), acp::Error> {
+    // Watcher native calls may outlive this session's current-thread runtime.
+    // Keep their blocking owner on the caller's host runtime instead.
+    let mut tool_context = tool_context;
+    tool_context.watcher_runtime = Some(tokio::runtime::Handle::current());
     let (init_tx, init_rx) =
         tokio::sync::oneshot::channel::<Result<SessionInitResult, agent::AgentBuildError>>();
     let persistence_completion = persistence.task_completion();

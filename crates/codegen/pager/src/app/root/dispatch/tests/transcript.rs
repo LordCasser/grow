@@ -3,6 +3,46 @@
 use super::*;
 
 #[test]
+fn attached_ctrl_x_m_opens_current_session_model_selector() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = shell::agent::models::ModelId::new("prefix/configured");
+    let models = &mut app.agents.get_mut(&id).unwrap().session.models;
+    models.available.insert(
+        model_id.clone(),
+        shell::agent::models::ModelInfo::new(model_id.clone(), "Configured"),
+    );
+    models.current = Some(model_id.clone());
+    open_dashboard(&mut app);
+    dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id),
+    );
+    let prefix = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert!(matches!(
+        app.handle_input(&prefix),
+        crate::app::root::InputOutcome::Changed
+    ));
+    let next = Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    let crate::app::root::InputOutcome::Action(action) = app.handle_input(&next) else {
+        panic!("model continuation must reach dispatch");
+    };
+    dispatch(action, &mut app);
+    let Some(crate::views::modal::ActiveModal::ArgPicker { command, items, .. }) =
+        &app.agents[&id].active_modal
+    else {
+        panic!("configured model selector must open");
+    };
+    assert_eq!(command, "model");
+    assert!(
+        items
+            .iter()
+            .any(|item| item.insert_text == model_id.0.as_ref())
+    );
+}
+
+#[test]
 fn agent_modal_loads_without_scanning_on_open_and_ignores_stale_results() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

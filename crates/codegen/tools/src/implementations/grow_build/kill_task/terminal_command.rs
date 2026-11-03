@@ -1,6 +1,6 @@
-//! Workspace-only, subagent-free variant of `kill_task` (delegates to [`KillTaskTool`]).
+//! Workspace-only, subagent-free variant of `kill_task`.
 
-use super::KillTaskTool;
+use super::{KillTaskScope, run_scoped_kill_task};
 use crate::implementations::grow_build::task_output::background_bash_requires_exprs;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -71,7 +71,7 @@ impl tool_runtime::Tool for KillTerminalCommandTool {
         ctx: tool_runtime::ToolCallContext,
         input: KillTaskToolInput,
     ) -> Result<KillTaskOutput, tool_runtime::ToolError> {
-        tool_runtime::Tool::run(&KillTaskTool, ctx, input).await
+        run_scoped_kill_task(ctx, input, KillTaskScope::TerminalOnly).await
     }
 }
 
@@ -82,6 +82,10 @@ mod tests {
         BackgroundHandle, KillOutcome, TaskSnapshot, TerminalBackend, TerminalRunRequest,
         TerminalRunResult,
     };
+    use crate::implementations::grow_build::task::backend::{
+        ChannelBackend, SubagentBackendResource,
+    };
+    use crate::implementations::grow_build::task::types::{SubagentCancelOutcome, SubagentEvent};
     use crate::types::resources::{Resources, Terminal};
     use crate::types::tool_metadata::ToolMetadata;
     use crate::types::tool_metadata::test_ctx_with_call_id;
@@ -241,5 +245,42 @@ mod tests {
             }
             other => panic!("Expected TaskNotFound, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_only_entry_does_not_touch_subagent_backend() {
+        let mut resources = resources_with_terminal(KillOutcome::NotFound);
+        let (tx, mut cancel_rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+        resources.insert(SubagentBackendResource(Arc::new(ChannelBackend::new(tx))));
+        let shared = resources.into_shared();
+        let child_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_cancelled_for_responder = child_cancelled.clone();
+        let responder = tokio::spawn(async move {
+            if let Some(SubagentEvent::Cancel(request)) = cancel_rx.recv().await {
+                child_cancelled_for_responder.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = request.respond_to.send(SubagentCancelOutcome::Cancelled);
+            }
+        });
+
+        let result = tool_runtime::Tool::run(
+            &KillTerminalCommandTool,
+            test_ctx_with_call_id(shared, "tool_call"),
+            KillTaskToolInput {
+                task_id: "child-id".into(),
+            },
+        )
+        .await
+        .unwrap();
+        responder.abort();
+
+        match result {
+            KillTaskOutput::TaskNotFound(message) => {
+                assert!(message.contains("child-id"));
+                assert!(message.contains("not found"));
+                assert!(!message.contains("subagents exist"));
+            }
+            other => panic!("Expected terminal TaskNotFound, got {other:?}"),
+        }
+        assert!(!child_cancelled.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

@@ -1,0 +1,10 @@
+## 决策
+load已持有root lifecycle guard，记录本次spawn的准确handle。restore失败后，只对该新建handle查询权威Runtime；仅Suspended可通过既有RetireSuspendedRuntime物理退休，再等待原thread/writer drain，以idle-unload相同的方式移除resident资源、标记Dormant。不能调用Shutdown/SessionEnd/TeardownSession替代退休，不能取消逻辑任务。
+
+Restoring/Running、原有viewer或迟到替换incarnation不退休；失败的退休保留原owner并报告未确认，下一次load沿原owner/closed-handle drain入口继续。没有RestorePrepared前不会adopt child，因此本次临时root可以独立退休；prepare之后的partial release完全复用现有operation/instance。
+
+## 验证
+Tier3：隔离真实JSONL checkpoint来源故障注入、两次失败load均确认无临时resident，再修复fixture来源后同进程Retry成功且prepare/release各一次。核对在已有owner的Restoring/Running阶段不发退休命令，原checkpoint/operation不变。独立对抗review。
+
+## 失败与取消窗口的独立审查修正
+初审发现ACK后等待drain仍保持resident会被supervisor误作异常退出并发送逻辑TeardownSession。ACK后立即进入既有nonresident draining状态，原thread继续持有writer；取消ACK前的窗口以既有ResidentResources中的failed_suspended_restore因果标记保留“本次失败load的未准备checkpoint owner”，显式Retry先完成其退休，supervisor仅物理清理该incarnation。该标记不是产品开关、不持久化、不复制checkpoint；prepared/live阶段不标记。

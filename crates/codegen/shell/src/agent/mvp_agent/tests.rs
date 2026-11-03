@@ -1,9 +1,15 @@
 use super::*;
 
+mod auxiliary_load_tests;
+mod dependency_admission_tests;
 mod mcp_child_policy_reload_tests;
-mod subagent_toggle_reload_tests;
-mod subagent_restore_authority_tests;
 mod plan_decision_status_tests;
+mod project_rules_recovery_tests;
+mod restore_retry_tests;
+mod subagent_restore_authority_tests;
+mod subagent_observation_tests;
+mod subagent_toggle_reload_tests;
+mod task_resume_presentation_tests;
 
 #[test]
 fn complete_jsonl_snapshot_never_returns_a_partial_record_offset() {
@@ -670,7 +676,7 @@ fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::Ses
     make_test_handle_with_receiver(model, client_id).0
 }
 
-fn make_test_handle_with_receiver(
+pub(super) fn make_test_handle_with_receiver(
     model: &str,
     client_id: Option<&str>,
 ) -> (
@@ -1083,7 +1089,7 @@ fn test_sessionless_request_requires_session_id() {
     );
 }
 /// Build a minimal MvpAgent suitable for testing extension methods.
-fn build_minimal_agent_for_tests() -> MvpAgent {
+pub(super) fn build_minimal_agent_for_tests() -> MvpAgent {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
@@ -1165,8 +1171,9 @@ async fn session_delete_tears_down_resident_actor_before_releasing_lifecycle() {
             crate::session::SessionThread::from_handle(thread),
         );
 
-        let deletion = agent
-            .teardown_live_session_before_delete(&sid)
+        let deletion = agent.lock_session_lifecycle(&sid).await;
+        agent
+            .teardown_live_session_before_delete_locked(&sid)
             .await
             .expect("resident session deletion must not panic or fail");
         assert!(!agent.has_live_or_draining_session(&sid));
@@ -2350,7 +2357,7 @@ fn orphaned_tasks_filters_rewind_dead_branches() {
     );
 }
 /// `spawn_gateway_bridge` uses `tokio::task::spawn_local`.
-fn run_local_for_bridge_test<F, Fut, T>(body: F) -> T
+pub(super) fn run_local_for_bridge_test<F, Fut, T>(body: F) -> T
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = T>,
@@ -3853,7 +3860,13 @@ fn session_rename_lifecycle_is_serialized() {
                     .await
                     .is_err()
             );
-            let deletion = agent.teardown_live_session_before_delete(&sid);
+            let deletion = async {
+                let owner = agent.lock_session_lifecycle(&sid).await;
+                agent
+                    .teardown_live_session_before_delete_locked(&sid)
+                    .await?;
+                Ok::<_, String>(owner)
+            };
             tokio::pin!(deletion);
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(30), &mut deletion)
@@ -4481,6 +4494,7 @@ context_window = 128000
                         "prior system head",
                     )],
                     Default::default(),
+                    Default::default(),
                     Vec::new(),
                 )
                 .await
@@ -4827,3 +4841,8 @@ fn cancelled_rebuild_releases_nonresident_config_watch() {
 
 #[path = "suspension_admission_tests.rs"]
 mod suspension_admission_tests;
+
+#[path = "deletion_tests.rs"]
+mod deletion_tests;
+
+mod consultation_deletion_tests;

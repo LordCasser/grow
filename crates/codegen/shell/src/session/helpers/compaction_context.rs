@@ -41,7 +41,7 @@ pub struct McpToolNames {
 /// `ToolKind::BackgroundTaskAction` and `ToolKind::KillTaskAction`.
 /// Never hard-code tool names — they can be renamed by the client.
 pub struct SubagentToolNames {
-    /// Model-facing name of the poll/status tool (e.g. "get_task_output").
+    /// Model-facing name of the poll/status tool (e.g. "get_subagent_status").
     pub poll: String,
     /// Model-facing name of the cancel/kill tool (e.g. "kill_task").
     pub cancel: String,
@@ -364,7 +364,7 @@ mod tests {
     fn system_reminder_includes_subagent_section_when_tool_names_present() {
         let ctx = ctx_with_running_subagents();
         let names = SubagentToolNames {
-            poll: "get_command_or_subagent_output".into(),
+            poll: "inspect_child".into(),
             cancel: "kill_command_or_subagent".into(),
         };
         let result = to_system_reminder_sync(&ctx, &[], &[], Some(&names), None);
@@ -373,7 +373,7 @@ mod tests {
             text.contains("Running Subagents"),
             "missing subagent section"
         );
-        assert!(text.contains("get_command_or_subagent_output"));
+        assert!(text.contains("inspect_child"));
         assert!(text.contains("kill_command_or_subagent"));
         assert!(text.contains("sub-1"));
     }
@@ -415,7 +415,7 @@ mod tests {
     /// Regression: task IDs in the post-compaction reminder must be rendered
     /// verbatim. A fabricated `task-` prefix produces an ID that does not
     /// exist in the task registry, so the model's follow-up
-    /// `get_task_output(task_id="task-<uuid>")` calls fail.
+    /// `get_subagent_status(subagent_ids=["task-<uuid>"])` calls fail.
     #[test]
     fn running_task_ids_render_verbatim() {
         let ctx = CompactionStateContext {

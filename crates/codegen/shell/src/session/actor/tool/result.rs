@@ -85,14 +85,16 @@ pub(super) fn undispatched_tool_outcome(action: &ToolLoop) -> &'static str {
     }
 }
 /// Blocking wait tools that should abort when a mid-turn interjection is pending.
-pub(super) fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool {
-    match tool_name {
-        "get_task_output"
-        | "get_command_or_subagent_output"
-        | "get_task_or_subagent_output"
-        | "get_terminal_command_output" => tool_types::task_output_waits_from_json(args),
-        "Await" | "AwaitShell" => true,
-        _ => false,
+pub(super) fn interruptible_wait_input(
+    tool_name: &str,
+    input: &tools::types::tool_io::ToolInput,
+) -> Option<tools::types::tool_io::ToolInput> {
+    use tools::types::tool_io::ToolInput;
+    match input {
+        ToolInput::SubagentWait(_) => Some(input.clone()),
+        ToolInput::TaskOutput(args) if args.waits() => Some(input.clone()),
+        ToolInput::Dynamic(_) if matches!(tool_name, "Await" | "AwaitShell") => Some(input.clone()),
+        _ => None,
     }
 }
 pub(in crate::session::actor) async fn wait_for_pending_interjection(
@@ -102,47 +104,71 @@ pub(in crate::session::actor) async fn wait_for_pending_interjection(
 }
 use crate::tools::tool_context::BlockingWaitGuard;
 /// Model-facing result when a wait is aborted for a pending interjection.
-pub(super) fn interrupted_wait_tool_result(args: &serde_json::Value) -> ToolRunResult {
-    interrupted_wait_tool_result_with_msg(
-        args,
-        "Wait moved to background because the user sent a message. The task is still running and its completion will be delivered automatically.",
-    )
+pub(super) fn interrupted_wait_tool_result(
+    args: &serde_json::Value,
+    waited_ms: u64,
+) -> ToolRunResult {
+    let msg = if super::super::completion_delivery::wait_task_ids(args).is_empty() {
+        "Wait was interrupted by the user; no task execution state was observed."
+    } else {
+        "Wait was interrupted by the user; execution state is unconfirmed. Pending completion notifications remain enabled."
+    };
+    interrupted_wait_tool_result_with_msg(args, msg, waited_ms)
 }
 /// [`interrupted_wait_tool_result`] with a caller-chosen model-facing message.
 pub(super) fn interrupted_wait_tool_result_with_msg(
     args: &serde_json::Value,
     msg: &str,
+    waited_ms: u64,
 ) -> ToolRunResult {
     use tool_types::{TaskOutputOutput, TaskOutputResult};
-    let task_id = args
-        .get("task_ids")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .or_else(|| args.get("task_id").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let status = if task_id.is_empty() {
-        "cancelled"
-    } else {
-        "running"
-    };
-    let result = TaskOutputResult {
+    let task_ids = super::super::completion_delivery::wait_task_ids(args);
+    if args.get("subagent_ids").is_some() {
+        let output = tool_types::WaitSubagentOutput {
+            reason: tool_types::SubagentWaitReason::Interrupted,
+            waited_ms,
+            subagents: task_ids
+                .into_iter()
+                .map(|id| {
+                    tool_types::SubagentWaitResult::unknown(
+                        id,
+                        tool_types::SubagentStatus::ObservationInterrupted,
+                        msg.to_owned(),
+                    )
+                })
+                .collect(),
+        };
+        return ToolRunResult {
+            prompt_text: serde_json::to_string_pretty(&output).expect("wait result is JSON data"),
+            output: ToolsToolOutput::SubagentWait(output),
+            effective_tool_name: None,
+        };
+    }
+
+    let result_for = |task_id| TaskOutputResult {
         task_id,
-        command: String::new(),
-        status: status.to_string(),
-        exit_code: None,
-        started: String::new(),
-        ended: None,
-        duration_secs: 0.0,
+        status: "observation_interrupted".to_string(),
         output: msg.to_string(),
-        output_file: String::new(),
-        truncated: false,
-        truncation_hint: String::new(),
         raw_output_bytes: msg.len(),
+        ..Default::default()
+    };
+    let output = match task_ids.as_slice() {
+        [] => TaskOutputOutput::Result(result_for(String::new())),
+        [task_id] => TaskOutputOutput::Result(result_for(task_id.clone())),
+        task_ids => TaskOutputOutput::MultiResult(tool_types::MultiTaskOutputResult {
+            mode: "wait_all".to_string(),
+            summary: format!(
+                "Wait interrupted; execution state remains unconfirmed for {} tasks.",
+                task_ids.len()
+            ),
+            results: task_ids
+                .iter()
+                .map(|task_id| result_for(task_id.clone()))
+                .collect(),
+        }),
     };
     ToolRunResult {
-        output: ToolsToolOutput::TaskOutput(TaskOutputOutput::Result(result)),
+        output: ToolsToolOutput::TaskOutput(output),
         prompt_text: msg.to_string(),
         effective_tool_name: None,
     }
@@ -200,6 +226,7 @@ impl SessionActor {
                 | chat_state::NotificationSource::PlanHandoff { .. }
                 | chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::AgentReply { .. }
+                | chat_state::NotificationSource::InquiryAnswered { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => false,
             })
             .map(|notification| notification.id)

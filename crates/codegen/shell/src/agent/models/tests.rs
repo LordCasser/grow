@@ -192,3 +192,101 @@ fn reasoning_efforts_come_from_the_selected_catalog_entry() {
     assert_eq!(efforts.len(), 2);
     assert!(manager.model_reasoning_efforts("local/beta").is_empty());
 }
+
+#[test]
+fn persisted_route_selection_prefers_exact_original_key() {
+    let manager = ModelsManager::from_config(&config(
+        r#"
+        [provider.local.models.a_alias]
+        model = "persisted-route"
+        reasoning_efforts = ["low"]
+
+        [provider.local.models.z_original]
+        model = "persisted-route"
+        reasoning_efforts = ["low"]
+        "#,
+        "local/z_original",
+    ))
+    .unwrap();
+    let route = sampling_types::model_image_input_key_from_parts(
+        "persisted-route",
+        &sampling_types::ApiBackend::ChatCompletions,
+        "https://llm.example/v1",
+        &Default::default(),
+    );
+
+    assert_eq!(
+        manager.select_persisted_transport_model(
+            &ModelId::new("local/z_original"),
+            &route,
+            Some(sampling_types::ReasoningEffort::Low),
+        ),
+        Some(ModelId::new("local/z_original")),
+        "the persisted key wins when its route and saved effort still match"
+    );
+}
+
+#[test]
+fn persisted_route_selection_uses_an_exact_alias_when_original_key_changes() {
+    let manager = ModelsManager::from_config(&config(
+        r#"
+        [provider.local.models.a_alias]
+        model = "persisted-route"
+        reasoning_efforts = ["low"]
+
+        [provider.local.models.z_original]
+        model = "changed-route"
+        reasoning_efforts = ["low"]
+        "#,
+        "local/z_original",
+    ))
+    .unwrap();
+    let route = sampling_types::model_image_input_key_from_parts(
+        "persisted-route",
+        &sampling_types::ApiBackend::ChatCompletions,
+        "https://llm.example/v1",
+        &Default::default(),
+    );
+
+    assert_eq!(
+        manager.select_persisted_transport_model(
+            &ModelId::new("local/z_original"),
+            &route,
+            Some(sampling_types::ReasoningEffort::Low),
+        ),
+        Some(ModelId::new("local/a_alias")),
+        "a changed catalog key cannot displace the matching saved provider route"
+    );
+}
+
+#[test]
+fn persisted_route_selection_requires_the_saved_effort() {
+    let manager = ModelsManager::from_config(&config(
+        r#"
+        [provider.local.models.a_alias]
+        model = "persisted-route"
+        reasoning_efforts = ["low"]
+
+        [provider.local.models.z_original]
+        model = "persisted-route"
+        "#,
+        "local/z_original",
+    ))
+    .unwrap();
+    let route = sampling_types::model_image_input_key_from_parts(
+        "persisted-route",
+        &sampling_types::ApiBackend::ChatCompletions,
+        "https://llm.example/v1",
+        &Default::default(),
+    );
+
+    assert_eq!(
+        manager.select_persisted_transport_model(
+            &ModelId::new("local/z_original"),
+            &route,
+            Some(sampling_types::ReasoningEffort::Low),
+        ),
+        Some(ModelId::new("local/a_alias")),
+        "same transport without the persisted effort is not an exact match"
+    );
+}

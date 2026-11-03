@@ -1,0 +1,58 @@
+PAGER: expected regression assertions against current behavior
+running 6 tests
+test app::root::dispatch::tests::dashboard::audit_fork_journey_close_last_local_view ... 
+thread 'app::root::dispatch::tests::dashboard::audit_fork_journey_close_last_local_view' (12584384) panicked at crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs:5243:5:
+the dashboard/new-agent surface can survive the last local view closing
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test app::root::dispatch::tests::dashboard::audit_fork_journey_close_owned_root_then_quit_with_viewer ... 
+thread 'app::root::dispatch::tests::dashboard::audit_fork_journey_close_owned_root_then_quit_with_viewer' (12584388) panicked at crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs:5256:5:
+the backend-owned root still needs suspension after its view closes, got [UnregisterActiveSession { session_id: SessionId("second") }, Quit]
+FAILED
+test app::root::dispatch::tests::dashboard::audit_fork_journey_closed_session_reappears_as_roster_row ... 
+thread 'app::root::dispatch::tests::dashboard::audit_fork_journey_closed_session_reappears_as_roster_row' (12584391) panicked at crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs:5270:5:
+a supposedly closed session is still visible through the roster: [TopLevel(AgentId(1)), Roster { session_id: "test-session" }]
+FAILED
+test app::root::dispatch::tests::dashboard::audit_fork_journey_delete_stay_retires_local_binding ... 
+thread 'app::root::dispatch::tests::dashboard::audit_fork_journey_delete_stay_retires_local_binding' (12584396) panicked at crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs:5282:5:
+successful delete must retire same-session views even when staying on Welcome
+FAILED
+test app::root::dispatch::tests::dashboard::audit_fork_journey_stop_child_only_root ... 
+thread 'app::root::dispatch::tests::dashboard::audit_fork_journey_stop_child_only_root' (12584398) panicked at crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs:5221:5:
+a child-only Working root needs a stop effect, got []
+FAILED
+test app::root::dispatch::tests::dashboard::audit_fork_journey_stop_goal_only_root ... 
+thread 'app::root::dispatch::tests::dashboard::audit_fork_journey_stop_goal_only_root' (12584402) panicked at crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs:5234:5:
+a goal-only Working root needs a stop effect
+FAILED
+
+failures:
+
+failures:
+    app::root::dispatch::tests::dashboard::audit_fork_journey_close_last_local_view
+    app::root::dispatch::tests::dashboard::audit_fork_journey_close_owned_root_then_quit_with_viewer
+    app::root::dispatch::tests::dashboard::audit_fork_journey_closed_session_reappears_as_roster_row
+    app::root::dispatch::tests::dashboard::audit_fork_journey_delete_stay_retires_local_binding
+    app::root::dispatch::tests::dashboard::audit_fork_journey_stop_child_only_root
+    app::root::dispatch::tests::dashboard::audit_fork_journey_stop_goal_only_root
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 7649 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p pager --lib`
+
+STORAGE: expected regression assertion against current behavior
+
+running 1 test
+test session::storage::jsonl::tests::audit_fork_journey_delete_independent_fork ... 
+thread 'session::storage::jsonl::tests::audit_fork_journey_delete_independent_fork' (12567926) panicked at crates/codegen/shell/src/session/storage/jsonl/tests.rs:8067:41:
+a standalone fork with only inherited history has no child result dependency: Custom { kind: InvalidInput, error: "session audit-independent-fork is linked to parent or child session(s) test-session-123; single-session deletion would remove recovery evidence. Automatic cleanup can reclaim the linked sessions together after all members are stale and eligible" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    session::storage::jsonl::tests::audit_fork_journey_delete_independent_fork
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4465 filtered out; finished in 0.23s
+

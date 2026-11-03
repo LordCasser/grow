@@ -109,12 +109,7 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
     // consumed-completion sweep), then a foreground sleep that pins the turn
     // running while the user message and Ctrl+C land.
     let poll_args = json!({ "task_ids": [task_id.clone()] }).to_string();
-    let _poll_turn = expect_tool_turn(
-        &content,
-        "call_wake_poll",
-        "get_command_or_subagent_output",
-        poll_args,
-    );
+    let _poll_turn = expect_tool_turn(&content, "call_wake_poll", "get_command_output", poll_args);
     let hold_args = json!({
         "command": format!("/bin/sleep {HOLD_SLEEP_SECS}"),
         "description": "hold turn"

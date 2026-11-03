@@ -1165,10 +1165,37 @@ pub(crate) fn quarantined_tool_exchange(items: &[ConversationItem]) -> Conversat
 pub(crate) fn quarantine_malformed_tool_exchanges(items: &mut Vec<ConversationItem>) -> usize {
     let ranges = malformed_tool_exchange_ranges(items);
     let count = ranges.len();
-    for range in ranges.into_iter().rev() {
-        let replacement = quarantined_tool_exchange(&items[range.clone()]);
-        items.splice(range, [replacement]);
+    if count == 0 {
+        return 0;
     }
+    // Build every evidence value from the original history before changing
+    // any range. Ranges are ordered and cannot cross another Assistant.
+    let mut replacements = ranges
+        .into_iter()
+        .map(|range| {
+            let replacement = quarantined_tool_exchange(&items[range.clone()]);
+            (range, replacement)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .peekable();
+    let mut index = 0;
+    let mut skip_until = 0;
+    items.retain_mut(|item| {
+        let original_index = index;
+        index += 1;
+        if replacements
+            .peek()
+            .is_some_and(|(range, _)| range.start == original_index)
+        {
+            let (range, replacement) = replacements.next().unwrap();
+            *item = replacement;
+            skip_until = range.end;
+            true
+        } else {
+            original_index >= skip_until
+        }
+    });
     count
 }
 /// Strip `ToolResult`s that are not in the contiguous run immediately
@@ -3567,6 +3594,285 @@ actual user question";
         assert!(
             out.iter().any(|i| i.text_content() == "recent answer"),
             "recent turn must survive"
+        );
+    }
+
+    fn old_quarantine_malformed_tool_exchanges(items: &mut Vec<ConversationItem>) -> usize {
+        let ranges = malformed_tool_exchange_ranges(items);
+        let count = ranges.len();
+        for range in ranges.into_iter().rev() {
+            let replacement = quarantined_tool_exchange(&items[range.clone()]);
+            items.splice(range, [replacement]);
+        }
+        count
+    }
+
+    fn old_repair_dangling_tool_calls(
+        conversation: &mut Vec<ConversationItem>,
+        reason: sampling_types::DanglingToolCallReason,
+    ) -> usize {
+        use sampling_types::DanglingToolCallReason;
+        let mut repairs = Vec::new();
+        let mut i = 0;
+        while i < conversation.len() {
+            if let ConversationItem::Assistant(assistant) = &conversation[i]
+                && !assistant.tool_calls.is_empty()
+            {
+                let calls: Vec<(std::sync::Arc<str>, String)> = assistant
+                    .tool_calls
+                    .iter()
+                    .map(|call| (call.id.clone(), call.name.clone()))
+                    .collect();
+                let mut answered = std::collections::HashSet::new();
+                let mut j = i + 1;
+                while j < conversation.len() {
+                    if let ConversationItem::ToolResult(result) = &conversation[j] {
+                        answered.insert(result.tool_call_id.clone());
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let synthetic = calls
+                    .iter()
+                    .filter(|(id, _)| !answered.contains(id.as_ref()))
+                    .map(|(id, name)| {
+                        let text = match reason {
+                            DanglingToolCallReason::UserCancelled => format!(
+                                "Tool execution was cancelled by the user (tool `{name}` was not executed)."
+                            ),
+                            DanglingToolCallReason::ProcessInterrupted => format!(
+                                "Tool execution was interrupted before a result was recorded (tool `{name}` may not have started)."
+                            ),
+                            DanglingToolCallReason::HarnessHalted { class } => format!(
+                                "Tool execution was halted by the harness ({class}); the tool `{name}` was not executed."
+                            ),
+                        };
+                        ConversationItem::tool_result(id.as_ref(), text)
+                    })
+                    .collect::<Vec<_>>();
+                if !synthetic.is_empty() {
+                    repairs.push((j, synthetic));
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+        let count = repairs.iter().map(|(_, items)| items.len()).sum();
+        for (index, synthetic) in repairs.into_iter().rev() {
+            conversation.splice(index..index, synthetic);
+        }
+        count
+    }
+
+    fn old_dedup_duplicate_tool_results(items: &mut Vec<ConversationItem>) -> usize {
+        let mut removed = 0;
+        let mut i = 0;
+        while i < items.len() {
+            if let ConversationItem::Assistant(assistant) = &items[i]
+                && !assistant.tool_calls.is_empty()
+            {
+                let start = i + 1;
+                let mut end = start;
+                while end < items.len() && matches!(&items[end], ConversationItem::ToolResult(_)) {
+                    end += 1;
+                }
+                if end > start {
+                    let mut seen = std::collections::HashMap::<String, usize>::new();
+                    let mut positions = Vec::new();
+                    for (index, item) in items.iter().enumerate().take(end).skip(start) {
+                        if let ConversationItem::ToolResult(result) = item
+                            && let Some(previous) = seen.insert(result.tool_call_id.clone(), index)
+                        {
+                            positions.push(previous);
+                        }
+                    }
+                    if !positions.is_empty() {
+                        positions.sort_unstable();
+                        positions.reverse();
+                        for index in &positions {
+                            items.remove(*index);
+                        }
+                        removed += positions.len();
+                        continue;
+                    }
+                }
+                i = end;
+                continue;
+            }
+            i += 1;
+        }
+        removed
+    }
+
+    fn old_repair_history_with_reason(
+        items: &mut Vec<ConversationItem>,
+        reason: sampling_types::DanglingToolCallReason,
+    ) -> HistoryRepairReport {
+        let quarantined_tool_exchanges = old_quarantine_malformed_tool_exchanges(items);
+        let normalized_tool_batches = sampling_types::normalize_model_skill_results(items);
+        let duplicates_removed = old_dedup_duplicate_tool_results(items);
+        let stripped_tool_result_ids = strip_displaced_tool_results(items);
+        let synthetic_results_inserted = old_repair_dangling_tool_calls(items, reason);
+        HistoryRepairReport {
+            normalized_tool_batches,
+            quarantined_tool_exchanges,
+            duplicates_removed,
+            stripped_tool_result_ids,
+            synthetic_results_inserted,
+        }
+    }
+
+    fn assert_history_reports_equal(actual: &HistoryRepairReport, expected: &HistoryRepairReport) {
+        assert_eq!(
+            actual.normalized_tool_batches,
+            expected.normalized_tool_batches
+        );
+        assert_eq!(
+            actual.quarantined_tool_exchanges,
+            expected.quarantined_tool_exchanges
+        );
+        assert_eq!(actual.duplicates_removed, expected.duplicates_removed);
+        assert_eq!(
+            actual.stripped_tool_result_ids,
+            expected.stripped_tool_result_ids
+        );
+        assert_eq!(
+            actual.synthetic_results_inserted,
+            expected.synthetic_results_inserted
+        );
+    }
+
+    #[test]
+    fn retain_quarantine_matches_adjacent_reverse_splice_ranges_and_hides_reasoning() {
+        use sampling_types::BackendToolCallItem;
+
+        let original = vec![
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "PRIVATE-REASONING-MUST-NOT-LEAK",
+            )),
+            ConversationItem::BackendToolCall(BackendToolCallItem::code_interpreter(Some(
+                "public backend evidence",
+            ))),
+            ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: "".into(),
+                    name: "bad".into(),
+                    arguments: "{}".into(),
+                },
+                sampling_types::ToolCall {
+                    id: "shared-id".into(),
+                    name: "valid sibling".into(),
+                    arguments: "{}".into(),
+                },
+            ]),
+            ConversationItem::tool_result("shared-id", "first ambiguous result"),
+            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "shared-id".into(),
+                name: "later duplicate".into(),
+                arguments: "{}".into(),
+            }]),
+            ConversationItem::tool_result("shared-id", "second ambiguous result"),
+            ConversationItem::user("separated region"),
+            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "later-unique".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }]),
+        ];
+        assert_eq!(malformed_tool_exchange_ranges(&original), [0..4, 4..6]);
+        let mut old = original.clone();
+        let mut new = original;
+        assert_eq!(old_quarantine_malformed_tool_exchanges(&mut old), 2);
+        assert_eq!(quarantine_malformed_tool_exchanges(&mut new), 2);
+        assert_eq!(
+            serde_json::to_value(&new).unwrap(),
+            serde_json::to_value(&old).unwrap()
+        );
+        let recovery_text = new
+            .iter()
+            .filter(|item| matches!(item, ConversationItem::User(user) if user.synthetic_reason == Some(sampling_types::SyntheticReason::AutoRecovery)))
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>();
+        assert_eq!(recovery_text.len(), 2);
+        assert!(
+            recovery_text
+                .iter()
+                .all(|text| !text.contains("PRIVATE-REASONING-MUST-NOT-LEAK"))
+        );
+        assert!(recovery_text[0].contains("public backend evidence"));
+        assert!(recovery_text[1].contains("later duplicate"));
+    }
+
+    #[test]
+    fn repair_history_report_and_full_json_match_reverse_edit_pipeline() {
+        use sampling_types::{SkillLoadItem, SkillLoadSource};
+        let model_skill = ConversationItem::SkillLoad(SkillLoadItem {
+            input_id: "input-1".into(),
+            reference_index: 0,
+            call_id: "call-one".into(),
+            skill_name: "review".into(),
+            source: SkillLoadSource::Model,
+            args: "{}".into(),
+            prepared_body: "skill body".into(),
+            prompt_index: None,
+        });
+        let original = vec![
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "private quarantine context",
+            )),
+            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "".into(),
+                name: "invalid".into(),
+                arguments: "{}".into(),
+            }]),
+            ConversationItem::tool_result("", "preserve in quarantine"),
+            ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: "call-one".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                sampling_types::ToolCall {
+                    id: "call-two".into(),
+                    name: "grep".into(),
+                    arguments: "{}".into(),
+                },
+            ]),
+            ConversationItem::tool_result("call-one", "stale result"),
+            model_skill,
+            ConversationItem::tool_result("call-one", "authoritative result"),
+            ConversationItem::user("turn boundary"),
+            ConversationItem::tool_result("orphan", "strip this result"),
+            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "tail-call".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }]),
+        ];
+        let reason = sampling_types::DanglingToolCallReason::HarnessHalted {
+            class: "history_repair",
+        };
+        let mut old_items = original.clone();
+        let mut new_items = original;
+        let old_report = old_repair_history_with_reason(&mut old_items, reason);
+        let new_report = repair_history_with_reason(&mut new_items, reason);
+        assert_history_reports_equal(&new_report, &old_report);
+        assert_eq!(
+            serde_json::to_value(&new_items).unwrap(),
+            serde_json::to_value(&old_items).unwrap()
+        );
+        assert_eq!(new_report.normalized_tool_batches, 1);
+        assert_eq!(new_report.quarantined_tool_exchanges, 1);
+        assert_eq!(new_report.duplicates_removed, 1);
+        assert_eq!(new_report.stripped_tool_result_ids, ["orphan"]);
+        assert_eq!(new_report.synthetic_results_inserted, 2);
+        let before_second_pass = serde_json::to_value(&new_items).unwrap();
+        assert!(!repair_history_with_reason(&mut new_items, reason).changed());
+        assert_eq!(
+            serde_json::to_value(&new_items).unwrap(),
+            before_second_pass
         );
     }
 }

@@ -187,8 +187,8 @@ pub(in crate::app::root::dispatch) fn dispatch_fork_resolved(
     app.next_agent_id += 1;
     let new_agent = build_fork_placeholder(app, new_id, parent_id, &parent_cwd, worktree);
     let parent_marker = match directive.as_deref() {
-        Some(d) => format!("Forked: {d}"),
-        None => "Forked".to_string(),
+        Some(d) => format!("Fork requested: {d}"),
+        None => "Fork requested".to_string(),
     };
     app.agents.insert(new_id, new_agent);
     {
@@ -712,20 +712,57 @@ pub(in crate::app::root::dispatch) fn handle_fork_session_failed(
     error: String,
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, error = %error, "Fork session failed");
+    let Some(agent) = app.agents.get(&agent_id) else {
+        return vec![];
+    };
+    if agent.session.session_id.is_some() {
+        return vec![];
+    }
+    let source = agent.session.forked_from;
+    let foreground = app.active_view == ActiveView::Agent(agent_id);
+    let attached = app.dashboard.as_ref().and_then(|d| d.attached_agent) == Some(agent_id);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.clear_live_feedback("worktree");
         agent.session.clear_pending_extensions_fetch();
+        agent.session.prompt_history_loading = false;
+        agent.session.loading_replay = false;
+        agent.session.clear_mcp_init_progress();
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
         agent.mark_turn_finished();
-        agent.pending_first_prompt = None;
+        if let Some(directive) = agent.pending_first_prompt.take() {
+            if agent.prompt.text().is_empty() {
+                agent.prompt.set_text(&directive);
+            } else {
+                agent.session.enqueue_prompt_front(directive);
+            }
+        }
         agent.pending_fork_banner = None;
+        agent.generated_session_title = Some("Fork failed".into());
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error,
+                error: error.clone(),
                 elapsed,
             }));
+        if !agent.prompt.text().is_empty() || agent.session.queue_len() > 0 {
+            agent.show_toast(&format!(
+                "Fork failed: {error}. Unsent input kept in this draft."
+            ));
+            return vec![];
+        }
     }
+    super::modal::retire_agent_view(app, agent_id);
+    if foreground && let Some(source) = source.filter(|id| app.agents.contains_key(id)) {
+        if attached {
+            super::super::dashboard::dispatch_dashboard_attach(
+                app,
+                crate::views::dashboard::DashboardRowId::TopLevel(source),
+            );
+        } else {
+            switch_to_agent(app, source, SwitchCause::Picker);
+        }
+    }
+    app.show_toast(&format!("Fork failed: {error}"));
     vec![]
 }

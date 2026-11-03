@@ -4176,6 +4176,7 @@ async fn child_result_and_parent_ended_retries_keep_their_canonical_event_once()
                 resumed_from: None,
                 parent_prompt_id: None,
                 capability_mode: None,
+                birth_mcp_servers: Some(Default::default()),
                 permission_mode: None,
                 effective_permission_mode: None,
                 workflow_run_id: None,
@@ -5477,8 +5478,8 @@ async fn final_request_projection_accounts_for_goal_shadows_and_json_schema() {
         .build_request(
             "test-timeline",
             vec![],
-            None,
-            Some(current),
+            Some("remember the active branch".to_owned()),
+            Some(current.clone()),
             Some(JsonOutputFormat::JsonSchema(serde_json::json!({
                 "type": "object",
                 "properties": {"answer": {"type": "string"}}
@@ -5490,6 +5491,51 @@ async fn final_request_projection_accounts_for_goal_shadows_and_json_schema() {
     assert_eq!(
         request.items[0].text_content(),
         sampling_types::SUPERSEDED_GOAL_DIRECTIVE
+    );
+    let saved_surface = h.handle.get_conversation().await;
+    assert_eq!(
+        saved_surface[0].text_content(),
+        "obsolete objective ".repeat(1_000),
+        "Goal shadowing must stay request-only"
+    );
+    let events = h.handle.timeline_events().await.unwrap();
+    let cold = crate::Timeline::from_events(events.clone()).unwrap();
+    let expected = sampling_types::project_conversation_for_goal_scope(
+        cold.surface().to_vec(),
+        Some(&current),
+    );
+    assert_eq!(
+        serde_json::to_value(&request.items).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
+        "request projection must match the cold-fold Surface plus Goal shadowing"
+    );
+    assert!(matches!(
+        request.items.last(),
+        Some(ConversationItem::User(user))
+            if user.synthetic_reason == Some(SyntheticReason::MemoryContext)
+    ));
+    let repeated = h
+        .handle
+        .build_request(
+            "test-timeline",
+            vec![],
+            Some("remember the active branch".to_owned()),
+            Some(current),
+            Some(JsonOutputFormat::JsonSchema(serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}}
+            }))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&repeated.items).unwrap(),
+        serde_json::to_value(&request.items).unwrap()
+    );
+    assert_eq!(
+        h.handle.timeline_events().await.unwrap().len(),
+        events.len(),
+        "a repeated memory reminder must not append another Timeline event"
     );
     assert_eq!(
         h.handle.get_projected_tokens().await,
@@ -5619,6 +5665,262 @@ async fn persistent_memory_context_retries_an_uncertain_commit() {
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&original).unwrap(),
     );
+}
+
+#[tokio::test]
+async fn request_time_integrity_repair_retry_and_memory_wait_for_ack() {
+    use sampling_types::{SyntheticReason, ToolCall};
+
+    let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 1);
+    h.drain_persistence();
+    h.handle
+        .push_response_durably(
+            vec![ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "request-time-dangling".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }])],
+            None,
+        )
+        .await
+        .unwrap();
+    h.drain_persistence();
+    let raw_events = h
+        .handle
+        .timeline_events()
+        .await
+        .expect("raw assistant response was acknowledged");
+    let raw_surface = crate::Timeline::from_events(raw_events.clone())
+        .unwrap()
+        .surface()
+        .to_vec();
+    assert!(
+        matches!(raw_surface.as_slice(), [ConversationItem::Assistant(a)] if a.tool_calls.len() == 1)
+    );
+
+    let build = tokio::spawn({
+        let handle = h.handle.clone();
+        async move {
+            handle
+                .build_request(
+                    "request-time-repair",
+                    vec![],
+                    Some("remember after repair".into()),
+                    None,
+                    None,
+                )
+                .await
+        }
+    });
+
+    let first_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("request-time integrity repair ACK");
+    let first_attempt = h
+        .persistence_rx
+        .drain()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(*event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("repair attempt was persisted");
+    assert!(matches!(
+        first_attempt.messages(),
+        Some(event) if event.cause == crate::MessageCause::IntegrityRepair
+    ));
+    assert!(!build.is_finished(), "request must wait for the repair ACK");
+    first_ack
+        .send(Err(std::io::Error::other("transient repair write failure")))
+        .unwrap();
+
+    let retry_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("exact repair retry ACK");
+    let retry_attempt = h
+        .persistence_rx
+        .drain()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(*event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("repair retry was persisted");
+    assert_eq!(
+        serde_json::to_value(&retry_attempt).unwrap(),
+        serde_json::to_value(&first_attempt).unwrap(),
+        "retry preserves the exact repair event"
+    );
+    assert!(!build.is_finished());
+    retry_ack.send(Ok(())).unwrap();
+
+    let memory_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("memory append ACK follows repair ACK");
+    let memory_attempt = h
+        .persistence_rx
+        .drain()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(*event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("memory append was persisted");
+    assert!(matches!(
+        memory_attempt.messages(),
+        Some(event)
+            if event.cause == crate::MessageCause::MemoryContext
+                && event.items.len() == 1
+                && matches!(&event.items[0], ConversationItem::User(user)
+                    if user.synthetic_reason == Some(SyntheticReason::MemoryContext))
+    ));
+    assert!(!build.is_finished(), "request must wait for the memory ACK");
+    memory_ack.send(Ok(())).unwrap();
+
+    let request = build.await.unwrap().unwrap();
+    let canonical = h.handle.get_conversation().await;
+    let committed_events = h.handle.timeline_events().await.unwrap();
+    let cold = crate::Timeline::from_events(committed_events).unwrap();
+    assert_eq!(
+        serde_json::to_value(&request.items).unwrap(),
+        serde_json::to_value(&canonical).unwrap(),
+        "request must use the committed Surface after both ACKs"
+    );
+    assert_eq!(
+        serde_json::to_value(&request.items).unwrap(),
+        serde_json::to_value(cold.surface()).unwrap(),
+        "request must match a cold Timeline fold"
+    );
+    assert!(
+        matches!(request.items.get(1), Some(ConversationItem::ToolResult(result))
+        if result.tool_call_id == "request-time-dangling"
+            && result.content.contains("cancelled by the user"))
+    );
+    assert_eq!(
+        request
+            .items
+            .iter()
+            .filter(|item| matches!(item, ConversationItem::User(user)
+                if user.synthetic_reason == Some(SyntheticReason::MemoryContext)))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn request_time_repair_and_memory_cancellation_never_return_a_request() {
+    use sampling_types::ToolCall;
+
+    for cancel_after_repair_ack in [false, true] {
+        let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 1);
+        h.drain_persistence();
+        h.handle
+            .push_response_durably(
+                vec![ConversationItem::assistant_tool_calls(vec![ToolCall {
+                    id: "cancel-boundary".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }])],
+                None,
+            )
+            .await
+            .unwrap();
+        h.drain_persistence();
+        let raw = h.handle.timeline_events().await.unwrap();
+        let build = tokio::spawn({
+            let handle = h.handle.clone();
+            async move {
+                handle
+                    .build_request(
+                        "cancel-boundary",
+                        vec![],
+                        Some("memory after repair".into()),
+                        None,
+                        None,
+                    )
+                    .await
+            }
+        });
+        let repair_ack = h
+            .persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("request-time repair attempt");
+        let repair_event = h
+            .persistence_rx
+            .drain()
+            .into_iter()
+            .find_map(|record| match record {
+                PersistenceRecord::Timeline(event) => Some(*event),
+                PersistenceRecord::Flush => None,
+            })
+            .expect("repair attempt event");
+        if cancel_after_repair_ack {
+            repair_ack.send(Ok(())).unwrap();
+            let _memory_ack = h
+                .persistence_rx
+                .next_timeline_ack()
+                .await
+                .expect("memory append attempt after repair ACK");
+            let memory_event = h
+                .persistence_rx
+                .drain()
+                .into_iter()
+                .find_map(|record| match record {
+                    PersistenceRecord::Timeline(event) => Some(*event),
+                    PersistenceRecord::Flush => None,
+                })
+                .expect("memory append attempt event");
+            assert!(matches!(
+                memory_event.messages(),
+                Some(event) if event.cause == crate::MessageCause::MemoryContext
+            ));
+            h._cancellation_token.cancel();
+            assert!(
+                build.await.unwrap().is_err(),
+                "cancelled build must not return a request"
+            );
+
+            let mut acknowledged = raw;
+            acknowledged.push(repair_event);
+            let cold = crate::Timeline::from_events(acknowledged).unwrap();
+            assert!(
+                cold.surface()
+                    .iter()
+                    .any(|item| matches!(item, ConversationItem::ToolResult(_)))
+            );
+            assert!(!cold.surface().iter().any(|item| matches!(item,
+                ConversationItem::User(user)
+                    if user.synthetic_reason == Some(sampling_types::SyntheticReason::MemoryContext)
+            )), "unacknowledged memory append must not enter the replayed Surface");
+        } else {
+            h._cancellation_token.cancel();
+            assert!(
+                build.await.unwrap().is_err(),
+                "cancelled build must not return a request"
+            );
+
+            let cold = crate::Timeline::from_events(raw).unwrap();
+            assert!(cold.surface().iter().any(|item| matches!(item,
+                ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty()
+            )));
+            assert!(
+                !cold
+                    .surface()
+                    .iter()
+                    .any(|item| matches!(item, ConversationItem::ToolResult(_))),
+                "an unacknowledged repair attempt is not part of the replayable prefix"
+            );
+            assert!(repair_event.messages().is_some());
+            drop(repair_ack);
+        }
+    }
 }
 
 #[tokio::test]
@@ -12213,3 +12515,55 @@ mod compaction_ack_tests;
 
 #[path = "low_anchor_tests.rs"]
 mod low_anchor_tests;
+
+#[tokio::test]
+async fn timeline_suffix_query_freezes_frontier_and_does_not_clone_prior_events() {
+    let h = TestHarness::new();
+    for n in 0..4 {
+        h.handle
+            .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "test".into(),
+                    name: "suffix".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(serde_json::json!(n)),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    let all = h.handle.timeline_events().await.unwrap();
+    let from = all[2].seq.get();
+    let captured = h.handle.timeline_events_from(from).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&captured).unwrap(),
+        serde_json::to_value(&all[2..]).unwrap()
+    );
+    let next = captured.last().unwrap().seq.get() + 1;
+    assert!(
+        h.handle
+            .timeline_events_from(next)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+            crate::ObservationEvent {
+                scope: "test".into(),
+                name: "later".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        captured.len(),
+        2,
+        "the earlier captured frontier is immutable"
+    );
+    assert_eq!(h.handle.timeline_events_from(next).await.unwrap().len(), 1);
+}

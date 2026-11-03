@@ -2173,74 +2173,28 @@ mod tests {
     /// whichever matches the active surface — lit — instead of always
     /// keeping the first-registered (list) def.
     #[test]
-    fn build_entries_overlay_stop_wins_dedup() {
+    fn build_entries_session_commands_is_global_and_unique() {
         let registry = ActionRegistry::defaults();
-        // Match the two Ctrl+X rows by ActionId: the list and overlay
-        // stops carry different labels ("delete" vs "stop").
-        let is_stop = |action_id: &Option<ActionId>| {
-            matches!(
-                action_id,
-                Some(ActionId::DashboardStop | ActionId::DashboardOverlayStop)
-            )
-        };
-        let stop_rows = |entries: &[ShortcutsHelpEntry]| -> Vec<(String, bool)> {
-            entries
+        for contexts in [
+            vec![When::DashboardFocused, When::Always],
+            vec![When::AgentScreen, When::Always, When::DashboardOverlay],
+        ] {
+            let entries = build_entries(&contexts, &registry, true);
+            let rows = entries
                 .iter()
-                .filter_map(|e| match e {
-                    ShortcutsHelpEntry::Hint {
-                        item,
-                        dimmed,
-                        action_id,
-                        ..
-                    } if is_stop(action_id) => Some((
-                        item.description.as_deref().unwrap_or_default().to_string(),
-                        *dimmed,
-                    )),
-                    _ => None,
+                .filter(|entry| {
+                    matches!(
+                        entry,
+                        ShortcutsHelpEntry::Hint {
+                            action_id: Some(ActionId::SessionCommands),
+                            dimmed: false,
+                            ..
+                        }
+                    )
                 })
-                .collect()
-        };
-        let stop_id = |entries: &[ShortcutsHelpEntry]| -> Option<ActionId> {
-            entries
-                .iter()
-                .find_map(|e| match e {
-                    ShortcutsHelpEntry::Hint { action_id, .. } if is_stop(action_id) => {
-                        Some(*action_id)
-                    }
-                    _ => None,
-                })
-                .flatten()
-        };
-        // Dashboard LIST: the list stop survives, lit.
-        let list = build_entries(&[When::DashboardFocused, When::Always], &registry, true);
-        assert_eq!(
-            stop_rows(&list),
-            vec![("Stop / Delete agent".to_string(), false)],
-        );
-        assert_eq!(
-            stop_id(&list),
-            Some(ActionId::DashboardStop),
-            "the lit list `stop` is inserted first and never replaced — keeps DashboardStop",
-        );
-        // Session OVERLAY: the overlay stop survives, lit.
-        let overlay = build_entries(
-            &[When::AgentScreen, When::Always, When::DashboardOverlay],
-            &registry,
-            true,
-        );
-        assert_eq!(
-            stop_rows(&overlay),
-            vec![(
-                "Stop agent, close session (back to dashboard)".to_string(),
-                false
-            )],
-            "the overlay must show exactly the overlay `stop`, lit",
-        );
-        assert_eq!(
-            stop_id(&overlay),
-            Some(ActionId::DashboardOverlayStop),
-            "the lit overlay `stop` replaces the dimmed list row — carries DashboardOverlayStop",
-        );
+                .count();
+            assert_eq!(rows, 1);
+        }
     }
 
     #[test]

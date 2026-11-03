@@ -530,3 +530,67 @@ Subagent validation and dispatch SHALL distinguish unknown definition IDs, expli
 #### Scenario: Plugin and CLI catalogs change enablement
 - **WHEN** 唯一允许的 plugin 或 CLI Agent 被关闭后重新开启
 - **THEN** 普通会话与子会话的 Task 目录移除后恢复该正式 ID，空目录撤下 Task；重建保留 CLI 来源，重复名称继续使用执行解析选中的定义。
+
+### Requirement: Cold child restore retains durable birth MCP membership
+A child Spawn SHALL durably retain the known MCP server membership of the filtered live grant frozen for canonical Spawn admission before child execution. Cold restoration SHALL require that fact and intersect it with current eligible inherited services and the direct parent ceiling. Retained servers SHALL bind to the current process incarnation and obtain new permits; current configuration SHALL NOT add members to the original child or its descendants. Missing birth membership SHALL fail before tree execution is released, while a known empty set SHALL remain empty.
+
+#### Scenario: Profile and parent pool become wider offline
+- **WHEN** a child born with a narrow MCP pool is cold restored after its profile or parent pool admits more services
+- **THEN** only surviving birth members may be rebound, used or delegated, with fresh incarnation/generation authorization.
+
+#### Scenario: Current authority becomes narrower
+- **WHEN** a birth member is unavailable or no longer permitted by the current parent/profile
+- **THEN** that member is unavailable to the restored child, and other retained members are not expanded.
+
+#### Scenario: Birth membership is missing or empty
+- **WHEN** a cold child lacks a durable membership fact or has a recorded empty birth set
+- **THEN** missing facts block execution before preparation, while the known empty set permits restoration without granting any MCP server.
+
+#### Scenario: Parent transports change during initialization
+- **WHEN** the parent removes a birth member, replaces its client identity or adds another server after the child admission grant is frozen
+- **THEN** the grant is not resampled during actor setup; calls intersect the frozen IDs with live authority, and the old child cannot acquire the replacement or added transport.
+
+### Requirement: Task-cancellation entry scopes preserve target ownership
+
+The terminal-command cancellation entry SHALL operate only on the injected terminal backend and SHALL NOT inspect or call a subagent backend. The mixed `kill_task` entry SHALL retain terminal-first behavior when a terminal is available and SHALL permit cancellation through the session-bound subagent backend when no terminal is available. SubagentBackend SHALL remain the authority for child-source authorization and idempotent lifecycle outcomes. Both entries SHALL preserve actual killed, already-exited, not-found and unauthorized results; a terminal match SHALL take precedence over a same-ID child.
+
+#### Scenario: Terminal-only entry misses a command ID
+
+- **WHEN** `kill_terminal_command` has a terminal and a subagent backend, and the terminal reports `NotFound` for the requested ID
+- **THEN** it returns the terminal not-found result without reading or calling the subagent backend, and does not claim that no subagents exist
+
+#### Scenario: Mixed entry runs without a terminal
+
+- **WHEN** `kill_task` has only a session-bound subagent backend and the requested child is authorized
+- **THEN** it requests cancellation through that backend and returns its actual killed or already-exited result
+
+#### Scenario: Foreign child is rejected
+
+- **WHEN** the mixed entry requests a child outside the backend caller's authorized source scope
+- **THEN** the backend authorization failure is returned as unauthorized and no successful cancellation result is reported
+
+#### Scenario: Child has already finished
+
+- **WHEN** the backend reports that the requested child has already finished
+- **THEN** the mixed entry returns `already_exited` and does not claim a new cancellation
+
+#### Scenario: Terminal and child share an ID
+
+- **WHEN** the mixed entry has both resources and the terminal reports `Killed` or `AlreadyExited` for an ID also known to the child backend
+- **THEN** it returns the terminal result and does not send a child cancellation request
+
+### Requirement: Terminal ownership ends after command group cleanup
+
+On Unix, a terminal command owner SHALL finish signalling its still-owned process group before reaping its leader, including cancellation, timeout and normal leader completion. It SHALL NOT signal a remembered PGID after the leader has been reaped. Explicit cancellation SHALL allow the existing TERM grace before final group KILL; leader exit alone SHALL NOT waive group cleanup. This guarantee covers members that remain in the command process group, not descendants that deliberately detach from it. Windows SHALL retain Job Object based tree cleanup.
+
+#### Scenario: Leader exits before a TERM-ignoring descendant
+- **WHEN** cancellation sends TERM and the leader exits while a same-group descendant ignores TERM
+- **THEN** final group KILL precedes leader reap and the descendant does not survive command cleanup.
+
+#### Scenario: Naturally completed leader leaves a same-group descendant
+- **WHEN** the terminal observes that the leader exited but a same-group descendant still holds output pipes
+- **THEN** the group is terminated before leader reap and command completion drains the closed output without abandoning the descendant.
+
+#### Scenario: Timeout leader exits during asynchronous cleanup
+- **WHEN** timeout reports its existing terminal result and the leader exits before the next cleanup poll
+- **THEN** the owner completes group cleanup before reaping that leader, preserving the timeout result.

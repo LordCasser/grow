@@ -1606,3 +1606,126 @@ pub fn insert_scheduled_task_for_test(
 pub fn set_show_thinking_blocks(enabled: bool) {
     crate::appearance::cache::set_show_thinking_blocks(enabled);
 }
+
+/// App-owned history deletion uses the same confirmation in both renderers.
+pub fn session_deletion_open(app: &AppView) -> bool {
+    app.session_deletion.is_some()
+}
+pub fn draw_session_deletion(app: &mut AppView, terminal: &mut crate::app::PagerTerminal) {
+    let Some(deletion) = app.session_deletion.as_mut() else {
+        return;
+    };
+    crate::render::draw::draw_frame(terminal, &mut app.cursor, |frame, _| {
+        let area = frame.area();
+        paint_session_deletion_or_exit(
+            frame.buffer_mut(),
+            area,
+            deletion,
+            app.exit_suspension.as_ref(),
+        );
+        (None, None)
+    });
+}
+
+fn paint_session_deletion_or_exit(
+    buf: &mut Buffer,
+    area: Rect,
+    deletion: &mut crate::app::root::dispatch::session::deletion::SessionDeletion,
+    exit: Option<&crate::app::root::ExitSuspension>,
+) {
+    use ratatui::widgets::Widget;
+    ratatui::widgets::Clear.render(area, buf);
+    if let Some(exit) = exit {
+        crate::app::root::paint_exit_suspension_notice(buf, area, exit);
+    } else {
+        deletion.render(buf, area);
+    }
+}
+
+#[cfg(test)]
+mod session_deletion_exit_tests {
+    use super::*;
+    use crate::app::{
+        actions::{Action, Effect, TaskResult},
+        root::{InputOutcome, dispatch::dispatch},
+        session::AgentId,
+    };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn minimal_session_deletion_yields_to_global_exit_pending_and_failure() {
+        let mut app = test_minimal_app();
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        app.agents.insert(
+            AgentId(0),
+            test_agent_view(Some("delete-target"), "/tmp".into()),
+        );
+        app.active_view = ActiveView::Agent(AgentId(0));
+        dispatch(Action::DeleteCurrentSession, &mut app);
+        assert!(app.session_deletion.is_some());
+        let area = Rect::new(0, 0, 80, 18);
+        let mut buf = Buffer::empty(area);
+        paint_session_deletion_or_exit(
+            &mut buf,
+            area,
+            app.session_deletion.as_mut().unwrap(),
+            None,
+        );
+        let text = |buf: &Buffer| {
+            buf.content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(text(&buf).contains("Delete session history?"));
+        let quit = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(matches!(app.handle_input(&quit), InputOutcome::Changed));
+        let InputOutcome::Action(action) = app.handle_input(&quit) else {
+            panic!("global quit survives deletion owner");
+        };
+        let effects = dispatch(action, &mut app);
+        let [Effect::SuspendForExit { exit_id }] = effects.as_slice() else {
+            panic!("runtime confirmation expected: {effects:?}");
+        };
+        paint_session_deletion_or_exit(
+            &mut buf,
+            area,
+            app.session_deletion.as_mut().unwrap(),
+            app.exit_suspension.as_ref(),
+        );
+        assert!(text(&buf).contains("Suspending session tree"));
+        assert!(!text(&buf).contains("Delete session history?"));
+        dispatch(
+            Action::TaskComplete(TaskResult::ExitSuspensionResolved {
+                exit_id: exit_id.clone(),
+                result: Err("test writer drain failed".into()),
+            }),
+            &mut app,
+        );
+        assert!(app.session_deletion.is_some());
+        paint_session_deletion_or_exit(
+            &mut buf,
+            area,
+            app.session_deletion.as_mut().unwrap(),
+            app.exit_suspension.as_ref(),
+        );
+        let painted = text(&buf);
+        assert!(painted.contains("Exit not confirmed"));
+        assert!(painted.contains("r retry") && painted.contains("f force quit"));
+        assert!(!painted.contains("Delete session history?"));
+        assert!(matches!(
+            app.handle_input(&Event::Key(KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::NONE
+            ))),
+            InputOutcome::Action(Action::RetryExitSuspension)
+        ));
+        assert!(matches!(
+            app.handle_input(&Event::Key(KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::NONE
+            ))),
+            InputOutcome::Action(Action::ForceQuit)
+        ));
+    }
+}

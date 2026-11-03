@@ -2098,11 +2098,17 @@ mod tests {
             }
         });
         let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        assert!(logs.contains("client_post"));
-        assert!(logs.contains("sampling_request"));
-        assert!(logs.contains("has_authorization_header"));
-        assert!(logs.contains("has_x_api_key_header"));
-        assert!(logs.contains("auth_type"));
+        assert!(logs.contains("client_post"), "captured logs: {logs}");
+        assert!(logs.contains("sampling_request"), "captured logs: {logs}");
+        assert!(
+            logs.contains("has_authorization_header"),
+            "captured logs: {logs}"
+        );
+        assert!(
+            logs.contains("has_x_api_key_header"),
+            "captured logs: {logs}"
+        );
+        assert!(logs.contains("auth_type"), "captured logs: {logs}");
         assert!(!logs.contains("bear-secret"), "bearer leaked: {logs}");
         assert!(!logs.contains("api-secret"), "API key leaked: {logs}");
     }

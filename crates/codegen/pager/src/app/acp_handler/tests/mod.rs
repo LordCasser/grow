@@ -1202,6 +1202,7 @@ pub(super) fn write_subagent_spawn_timeline(
                 resumed_from: None,
                 parent_prompt_id: None,
                 capability_mode: None,
+                birth_mcp_servers: Some(Default::default()),
                 permission_mode: None,
                 effective_permission_mode: None,
                 workflow_run_id: None,
@@ -1809,6 +1810,8 @@ mod interjection;
 mod session_routing;
 mod plugins;
 mod subagents;
+mod subagent_reclamation;
+mod subagent_reclamation_background;
 mod subagent_permission_routing_tests;
 mod goals;
 mod interactions;

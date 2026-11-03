@@ -137,7 +137,7 @@ CLI/TUI 会话文件导出先写同目录临时文件并同步，再原子替换
 
 `/copy` 与 `/export` 的显式文件输出通过后台串行任务提交，UI 不再直接执行文件写入和同步。同一应用最多一个写入执行、八个等待，满载时明确提示；请求使用提交时的内容与目标快照，结果只通知原会话。正文渲染和剪贴板/默认备份仍同步，关闭进程不会持久化待处理队列。
 
-`/transcript` 的 Markdown 与 minimal ANSI 快照使用私有临时文件（Unix 0600），由待处理请求持有；替换请求、分页器结束或非重试错误都会释放并尝试清理。挂起超时保留同一文件供重试。正常应用释放也会清理，进程崩溃或强制终止不保证执行清理。契约见 [client-surfaces](../../../../openspec/specs/client-surfaces/spec.md)。
+`/transcript` 的 Markdown 与 minimal ANSI 快照使用私有临时文件（Unix 0600），由待处理请求持有；替换请求、分页器结束或非重试错误都会释放并尝试清理。挂起超时保留同一文件供重试。正常应用释放也会清理，进程崩溃或强制终止不保证执行清理。契约见 [client-surfaces](../../../openspec/specs/client-surfaces/spec.md)。
 
 minimal transcript 的 ANSI 正文仍按每帧 8ms 分片渲染；最终私有快照在后台阻塞任务写入。只有仍属于当前请求代次和原 root/child/session 的完整结果才会打开分页器。Full/TUI Markdown 快照写入保留同步路径，暂无归档的整体输入响应时限。
 
@@ -157,7 +157,7 @@ minimal 的 transcript 分帧构建在原会话重连时等待，重连完成后
 
 `/debug fps` 与 `GROW_FPS` 也覆盖 minimal：对现有 draw hook 计时，在 live viewport 顶部预留两行读数，正文至少保留三行，空间不足时隐藏读数。关闭后 viewport 恢复原内容高度。统计是同步渲染成本的倒数，不是后台 PTY 完成时间或屏幕刷新率；不增加空闲刷新计时器。
 
-macOS 图片提示的元数据探测遇到原生粘贴读取占用锁时会跳过，不在 UI 等待后台读图。未知分类保留重试机会，确认无图片时按分类自身版本去重。节流和成功显示后的冷却规则保持；这不代表 AppKit 初始化或原生调用具有总超时。契约见 [client-surfaces](../../../../openspec/specs/client-surfaces/spec.md)。
+macOS 图片提示的元数据探测遇到原生粘贴读取占用锁时会跳过，不在 UI 等待后台读图。未知分类保留重试机会，确认无图片时按分类自身版本去重。节流和成功显示后的冷却规则保持；这不代表 AppKit 初始化或原生调用具有总超时。契约见 [client-surfaces](../../../openspec/specs/client-surfaces/spec.md)。
 
 剪贴板类型快照会在分类前后核对版本；探测期间版本变化或类型读取不可用时返回未知，不把它缓存为“没有图片”。返回后外部应用仍可能继续复制，后续粘贴仍使用既有检查路径。
 

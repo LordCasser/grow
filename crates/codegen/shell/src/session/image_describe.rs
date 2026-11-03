@@ -129,7 +129,17 @@ impl ImageDescribeCache {
     }
 
     pub fn get(&self, key: &(u64, String, String, String)) -> Option<CachedImageDescription> {
-        self.inner.lock().get(key).cloned()
+        self.inner
+            .lock()
+            .iter()
+            .filter(|(candidate, _)| {
+                candidate.0 <= key.0
+                    && candidate.1 == key.1
+                    && candidate.2 == key.2
+                    && candidate.3 == key.3
+            })
+            .max_by_key(|(candidate, _)| candidate.0)
+            .map(|(_, value)| value.clone())
     }
 
     pub fn insert(
@@ -682,7 +692,12 @@ mod tests {
         assert_eq!(cached.description, "Pages contain scanned invoices.");
         assert_eq!(cached.result_ref, result_ref);
         let next_revision = cache.key_for_urls(&image_urls, "event-2-item-0", 8);
-        assert!(cache.get(&next_revision).is_none());
+        assert_eq!(
+            cache.get(&next_revision).unwrap().description,
+            cached.description
+        );
+        let earlier_revision = cache.key_for_urls(&image_urls, "event-2-item-0", 6);
+        assert!(cache.get(&earlier_revision).is_none());
         let same_source_different_context = cache.key_for_urls(&image_urls, "event-2-item-0", 7);
         assert_eq!(same_source_different_context, key);
     }

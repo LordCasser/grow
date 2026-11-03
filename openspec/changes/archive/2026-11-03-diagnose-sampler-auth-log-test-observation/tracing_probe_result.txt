@@ -1,0 +1,6 @@
+worker=0 events=25000 spans=25000 enters=25000 exits=25000
+worker=1 events=25000 spans=25000 enters=25000 exits=25000
+worker=2 events=25000 spans=25000 enters=25000 exits=25000
+worker=3 events=25000 spans=25000 enters=25000 exits=25000
+expected_on_dispatcher=100000 events=100000 spans=100000 enters=100000 exits=100000
+NO LOSS in probe

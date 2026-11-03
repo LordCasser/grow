@@ -1,5 +1,6 @@
 //! Session lifecycle, loading, picking, modal, and fork dispatchers.
 
+pub(crate) mod deletion;
 pub(in crate::app::root::dispatch) mod fork;
 pub(in crate::app::root::dispatch) mod lifecycle;
 pub(in crate::app::root::dispatch) mod list;

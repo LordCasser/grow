@@ -1,0 +1,13 @@
+## 实施与验证
+- [x] 1. 恢复 S1：持久项目规则同源
+- [x] 2. 恢复 S3：失败 load 的同进程重试与 owner
+- [x] 3. 恢复 S2：执行依赖准入、workspace 身份及出生 MCP
+- [x] 4. Task resume_from 展示继承
+- [x] 5. 外部 ACP Plan 坏响应恢复契约
+- [x] 6. Plan artifact 二次读取竞态
+- [x] 7. Sampler 历史偶发核查与失败诊断（当前未复现）
+- [x] 8. 算法候选 R3/S2/S3/C1/C3
+- [x] 9. 算法候选 C2/C4/T1/T2/T3/T4/U2/U3 的门槛和结果
+- [x] 10. 精简 backlog 并独立对抗性 review
+- [x] 11. 完整相关验证与 OpenSpec 校验/归档
+- [x] 12. 编译本地 release 并验证产物

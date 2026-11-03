@@ -4822,11 +4822,22 @@ pub fn repair_dangling_tool_calls(
         i += 1;
     }
 
-    // Phase 2: apply repairs in reverse index order so earlier indices stay valid.
+    // Merge the ordered insertion plan once instead of moving a long suffix
+    // for every missing result. Healthy histories keep their existing Vec.
     let total: usize = repairs.iter().map(|(_, s)| s.len()).sum();
-    for (insert_at, synthetic) in repairs.into_iter().rev() {
-        conversation.splice(insert_at..insert_at, synthetic);
+    if total == 0 {
+        return 0;
     }
+    let mut original = std::mem::take(conversation).into_iter();
+    let mut repaired = Vec::with_capacity(original.len() + total);
+    let mut cursor = 0;
+    for (insert_at, synthetic) in repairs {
+        repaired.extend(original.by_ref().take(insert_at - cursor));
+        repaired.extend(synthetic);
+        cursor = insert_at;
+    }
+    repaired.extend(original);
+    *conversation = repaired;
     total
 }
 
@@ -4901,60 +4912,48 @@ fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) ->
 ///
 /// Returns the number of duplicate entries removed.
 pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) -> usize {
-    let mut total_removed = 0;
+    let mut to_remove = Vec::new();
     let mut i = 0;
-
     while i < conversation.len() {
-        // Look for assistant messages with tool calls.
         if let ConversationItem::Assistant(a) = &conversation[i]
             && !a.tool_calls.is_empty()
         {
-            // Scan the run of ToolResult items immediately after.
             let start = i + 1;
             let mut end = start;
-            while end < conversation.len() {
-                if matches!(&conversation[end], ConversationItem::ToolResult(_)) {
-                    end += 1;
-                } else {
-                    break;
+            while matches!(conversation.get(end), Some(ConversationItem::ToolResult(_))) {
+                end += 1;
+            }
+            let mut seen = std::collections::HashMap::<String, usize>::new();
+            for (index, item) in conversation.iter().enumerate().take(end).skip(start) {
+                if let ConversationItem::ToolResult(result) = item
+                    && let Some(previous) = seen.insert(result.tool_call_id.clone(), index)
+                {
+                    // Only an earlier result in this same contiguous run is
+                    // removed; the last occurrence remains authoritative.
+                    to_remove.push(previous);
                 }
             }
-
-            // Within [start..end), find duplicates by tool_call_id.
-            // Keep the *last* occurrence of each id (the real result).
-            if end > start {
-                let mut seen = std::collections::HashMap::<String, usize>::new();
-                let mut to_remove = Vec::<usize>::new();
-
-                for (idx, item) in conversation.iter().enumerate().take(end).skip(start) {
-                    if let ConversationItem::ToolResult(tr) = item
-                        && let Some(prev) = seen.insert(tr.tool_call_id.clone(), idx)
-                    {
-                        // We've seen this id before — mark the *previous* for removal.
-                        to_remove.push(prev);
-                    }
-                }
-
-                if !to_remove.is_empty() {
-                    // Remove in reverse order so indices stay valid.
-                    to_remove.sort_unstable();
-                    to_remove.reverse();
-                    for idx in &to_remove {
-                        conversation.remove(*idx);
-                    }
-                    total_removed += to_remove.len();
-                    // Don't advance i — the window shifted, re-scan from same spot.
-                    continue;
-                }
-            }
-
             i = end;
-            continue;
+        } else {
+            i += 1;
         }
-        i += 1;
     }
-
-    total_removed
+    let removed = to_remove.len();
+    if removed == 0 {
+        return 0;
+    }
+    to_remove.sort_unstable();
+    let mut to_remove = to_remove.into_iter().peekable();
+    let mut index = 0;
+    conversation.retain(|_| {
+        let remove = to_remove.peek() == Some(&index);
+        if remove {
+            to_remove.next();
+        }
+        index += 1;
+        !remove
+    });
+    removed
 }
 
 // ============================================================================
@@ -13061,6 +13060,182 @@ mod tests {
             0,
             "durable reasoning must be omitted"
         );
+    }
+
+    fn old_repair_dangling_tool_calls(
+        conversation: &mut Vec<ConversationItem>,
+        reason: DanglingToolCallReason,
+    ) -> usize {
+        let mut repairs: Vec<(usize, Vec<ConversationItem>)> = Vec::new();
+        let mut i = 0;
+        while i < conversation.len() {
+            if let ConversationItem::Assistant(assistant) = &conversation[i]
+                && !assistant.tool_calls.is_empty()
+            {
+                let tool_calls: Vec<(Arc<str>, String)> = assistant
+                    .tool_calls
+                    .iter()
+                    .map(|call| (call.id.clone(), call.name.clone()))
+                    .collect();
+                let mut answered = std::collections::HashSet::new();
+                let mut j = i + 1;
+                while j < conversation.len() {
+                    if let ConversationItem::ToolResult(result) = &conversation[j] {
+                        answered.insert(result.tool_call_id.clone());
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let synthetic = tool_calls
+                    .iter()
+                    .filter(|(id, _)| !answered.contains(id.as_ref()))
+                    .map(|(id, name)| {
+                        ConversationItem::tool_result(
+                            id.as_ref(),
+                            synthetic_dangling_result_text(name, reason),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if !synthetic.is_empty() {
+                    repairs.push((j, synthetic));
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+        let total = repairs.iter().map(|(_, synthetic)| synthetic.len()).sum();
+        for (insert_at, synthetic) in repairs.into_iter().rev() {
+            conversation.splice(insert_at..insert_at, synthetic);
+        }
+        total
+    }
+
+    fn old_dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) -> usize {
+        let mut total_removed = 0;
+        let mut i = 0;
+        while i < conversation.len() {
+            if let ConversationItem::Assistant(assistant) = &conversation[i]
+                && !assistant.tool_calls.is_empty()
+            {
+                let start = i + 1;
+                let mut end = start;
+                while end < conversation.len()
+                    && matches!(&conversation[end], ConversationItem::ToolResult(_))
+                {
+                    end += 1;
+                }
+                if end > start {
+                    let mut seen = std::collections::HashMap::<String, usize>::new();
+                    let mut to_remove = Vec::<usize>::new();
+                    for (index, item) in conversation.iter().enumerate().take(end).skip(start) {
+                        if let ConversationItem::ToolResult(result) = item
+                            && let Some(previous) = seen.insert(result.tool_call_id.clone(), index)
+                        {
+                            to_remove.push(previous);
+                        }
+                    }
+                    if !to_remove.is_empty() {
+                        to_remove.sort_unstable();
+                        to_remove.reverse();
+                        for index in &to_remove {
+                            conversation.remove(*index);
+                        }
+                        total_removed += to_remove.len();
+                        continue;
+                    }
+                }
+                i = end;
+                continue;
+            }
+            i += 1;
+        }
+        total_removed
+    }
+
+    fn assert_old_new_items_equal(
+        original: &[ConversationItem],
+        old: impl FnOnce(&mut Vec<ConversationItem>) -> usize,
+        new: impl FnOnce(&mut Vec<ConversationItem>) -> usize,
+    ) -> usize {
+        let mut expected = original.to_vec();
+        let mut actual = original.to_vec();
+        let old_count = old(&mut expected);
+        let new_count = new(&mut actual);
+        assert_eq!(new_count, old_count);
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        new_count
+    }
+
+    fn model_skill_result(call_id: &str) -> ConversationItem {
+        ConversationItem::SkillLoad(SkillLoadItem {
+            input_id: "model-input".into(),
+            reference_index: 0,
+            call_id: call_id.into(),
+            skill_name: "review".into(),
+            source: SkillLoadSource::Model,
+            args: "{}".into(),
+            prepared_body: Arc::from("private skill body"),
+            prompt_index: None,
+        })
+    }
+
+    #[test]
+    fn one_pass_repairs_match_reverse_edit_oracles_at_result_boundaries() {
+        let dangling = vec![
+            ConversationItem::user("first"),
+            assistant_with_calls(&[("answered", "read_file"), ("missing-a", "grep")]),
+            ConversationItem::tool_result("answered", "kept result"),
+            model_skill_result("answered"),
+            ConversationItem::tool_result("outside-run", "not attached to the assistant"),
+            assistant_with_calls(&[("missing-b", "bash")]),
+            ConversationItem::user("boundary"),
+        ];
+        for reason in [
+            DanglingToolCallReason::UserCancelled,
+            DanglingToolCallReason::ProcessInterrupted,
+            DanglingToolCallReason::HarnessHalted { class: "test" },
+        ] {
+            let count = assert_old_new_items_equal(
+                &dangling,
+                |items| old_repair_dangling_tool_calls(items, reason),
+                |items| repair_dangling_tool_calls(items, reason),
+            );
+            assert_eq!(count, 2);
+        }
+
+        let duplicates = vec![
+            assistant_with_calls(&[("same", "read_file")]),
+            ConversationItem::tool_result("same", "old-1"),
+            ConversationItem::tool_result("same", "old-2"),
+            ConversationItem::tool_result("same", "last in first run"),
+            ConversationItem::assistant("message boundary"),
+            assistant_with_calls(&[("same", "read_file")]),
+            ConversationItem::tool_result("same", "old in second run"),
+            ConversationItem::tool_result("same", "last in second run"),
+        ];
+        assert_eq!(
+            assert_old_new_items_equal(
+                &duplicates,
+                old_dedup_duplicate_tool_results,
+                dedup_duplicate_tool_results,
+            ),
+            3
+        );
+        let mut deduplicated = duplicates;
+        assert_eq!(dedup_duplicate_tool_results(&mut deduplicated), 3);
+        let result_texts = deduplicated
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::ToolResult(result) => Some(result.content.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(result_texts, ["last in first run", "last in second run"]);
     }
 }
 

@@ -43,11 +43,10 @@ where
     Ok(serde_json::from_slice(&payload)?)
 }
 
-pub async fn write_json<W, T>(writer: &mut W, value: &T) -> Result<(), FrameError>
-where
-    W: AsyncWrite + Unpin,
-    T: Serialize + ?Sized,
-{
+/// Encode exactly the payload and limit used by the local IPC writer.
+pub(crate) fn encode_json_payload<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<(u32, Vec<u8>), FrameError> {
     let payload = serde_json::to_vec(value)?;
     let length = u32::try_from(payload.len()).map_err(|_| FrameError::TooLarge {
         actual: payload.len() as u64,
@@ -57,6 +56,16 @@ where
             actual: u64::from(length),
         });
     }
+
+    Ok((length, payload))
+}
+
+pub async fn write_json<W, T>(writer: &mut W, value: &T) -> Result<(), FrameError>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize + ?Sized,
+{
+    let (length, payload) = encode_json_payload(value)?;
 
     writer.write_all(&length.to_be_bytes()).await?;
     writer.write_all(&payload).await?;

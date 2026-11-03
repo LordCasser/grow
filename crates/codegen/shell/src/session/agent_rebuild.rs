@@ -76,6 +76,7 @@ pub(crate) struct AgentRebuildSpec {
     pub resources_persistence: Arc<tools::persistence::ResourcesPersistence>,
     pub resource_domain: Arc<tools::registry::types::SessionResourceDomain>,
     pub session_env: Arc<HashMap<String, String>>,
+    pub chat_state_handle: chat_state::ChatStateHandle,
     pub models_manager: crate::agent::models::ModelsManager,
     /// Live session memory dependency. `/memory on|off` updates this cell, so
     /// a later Agent rebuild cannot restore spawn-time memory state.
@@ -194,6 +195,7 @@ impl AgentRebuildSpec {
             resources_persistence,
             resource_domain,
             session_env,
+            chat_state_handle,
             models_manager,
             memory_runtime,
             context_recall_backend,
@@ -338,16 +340,16 @@ impl AgentRebuildSpec {
             }))
             .await;
         if let Some(event_tx) = subagent_event_tx.clone() {
-            use tools::implementations::grow_build::task::backend::{
-                ChannelBackend, SubagentBackendResource,
-            };
+            use tools::implementations::grow_build::task::backend::SubagentBackendResource;
             use tools::implementations::grow_build::task::types::{
                 MaxSubagentDepth, SessionIdResource, SubagentDepthCounter, SubagentEventSender,
             };
-            let backend = SubagentBackendResource(Arc::new(ChannelBackend::for_session(
-                event_tx.clone(),
-                session_id_str.clone(),
-            )));
+            let backend =
+                SubagentBackendResource(Arc::new(crate::agent::subagent::observation::backend(
+                    event_tx.clone(),
+                    session_id_str.clone(),
+                    Some(chat_state_handle.clone()),
+                )));
             agent.tool_bridge().update_resource(backend).await;
             agent
                 .tool_bridge()
@@ -411,6 +413,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         resources_persistence: Arc::new(tools::persistence::ResourcesPersistence::noop()),
         resource_domain: Arc::new(tools::registry::types::SessionResourceDomain::new()),
         session_env: Arc::new(HashMap::new()),
+        chat_state_handle: chat_state::ChatStateHandle::noop(),
         models_manager: crate::agent::models::ModelsManager::default(),
         memory_runtime: Arc::new(parking_lot::RwLock::new(None)),
         context_recall_backend: crate::session::actor::context_recall::context_recall_channel().0,

@@ -190,7 +190,7 @@ pub fn render_completion_output_delivery(
         Some(name) => {
             let _ = write!(
                 buffer,
-                "Use {name}(\"{subject_id}\") to see the full output."
+                "Use {name} to see the full output for ID {subject_id}."
             );
         }
         None => match disk_pointer_footer {
@@ -277,6 +277,14 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         ids.push(id);
     }
     match output {
+        ToolOutput::SubagentWait(wait) => {
+            ids.extend(
+                wait.subagents
+                    .iter()
+                    .filter(|row| row.status.is_terminal())
+                    .map(|row| row.subagent_id.as_str()),
+            );
+        }
         ToolOutput::TaskOutput(TaskOutputOutput::Result(result))
             if crate::implementations::grow_build::task_output::is_terminal_status(
                 &result.status,
@@ -311,7 +319,9 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
                 ids.push(id);
             }
         }
-        ToolOutput::Bash(_)
+        ToolOutput::SubagentList(_)
+        | ToolOutput::SubagentStatus(_)
+        | ToolOutput::Bash(_)
         | ToolOutput::BackgroundTaskStarted(_)
         | ToolOutput::GrepSearch(_)
         | ToolOutput::ReadFile(_)
@@ -406,7 +416,13 @@ mod tests {
             truncation_hint: String::new(),
             raw_output_bytes: 0,
         };
-        for status in ["completed", "failed", "cancelled", "timed_out"] {
+        for status in [
+            "completed",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "output_unavailable",
+        ] {
             let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(result("task", status)));
             assert_eq!(consumed_completion_ids(&output), vec!["task"]);
         }
@@ -418,7 +434,7 @@ mod tests {
     fn bash_pointer_and_inline_delivery_are_exclusive() {
         let task = task_snapshot("task-1", &"x".repeat(MAX_INLINE_COMPLETION_BYTES * 2));
         let pointer = format_bash_completion(&task, Some("task_output"), Some("read_file"));
-        assert!(pointer.contains("task_output(\"task-1\")"));
+        assert!(pointer.contains("Use task_output to see the full output for ID task-1."));
         assert!(!pointer.contains("response:"));
 
         let inline = format_bash_completion(&task, None, Some("read_file"));
@@ -440,6 +456,9 @@ mod tests {
             output: std::sync::Arc::from(large_output.as_str()),
             planning_summary: None,
         };
+        let pointer = format_subagent_completion(&completion, Some("await_child"));
+        assert!(pointer.contains("Use await_child to see the full output for ID subagent-1."));
+        assert!(!pointer.contains("response:"));
         let message = format_subagent_completion(&completion, None);
         assert!(message.contains(&large_output));
         assert!(!message.contains("[Output truncated"));

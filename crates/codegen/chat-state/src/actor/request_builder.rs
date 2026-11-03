@@ -20,9 +20,10 @@ impl ChatStateActor {
     ///
     /// # Repair invariant
     ///
-    /// This method durably repairs the actor's own Surface before cloning it,
-    /// including malformed tool identities and pairing. Never silently repair
-    /// only the request clone: the exact replacement must be in the Timeline.
+    /// This method reuses the healthy owned Surface copy, or waits for the
+    /// actor's exact malformed-identity/pairing replacement to commit before
+    /// using a copy of it. Never repair only the request: the replacement must
+    /// be acknowledged in the Timeline.
     pub(super) async fn build_conversation_request(
         &mut self,
         timeline_id: &str,
@@ -32,10 +33,12 @@ impl ChatStateActor {
         json_output: Option<JsonOutputFormat>,
         use_image_descriptions: bool,
     ) -> Result<ConversationRequest, crate::commands::TimelineWriteError> {
-        self.ensure_conversation_integrity_durably(
-            sampling_types::DanglingToolCallReason::UserCancelled,
-        )
-        .await?;
+        let mut items = self
+            .ensure_conversation_integrity_durably(
+                sampling_types::DanglingToolCallReason::UserCancelled,
+            )
+            .await?
+            .unwrap_or_else(|| self.state.timeline.surface().to_vec());
         if let Some(reminder) = memory_reminder
             .as_deref()
             .map(str::trim)
@@ -57,14 +60,14 @@ impl ChatStateActor {
                     .timeline
                     .prepare(crate::TimelineEventKind::Messages(crate::MessageEvent {
                         cause: MessageCause::MemoryContext,
-                        items: vec![item],
+                        items: vec![item.clone()],
                         surface: crate::SurfaceOp::Append,
                         response_admission: None,
                     }))?;
                 self.commit_timeline_event(event).await?;
+                items.push(item);
             }
         }
-        let mut items = self.state.timeline.surface().to_vec();
         items = sampling_types::project_conversation_for_goal_scope(items, active_goal.as_ref());
         if use_image_descriptions {
             sampling_types::conversation::select_image_descriptions(&mut items).map_err(
@@ -93,16 +96,7 @@ impl ChatStateActor {
         let inline_images = inline_image_count(&items);
         // A SurfaceId is stable across append. Check the exact source part as
         // well, so a replacement under an old coordinate cannot inherit it.
-        let valid_choices = selection
-            .replaced
-            .iter()
-            .all(|((source, part_index), identity)| {
-                surface_ids
-                    .iter()
-                    .position(|id| id == source)
-                    .and_then(|index| image_content(&items[index]).get(*part_index))
-                    .is_some_and(|part| image_part_matches(part, identity))
-            });
+        let valid_choices = image_budget_choices_are_valid(&items, &surface_ids, &selection);
         if !valid_choices {
             selection.replaced.clear();
         }
@@ -136,19 +130,12 @@ impl ChatStateActor {
                 {
                     selection
                         .replaced
-                        .insert((surface_ids[*index], *part_index), identity.clone());
+                        .insert((*index, *part_index), identity.clone());
                 }
             }
         }
         selection.surface_ids = surface_ids.clone();
-        let mut effective_evicted_parts = Vec::new();
-        for (index, source) in surface_ids.iter().enumerate() {
-            for part in 0..image_content(&items[index]).len() {
-                if selection.replaced.contains_key(&(*source, part)) {
-                    effective_evicted_parts.push((index, part));
-                }
-            }
-        }
+        let effective_evicted_parts: Vec<_> = selection.replaced.keys().copied().collect();
 
         // Per-turn image-budget record for local verification. Emitted on the
         // ChatState event channel (chat-state can't reach the shell's unified
@@ -232,6 +219,26 @@ impl ChatStateActor {
     }
 }
 
+fn image_budget_choices_are_valid(
+    items: &[ConversationItem],
+    surface_ids: &[crate::SurfaceId],
+    selection: &ImageBudgetSelection,
+) -> bool {
+    selection
+        .replaced
+        .iter()
+        .all(|((index, part_index), identity)| {
+            selection
+                .surface_ids
+                .get(*index)
+                .zip(surface_ids.get(*index))
+                .filter(|(saved, current)| saved == current)
+                .and_then(|_| items.get(*index))
+                .and_then(|item| image_content(item).get(*part_index))
+                .is_some_and(|part| image_part_matches(part, identity))
+        })
+}
+
 /// Replay the same identity-bound image choices for request assembly and
 /// context pressure; replacements do not inherit old image coordinates.
 pub(super) fn apply_image_budget_choices(
@@ -239,9 +246,15 @@ pub(super) fn apply_image_budget_choices(
     surface_ids: &[crate::SurfaceId],
     selection: &ImageBudgetSelection,
 ) {
-    for ((source, part_index), identity) in &selection.replaced {
-        if let Some(index) = surface_ids.iter().position(|id| id == source)
-            && let Some(part) = image_content_mut(&mut items[index]).get_mut(*part_index)
+    for ((index, part_index), identity) in &selection.replaced {
+        let source_matches = selection
+            .surface_ids
+            .get(*index)
+            .zip(surface_ids.get(*index))
+            .is_some_and(|(saved, current)| saved == current);
+        if source_matches
+            && let Some(item) = items.get_mut(*index)
+            && let Some(part) = image_content_mut(item).get_mut(*part_index)
             && image_part_matches(part, identity)
         {
             *part = ContentPart::Text {
@@ -264,16 +277,8 @@ fn prompt_cache_key(
     epoch_nonce: &str,
 ) -> String {
     let branch_anchor = timeline
-        .events()
-        .iter()
-        .rev()
-        .find_map(|event| {
-            event
-                .messages()
-                .filter(|messages| messages.cause == MessageCause::Rewind)
-                .map(|_| event.seq.get())
-        })
-        .map_or_else(|| "root".to_owned(), |seq| seq.to_string());
+        .last_rewind_seq()
+        .map_or_else(|| "root".to_owned(), |seq| seq.get().to_string());
     let backend = match sampling.api_backend {
         sampling_types::ApiBackend::ChatCompletions => "chat_completions",
         sampling_types::ApiBackend::Responses => "responses",
@@ -588,6 +593,306 @@ pub(crate) fn compact_images_to_byte_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Timeline, TimelineEventKind};
+
+    type LegacyChoice = (
+        crate::SurfaceId,
+        usize,
+        (std::sync::Weak<str>, Option<std::sync::Weak<str>>),
+    );
+
+    fn surface_ids(count: usize) -> Vec<crate::SurfaceId> {
+        (0..count)
+            .map(|index| crate::SurfaceId {
+                event: crate::EventSeq::new(index as u64 + 1),
+                item: 0,
+            })
+            .collect()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RewindPlacement {
+        None,
+        Old,
+        Latest,
+    }
+
+    fn cache_key_fixture_config() -> sampling_types::SamplingConfig {
+        sampling_types::SamplingConfig {
+            base_url: "https://example.invalid".into(),
+            model: "probe-model".into(),
+            output_limit: None,
+            temperature: None,
+            top_p: None,
+            api_backend: sampling_types::ApiBackend::ChatCompletions,
+            extra_headers: Default::default(),
+            query_params: Default::default(),
+            env_http_headers: Default::default(),
+            context_window: std::num::NonZeroU64::new(100_000).unwrap(),
+            reasoning_effort: None,
+            stream_tool_calls: None,
+        }
+    }
+
+    fn cache_key_fixture_timeline(event_count: usize, placement: RewindPlacement) -> Timeline {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(crate::TurnEvent::Started {
+                prompt_id: "cache-key-probe".into(),
+                id: crate::TurnId(1),
+                input_ids: Vec::new(),
+                identity: crate::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "probe-model".into(),
+                input_message_count: timeline.surface_len(),
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: crate::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        let mut prompt = ConversationItem::user("prompt");
+        prompt.set_prompt_index(0);
+        timeline.append(prompt, MessageCause::User).unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(crate::TurnEvent::Ended {
+                id: crate::TurnId(1),
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: crate::TurnTerminal {
+                    source: crate::TurnTerminalSource::Host,
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+
+        let target = |timeline: &mut Timeline| {
+            let rewound = timeline.rewind_surface(0).unwrap();
+            timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        };
+        let recovery = |timeline: &mut Timeline| {
+            timeline
+                .record(TimelineEventKind::Recovery(crate::RecoveryEvent {
+                    action: "cache-key-probe".into(),
+                    correlation_id: None,
+                    reason: "filler".into(),
+                    details: None,
+                }))
+                .unwrap();
+        };
+
+        let remaining = event_count - timeline.events().len();
+        match placement {
+            RewindPlacement::None => {
+                for _ in 0..remaining {
+                    recovery(&mut timeline);
+                }
+            }
+            RewindPlacement::Old => {
+                target(&mut timeline);
+                for _ in timeline.events().len()..event_count {
+                    recovery(&mut timeline);
+                }
+            }
+            RewindPlacement::Latest => {
+                for _ in 0..remaining.saturating_sub(1) {
+                    recovery(&mut timeline);
+                }
+                target(&mut timeline);
+            }
+        }
+        assert_eq!(timeline.events().len(), event_count);
+        timeline
+    }
+
+    fn reverse_scan_prompt_cache_key(
+        timeline_id: &str,
+        timeline: &Timeline,
+        sampling: &sampling_types::SamplingConfig,
+        epoch_nonce: &str,
+    ) -> String {
+        let branch_anchor = timeline
+            .events()
+            .iter()
+            .rev()
+            .find_map(|event| {
+                event
+                    .messages()
+                    .filter(|messages| messages.cause == MessageCause::Rewind)
+                    .map(|_| event.seq.get())
+            })
+            .map_or_else(|| "root".to_owned(), |seq| seq.to_string());
+        let backend = match sampling.api_backend {
+            sampling_types::ApiBackend::ChatCompletions => "chat_completions",
+            sampling_types::ApiBackend::Responses => "responses",
+            sampling_types::ApiBackend::Messages => "messages",
+        };
+        let mut hasher = blake3::Hasher::new();
+        for component in [
+            "grow-prompt-cache-v1",
+            timeline_id,
+            branch_anchor.as_str(),
+            backend,
+            sampling.base_url.as_str(),
+            sampling.model.as_str(),
+            epoch_nonce,
+        ] {
+            hasher.update(component.as_bytes());
+            hasher.update(&[0]);
+        }
+        let digest = hasher.finalize().to_hex();
+        format!("grow-{}", &digest.as_str()[..32])
+    }
+
+    fn image_items(parts_per_item: &[usize]) -> Vec<ConversationItem> {
+        parts_per_item
+            .iter()
+            .enumerate()
+            .map(|(item_index, part_count)| {
+                let mut item = ConversationItem::user(format!("item {item_index}"));
+                if *part_count > 0 {
+                    let ConversationItem::User(user) = &mut item else {
+                        unreachable!();
+                    };
+                    user.content.clear();
+                }
+                for part_index in 0..*part_count {
+                    item.add_image(format!("data:image/png;base64,{item_index}-{part_index}"));
+                }
+                item
+            })
+            .collect()
+    }
+
+    fn described_image_item(url: &str, description: &str) -> ConversationItem {
+        let mut item = ConversationItem::user("described image");
+        let ConversationItem::User(user) = &mut item else {
+            unreachable!();
+        };
+        user.content = vec![ContentPart::Image {
+            url: std::sync::Arc::<str>::from(url),
+            description: Some(std::sync::Arc::<str>::from(description)),
+        }];
+        item
+    }
+
+    fn selection_and_legacy_choices(
+        saved_items: &[ConversationItem],
+        saved_ids: &[crate::SurfaceId],
+        specs: &[(usize, usize, usize, usize)],
+    ) -> (ImageBudgetSelection, Vec<LegacyChoice>) {
+        let mut selection = ImageBudgetSelection {
+            route: sampling_types::ModelImageInputKey::new("test-model", "responses", "test"),
+            use_image_descriptions: false,
+            surface_ids: saved_ids.to_vec(),
+            replaced: Default::default(),
+        };
+        let mut legacy = Vec::with_capacity(specs.len());
+        for &(source_index, key_part, identity_index, identity_part) in specs {
+            let identity = image_part_identity(
+                image_content(&saved_items[identity_index])
+                    .get(identity_part)
+                    .expect("fixture identity points to a saved image part"),
+            )
+            .expect("fixture identity is an inline image");
+            selection
+                .replaced
+                .insert((source_index, key_part), identity.clone());
+            legacy.push((saved_ids[source_index], key_part, identity));
+        }
+        legacy.sort_by_key(|(source, part, _)| (*source, *part));
+        (selection, legacy)
+    }
+
+    fn legacy_choices_are_valid(
+        items: &[ConversationItem],
+        surface_ids: &[crate::SurfaceId],
+        choices: &[LegacyChoice],
+    ) -> bool {
+        choices.iter().all(|(source, part_index, identity)| {
+            surface_ids
+                .iter()
+                .position(|id| id == source)
+                .and_then(|index| image_content(&items[index]).get(*part_index))
+                .is_some_and(|part| image_part_matches(part, identity))
+        })
+    }
+
+    fn legacy_apply_choices(
+        items: &mut [ConversationItem],
+        surface_ids: &[crate::SurfaceId],
+        choices: &[LegacyChoice],
+    ) {
+        for (source, part_index, identity) in choices {
+            if let Some(index) = surface_ids.iter().position(|id| id == source)
+                && let Some(part) = image_content_mut(&mut items[index]).get_mut(*part_index)
+                && image_part_matches(part, identity)
+            {
+                *part = ContentPart::Text {
+                    text: IMAGE_COMPACT_PLACEHOLDER.into(),
+                };
+            }
+        }
+    }
+
+    fn serialized_items(items: &[ConversationItem]) -> Vec<serde_json::Value> {
+        items
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect()
+    }
+
+    fn assert_matches_legacy(
+        label: &str,
+        saved_items: &[ConversationItem],
+        saved_ids: &[crate::SurfaceId],
+        current_items: &[ConversationItem],
+        current_ids: &[crate::SurfaceId],
+        specs: &[(usize, usize, usize, usize)],
+    ) {
+        let (selection, legacy) = selection_and_legacy_choices(saved_items, saved_ids, specs);
+
+        // Request assembly clears every choice if any source is stale.
+        let expected_valid = legacy_choices_are_valid(current_items, current_ids, &legacy);
+        let actual_valid = image_budget_choices_are_valid(current_items, current_ids, &selection);
+        assert_eq!(actual_valid, expected_valid, "{label}: validation");
+        let mut expected_request = current_items.to_vec();
+        if expected_valid {
+            legacy_apply_choices(&mut expected_request, current_ids, &legacy);
+        }
+        let mut actual_request = current_items.to_vec();
+        let mut request_selection = selection.clone();
+        if !actual_valid {
+            request_selection.replaced.clear();
+        }
+        apply_image_budget_choices(&mut actual_request, current_ids, &request_selection);
+        assert_eq!(
+            serialized_items(&actual_request),
+            serialized_items(&expected_request),
+            "{label}: request all-or-clear application"
+        );
+
+        // Context-pressure refresh skips only entries that fail their own
+        // source/part/identity check.
+        let mut expected_pressure = current_items.to_vec();
+        legacy_apply_choices(&mut expected_pressure, current_ids, &legacy);
+        let mut actual_pressure = current_items.to_vec();
+        apply_image_budget_choices(&mut actual_pressure, current_ids, &selection);
+        assert_eq!(
+            serialized_items(&actual_pressure),
+            serialized_items(&expected_pressure),
+            "{label}: pressure per-choice application"
+        );
+    }
 
     #[test]
     fn mixed_image_carriers_share_count_eviction_and_byte_accounting() {
@@ -918,5 +1223,185 @@ mod tests {
         item.add_image(r#"https://example.com/a"b"#);
         let conv = vec![item];
         assert!(conversation_body_bytes(&conv) <= serde_json::to_vec(&conv).unwrap().len());
+    }
+
+    #[test]
+    fn image_budget_choice_validation_and_application_match_legacy_positions() {
+        let ids = surface_ids(4);
+        let empty_items = image_items(&[1, 1, 1]);
+        assert_matches_legacy(
+            "zero choices",
+            &empty_items,
+            &ids[..3],
+            &empty_items,
+            &ids[..3],
+            &[],
+        );
+
+        let one_source = image_items(&[1, 1, 1]);
+        assert_matches_legacy(
+            "one choice",
+            &one_source,
+            &ids[..3],
+            &one_source,
+            &ids[..3],
+            &[(1, 0, 1, 0)],
+        );
+
+        let multi_source = image_items(&[1, 1, 1]);
+        assert_matches_legacy(
+            "multiple sources",
+            &multi_source,
+            &ids[..3],
+            &multi_source,
+            &ids[..3],
+            &[(0, 0, 0, 0), (2, 0, 2, 0)],
+        );
+
+        let multipart = image_items(&[3, 1]);
+        assert_matches_legacy(
+            "multiple parts from one source",
+            &multipart,
+            &ids[..2],
+            &multipart,
+            &ids[..2],
+            &[(0, 0, 0, 0), (0, 2, 0, 2)],
+        );
+
+        // One invalid member clears the full request choice set, while the
+        // context-pressure helper still applies its independently valid row.
+        let out_of_bounds = image_items(&[1, 1]);
+        assert_matches_legacy(
+            "out-of-bounds part with valid sibling",
+            &out_of_bounds,
+            &ids[..2],
+            &out_of_bounds,
+            &ids[..2],
+            &[(0, 0, 0, 0), (1, 4, 1, 0)],
+        );
+
+        let non_image = vec![
+            image_items(&[1])[0].clone(),
+            ConversationItem::user("plain"),
+        ];
+        assert_matches_legacy(
+            "non-image source with valid sibling",
+            &non_image,
+            &ids[..2],
+            &non_image,
+            &ids[..2],
+            &[(0, 0, 0, 0), (1, 0, 0, 0)],
+        );
+
+        let stale_source = image_items(&[1, 1, 1]);
+        let mut changed_ids = ids[..3].to_vec();
+        changed_ids[1] = ids[3];
+        assert!(!changed_ids.starts_with(&ids[..3]));
+        assert_matches_legacy(
+            "changed SurfaceId at saved slot",
+            &stale_source,
+            &ids[..3],
+            &stale_source,
+            &changed_ids,
+            &[(0, 0, 0, 0), (1, 0, 1, 0)],
+        );
+
+        let saved_same_text = image_items(&[1, 1]);
+        let current_same_text = vec![image_items(&[1])[0].clone(), saved_same_text[1].clone()];
+        assert_matches_legacy(
+            "new Arc with identical URL text",
+            &saved_same_text,
+            &ids[..2],
+            &current_same_text,
+            &ids[..2],
+            &[(0, 0, 0, 0), (1, 0, 1, 0)],
+        );
+
+        let described_saved = vec![
+            described_image_item("data:image/png;base64,described", "same description"),
+            image_items(&[1])[0].clone(),
+        ];
+        let mut described_current = described_saved.clone();
+        let ConversationItem::User(described_user) = &mut described_current[0] else {
+            unreachable!();
+        };
+        let ContentPart::Image { description, .. } = &mut described_user.content[0] else {
+            unreachable!();
+        };
+        *description = Some(std::sync::Arc::<str>::from("same description"));
+        assert_matches_legacy(
+            "new description Arc with same text",
+            &described_saved,
+            &ids[..2],
+            &described_current,
+            &ids[..2],
+            &[(0, 0, 0, 0), (1, 0, 1, 0)],
+        );
+
+        let saved_prefix = image_items(&[1, 1]);
+        let mut appended_items = saved_prefix.clone();
+        appended_items.push(image_items(&[1])[0].clone());
+        assert!(ids[..3].starts_with(&ids[..2]));
+        assert_matches_legacy(
+            "valid prefix append",
+            &saved_prefix,
+            &ids[..2],
+            &appended_items,
+            &ids[..3],
+            &[(0, 0, 0, 0), (1, 0, 1, 0)],
+        );
+
+        let nonmonotonic_ids = vec![ids[2], ids[0], ids[1]];
+        let nonmonotonic_items = image_items(&[1, 1, 1]);
+        let (nonmonotonic_selection, legacy) = selection_and_legacy_choices(
+            &nonmonotonic_items,
+            &nonmonotonic_ids,
+            &[(0, 0, 0, 0), (1, 0, 1, 0), (2, 0, 2, 0)],
+        );
+        let mut expected_surface_order = Vec::new();
+        for (index, source) in nonmonotonic_ids.iter().enumerate() {
+            for part in 0..image_content(&nonmonotonic_items[index]).len() {
+                if legacy.iter().any(|(legacy_source, legacy_part, _)| {
+                    legacy_source == source && *legacy_part == part
+                }) {
+                    expected_surface_order.push((index, part));
+                }
+            }
+        }
+        let effective_evicted_parts: Vec<_> =
+            nonmonotonic_selection.replaced.keys().copied().collect();
+        assert_eq!(
+            effective_evicted_parts, expected_surface_order,
+            "index-key order preserves current Surface order even for nonmonotonic IDs"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_key_matches_reverse_scan_for_rewind_positions() {
+        let sampling = cache_key_fixture_config();
+        for event_count in [128, 2_048, 8_192] {
+            for placement in [
+                RewindPlacement::None,
+                RewindPlacement::Old,
+                RewindPlacement::Latest,
+            ] {
+                let timeline = cache_key_fixture_timeline(event_count, placement);
+                assert_eq!(
+                    timeline.last_rewind_seq(),
+                    timeline.events().iter().rev().find_map(|event| {
+                        event
+                            .messages()
+                            .filter(|messages| messages.cause == MessageCause::Rewind)
+                            .map(|_| event.seq)
+                    }),
+                    "indexed anchor matches the canonical event scan"
+                );
+                assert_eq!(
+                    prompt_cache_key("timeline", &timeline, &sampling, "epoch"),
+                    reverse_scan_prompt_cache_key("timeline", &timeline, &sampling, "epoch"),
+                    "key bytes remain identical at {event_count} events for {placement:?}"
+                );
+            }
+        }
     }
 }

@@ -71,6 +71,7 @@ async fn cold_target_reuses_terminal_or_interrupted_receipt_without_a_new_sideba
                                 &original.inquiry_id,
                                 "saved answer".into(),
                             ),
+                            None,
                         )
                         .await
                         .unwrap();

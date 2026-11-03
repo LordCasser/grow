@@ -205,6 +205,27 @@ fn apply_coordination_tool_gates(
         tool_config.tools.push((&AskSessionTool).into());
     }
 }
+
+/// Keep background Bash available only when the final toolset can observe and
+/// cancel command tasks. Without those lifecycle tools, normalize Bash to the
+/// foreground-only mode used by the registry requirements.
+fn gate_background_bash_without_lifecycle(
+    tool_config: &mut tools::registry::types::ToolServerConfig,
+) {
+    let has_kind = |kind| tool_config.tools.iter().any(|tool| tool.kind == Some(kind));
+    if has_kind(ToolKind::BackgroundTaskAction) && has_kind(ToolKind::KillTaskAction) {
+        return;
+    }
+
+    for tool in &mut tool_config.tools {
+        if !matches!(short_tool_name(&tool.id), "run_terminal_cmd") {
+            continue;
+        }
+        let params = tool.params.get_or_insert_with(Default::default);
+        params.insert("enabled_background".into(), false.into());
+        params.insert("auto_background_on_timeout".into(), false.into());
+    }
+}
 impl AgentBuilder {
     pub fn new(
         working_directory: PathBuf,
@@ -645,10 +666,8 @@ impl AgentBuilder {
         );
         apply_coordination_tool_gates(&mut tool_config, self.prompt_audience);
         let task_tool_id = format!("{}:{}", tools::types::tool::ToolNamespace::Grow, "task");
-        let mut task_stripped = false;
         if !self.subagents_enabled {
             tool_config.tools.retain(|tc| tc.id != task_tool_id);
-            task_stripped = true;
         } else {
             let filter = definition.subagent_filter();
             let mut live_subagents = None;
@@ -668,7 +687,6 @@ impl AgentBuilder {
             };
             if !has_subagents {
                 tool_config.tools.retain(|tc| tc.id != task_tool_id);
-                task_stripped = true;
             } else if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
                 if let Some(task_tc) = tool_config
                     .tools
@@ -704,30 +722,6 @@ impl AgentBuilder {
                         .expect("primary Agent requires full discovered child descriptors"),
                     &self.task_model_slugs,
                 ));
-            }
-        }
-        if task_stripped {
-            use tools::types::tool::ToolNamespace;
-            let has_satisfier = |ns: ToolNamespace, id: &str, needs_bg: bool| {
-                let fq = format!("{ns}:{id}");
-                tool_config.tools.iter().any(|tc| {
-                    tc.id == fq
-                        && (!needs_bg
-                            || tc
-                                .params
-                                .as_ref()
-                                .and_then(|p| p.get("enabled_background"))
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true))
-                })
-            };
-            if !has_satisfier(ToolNamespace::Grow, "run_terminal_cmd", true)
-                && !has_satisfier(ToolNamespace::GrowConcise, "run_terminal_cmd", true)
-            {
-                let lifecycle = ["get_task_output", "kill_task"];
-                tool_config
-                    .tools
-                    .retain(|tc| !lifecycle.contains(&short_tool_name(&tc.id)));
             }
         }
         if let tools::implementations::grow_build::web_fetch::WebFetchConfig::Enabled { ref params } =
@@ -804,23 +798,7 @@ impl AgentBuilder {
         tool_config
             .tools
             .retain(|tc| definition.session_tools_allowed(tc));
-        let task_deps = ["task", "get_task_output", "kill_task"];
-        let task_enabled = tool_config
-            .tools
-            .iter()
-            .any(|tool| short_tool_name(&tool.id) == "task");
-        if !task_enabled {
-            tool_config
-                .tools
-                .retain(|tc| !task_deps.contains(&short_tool_name(&tc.id)));
-            for tc in &mut tool_config.tools {
-                if short_tool_name(&tc.id) == "run_terminal_cmd" {
-                    let params = tc.params.get_or_insert_with(Default::default);
-                    params.insert("enabled_background".into(), false.into());
-                    params.insert("auto_background_on_timeout".into(), false.into());
-                }
-            }
-        }
+        gate_background_bash_without_lifecycle(&mut tool_config);
         let tool_bridge = ToolBridge::finalize_builder(
             tool_bridge_builder,
             tool_config,
@@ -941,7 +919,7 @@ const TASK_TOOL_NAMING: tool_types::TaskToolNaming<'static> = tool_types::TaskTo
     subagent_type_param: "${{ params.task.subagent_type }}",
     run_in_background_param: "${{ params.task.run_in_background }}",
     resume_from_param: "${{ params.task.resume_from }}",
-    background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
+    background_wait_tool: "${{ tools.by_kind.subagent_wait }}",
     isolation_param: "${{ params.task.isolation }}",
 };
 /// Concise task-tool description for child sessions. Delegation from a child
@@ -957,7 +935,7 @@ Prefer doing the work yourself unless delegation is clearly necessary.\n\
 \n\
 Usage: specify ${{ params.task.subagent_type }} from [{available_types}], \n\
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
-${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
+${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.subagent_wait }} to wait for completion and retrieve the result. This is set to true by default.";
 /// CLI [`tool_types::SubagentToolNaming`]: each kind maps to its
 /// `${{ tools.by_kind.* }}` template placeholder, so rendering a built-in's
 /// `tools_template` reproduces the placeholders for the CLI's `TemplateRenderer`
@@ -1359,9 +1337,10 @@ mod tests {
             "should reference the resume_from parameter"
         );
         assert!(
-            desc.contains("keeps its full transcript and tool state"),
+            desc.contains("keeps its full transcript; its runtime and tools are rebuilt"),
             "should describe resume semantics"
         );
+        assert!(desc.contains("without copying prior permits"));
         assert!(
             desc.contains("same subagent_type"),
             "should state the resumed agent must match subagent_type"
@@ -1642,6 +1621,33 @@ mod tests {
         def.session_tools_denylist = Some(vec!["read_file".into()]);
         assert!(!def.session_tools_allowed(&read));
     }
+    #[test]
+    fn background_gate_normalizes_authored_background_to_foreground_only() {
+        let bash = tools::registry::types::ToolConfig::for_tool::<
+            tools::implementations::grow_build::BashTool,
+        >()
+        .with_param("enabled_background", true)
+        .with_param("auto_background_on_timeout", true);
+        let mut config = tools::registry::types::ToolServerConfig { tools: vec![bash] };
+        gate_background_bash_without_lifecycle(&mut config);
+        assert_eq!(
+            config.tools[0]
+                .params
+                .as_ref()
+                .and_then(|params| params.get("enabled_background"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+            "foreground-only toolsets must disable background Bash"
+        );
+        assert_eq!(
+            config.tools[0]
+                .params
+                .as_ref()
+                .and_then(|params| params.get("auto_background_on_timeout"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
     const AGENT_TOOLS_BASE: &[&str] = &["read_file", "run_terminal_cmd"];
     #[tokio::test]
     async fn explicit_tool_list_without_agent_disables_task_tools() {
@@ -1663,7 +1669,14 @@ mod tests {
         let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
         tools.push("spawn_subagent".into());
         tools.extend(
-            ["get_command_or_subagent_output", "kill_command_or_subagent"].map(str::to_owned),
+            [
+                "get_command_output",
+                "list_subagent",
+                "get_subagent_status",
+                "wait_subagent",
+                "kill_command_or_subagent",
+            ]
+            .map(str::to_owned),
         );
         let mut definition = crate::config::AgentDefinition::default_grow_build();
         definition.tools = tools;
@@ -1691,15 +1704,20 @@ mod tests {
         assert!(description.contains("**explore**"));
         assert!(!description.contains("**plan**"));
         assert!(!description.contains("**general-purpose**"));
+        let role = agent.role_prompt().expect("finalized Agent role");
+        for name in ["list_subagent", "get_subagent_status", "wait_subagent"] {
+            assert!(role.contains(&format!("`{name}`")), "{role}");
+            assert!(!agent.system_prompt().contains(&format!("`{name}`")));
+        }
     }
     #[tokio::test]
-    async fn spawning_blocked_disables_all_background_bash_modes() {
+    async fn foreground_only_bash_disables_background_modes() {
         use tools::computer::local::LocalTerminalBackend;
         use tools::implementations::grow_build::bash::BashParams;
         use tools::notification::ToolNotificationHandle;
         use tools::types::resources::Params;
         let mut definition = crate::config::AgentDefinition::default_grow_build();
-        definition.tools = vec!["run_terminal_cmd".into()];
+        definition.tools = vec!["read_file".into(), "run_terminal_cmd".into()];
         let bash_params = serde_json::json!({
             "max_timeout_secs": 36_000.0,
             "auto_background_on_timeout": true,
@@ -1727,6 +1745,44 @@ mod tests {
         assert!(!applied.0.auto_background_on_timeout);
         assert_eq!(applied.0.max_timeout_secs, Some(36_000.0));
         assert!(!applied.0.allow_background_operator);
+    }
+    #[tokio::test]
+    async fn command_lifecycle_tools_keep_background_bash_without_task() {
+        use tools::computer::local::LocalTerminalBackend;
+        use tools::implementations::grow_build::bash::BashParams;
+        use tools::notification::ToolNotificationHandle;
+        use tools::types::resources::Params;
+        let mut definition = crate::config::AgentDefinition::default_grow_build();
+        definition.tools = [
+            "run_terminal_cmd",
+            "get_command_output",
+            "kill_command_or_subagent",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .with_subagents_enabled(false)
+        .build()
+        .await
+        .expect("command lifecycle tools should keep background Bash valid");
+        let names: Vec<_> = agent
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect();
+        assert!(!names.contains(&"spawn_subagent".to_owned()));
+        let applied = agent
+            .tool_bridge()
+            .read_resource::<Params<BashParams>>()
+            .await
+            .expect("bash params should be registered");
+        assert!(applied.0.enabled_background);
     }
     /// Canonical tool names produce a real restricted toolset.
     #[tokio::test]

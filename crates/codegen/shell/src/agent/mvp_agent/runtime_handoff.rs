@@ -3,6 +3,13 @@ use super::*;
 use chat_state::session_runtime::{RuntimeNodeRef, RuntimePhase, SessionRuntimeEvent};
 use tools::implementations::grow_build::task::types::{FrozenChildRef, SubagentEvent};
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExitScope {
+    client_id: u64,
+    session_ids: Vec<String>,
+}
+
 #[derive(Default, PartialEq, Eq)]
 struct CanonicalChildFacts {
     spawned: std::collections::BTreeMap<String, chat_state::SubagentSpawnEvent>,
@@ -347,6 +354,20 @@ impl MvpAgent {
 
     /// An executable child load belongs to the original tree. Resolve before
     /// taking lifecycle/catalog locks or claiming any child writer.
+    async fn resolve_original_workspace_alias(
+        &self,
+        mut arguments: acp::LoadSessionRequest,
+        info: &SessionInfo,
+    ) -> Result<acp::LoadSessionRequest, acp::Error> {
+        if !crate::session::storage::same_workspace_directory(std::path::Path::new(&info.cwd), &arguments.cwd).await
+            .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
+        {
+            return Err(acp::Error::invalid_params().data("Session workspace differs from its recorded directory."));
+        }
+        arguments.cwd = std::path::PathBuf::from(&info.cwd);
+        Ok(arguments)
+    }
+
     pub(super) async fn resolve_runtime_load_root(
         &self,
         mut arguments: acp::LoadSessionRequest,
@@ -357,22 +378,23 @@ impl MvpAgent {
         })
         .await
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-        let Some(summary) = summary.filter(|summary| summary.parent_session_id.is_some()) else {
-            return Ok(arguments);
-        };
+        let Some(summary) = summary else { return Ok(arguments); };
+        if summary.parent_session_id.is_none() {
+            return self.resolve_original_workspace_alias(arguments, &summary.info).await;
+        }
         let (child, observer) = crate::session::persistence::load_light(&summary.info, None, false)
             .await
             .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
         drop(observer);
         let runtime = child.timeline.runtime_lifecycle();
         if runtime.phase == RuntimePhase::Running {
-            return Ok(arguments);
+            return self.resolve_original_workspace_alias(arguments, &summary.info).await;
         }
         let root_id = runtime.root_session_id.clone().ok_or_else(|| {
             acp::Error::internal_error().data("suspended child has no lifecycle root")
         })?;
         if root_id == arguments.session_id.0.as_ref() {
-            return Ok(arguments);
+            return self.resolve_original_workspace_alias(arguments, &summary.info).await;
         }
         let root_lookup = root_id.clone();
         let root_summary = tokio::task::spawn_blocking(move || {
@@ -494,19 +516,26 @@ impl MvpAgent {
             .map_err(|_| "runtime snapshot exceeded suspension deadline".to_string())?
     }
 
-    pub(super) async fn suspend_for_exit(&self, exit_id: String) -> Result<(), String> {
+    pub(super) async fn suspend_for_exit(
+        &self,
+        exit_id: String,
+        scope: Option<ExitScope>,
+    ) -> Result<(), String> {
         if uuid::Uuid::parse_str(&exit_id).is_err() {
             return Err("invalid exit request identity".into());
         }
-        let existing = self.exit_suspend.borrow().clone();
+        let owner = scope.as_ref().map(|scope| scope.client_id);
+        let existing = self.exit_suspend.borrow().get(&owner).cloned();
         let response = if let Some((previous_id, previous)) = existing {
-            if previous_id == exit_id || previous.peek().is_none() {
+            if previous_id == exit_id
+                || futures::FutureExt::now_or_never(previous.clone()).is_none()
+            {
                 previous
             } else {
-                self.start_exit_suspension(exit_id)
+                self.start_exit_suspension(exit_id, scope)
             }
         } else {
-            self.start_exit_suspension(exit_id)
+            self.start_exit_suspension(exit_id, scope)
         };
         response
             .await
@@ -516,18 +545,26 @@ impl MvpAgent {
     fn start_exit_suspension(
         &self,
         exit_id: String,
+        scope: Option<ExitScope>,
     ) -> futures::future::Shared<oneshot::Receiver<Result<(), String>>> {
         use futures::FutureExt;
         let (respond, response) = oneshot::channel();
         let response = response.shared();
-        *self.exit_suspend.borrow_mut() = Some((exit_id, response.clone()));
+        let owner = scope.as_ref().map(|scope| scope.client_id);
+        self.exit_suspend
+            .borrow_mut()
+            .insert(owner, (exit_id, response.clone()));
         let agent = LocalRef::new(self);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         // Register this owner with MvpAgent, not with the transport waiter.
         // An RPC timeout cannot detach writer or sampler settlement ownership.
         self.spawn_owned_local(async move {
             let agent = agent.get();
-            let roots = agent.sessions.borrow().keys().cloned().collect::<Vec<_>>();
+            let roots = match scope {
+                Some(scope) => scope.session_ids.into_iter().map(acp::SessionId::new).collect(),
+                None => agent.sessions.borrow().keys().chain(agent.session_threads.borrow().keys())
+                    .cloned().collect::<std::collections::HashSet<_>>().into_iter().collect::<Vec<_>>(),
+            };
             for root in &roots {
                 if let Some(handle) = agent.control_session_handle(root) {
                     handle
@@ -544,7 +581,7 @@ impl MvpAgent {
                     break;
                 }
                 let started = std::time::Instant::now();
-                if let Err(error) = agent.suspend_session_tree(&root, deadline).await {
+                if let Err(error) = agent.suspend_exit_root(&root, deadline).await {
                     tracing::warn!(root_session_id = %root, elapsed_ms = started.elapsed().as_millis() as u64, %error, "session tree suspension remains unconfirmed");
                     failure = Some(error);
                     break;
@@ -656,6 +693,9 @@ impl MvpAgent {
                 spawn.capability_mode.as_deref(),
             )
             .map_err(|error| format!("original child {}: {error}", spawn.subagent_id))?;
+            if spawn.birth_mcp_servers.is_none() {
+                return Err(format!("original child {} is missing birth MCP membership", spawn.subagent_id));
+            }
             let recipe = SubagentExecutionRecipe::from_value(&spawn.execution_recipe)
                 .map_err(|error| error.to_string())?;
             if recipe.owner.workflow_run_id() != spawn.workflow_run_id.as_deref()
@@ -1000,6 +1040,44 @@ impl MvpAgent {
         let _owner = tokio::time::timeout_at(deadline, self.lock_session_lifecycle(&root))
             .await
             .map_err(|_| "session lifecycle ownership is not confirmed".to_string())?;
+        self.suspend_root_tree_locked(&root, deadline).await
+    }
+
+    async fn suspend_exit_root(
+        &self,
+        root: &acp::SessionId,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), String> {
+        let _owner = tokio::time::timeout_at(deadline, self.lock_session_lifecycle(root))
+            .await
+            .map_err(|_| "session lifecycle ownership is not confirmed".to_string())?;
+        if self.control_session_handle(root).is_some() {
+            self.suspend_root_tree_locked(root, deadline).await?;
+        } else {
+            // Explicit close may already have removed the actor while retaining
+            // its writer. The same lifecycle guard must prove drain completion.
+            let draining = self.session_threads.borrow().contains_key(root);
+            let exit = tokio::time::timeout_at(deadline, self.drain_old_session_thread(root))
+                .await
+                .map_err(|_| "closing session writer is still retiring".to_string())??;
+            if draining {
+                let state = if exit == SessionThreadExit::Panicked {
+                    SessionLiveState::DeadFailed
+                } else {
+                    SessionLiveState::Completed
+                };
+                self.remove_session_terminal(root, state);
+            }
+        }
+        Ok(())
+    }
+
+    async fn suspend_root_tree_locked(
+        &self,
+        root: &acp::SessionId,
+        deadline: tokio::time::Instant,
+    ) -> Result<(String, Vec<RuntimeNodeRef>), String> {
+        let root = root.clone();
         let root_handle = self
             .control_session_handle(&root)
             .ok_or_else(|| "the owning root session is not resident".to_string())?;
@@ -1396,6 +1474,7 @@ mod tests {
             resumed_from: None,
             parent_prompt_id: None,
             capability_mode: None,
+            birth_mcp_servers: Some(Default::default()),
             permission_mode: None,
             effective_permission_mode: None,
             workflow_run_id: None,

@@ -105,64 +105,20 @@ struct ListRunningSubagentsRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ListRunningSubagentsResponse {
-    subagents: Vec<SubagentLiveSnapshotDto>,
+    subagents: Vec<SubagentSnapshotDto>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SubagentLiveSnapshotDto {
-    subagent_id: String,
-    parent_session_id: String,
-    child_session_id: String,
-    subagent_type: String,
-    description: String,
-    started_at_epoch_ms: u64,
-    duration_ms: u64,
-    turn_count: u32,
-    tool_call_count: u32,
-    tokens_used: u64,
-    context_window_tokens: u64,
-    context_usage_pct: u8,
-    tools_used: Vec<String>,
-    error_count: u32,
-}
-
-impl From<SubagentInspection> for SubagentLiveSnapshotDto {
+impl From<SubagentInspection> for SubagentSnapshotDto {
     fn from(inspection: SubagentInspection) -> Self {
-        let SubagentInspection {
-            snapshot,
-            parent_session_id,
-            child_session_id,
-            ..
-        } = inspection;
-        let SubagentSnapshotStatus::Running {
-            turn_count,
-            tool_call_count,
-            tokens_used,
-            context_window_tokens,
-            context_usage_pct,
-            tools_used,
-            error_count,
-        } = snapshot.status
-        else {
-            unreachable!("list_running returns only active children");
-        };
-        Self {
-            subagent_id: snapshot.subagent_id,
-            parent_session_id,
-            child_session_id,
-            subagent_type: snapshot.subagent_type,
-            description: snapshot.description,
-            started_at_epoch_ms: snapshot.started_at_epoch_ms,
-            duration_ms: snapshot.duration_ms,
-            turn_count,
-            tool_call_count,
-            tokens_used,
-            context_window_tokens,
-            context_usage_pct,
-            tools_used,
-            error_count,
-        }
+        Self::from_snapshot(
+            inspection.snapshot,
+            inspection.parent_session_id,
+            inspection.child_session_id,
+            SubagentProvenance {
+                fork_parent_prompt_id: inspection.fork_parent_prompt_id,
+                resumed_from: inspection.resumed_from,
+            },
+        )
     }
 }
 
@@ -187,7 +143,7 @@ struct GetSubagentResponse {
 
 /// ACP DTO for a single subagent snapshot (any status).
 ///
-/// Extends the identity fields from `SubagentLiveSnapshotDto` with
+/// Carries subagent identity with
 /// status-dependent fields for completed/failed/cancelled states.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -273,6 +229,9 @@ impl SubagentSnapshotDto {
             resumed_from: provenance.resumed_from,
         };
         match snap.status {
+            SubagentSnapshotStatus::RunningProgressUnavailable => {
+                dto.status = "running_progress_unavailable".into();
+            }
             SubagentSnapshotStatus::Initializing => {
                 dto.status = "initializing".into();
             }
@@ -434,18 +393,13 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             let block = req.block.unwrap_or(false);
             let timeout_ms = req.timeout_ms.unwrap_or(30_000);
 
-            let result = async {
-                let snapshot = agent
-                    .query_subagent(&req.session_id, &req.subagent_id, block, Some(timeout_ms))
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let inspection = agent
-                    .inspect_subagent(&req.session_id, &req.subagent_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let (parent_session_id, child_session_id, provenance) = inspection
-                    .map(|inspection| {
-                        (
+            let result = agent
+                .observe_subagent(&req.session_id, &req.subagent_id, block, timeout_ms)
+                .await
+                .map(|inspection| GetSubagentResponse {
+                    snapshot: inspection.map(|inspection| {
+                        SubagentSnapshotDto::from_snapshot(
+                            inspection.snapshot,
                             inspection.parent_session_id,
                             inspection.child_session_id,
                             SubagentProvenance {
@@ -453,20 +407,9 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
                                 resumed_from: inspection.resumed_from,
                             },
                         )
-                    })
-                    .unwrap_or_default();
-                Ok::<_, String>(GetSubagentResponse {
-                    snapshot: snapshot.map(|snapshot| {
-                        SubagentSnapshotDto::from_snapshot(
-                            snapshot,
-                            parent_session_id,
-                            child_session_id,
-                            provenance,
-                        )
                     }),
                 })
-            }
-            .await;
+                .map_err(|error| error.to_string());
             respond(result)
         }
         "grow/subagent/list_running" => {
@@ -477,7 +420,7 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
                 .map(|subagents| ListRunningSubagentsResponse {
                     subagents: subagents
                         .into_iter()
-                        .map(SubagentLiveSnapshotDto::from)
+                        .map(SubagentSnapshotDto::from)
                         .collect(),
                 })
                 .map_err(|error| error.to_string());
@@ -512,22 +455,27 @@ mod tests {
 
     #[test]
     fn subagent_live_snapshot_dto_serializes_camel_case() {
-        let dto = SubagentLiveSnapshotDto {
-            subagent_id: "sub-1".into(),
-            parent_session_id: "parent-1".into(),
-            child_session_id: "child-1".into(),
-            subagent_type: "explore".into(),
-            description: "find files".into(),
-            started_at_epoch_ms: 1_700_000_000_000,
-            duration_ms: 5000,
-            turn_count: 2,
-            tool_call_count: 7,
-            tokens_used: 30_000,
-            context_window_tokens: 256_000,
-            context_usage_pct: 23,
-            tools_used: vec!["bash".into(), "grep".into()],
-            error_count: 1,
-        };
+        let dto = SubagentSnapshotDto::from_snapshot(
+            SubagentSnapshot {
+                subagent_id: "sub-1".into(),
+                subagent_type: "explore".into(),
+                description: "find files".into(),
+                started_at_epoch_ms: 1_700_000_000_000,
+                duration_ms: 5000,
+                status: SubagentSnapshotStatus::Running {
+                    turn_count: 2,
+                    tool_call_count: 7,
+                    tokens_used: 30_000,
+                    context_window_tokens: 256_000,
+                    context_usage_pct: 23,
+                    tools_used: vec!["bash".into(), "grep".into()],
+                    error_count: 1,
+                },
+            },
+            "parent-1".into(),
+            "child-1".into(),
+            SubagentProvenance::default(),
+        );
         let json = serde_json::to_value(&dto).expect("should serialize");
         assert_eq!(json["subagentId"], "sub-1");
         assert_eq!(json["parentSessionId"], "parent-1");
@@ -568,12 +516,51 @@ mod tests {
             fork_parent_prompt_id: None,
             resumed_from: None,
         };
-        let dto = SubagentLiveSnapshotDto::from(resolved);
+        let dto = SubagentSnapshotDto::from(resolved);
         assert_eq!(dto.subagent_id, "s");
         assert_eq!(dto.parent_session_id, "p");
         assert_eq!(dto.child_session_id, "c");
-        assert_eq!(dto.context_usage_pct, 50);
-        assert_eq!(dto.tools_used, vec!["read_file"]);
+        assert_eq!(dto.context_usage_pct, Some(50));
+        assert_eq!(dto.tools_used, Some(vec!["read_file".into()]));
+    }
+
+    #[test]
+    fn active_list_projects_missing_progress_and_finalization_without_panicking() {
+        for (status, expected) in [
+            (
+                SubagentSnapshotStatus::RunningProgressUnavailable,
+                "running_progress_unavailable",
+            ),
+            (
+                SubagentSnapshotStatus::FinalizationPending {
+                    outcome: "completed".into(),
+                    error: None,
+                },
+                "finalization_pending",
+            ),
+        ] {
+            let dto = SubagentSnapshotDto::from(SubagentInspection {
+                snapshot: SubagentSnapshot {
+                    subagent_id: "active".into(),
+                    subagent_type: "review".into(),
+                    description: "active responsibility".into(),
+                    status,
+                    started_at_epoch_ms: 1,
+                    duration_ms: 2,
+                },
+                parent_session_id: "parent".into(),
+                child_session_id: "child".into(),
+                fork_parent_prompt_id: None,
+                resumed_from: None,
+            });
+            let value = serde_json::to_value(dto).unwrap();
+            assert_eq!(value["status"], expected);
+            assert_eq!(value["subagentId"], "active");
+            assert!(
+                value.get("turnCount").is_none(),
+                "unknown counters must not become zero"
+            );
+        }
     }
 
     #[test]

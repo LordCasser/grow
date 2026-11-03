@@ -115,7 +115,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_mcp_pool: None,
         parent_skills: None,
         parent_skills_config: agent::prompt::skills::SkillsConfig::default(),
-        task_output_tool_name: Some("get_task_output".to_string()),
+        subagent_wait_tool_name: Some("wait_subagent".to_string()),
         goal_loop_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         parent_terminal_backend: None,
         parent_notification_handle: None,

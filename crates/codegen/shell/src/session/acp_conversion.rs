@@ -359,6 +359,27 @@ pub fn acp_tool_update(
                     .title(Some(title)),
             ))
         }
+        ToolOutput::SubagentWait(wait) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(raw_output_json(output, rewriter))
+                .title(Some(format!("Wait for subagents: {:?}", wait.reason))),
+        )),
+        ToolOutput::SubagentStatus(status) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(raw_output_json(output, rewriter))
+                .title(Some(format!("Subagent status: {}", status.subagents.len()))),
+        )),
+        ToolOutput::SubagentList(list) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(raw_output_json(output, rewriter))
+                .title(Some(format!("List subagents: {}", list.subagents.len()))),
+        )),
         ToolOutput::TaskOutput(task_output) => {
             let (status, title) = match task_output {
                 TaskOutputOutput::Result(r) => {

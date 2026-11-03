@@ -93,7 +93,7 @@ async fn spinner_reappears_after_wait_resumes() {
     let _wait_turn = expect_tool_turn(
         &content,
         "call_spinner_wait",
-        "get_command_or_subagent_output",
+        "get_command_output",
         wait_args,
     );
 

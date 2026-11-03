@@ -607,6 +607,7 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
                 resumed_from: Some("sa-prior".into()),
                 parent_prompt_id: Some("prompt-1".into()),
                 capability_mode: Some("all".into()),
+                birth_mcp_servers: Some(Default::default()),
                 permission_mode: Some("auto".into()),
                 effective_permission_mode: Some("auto".into()),
                 workflow_run_id: None,
@@ -704,6 +705,7 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
             resumed_from: Some("sa-earlier".into()),
             parent_prompt_id: Some("prompt-9".into()),
             capability_mode: Some("read-only".into()),
+            birth_mcp_servers: Some(Default::default()),
             permission_mode: Some("ask".into()),
             effective_permission_mode: Some("deny-writes".into()),
             workflow_run_id: Some("workflow-1".into()),
@@ -1664,4 +1666,26 @@ fn skills_inherited_count_matches_parent_skills_len() {
         0
     };
     assert_eq!(count, 2);
+}
+
+
+#[test]
+fn frozen_child_mcp_grant_intersects_the_same_sample_with_parent_ids() {
+    use crate::session::mcp_servers::{McpClient, McpState, SharedMcpPool};
+    use crate::session::subagent_capability::DelegableCapabilityCeiling;
+    let mut state = McpState::new(vec![]);
+    let original = Arc::new(McpClient::stub("github"));
+    state.owned_clients.insert("github".into(), original.clone());
+    let ceiling = DelegableCapabilityCeiling::new(tool_types::SubagentCapabilityMode::All, std::collections::HashMap::from([("github".into(), original.client_id())]));
+    let mut admitted = SharedMcpPool::from_state(&state);
+    admitted.freeze_current_clients();
+    let replacement = Arc::new(McpClient::stub("github"));
+    state.owned_clients.insert("github".into(), replacement.clone());
+    // Publish the replacement on the same parent's live authority.
+    let mut later = SharedMcpPool::from_state(&state);
+    super::freeze_child_mcp_grant(&mut admitted, Some(&ceiling));
+    assert_eq!(admitted.client_bindings().get("github"), Some(&original.client_id()));
+    assert!(admitted.eligibility().current_clients().is_empty(), "the admitted old grant cannot call its replacement");
+    super::freeze_child_mcp_grant(&mut later, Some(&ceiling));
+    assert!(later.client_bindings().is_empty(), "parent's old ID grant cannot admit the replacement ID");
 }

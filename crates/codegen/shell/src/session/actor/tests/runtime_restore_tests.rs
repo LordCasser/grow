@@ -22,6 +22,7 @@ fn accepted_final_response_resumes_original_turn_without_provider_or_prompt_repl
                     None,
                 )
                 .await;
+                support::record_test_model_route(&actor).await;
                 let (workflow_manager, workflow_tracker, _subagent_events) =
                     crate::session::workflow::manager::WorkflowManager::test_bundle_with_timeline(
                         actor.chat_state_handle.clone(),
@@ -196,6 +197,7 @@ fn suspended_workflow_rebinds_the_same_open_child_before_original_turn_releases(
                     None,
                 )
                 .await;
+                support::record_test_model_route(&actor).await;
                 let (workflow_manager, workflow_tracker, mut subagent_events) =
                     WorkflowManager::test_bundle_with_timeline(
                         actor.chat_state_handle.clone(),
@@ -257,6 +259,7 @@ complete(child.output);"#;
                             resumed_from: child_request.resume_from.clone(),
                             parent_prompt_id: child_request.parent_prompt_id.clone(),
                             capability_mode: None,
+                            birth_mcp_servers: Some(Default::default()),
                             permission_mode: None,
                             effective_permission_mode: None,
                             workflow_run_id: child_request.owner.workflow_run_id().map(str::to_owned),

@@ -8,7 +8,7 @@ use std::fmt::Write;
 use crate::types::output::{TodoWriteOutput, TodoWriteSuccess};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
-use tool_types::{DependencyKind, LocalPlan, PlanPriority, PlanStepStatus};
+use tool_types::{DependencyKind, LocalPlan, PlanLink, PlanPriority, PlanStepStatus};
 #[cfg(test)]
 use tool_types::{WaitCondition, WaitDependency};
 
@@ -293,7 +293,8 @@ impl crate::types::tool_metadata::ToolMetadata for TodoWriteTool {
     fn description_template(&self) -> &str {
         r#"Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.
 
-Use for any task with 3+ steps. Skip for trivial single-step work."#
+Use for any task with 3+ steps. Skip for trivial single-step work.
+Send {"todos":[]} to inspect current responsibilities. To review a delivery, copy its review binding into actions[].review.review and add decision, reason and verificationRefs. resultId is the exact supplied string (or null), not a task ID or a sequence number."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -493,6 +494,15 @@ pub fn todo_write_success(plan: &LocalPlan) -> TodoWriteSuccess {
     }
 }
 
+/// Copyable input fields shared by tool output, request context and rejection.
+pub fn review_binding(plan: &LocalPlan, link: &PlanLink) -> serde_json::Value {
+    serde_json::json!({
+        "linkId": link.id,
+        "resultId": link.result_id,
+        "reviewedSourceRevision": plan.revision,
+    })
+}
+
 fn append_plan_obligations_summary(summary: &mut String, plan: &LocalPlan) {
     const LIMIT: usize = 8;
     let incoming: Vec<_> = plan
@@ -547,6 +557,7 @@ fn append_plan_obligations_summary(summary: &mut String, plan: &LocalPlan) {
         }
     }
     if !required.is_empty() {
+        summary.push_str("\nCopy a review binding into actions[].review.review; add decision, reason and verificationRefs. A binding alone does not accept or release work.");
         write!(
             summary,
             "\n- Required delivery gates still open: {}",
@@ -556,8 +567,12 @@ fn append_plan_obligations_summary(summary: &mut String, plan: &LocalPlan) {
         for link in required.iter().take(LIMIT) {
             write!(
                 summary,
-                "\n  - {} (step {}, child {})",
-                link.id, link.parent_step_id, link.child_session_id
+                "\n  - {} (step {}, child {}, terminal {})\n    review binding: {}",
+                link.id,
+                link.parent_step_id,
+                link.child_session_id,
+                link.terminal,
+                review_binding(plan, link),
             )
             .ok();
         }
@@ -833,10 +848,55 @@ mod tests {
         );
         assert!(result.summary_for_prompt.contains("wait-1 (Any)"));
         assert!(
-            result
-                .summary_for_prompt
-                .contains("link-required (step step-required, child child-required)")
+            result.summary_for_prompt.contains(
+                "link-required (step step-required, child child-required, terminal false)"
+            )
         );
+    }
+
+    #[test]
+    fn delivery_summary_preserves_copyable_result_identity_and_current_revision() {
+        let mut plan = LocalPlan::new("session-1", "scope-1");
+        plan.revision = 6;
+        let result_id = r#"{"timeline_id":"child-1","first_seq":751,"last_seq":751}"#;
+        plan.links.push(PlanLink {
+            id: "child-1".into(),
+            parent_step_id: "step-1".into(),
+            child_session_id: "child-1".into(),
+            terminal: true,
+            required: true,
+            pending_source_revision: None,
+            review_required_revision: 5,
+            result_id: Some(result_id.into()),
+            dispatch_failure: None,
+        });
+        for delivered in [true, false] {
+            if !delivered {
+                plan.links[0].terminal = false;
+                plan.links[0].result_id = None;
+            }
+            let output = todo_write_success(&plan);
+            let binding = output
+                .summary_for_prompt
+                .lines()
+                .find_map(|line| line.strip_prefix("    review binding: "))
+                .expect("the model receives a copyable review binding");
+            let mut review: serde_json::Value = serde_json::from_str(binding).unwrap();
+            assert_eq!(
+                review["resultId"],
+                if delivered {
+                    serde_json::json!(result_id)
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            review["decision"] = serde_json::json!(if delivered { "accepted" } else { "released" });
+            review["reason"] = serde_json::json!("verified disposition");
+            let review: tool_types::DeliveryReview = serde_json::from_value(review).unwrap();
+            assert_eq!(review.link_id, "child-1");
+            assert_eq!(review.reviewed_source_revision, 6);
+            assert_eq!(review.result_id.as_deref(), delivered.then_some(result_id));
+        }
     }
 
     fn seed_state(items: &[(&str, &str, TodoStatus)]) -> TodoState {

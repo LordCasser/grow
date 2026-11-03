@@ -1,6 +1,104 @@
 # 开发流程
 
+Dashboard 是会话总览，选择只更新只读预览。单击选择、Enter 或双击打开真实
+AgentView；详情的编辑、翻页、Esc/Left 与普通入口相同，Ctrl+\ 显式返回总览。
+New session 输入与搜索 query 各自保留草稿/光标/附件/undo；输入聚焦时 Enter 只提交新会话，
+空稿不打开背后选中行。默认总览按稳定身份排序，可用 Ctrl+G 切到状态/目录分组。
+Ctrl+[ / Ctrl+] 始终按本地打开顺序切换，与总览搜索、分组及运行状态无关。
+见 [Dashboard 交互契约](../openspec/specs/client-surfaces/spec.md#requirement-dashboard-overview-does-not-own-implicit-reply-input)。
+
+Ctrl+X 是注册表中的统一 SessionCommands 前缀，普通详情、Dashboard 本地选中行和
+child 共用 AgentView 命令入口；重绑会同时改变所有入口。M/A/E/P/B 配置原目标，
+重复前缀或 X 只停止工作，空闲时保留会话；C 明确关闭并等待 runtime ACK，D 请求
+永久删除，独立弹窗 Y 确认、N/Esc 取消。删除确认固定原 ID/cwd/绑定 epoch，确认时
+复查换绑与忙闲；删除确认独立于前缀的两秒选择期限，也不依赖后续列表选择；晚到回执不抢走其他页面。
+排查导引失效须同时验证 AppView 按键入口、真实 selector dispatch 和 PTY 路径。
+见 [命令前缀契约](../openspec/specs/client-surfaces/spec.md#requirement-session-command-prefixes-survive-dashboard-attachment)。
+
+fork 初始请求失败时，空占位页回到来源；未提交指令和草稿留在可关闭的失败草稿页。
+来源先关闭仍按原 fork 请求处理失败；复制成功后的首次 replay 失败同样保留
+未提交内容，不删除可能已提交的副本。晚到的初始失败不抢焦点、不修改已绑定页。
+无 ID 草稿通过显式 Close 执行本地退休和草稿 checkpoint；它没有可永久删除的历史。见
+[失败 fork 落点](../openspec/specs/client-surfaces/spec.md#requirement-failed-fork-startup-has-a-recoverable-local-destination)。
+
+历史 replay 尚未完整时，AppView 仍接受已注册的 Dashboard/前后 session 导航及
+attached frame 的导航点击；输入和 session 控制保持冻结。后台加载失败只退休
+自身临时页，不能跳回旧返回点。见
+[加载导航契约](../openspec/specs/client-surfaces/spec.md#requirement-loading-history-preserves-session-navigation)。
+
+Dashboard Working 行的停止使用与绘制相同的活动投影，包含 foreground-idle 的
+普通 child、Goal 和可管理的 Workflow；Workflow 控制按 run id 经过 host command，
+不进入模型队列。停止请求发出后仍等待权威活动更新再允许删除。见
+[停止活动契约](../openspec/specs/client-surfaces/spec.md#requirement-dashboard-stop-covers-the-selected-session-activity)。
+
+确认关闭详情页时必须先完成 `grow/session/close`，再退休对应绑定的 AgentView；
+服务端保留历史，前端通过现有 draft owner 保存最新草稿。最后一页也能关闭；
+失败保留关闭状态供重试，迟到回执按 session id 与 binding epoch 丢弃。
+见 [session 关闭契约](../openspec/specs/client-surfaces/spec.md#requirement-session-close-retires-runtime-before-its-local-view)。
+
+进程退出统一请求 runtime 确认，Welcome/viewer 页面不能代表 runtime 无工作。
+leader 从 `session_driver` 覆盖退出 scope，各连接保留独立的在途挂起 owner；
+在途 new/load 注册完成前不能确认退出。close 与 exit 使用同一个 lifecycle guard
+核对 draining writer。退出期间阻止新输入派发，Retry/Force 在 replay 吞键前处理。
+见 [退出所有权契约](../openspec/specs/client-surfaces/spec.md#requirement-exit-suspension-uses-runtime-ownership-rather-than-visible-pages)。
+
+单条 session 删除根据 canonical Spawn/Seed 的双向引用保护结果来源；
+`summary.parent_session_id` 仅表示 fork 来源，不能单独阻止独立副本删除。
+父级已提交 Spawn、child 尚未写 Seed 的窗口也必须保留 child。
+见 [fork 删除资格](../openspec/specs/session-timeline/spec.md#requirement-fork-display-ancestry-does-not-establish-a-result-chain-dependency)。
+
+显式删除在 writer lease 下验证 canonical journal、因果、presentation 结构和
+receipt owner；不复用只读/TTL aggregate 预算，也不加载 sampling body、notice
+或 prompt artifact 来证明其可恢复。维护与恢复仍使用各自完整验证路径。
+见 [主动删除验证](../openspec/specs/session-timeline/spec.md#requirement-explicit-deletion-validates-canonical-references-without-observation-quotas)。
+
+独立 session 的显式永久删除会放弃其未消费的本地挂起/恢复责任；原 writer、
+canonical 引用和 quarantine 身份检查仍须通过。自动 TTL 保留同一份挂起历史，
+删除不伪造 ExecutionReleased，也不要求先恢复运行或级联删除关联 session。
+见 [显式放弃本地续跑](../openspec/specs/session-timeline/spec.md#requirement-explicit-permanent-deletion-can-abandon-independent-local-continuation)。
+
+删除由后端在同一 lifecycle transaction 内先 preflight、后 teardown/drain，再做
+writer/quarantine 的最终核对；客户端不能提前发 Cancel/Kill。错误回执明确原绑定
+是否失效，未知 transport outcome 也不能继续把旧 view 当成活 actor；先通过现有
+owner 保存草稿并退休旧树，再显式 resume。成功 Stay 同样退休 matching views，
+保留无关 picker/页面。见 [删除结果收敛](../openspec/specs/client-surfaces/spec.md#requirement-session-deletion-reconciles-runtime-and-local-views-on-every-outcome)。
+
+主会话 resume 后，child transcript 在首次打开或首条实时正文/展示事件到达时恢复；
+必须先重放任务 prompt 与已有执行记录，再接收自动续跑的 Thinking、正文、工具或终态，
+避免新内容阻止 deferred replay。纯历史与控制快照仍保留延迟加载。
+行为见 [child 历史衔接](../openspec/specs/client-surfaces/spec.md#requirement-deferred-child-history-precedes-resumed-live-presentation)。
+
+已完成且未选中的 child 会释放 transcript、工具跟踪和关联渲染缓存，保留原
+AgentView 的会话身份、控制代次、草稿和交互 owner；正在回放、重载或仍有查看器
+持有展示时继续保留。再次打开由原历史 projector 重建，错误显示为可重试提示，
+成功后清除提示；ACP/Grow 高水位在卸载时保留，迟到重复事件不触发历史重载。
+Normal 与 Minimal 在共用事件循环执行同一回收，不删除 canonical 历史。见
+[child 展示回收](../openspec/specs/client-surfaces/spec.md#requirement-completed-child-transcripts-release-reconstructible-resident-state)。
+child 的后台任务开始/完成事实也经过原 history stream 和共用展示 reducer 恢复，
+已存在的 stdout、状态和取消 owner 不被旧快照覆盖，EntryId 则重新指向恢复后的行。
+canonical 完成事实仍会将尚在 Running 的同一任务推进终态；已终态的状态和时间不回退。
+
+Subagent coordinator 的 64 项容量按 pending、active、finalization、retiring 中
+仍有责任的 child 身份去重核算，同一 child 的持久收尾和物理退休只占一项。
+线程或 persistence 尚未退休、观察失败时保留 owner 并反压，确认释放后才恢复名额；
+完成缓存淘汰也不允许重用尚有 finalization/retiring owner 的 ID。见
+[收尾责任与容量](../openspec/specs/session-timeline/spec.md#requirement-subagent-finalization-retains-one-accountable-owner)。
+
 项目使用 OpenSpec SDD。先把本次要改变的行为写清楚，再实现和验证，最后归档成为当前规范。纯文档修正也保留最小变更记录，但不增加无意义需求。
+
+交付物已完成但仍被 planning completion gate 阻塞时，先用
+`todo_write({"todos":[]})` 读取未闭合交付摘要，将其中的 review binding
+原样复制进 `actions[].review.review`，再补决定、理由和验证依据。
+`resultId` 是完整的结果引用字符串，不能用 task id 或单独 seq 代替；
+释放已有结果也必须引用同一结果，尚无结果则使用摘要中的 null。
+绑定不匹配的错误会返回指定 link 的准确字段，旧义务不会被新用户输入清除。
+见 [交付验收契约](../openspec/specs/task-planning/spec.md#requirement-delivery-review-bindings-are-actionable-in-model-projections)。
+
+运行中粘贴的长 followup/steer 在安全边界按原输入身份消费；共享插话格式化
+保留全文和尾部指导，容量继续由既有请求预算/压缩处理。排查时分别核对
+原 payload、Input::Consumed 的 item.content 和实际请求；permission_evidence
+或前端完整显示不能证明模型收到了全文。见
+[插话正文契约](../openspec/specs/input-admission/spec.md#requirement-steering-consumption-preserves-admitted-text)。
 
 终端工具活动的分组入口是 Pager 的 `scrollback/state/groups.rs` 与
 `verb_group.rs`：先从原始顺序确定活动范围，再统计整组摘要并投影可见行。
@@ -62,6 +160,11 @@ Goal 与 Workflow 的 Grow 展示快照同样使用该会话网关预览 credit�
 ## 环境
 
 Rust toolchain 由 `rust-toolchain.toml` 声明，构建仍使用 Cargo。OpenSpec 是开发工具，不进入 Cargo 运行时依赖。
+
+原生依赖的 configure/make 还会调用 PATH 中的标准命令。检查 `command -v diff`：
+不同文件的标准 diff 应返回 1。若 SDK toolchains 中的同名工具遮蔽系统命令，先在本次
+构建的 PATH 中把 Rust 代理、Homebrew 和 `/usr/bin:/bin` 排到 SDK 前面；否则 configure
+可能把尚不存在的生成头文件误判成 unchanged。不要为这一环境问题修改 allocator 源码。
 
 ```sh
 npm install -g @fission-ai/openspec@1.11.0
@@ -149,11 +252,21 @@ Minimal 新会话欢迎卡在 root Agent 绑定 session ID 后才提交，因为
 
 ## Rust 验证入口
 
+共享 TUI 文本换行通过 textwrap 的分词与 Fragment 算法排版，字素宽度和长词拆分由
+`pager-render::render::wrapping` 负责，与 Ratatui 绘制单位一致；字符串截断及搜索列映射
+复用字素边界。中文混排回归可运行 `cargo test --locked -p pager-render --lib grapheme_layout`。
+契约见 [共享字素布局](../openspec/specs/client-surfaces/spec.md#requirement-shared-tui-text-layout-preserves-grapheme-boundaries)。
+字体缺字回退的 ink bounds 可能超过终端单列；这与 Unicode 计宽错误分别排查，不能据此全局改成 CJK 双宽。
+
 Bash 持久命令沿 `ShellState::prepare_command` 的 fd 3/4 传输快照；dump 在声明任何局部变量前捕获 `export -p`，原始 allexport 标志保存在函数自身位置参数中，避免序列化变量遮蔽用户同名导出值。排查大函数与 `set -a` 时，核对临时值的 export 属性及恢复顺序，不能靠缩短函数或关闭用户选项消除失败。回归入口为 `computer::local::shell_state::tests`，行为见 [Bash 快照导出隔离](../openspec/specs/tool-authorization/spec.md#requirement-persistent-bash-snapshots-isolate-serializer-export-state)。
 
 快照 reader 必须等到完整结束标记行（含换行），并按固定后缀检查，避免大载荷反复全文扫描。背景进程仅持有 fd 4 不应阻止完整快照返回；五秒期限与不完整快照保留旧状态的语义不变。见 [快照结束边界](../openspec/specs/tool-authorization/spec.md#requirement-shell-dump-readers-require-complete-terminator-lines)。
 
 ConfigFileWatcher 在 debouncer 回调处理路径时重新核对配置源所有权，已进入接收队列的通知不撤回。leader 与进程内 runtime 通过相同的 session 登记消息处理监听；登记绑定现有 resident 资源，actor 重建期间保留，移除、空闲卸载或 agent 销毁时发送释放。失败或取消的重建若未发布新 resident，由现有生命周期 guard 释放留下的登记。runtime 消费释放后才回收无主路径；共享 cwd、仓库祖先、启动 cwd、全局和显式配置源保留各自所有权。路径在接纳时规范化，释放不重新解释已消失或改指向的别名；watcher 启动失败会关闭未消费的登记接收端。生产统一走 session 所有权入口，直接 watch/unwatch API 的调用方仍须自行协调全部引用。见 [配置事件所有权](../openspec/specs/configuration-rules/spec.md#requirement-configuration-watch-delivery-retains-a-live-source-owner) 及 [resident 监听契约](../openspec/specs/configuration-rules/spec.md#requirement-dynamic-project-watches-follow-resident-session-ownership)。
+
+macOS 的 `ConfigFileWatcher` 使用 `PollWatcher`：目录 watcher 只轮询目录项元数据以发现新增配置路径，内容 watcher 只对当前存在的 `config.toml` 启用内容比较。其他平台的配置 watcher、技能/项目发现 watcher 和全局 `fsnotify` 保持各自原有后端。目录 watcher 先撤销路径，再撤销对应文件 watcher；PollWatcher 在扫描回调期间持有目录表锁，因此撤销会等已开始的该目录回调结束，避免回调在释放后重装文件 watcher。实现见 [配置 watcher](../crates/codegen/shell/src/config/watcher.rs)。
+
+Workspace 的 PerDir 初始 watcher 布局按浅层优先保留预算内目录，并仍完整遍历以报告候选总数；有界选择只减少待排序和保留的路径数量，不减少文件系统遍历。当前实现记录在 [PerDir watch selection change](../openspec/changes/archive/2026-11-03-bound-initial-per-directory-watch-selection/design.md)。
 
 Agent 激活必须将新的 ToolBridge 绑定到原 SessionActor 的 Planning runtime，并从 Timeline 恢复局部计划投影。启动 hydration 与 Agent 替换共用该绑定；替换本身不提交新计划或重复发布 ACP plan。Plan 顶部阶段入口依赖 Behavior 投影，点击沿 canonical artifact 查询显示完整计划；TODO 徽标及面板独立保留。契约见 [Agent 替换与 TODO](../openspec/specs/task-planning/spec.md#requirement-agent-replacement-preserves-session-planning-access) 和 [Plan 顶部详情](../openspec/specs/client-surfaces/spec.md#requirement-active-plan-has-an-inspectable-top-status-entry)。
 
@@ -229,9 +342,23 @@ Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗
 
 ### Runtime 状态与恢复诊断
 
+模型使用 `list_subagent` 枚举当前来源的子任务，`get_subagent_status` 按 `subagent_ids` 批量查询结构化状态、计数与持续时间，`wait_subagent` 独立等待并交付结果。枚举默认 `scope: "active"`，包含初始化、运行、挂起、收尾与观察未知项；`scope: "all"` 还包含授权持久历史。枚举和详情不读取答案 artifact，不消费完成通知。command 只使用 `get_command_output(task_ids, timeout_ms)`；旧混合入口已移除，不再用空 ID 数组发现。见 [工具职责契约](../openspec/specs/session-timeline/spec.md#requirement-subagent-tools-separate-enumeration-detail-and-completion-waiting)。
+
+这些子任务工具与 ACP `grow/subagent/get` 共用来源授权及 canonical 结果核对。runtime 缺项或断链时，在原期限内只读验证 source、root/direct-parent 权限和精确 Spawn/Seed/Ended/Result；历史 completed/failed/cancelled 可读，无关、未知及隐藏 Workflow child 继续拒绝。有 Spawn 无可信终态仍是观察未知。查询权限不扩大消息权限：root 可观察嵌套 child，消息仍由直接父级发送；空清单和无直接路由都不证明目标已清理。Pager 生命周期核对不读取无关采样正文，不恢复执行、不补写记录。见 [跨入口查询](../openspec/specs/session-timeline/spec.md#requirement-authorized-subagent-observations-agree-across-public-entries)。
+
+枚举、详情和非阻塞命令输出的整次预算为五秒；`wait_subagent` 默认等待30秒，显式等待使用 `timeout_ms` 与工具 cap 的较小值。资源队列、批量各项和来源读取共用绝对期限。后端分段返回未终态后继续等待；挂起与收尾不算完成，返回结束原因与实测耗时。`observation_unavailable`、`observation_timed_out`、`observation_invalid_evidence` 和 `observation_interrupted` 均不证明执行终态；未知计数为 null。intervention 中断保留全部目标身份和完成通知责任，等待识别使用已验证的输入类型，支持工具名和参数重命名。见 [调用期限与终态](../openspec/specs/session-timeline/spec.md#requirement-public-task-observations-share-one-call-deadline) 和 [中断投影](../openspec/specs/session-timeline/spec.md#requirement-interrupted-waits-preserve-identities-without-inventing-execution-state)。
+
+恢复与普通 child 共用真实 signals 采样，UI 进度 ACK 不阻止本地采样；取消 token 覆盖等待 signals 回复，runner 退出时释放本次采样 owner，保留单项网关在途边界。见 [采样取消](../openspec/specs/session-timeline/spec.md#requirement-progress-sampling-cancellation-covers-signal-observation)。
+
 正常退出由默认全局 `Ctrl+D` 在一秒内连续按两次确认，再经 `grow/session/suspend_for_exit` 请求一个五秒共享期限的树挂起；首次按键不改变草稿、队列、当前回合或 Goal，UI 只有收到挂起确认才退出。挂起期间重复退出键合并到原操作，不强退。`Ctrl+C` 保留 composer 清理、局部控件操作和当前回合取消；取消中的重复 `Ctrl+C` 只重试取消，不关联退出。更新重启仍走同一树挂起屏障。排查恢复先核对 root 的 `TreeSuspended`、各节点 checkpoint、命令结算与物理 writer 退役，再检查 `RestorePrepared` / `Resumed` / `ExecutionReleased`。不要把 sampler 的部分输出、调用方超时或新的 actor 实例当作执行资格；中断或未知命令先核对其记录，不能自动重放。行为见 [session-timeline](../openspec/specs/session-timeline/spec.md) 与 [已确认退出契约](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension)，验证见 [挂起记录](../openspec/changes/archive/2026-10-19-suspend-session-tree/verification.md)。
 
 退出未确认后再次连续两次 `Ctrl+D` 走重试，Pending 期间重复退出仍合并；`r` 重试、`f` 显式强退与旧响应身份校验保留。normal/minimal、Welcome 和 Dashboard 共用可见的英文退出状态，长错误不能挤掉恢复动作行。见 [未确认退出交互](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension)。
+
+排查 resume 后 child 集中显示 cancelled 时，先对齐 child 的 Turn terminal、parent 的 `Ended` 和退出日志；parent 在冷加载时补记 `Ended`，不代表取消发生在加载时。核对退出进程的启动时间和构建来源：替换磁盘上的 grow 不会更新仍在运行的旧进程。没有匹配的未消费挂起 checkpoint、且 child 已有取消终态时，普通 root resume 保留该终态；需要继续时使用已有显式 Task resume，不删除事实或回退旧 checkpoint。
+
+`attached_as_viewer` 只表示当前 prompt 是否由本客户端发起；后台完成通知触发的宿主回合也会将它设为 true，不能用它决定是否拥有 runtime 或是否需要挂起。退出回归应从真实 ACP 通知触发该状态，再验证两次 Ctrl+D 仍等待 runtime ACK，不能只覆盖原用户回合或手工设置 viewer。机制与事故对应见 [notification turn 退出调查](../openspec/changes/archive/2026-11-03-cover-notification-turn-exit-suspension/analysis.md)。
+
+`suspend_nested_task_tree` 的普通/minimal `ctrl_d_notification_turn_suspends_and_resumes_background_child` PTY 场景覆盖后台 A 完成唤醒 parent、后台 B 仍运行时的退出与新进程 `--continue`。验证必须使用同次构建的 `PAGER_BINARY`，核对原 child/Turn/Spawn、挂起 operation、唯一结果链接及命令中断不重放；只通过逐回合 UI 回归不能代替这个恢复闭环。
 
 挂起接纳后立即关闭有限辅助活动准入，但 actor 邮箱继续处理既有 owner 的结算、checkpoint 查询和退役。迟到的 AI 补全/下一步建议返回无建议，其他有限命令沿既有关闭通道结束，不能在准入关闭后启动新模型请求或修改配置。五秒调用期限不取消尚未排空的物理 owner；未确认时保留原操作身份重试，不能伪造 checkpoint。该边界复用活动 tracker，见 [辅助活动挂起边界](../openspec/specs/model-sampling/spec.md#requirement-suspension-rejects-new-auxiliary-command-work-while-draining-admitted-owners)；交错回归见 [挂起准入验证](../openspec/changes/archive/2026-10-19-reject-auxiliary-commands-during-suspension/verification.md)。
 
@@ -501,7 +628,17 @@ resident 会话的 rewind 在 Timeline durable ACK 后、真实采样路由替�
 
 Runtime 收件消息在 Responses 中同样使用带来源的独立 user 上下文，明确不是直接用户指令或人工授权；Chat/Messages 保留完整收件工具对。Chat 路由确认 reasoning_content 拒绝后，统一为所有缺字段的 assistant 编码空字段，包括 portable 与 live Runtime 投影，不生成思考正文。模型技能结果间的匹配 SkillLoad 元数据在请求前稳定归整至结果批次之后，原始 Timeline 事实不变，真实 sibling 结果不得被取消说明覆盖；旧 IntegrityRepair 保留原精确重放证明。契约见 [Runtime 收件投影](../openspec/specs/model-sampling/spec.md#requirement-runtime-agent-messages-project-to-complete-tool-exchanges) 与 [结果证据保全](../openspec/specs/session-timeline/spec.md#requirement-integrity-repair-preserves-evidence)。回归入口为 sampling-types 的 `runtime_projection`、chat-state 的 `model_skill_integrity` 及 actor 的 `model_skill_batch_preserves_success_through_request_and_timeline_replay`。
 
-`/btw` 只读复用主会话的图片文字分支：等待已启动的主转换及其 ImageProjection durable ACK，再冻结 Sideband 上下文并优先选择已有描述（不依赖负能力缓存是否命中）。它不启动视觉辅助/OCR、不写图片能力、不因图片拒绝重建主会话；读锁在 HTTP 请求前释放。已知纯文本路由的未转换图片以未就绪失败返回。问题及回答仅归属独立 Sideband。见 [Side question 图片分支复用](../openspec/specs/model-sampling/spec.md#requirement-side-questions-reuse-durable-image-fallback)。
+`/btw`、父子/peer 协调问答、recap 与 Memory Flush 共用冻结图片上下文：先等待已启动的主投影及 durable ACK，并在副本优先选择已有描述。已知拒图路由只对最终选中图片复用中立描述/OCR；未知路由首次乐观发送，明确拒图后记录实际 transport 能力，再用同一冻结来源恢复并重发一次。普通 400 不触发恢复；没有描述或超出既有输入预算则明确失败，不能丢图后生成。辅助恢复不修改主 Surface、不重抓较新的上下文；主写入 fail-stop 仍阻止后续 provider 准入。回归入口为 `image_input_recovery_tests::{auxiliary,frozen_recovery}`，见 [Side question 图片恢复](../openspec/specs/model-sampling/spec.md#requirement-side-questions-reuse-durable-image-fallback)、[协调询问](../openspec/specs/local-coordination/spec.md#requirement-inquiry-snapshots-reuse-durable-image-descriptions)、[Recap](../openspec/specs/model-sampling/spec.md#requirement-recap-reuses-acknowledged-image-descriptions) 与 [Flush 冻结证据](../openspec/specs/memory-search/spec.md#requirement-memory-flush-retains-bounded-completed-tool-evidence)。
+
+flush_model 显式配置通过现有辅助 resolver 解析完整 endpoint/backend/model/credentials，图片 key 与该实际路由一致；别名不可用则失败，不回退主 provider。`/flush` 和 ACP 手动 flush 在前台忙时均可独立运行，沿原活动 owner、原子锁和完成通知反馈；ACP 失败或锁冲突返回错误，确认无需写入仍可成功但 path 为空。btw、flush 和手动 compact 等待已有 session/load 屏障，再决定会话是否存在。见 [完整 flush 路由](../openspec/specs/memory-search/spec.md#requirement-explicit-memory-flush-models-resolve-their-complete-transport)、[手动 flush 准入](../openspec/specs/memory-search/spec.md#requirement-manual-memory-flush-admission-is-independent-of-foreground-turns) 和 [重载屏障](../openspec/specs/model-sampling/spec.md#requirement-context-consuming-auxiliary-extensions-wait-for-session-load)。
+
+`/memory off` 后，flush 执行入口、pre-compaction 快照等待后的准入和实际 provider 前都会检查当前 memory 状态；已发出的响应也不会写入已移除的记忆存储。手动、后台和错误恢复三个压缩入口共用该门禁。idle flush 要求正数 timeout、前台/FIFO/会话活动空闲，并从真实活动结束开始计时；只读状态查询不延后 idle。只有写入或确认无需写入才推进成功历史水位，失败/锁冲突留到下一空闲周期重试；rewind/compaction 的 ConversationReset 重置分支基线。回归入口为 `image_input_recovery_tests::disabled_memory` 和 `idle_memory_flush_tests`，见 [Runtime memory 门禁](../openspec/specs/memory-search/spec.md#requirement-runtime-disabled-memory-does-not-admit-flush-work) 和 [空闲 flush](../openspec/specs/memory-search/spec.md#requirement-idle-memory-flush-waits-for-inactivity-and-checkpoints-only-success)。
+
+测试夹具对 Sideband attempt 使用独立 ACK gate；放行时转发真实存储适配器的 ACK 结果，避免测试把未持久化的 attempt 伪装成成功。
+
+自动 recap 的主 API idle clock 在 cold load 时由已验证 Timeline 的最近主 Request 事实恢复；后续 Sideband、UI 或 load 活动不推迟该时钟。Fresh、新 seeded task 或没有主请求证据的历史保持未初始化状态。保留三分钟、三轮、新 turn 与 away identity 门禁，避免重载后因 0 时间戳永久不触发。见 [恢复自动 recap 空闲证据](../openspec/specs/model-sampling/spec.md#requirement-restored-automatic-recap-uses-durable-primary-api-activity)。
+
+Sideband 的历史来源校验认可已接受 ImageProjection 分配的全部坐标：shadow、tool-call shadow 及每个 carrier。它与 live/replay 的 slot 分配范围一致，恢复时不能把合法工具图片投影坐标判作越界；见 [图片投影来源归属](../openspec/specs/session-timeline/spec.md#requirement-image-projection-ownership-covers-allocated-surface-coordinates)。
 
 全屏 TUI 的 `/btw` 回答使用覆盖式大弹窗；Esc 收起后双击历史行可在同尺寸查看。Minimal 模式继续使用输入框上方的原生终端面板。界面契约见 [侧问结果弹窗](../openspec/specs/client-surfaces/spec.md#requirement-fullscreen-side-question-answers-use-a-large-popup)。
 
@@ -526,6 +663,12 @@ Resume 的首历史归因沿用 opt-in instrumentation：`session.replay.first_s
 
 ACP 的配置和技能 watcher 由 blocking runtime 注册，gateway 先开始处理协议。配置注册就绪即处理排队的路径订阅、启动 reload consumer，并协调启动间隙已建立 session 的当前 catalog/policy，不等待技能注册。取消或 gateway 结束可停止 LocalSet 等待，尚未完成的系统注册由 runtime 保有最终结果并释放；操作系统调用本身不可取消，runtime shutdown 仍可能等待它返回。见 [注册边界](../openspec/specs/client-surfaces/spec.md#requirement-ready-acp-service-is-not-blocked-by-watcher-registration)。
 
+动态 `ConfigFileWatcher` 更新也由同一个有序 blocking owner 持有 watcher 与更新队列；注册、释放和最终 Drop 都在该 worker 执行，ACP LocalSet 只等待异步结果。取消 LocalSet 的等待不会中断正在进行的 OS watch/unwatch 调用；调用返回后由 owner 收尾。独立 global watch 保持到 runtime 取消。这样 watcher 阻塞不会占住 ACP command executor，也不会把 native owner 移回 LocalSet。见 [动态 watcher owner](../openspec/changes/archive/2026-11-04-offload-dynamic-config-watch-updates/design.md)。
+
+SessionActor 的项目发现 watcher 也必须保持 native 所有权在 blocking worker：初始注册、事件后的目录刷新与 watcher 最终 Drop 均在该 worker；异步 LocalSet 只消费刷新后的 discovery 事件并 reload skills/workflows。Actor 初始化不等待 watcher，因此 session command ACK 可继续推进。实现与验证随 [watcher 注册边界 change](../openspec/changes/archive/2026-11-04-offload-dynamic-config-watch-updates/design.md) 记录。
+
+Unix terminal cleanup 以未 reap 的 leader 身份保护 PGID：显式取消、超时和正常 leader 退出都在释放 owner 前完成同组后代的收尾，再由 Tokio reap leader；explicit cancel 在 SIGTERM grace 内不提前 reap。terminal 路径在 reaping 前撤销自己的 `ProcessScope` 注册，因此后续 Weak upgrade 看不到该组；`kill_all` 若已在撤销前 upgrade 成功，仍可能与 owner reaping 并发，未声称该竞态已有同步或故障注入证明。该边界涵盖仍留在原进程组的后代，不涵盖主动 `setsid` 脱离者；Windows 继续由 Job Object 管理进程树。见 [命令组收尾 change](../openspec/changes/archive/2026-11-04-finish-command-groups-before-leader-reap/design.md)。
+
 SideQuestion 的任务同时监听响应接收端关闭；关闭后释放原请求 future，由原 Sideband guard 结算用量和终态，不另开取消账本。Plan live handoff 在 pending 已空时核对精确 source/version 的持久消费 Turn；仅当前 Turn 的重复核对幂等成功，其他 Turn、Dismissed 或不可用 owner 不得放行。见 [SideQuestion 生命周期](../openspec/specs/model-sampling/spec.md#requirement-side-question-work-follows-its-response-receiver) 与 [Plan 交接](../openspec/specs/behavior-goal/spec.md)。
 
 子会话恢复中的 `CompletedOutputUnavailable` 只是一项观察。已有合法 canonical Result 的 outcome 仍保留；没有合法 Result 时不合成成功，也不闭合 parent spawn。后代展示的 metadata v2 携带真实 typed parent Spawn 及匹配 terminal，复用标准 Seed/Result 交叉校验；展示身份不授予执行权。无 eventId 的 Started 历史复用相同 child 的任务行。见 [子会话恢复](../openspec/specs/session-timeline/spec.md) 与 [展示恢复](../openspec/specs/client-surfaces/spec.md)。
@@ -542,3 +685,19 @@ Task 的拒绝区分未知完整 ID、全局 toggle 禁用和父 Agent 委派限
 取消标记统一显示 `Turn cancelled`：现有 Pager 展示事件不携带操作者来源，`cancelled` stop reason 也可能来自内部准入关闭，不能据此显示“by user”。压缩完成通知只更新压缩反馈与计数；排查压缩后停止应核对 Timeline 的 Turn terminal、取消类别及 details，而不是从相邻两行推断因果。契约见 [取消归因](../openspec/specs/client-surfaces/spec.md#requirement-cancellation-markers-do-not-infer-the-actor)。
 
 压缩完成后的 provider 准入分别处理前台控制与存储失败：前台仍获准时，storage gate 的失败沿原错误路径返回，保留具体原因，禁止下一请求；已确认的 replacement 和 Completed 不回滚。后台 generation 在发布者取走 worker slot 后仍通过原 token 接收取消；replacement 提交前取消丢弃摘要，提交后的取消保留完成事实，两者均不单独取消普通前台。回归用例 `compaction_admission_tests` 控制 Summary / Completed 的持久确认顺序，不依赖 sleep。见 [压缩后存储准入](../openspec/specs/model-sampling/spec.md#requirement-provider-admission-preserves-storage-failure-after-compaction) 与 [取消 owner](../openspec/specs/context-compaction/spec.md#requirement-cancellation-preserves-and-drains-the-compaction-generation-owner)。
+
+Session列表的typed时间排序与延后行构建局部测量见 [S3验证](../openspec/changes/archive/2026-11-03-defer-session-listing-materialization/verification.md)；该pure阶段不含磁盘、DB、ACP或Pager，完整IO基准仍使用既有 `session_list` bench。
+
+图片预算缓存复用已保存Surface前缀中的item/part offset，校验SourceId与Weak身份；定位内核验证和测量见[C1记录](../openspec/changes/archive/2026-11-03-reuse-image-budget-choice-offsets/verification.md)，不代表整request/provider提速。正式图片预算契约仍在[model-sampling](../openspec/specs/model-sampling/spec.md#requirement-image-budget-choices-follow-their-request-projection-lifetime)。
+
+Prompt cache key 的 rewind 锚点由 Timeline accepted-event fold 派生；prepare、拒绝和未确认写入不发布锚点，cold replay重建，key组成不变。[算法验证](../openspec/changes/archive/2026-11-03-cache-last-rewind-anchor/verification.md)。
+
+单文件 hunk 查询在本次调用中共用 baseline/current 行表，单 hunk API和patch字节不变；不跨查询缓存。[差分与测量](../openspec/changes/archive/2026-11-03-reuse-file-line-tables-for-hunk-patches/verification.md)。
+
+搜索worker仅保留最近一次成功的Timeline读投影，每次新pinned reader完整hash旧committed prefix后才复用，torn尾不进入checkpoint。新增记录仍用统一scanner和replay验证，错误丢弃candidate，SQLite成功才存回；bootstrap保持full。它用最后一个session的Domain Timeline/索引驻留换取重复decode收益，不是字节硬限额或全session缓存。[差分、成本和heap测量](../openspec/changes/archive/2026-11-03-reuse-validated-search-ledger-prefix/verification.md)。
+
+损坏历史修复先按原坐标判定，隔离范围一次retain、缺结果一次有序合并、重复结果保持run内last-wins后一次retain；健康空计划不重建。原证据/文案/repair proof不变，稀疏单次编辑可能较慢。[差分与成本](../openspec/changes/archive/2026-11-03-rebuild-history-repair-edits-once/verification.md)。
+
+健康请求复用完整性检查已有的owned Surface副本；实际修复和新MemoryContext仍等各自durable ACK后才能返回请求，push-user保持原复制成本。副本不跨请求缓存。[真实ACK与差分验证](../openspec/changes/archive/2026-11-03-reuse-healthy-request-integrity-snapshot/verification.md)。
+
+持久结果 reader 的 unwind 通过既有 coordinator observation owner 结算为 Unavailable，释放读取许可后可继续服务。该隔离仅适用于启用 unwind 的构建（如库测试）；release/release-dist 保留 `panic=abort`，不宣称能在进程 abort 后继续运行。

@@ -648,10 +648,10 @@ A viewer reconnecting to a resident session SHALL NOT run interrupted-scope reco
 - **THEN** the viewer receives replay/live updates without an interrupted Recovery terminal for that turn, and the original actor records its matching real terminal before later prompts run.
 
 ### Requirement: Cold model route changes continue durable selection
-Fresh sessions SHALL durably record a secret-free baseline for the selected catalog model, reasoning effort, provider-facing model, and backend/endpoint transport identity before admitting prompts. Cold load SHALL compare the last durable model route with the currently resolved catalog route and, when they differ, durably append an exact from/to transition before publishing the actor or admitting sampling. A failed append SHALL prevent publication. A historical Timeline without a route observation SHALL receive an explicit current-route baseline without inventing an earlier route. Resident reconnect SHALL retain its live route. Stored discontinuous transitions SHALL still be rejected.
+Fresh sessions SHALL durably record a secret-free baseline for the selected catalog model, reasoning effort, provider-facing model, and backend/endpoint transport identity before admitting prompts. Ordinary cold load without a suspended execution continuation SHALL compare the last durable model route with the currently resolved catalog route and, when they differ, durably append an exact from/to transition before publishing the actor or admitting sampling. Suspended execution restore SHALL instead retain the checkpoint frontier's actual model destination and effort; it MAY rebind a catalog alias only to that exact destination. A failed append SHALL prevent publication. A historical Timeline without a route observation SHALL receive an explicit current-route baseline only for ordinary cold load, without inventing an earlier route. Resident reconnect SHALL retain its live route. Stored discontinuous transitions SHALL still be rejected.
 
 #### Scenario: Catalog route changes across restart
-- **WHEN** the same catalog model ID resolves to a different backend, endpoint, query route, or wire model after a cold restart
+- **WHEN** an ordinary cold load without suspended execution resolves the same catalog model ID to a different backend, endpoint, query route, or wire model
 - **THEN** the replacement writer records a transition from the last durable route to the selected current route before the resumed actor can sample, and a later reload validates the continuous chain.
 
 #### Scenario: Catalog route is unchanged
@@ -661,6 +661,10 @@ Fresh sessions SHALL durably record a secret-free baseline for the selected cata
 #### Scenario: Stored history is already discontinuous
 - **WHEN** two existing model observations disagree on the exact preceding route
 - **THEN** load rejects the invalid history rather than bridging or rewriting it.
+
+#### Scenario: The original key is repointed while an exact alias remains
+- **WHEN** a suspended checkpoint's catalog key now names another destination but a current selectable alias retains its exact original transport and effort
+- **THEN** restore selects the exact alias, records that alias rebind, and never executes the repointed destination.
 
 ### Requirement: Candidate preview uses a durable payload-free anchor
 
@@ -800,7 +804,7 @@ The subagent spawn Grow projection SHALL carry the effective reasoning effort se
 
 ### Requirement: Subagent finalization retains one accountable owner
 
-子任务执行返回、失败、panic 或取消后，系统 SHALL 保留该 child 的收尾责任，直到所需持久事实和交付责任已确认，或明确展示仍待修复。执行 outcome、提交状态和交付状态 SHALL 分离。未确认收尾不得被普通完成缓存淘汰、作为已完成依赖使用或用于绕过源实例仍存活时的 resume 拒绝。并发推进和暂存资源 SHALL 有界。
+子任务执行返回、失败、panic 或取消后，系统 SHALL 保留该 child 的收尾责任，直到所需持久事实和交付责任已确认，或明确展示仍待修复。执行 outcome、提交状态和交付状态 SHALL 分离。未确认收尾不得被普通完成缓存淘汰、作为已完成依赖使用或用于绕过源实例仍存活时的 resume 拒绝。并发推进和暂存资源 SHALL 有界。Coordinator capacity accounting SHALL count each unique child identity still held by pending execution, active execution, pending finalization, or physical retirement. If one child has both a pending finalization and a physical retirement owner, it SHALL consume one capacity slot. Reaching the existing bound SHALL apply backpressure without discarding either responsibility; a slot becomes available only after the corresponding owners meet their existing completion conditions.
 
 #### Scenario: Runner exits after output publication fails
 - **WHEN** runner 已返回，但 output artifact 或 child result 提交失败
@@ -813,6 +817,22 @@ The subagent spawn Grow projection SHALL carry the effective reasoning effort se
 #### Scenario: Pending finalization reaches capacity
 - **WHEN** 待收尾元数据或未持久正文达到容量上限
 - **THEN** 新准入受到反压，超限正文保全失败可见，既有未确认责任不被当作成功完成或静默丢弃。
+
+#### Scenario: Physical retirement reaches capacity
+- **WHEN** children have completed execution but their physical retirement owners remain outstanding until the existing capacity is reached
+- **THEN** another child is not dispatched, and all pending retirement and finalization responsibilities remain owned
+
+#### Scenario: Retirement and finalization overlap
+- **WHEN** one child simultaneously has a pending finalization and a physical retirement owner
+- **THEN** its identity consumes one capacity slot rather than two
+
+#### Scenario: Retiring owner is released
+- **WHEN** a retiring owner is confirmed retired and a child identity is admitted afterward
+- **THEN** capacity is available again, and the released owner is not joined or removed a second time
+
+#### Scenario: Retiring identity remains unique after completed-cache eviction
+- **WHEN** the completed presentation entry for a child is evicted while its physical retirement owner remains outstanding
+- **THEN** a spawn reusing that child identity is rejected, and the existing retirement owner remains intact
 
 证据与实施入口：`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs::finish_child/finish_panicked_child`、`crates/codegen/shell/src/agent/subagent/handle_request.rs`。
 
@@ -1104,6 +1124,10 @@ Replay activity SHALL exclude time between a validated `TreeSuspended` event and
 - **THEN** 根据最新执行证据走既有异常恢复，不回退旧 checkpoint 或重发已派发工作；旧挂起记录不授予永久自动重启资格。
 
 目标入口：`crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs::load_session`、`crates/codegen/shell/src/agent/subagent/handle_request.rs`、`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs`。
+
+#### Scenario: Resume during a background child completion notification
+- **WHEN** a parent is suspended during the internal Turn triggered by completed child A while background child B remains unfinished, and the root is cold resumed
+- **THEN** A retains its unique completed result, B continues automatically under its original child and Turn identities, and the parent retains its notification Turn; suspension creates no cancelled task result, re-admitted original user prompt, replacement Spawn or repeated command execution.
 
 ### Requirement: Suspended operations retain interruption evidence
 
@@ -1572,3 +1596,374 @@ Recovery SHALL NOT synthesize a successful canonical child result from Completed
 #### Scenario: Persisted birth authority is unavailable
 - **WHEN** 原 Spawn 缺失有效 capability_mode
 - **THEN** 恢复报告出生权限事实不可用并保持树执行准入关闭，不回退当前 profile 默认。
+
+### Requirement: Fork display ancestry does not establish a result-chain dependency
+
+Single-session deletion SHALL distinguish fork display ancestry from canonical cross-session dependencies. Summary parent_session_id alone SHALL NOT block deletion of an independent fork or its source. Canonical Spawn and SubagentSeed references SHALL protect both endpoints, including an incoming Spawn whose child has not yet committed its Seed. Writer ownership, unfinished runtime handoffs and identity-bound quarantine SHALL retain their existing checks; deletion SHALL NOT recursively remove related history.
+
+#### Scenario: Delete an independent fork or source
+- **WHEN** a persisted fork has only summary ancestry and no canonical result-chain edge or unfinished handoff
+- **THEN** either copy can be explicitly deleted while the other copy remains readable, in the same or another cwd.
+
+#### Scenario: Parent committed Spawn before child Seed
+- **WHEN** a canonical parent Spawn references the target but the target has no Seed or summary parent yet
+- **THEN** deleting that target alone is refused with the parent identity and both histories remain.
+
+### Requirement: Explicit deletion validates canonical references without observation quotas
+
+An explicit single-session deletion SHALL validate the committed journal's existing per-record integrity, sequence, canonical causal state, presentation bindings and receipt ownership under the writer lease. It SHALL determine cross-session and runtime eligibility from those facts without inheriting aggregate read-only/TTL observation or discovery quotas. Provider bodies and presentation/execution artifacts SHALL NOT be required to be readable merely to delete an otherwise eligible session. Automatic maintenance, model recovery and read-only observations SHALL retain their own evidence validation and budgets. Invalid committed canonical evidence SHALL still refuse deletion; quarantine identity checks and cross-session protections SHALL remain.
+
+#### Scenario: Valid long history exceeds observation budget
+- **WHEN** an eligible explicit target has a valid journal or sampling evidence references exceeding the maintenance aggregate budget
+- **THEN** explicit deletion can complete while bounded observation continues to report budget exhaustion.
+
+#### Scenario: Journal integrity cannot be established
+- **WHEN** committed journal checksum, sequence, canonical causality or receipt ownership is invalid
+- **THEN** deletion is refused and the target directory remains.
+
+### Requirement: Explicit permanent deletion can abandon independent local continuation
+
+An explicit permanent deletion SHALL be allowed to abandon an independent session's unconsumed local suspension or restoration continuation after the existing writer ownership, canonical cross-session reference and quarantine identity checks succeed. The quarantine commit SHALL dispose of that local history; deletion SHALL NOT synthesize ExecutionReleased, resume work, claim completion, or recursively delete another session. An active competing writer or a canonical cross-session dependency SHALL still refuse deletion. Automatic maintenance SHALL continue preserving unconsumed runtime handoffs, and recovery/import/rewind SHALL retain their existing evidence rules.
+
+#### Scenario: User permanently deletes an independent suspended history
+- **WHEN** explicit deletion targets independent Suspending, Suspended or Restoring history without a competing writer
+- **THEN** quarantine and permanent removal can complete without first restoring it or appending a fabricated execution release.
+
+#### Scenario: Automatic cleanup sees the same continuation
+- **WHEN** TTL maintenance sees the same unconsumed runtime history
+- **THEN** it retains the history and its recovery responsibility.
+
+#### Scenario: A writer still owns the target
+- **WHEN** another writer holds the independent target while explicit deletion is requested
+- **THEN** deletion is refused, the bytes remain unchanged, and the user can retry after writer settlement.
+
+### Requirement: Restored project instructions use the effective durable branch
+Restoring an existing task SHALL use the ordered typed ProjectInstructions in its validated current Surface for model context, runtime source identity and the owning permission classifier. Current disk rules SHALL NOT replace or supplement those instructions during restore. A child sharing a permission manager SHALL NOT overwrite its parent classifier.
+
+#### Scenario: Project rules changed on disk
+- **WHEN** a suspended task is restored after AGENTS.md changed
+- **THEN** its original effective durable rules are retained for model/source/classifier without rewriting its checkpoint, and unrelated recovery and authorization checks remain enforced.
+
+#### Scenario: No durable rules
+- **WHEN** an existing task without effective typed ProjectInstructions is restored after new rules are added on disk
+- **THEN** the restored task retains the absence of project rules; untyped user text is not treated as project instructions.
+
+#### Scenario: Effective branch changes
+- **WHEN** compaction, rewind or fork changes the validated current Surface
+- **THEN** rule selection follows the typed blocks retained on that branch in model order rather than physical log order.
+
+#### Scenario: New child with a durable seed
+- **WHEN** a new child or normalized fork is bootstrapped from its newly persisted seed
+- **THEN** current project instructions are durably added once when absent; a verbatim mirror retains the inherited prefix exactly, and restoration of an existing child does not add current disk rules.
+
+### Requirement: Explicit restore retry reloads an unprepared temporary owner
+A failed load SHALL physically retire and drain only the actor newly created by that load when its original runtime remains Suspended and has not acquired RestorePrepared. The next explicit load SHALL rebuild that actor from authoritative history and available dependencies. Retirement SHALL preserve logical work and its original checkpoint/operation, and an unconfirmed retirement SHALL retain the physical owner.
+
+#### Scenario: A failed cold load is retried
+- **WHEN** a cold load fails before preparation and its checkpoint source becomes available before an explicit retry
+- **THEN** the temporary actor is retired without finalizing the logical task, and the retry rechecks current authoritative facts rather than reusing the failed snapshot.
+
+#### Scenario: Restore ownership was already prepared or released
+- **WHEN** an existing viewer or a Restoring/Running owner is involved in a failed load
+- **THEN** that owner is retained and the same operation/instance is reconciled; no replacement execution is created.
+
+### Requirement: Suspended restore admission follows execution dependencies
+Restore admission SHALL verify original operation/writer ownership, Agent selector and plugin identity, actual workspace directory, persisted model destination, valid Workflow frozen sources and child birth ceilings. Effective durable role and project instructions SHALL govern the resumed model. Unrelated display metadata, current rule files, inactive Hook registry entries and numeric limit equality SHALL NOT block the whole tree. Aggregate source fingerprints SHALL remain diagnostic facts and SHALL NOT replace these checks or grant authority. Pending calls SHALL retain their identity and final arguments and revalidate current tool/transport/permission authority; unknown effects SHALL NOT be replayed.
+
+#### Scenario: Presentation or unrelated configuration changes
+- **WHEN** color, description, current rules or unrelated Hook registry/limit configuration changes while a task is suspended
+- **THEN** valid execution dependencies allow restoration under its effective durable role/rules and current authorization, without rewriting its checkpoint or replenishing usage.
+
+#### Scenario: Workspace aliases
+- **WHEN** current and recorded cwd spellings resolve to directory capabilities with the same entity identity
+- **THEN** restoration uses that workspace and preserves the durable session namespace; a different or unavailable directory is rejected.
+
+#### Scenario: Catalog alias and actual route
+- **WHEN** a persisted catalog alias is replaced by a selectable alias with the exact same recorded provider/model and backend/endpoint/query transport identity
+- **THEN** restoration may rebind the alias through the existing route observation; a different data destination/model is rejected before execution.
+
+#### Scenario: Original Agent cannot be resolved
+- **WHEN** the persisted selector/plugin cannot be reconstructed as that formal identity
+- **THEN** restore reports that missing dependency and never runs a same-name or global default substitute.
+
+#### Scenario: Source digest changes without an execution dependency change
+- **WHEN** the diagnostic aggregate digest differs but the required independent dependencies remain valid
+- **THEN** the original operation may continue with current authority; a matching digest cannot compensate for a missing birth or frozen-source fact.
+
+#### Scenario: Completion recovery policy changes
+- **WHEN** an ordinary Agent's optional completion recovery configuration changes offline
+- **THEN** restored execution uses the current harness recovery policy while retaining original Goal/TODO gates, output schema and committed tool prefix; Workflow execution retains its frozen policy.
+
+#### Scenario: A restored child has switched away from its birth Agent
+- **WHEN** an existing child's durable Agent control selected a different formal Agent before suspension and its birth profile is later removed
+- **THEN** exact restore reconstructs the persisted active Agent and retains birth RWX/MCP ceilings without treating the old birth profile as a new delegation; fresh child admission still uses current delegation filters.
+
+#### Scenario: A new seeded child records its own model route
+- **WHEN** a child starts a new lineage from a new, forked or resumed Surface seed
+- **THEN** it durably records its actual initial provider route before execution; inherited conversation content does not substitute for the child's route authority.
+
+### Requirement: Derived Task resumes retain inherited transcript presentation
+A Task resume_from child SHALL persist the selected source branch's historical user, assistant, thinking and tool transcript, including visible content preceding compaction, together with its new Seed before publication. Model context and inherited presentation SHALL derive from the same validated canonical source cut. Presentation references retained in the active Surface SHALL be rebound to the new child's Seed; source response, cursor, ingress, control and execution identities SHALL NOT become the new child's authorities. Source runtime, route, usage, Plan and child lifecycle state projections SHALL NOT replace the new child's own state. Ordinary fresh/fork context selection SHALL retain its existing semantics.
+
+#### Scenario: A resumed Task is viewed after reconnect
+- **WHEN** a canonical completed or cancelled Task is used as resume_from and the derived child is later cold-viewed
+- **THEN** the inherited transcript precedes the derived child's new prompt and output exactly once, under the derived display lineage.
+
+#### Scenario: Source context has been compacted
+- **WHEN** the selected source history contains user-visible messages no longer present in its active model Surface
+- **THEN** the derived transcript retains that history while model context still uses only the validated active Surface.
+
+#### Scenario: Source display echo and execution state
+- **WHEN** the source transcript includes an admitted user display echo and source control/runtime presentation
+- **THEN** the historical echo remains readable without a new ingress receipt, while source current-state projections and admission identities are not inherited.
+
+#### Scenario: Inherited presentation cannot be committed
+- **WHEN** source validation, history projection or staged child journal publication fails
+- **THEN** the requested derived epoch fails without exposing a partially initialized transcript or changing the immutable source lifecycle.
+
+### Requirement: Plan approval restoration retains one exact candidate snapshot
+A restored Plan approval attempt SHALL bind its artifact lookup and user request to one exact pending Behavior snapshot. It SHALL reuse that validated content rather than rereading a mutable current candidate. Missing or invalid artifacts MAY normalize only that exact snapshot; a replacement Plan SHALL remain unchanged and SHALL NOT be approved or abandoned by the old attempt.
+
+#### Scenario: Plan is replaced while artifact validation is in flight
+- **WHEN** recovery reads candidate A while the current Plan is replaced by candidate B
+- **THEN** A's completion neither requests approval for B nor normalizes B, including when B's artifact is unavailable.
+
+#### Scenario: The original candidate artifact is invalid
+- **WHEN** the exact current pending snapshot has an absent, empty, corrupt or unreadable artifact
+- **THEN** existing durable normalization applies only to that snapshot and no replacement body is inferred.
+
+#### Scenario: Malformed external approval response
+- **WHEN** an external client sends a malformed approval response
+- **THEN** the interaction attempt closes as Failed, the pending candidate remains unchanged, and an explicit later restore/load can repark it on the same connection with a new attempt identity; no automatic retry or implementation turn starts.
+
+#### Scenario: Candidate changes before request construction completes
+- **WHEN** an approval request already has body A but the current candidate changes while awaiting internal state or notification hooks
+- **THEN** it never combines body A with B's submission/revision/hash; stale or body/hash-mismatched requests fail before opening a waiter and the new candidate remains unchanged.
+
+#### Scenario: Stale transport state is normalized
+- **WHEN** a persisted approval-pending bit has no approval-capable phase
+- **THEN** normalization acquires the existing control transaction boundary, compares the captured snapshot, and publishes only its cleared bit after durable confirmation; a replacement snapshot or failed Control write remains unchanged.
+
+### Requirement: Image projection ownership covers allocated Surface coordinates
+
+Timeline source ownership SHALL recognize every Surface coordinate allocated by an accepted `ImageProjection`: one coordinate per shadow, one per projected tool-call shadow, and one per carrier source. Coordinates at or beyond the number of allocated slots SHALL NOT be considered owned.
+
+#### Scenario: Projected tool and carrier coordinates remain valid sources
+
+- **WHEN** a Sideband selection refers to a tool-call or carrier Surface coordinate allocated by an acknowledged ImageProjection
+- **THEN** Timeline recognizes that coordinate as owned, including after replay, while rejecting coordinates beyond the projection's allocated slots.
+
+证据入口：`crates/codegen/chat-state/src/timeline.rs` — `Timeline::owns_surface_id`、ImageProjection live apply、`fold_branch_provenance`；回归为 `image_projection_scrubs_response_carrier_paths_from_compaction_summary` 和 `canonical_surface_coordinate_producers_are_complete`。
+
+### Requirement: Model subagent queries retain access to authorized durable results
+
+模型子任务详情与等待查询在 coordinator 无该 child 注册时 SHALL 在原查询期限内只读核对当前来源的 durable Spawn、Ended 和适用的 child Result 链。lifecycle root 和 immediate parent SHALL 保留原有读取权限；无关来源、未知 ID 及隐藏的 Workflow child SHALL 保持授权拒绝且不泄漏存在性。历史查询 SHALL 使用有界只读 worker，不创建 writer、恢复执行或重新投递结果；有授权 Spawn 但无可信终态 SHALL 保持观察未知。
+
+#### Scenario: Parent queries an original child after cold recovery
+- **WHEN** 父会话恢复后 coordinator 没有原 child，但其 durable Spawn/Ended/Result 链可验证
+- **THEN** 单项和多项详情返回原 completed、failed 或 cancelled 状态及可信统计；wait_subagent可立即返回适用最终结果，详情不读取答案artifact，不把完成缓存缺项解释为权限丢失。
+
+#### Scenario: Unrelated or hidden source is queried
+- **WHEN** 来源未获 root/direct-parent 授权，或目标是 Workflow 隐藏 child 或未知 ID
+- **THEN** 查询继续拒绝，不读取或泄漏目标结果。
+
+#### Scenario: Historical result cannot be proven
+- **WHEN** 来源已授权但无 terminal、Result 链损坏或只读查询超时
+- **THEN** 返回对应观察未知或无效证据，不从文件改动、注册表缺项或部分正文生成任务终态。
+
+### Requirement: Subagent observations remain independent of progress delivery
+
+子 Agent 接入 coordinator 时 SHALL 使用已有真实 signals 初始化本地进度观察，普通启动与恢复原 Turn SHALL 使用相同的持续采样入口。UI 进度通知的交付确认 SHALL NOT 阻止后续本地观察更新；仍 SHALL 最多保留一项在途进度交付，并沿用既有取消与完成所有权。没有真实样本时 SHALL 保留观察未知，不虚构零计数。
+
+#### Scenario: Parent queries a restored open child Turn
+- **WHEN** child 从树挂起恢复原有未结束 Turn，父 Agent 查询该 child
+- **THEN** 查询可取得真实 signals 的运行快照，不因没有提交新 prompt 而持续返回不可用。
+
+#### Scenario: Progress gateway acknowledgment is blocked
+- **WHEN** 一项 UI 进度通知等待网关确认且 child signals 继续变化
+- **THEN** 本地查询反映后续样本，UI 通知仍只有原在途项；确认后后续通知使用当前样本。
+
+### Requirement: Task output distinguishes observation errors from confirmed execution
+
+子任务详情和等待入口的单项和多项结果 SHALL 将不可达、超时、无效证据分别表达为 observation_unavailable、observation_timed_out、observation_invalid_evidence，不将这些观察失败报告为 running 或任何任务终态。观察失败 SHALL 保留任务身份和未确认结果；授权拒绝继续独立处理。
+
+#### Scenario: Subagent status cannot be observed
+- **WHEN** 单项或多项 get_subagent_status / wait_subagent 查询得到不可达、超时或无效证据
+- **THEN** 结果返回对应观察失败状态和未知说明，既不确认运行，也不计入已完成数量。
+
+### Requirement: Public task observations share one call deadline
+命令输出、子任务枚举/详情/等待和 ACP 子任务查询 SHALL 从公共入口使用同一个绝对期限覆盖识别、队列、等待和结果读取。非阻塞查询总期限 SHALL 为五秒；命令输出与 wait_subagent 显式等待 SHALL 使用 timeout_ms 与现有工具 cap 的较小值作为整次调用预算。各 ID 和来源读取 SHALL 不重开预算。等待取消 SHALL 保留完成通知的正确收据责任。
+
+#### Scenario: A terminal mailbox or multiple child replies stall
+- **WHEN** 命令观察的terminal探测不回复，或subagent详情/等待的批量查询不回复
+- **THEN** 调用在共享期限结束时返回对应 observation_timed_out，保留全部 ID，不串行叠加五秒预算。
+
+#### Scenario: Backend returns Running after a shorter segment
+- **WHEN** backend 单次等待上限早于公共等待期限且 child 仍运行
+- **THEN** 等待继续使用剩余期限等待真实状态，不声称其他任务完成，也不把配置时长当实测时长。
+
+#### Scenario: Completion and observation uncertainty are aggregated
+- **WHEN** 输出包括 completed、failed、cancelled、timed_out 或 output_unavailable
+- **THEN** 单项判定和摘要将这些执行终态计入完成，列表仅在存在结果且全部项终态时为终态，空发现清单不代表执行终态；running 和 observation_* 不计入完成。
+
+### Requirement: Authorized subagent observations agree across public entries
+模型与 ACP 的 parent-owned 查询 SHALL 复用相同来源授权与 canonical 历史结果核对，在 coordinator 缺项或不可达时仍可于原期限内返回可信终态。prompt_status SHALL 以所需生命周期事实及引用验证状态，不因无关模型产物超过诊断读取额度而拒绝可信状态。所有入口 SHALL 保留 root/direct-parent、隐藏 Workflow 与精确来源链接约束。
+
+#### Scenario: Historical child is queried through ACP after coordinator loss
+- **WHEN** 合法来源查询可验证 Spawn/Seed/Ended/Result 的原 child，coordinator 缺项或通道关闭
+- **THEN** ACP 与模型入口返回相同终态及谱系；未结束或无效证据仍为观察未知，越权和隐藏目标仍拒绝。
+
+#### Scenario: Lifecycle evidence exceeds diagnostic body budget
+- **WHEN** child 或 parent 存在大量无关采样产物，但 canonical 生命周期引用有效
+- **THEN** prompt_status 可确认该生命周期，不加载无关正文；链接损坏仍报告无效证据。
+
+### Requirement: Interrupted waits preserve identities without inventing execution state
+用户或 parent intervention 只中断观察时 SHALL 为全部被查询身份保留结构化 observation_interrupted 结果，不据此推断 running 或 cancelled。已成功返回的正常工具结果和完成通知收据所有权 SHALL 保持原有优先与转移规则。
+
+#### Scenario: A multi-task wait is interrupted
+- **WHEN** 多项等待因 intervention 退出且没有获得目标状态
+- **THEN** 按实际工具执行共用的身份解析保留全部 ID 为观察中断且不计入完成，后续完成通知仍可正确交付。
+
+### Requirement: Active child inventories retain unknown progress
+list_running SHALL 保持原有 active 和来源权限范围，缺少 progress 样本的项 SHALL 显式表达计数未知并保留身份，不遮蔽其他已知项，不伪造零计数。
+
+#### Scenario: One active child has no progress sample
+- **WHEN** 同一来源拥有正常样本和缺样本的 active child
+- **THEN** 列表返回两项，正常项保留事实，缺样本项明确未知，隐藏或无关 child 不泄漏。
+
+### Requirement: Progress sampling cancellation covers signal observation
+采样器的现有 child cancellation token SHALL 覆盖 signals snapshot 等待，在 actor 不回复时仍能释放采样 owner；单项 UI 在途交付和本地样本更新 SHALL 保持原有边界。
+
+#### Scenario: Signals actor retains but does not answer a snapshot request
+- **WHEN** sampler 等待 signals 回复期间 runner 退出或其 child token 取消
+- **THEN** sampler 退出并释放 progress owner，无需等待 signals actor 被销毁，不反向取消任务或排队额外交付。
+
+### Requirement: Main agents can rediscover live child identities through task observation
+主模型 SHALL 可通过专用list_subagent入口按需枚举当前来源获准观察的 未终态或观察未知的child，即使压缩或先前文字遗漏其 ID，也不依赖旧 roster 或文件改动推断清理。发现 SHALL 沿用同一调用期限和来源权限；缺进度、正在收尾与真正执行终态 SHALL 保持区分。消息路由失败 SHALL 不被接口表达成已清理或已终态；直接父级消息授权 SHALL 保持。
+
+#### Scenario: A still executing child is missing from the model's remembered task list
+- **WHEN** 模型通过list_subagent(scope=active)请求重新发现当前未终态任务
+- **THEN** 返回当前来源可见的运行期与持久child身份及基本状态，包括缺进度、初始化、挂起、收尾与未确认项；其他来源与隐藏 Workflow child 继续过滤，失败保持观察未知；subagent入口不读取Terminal或枚举共享命令列表。
+
+#### Scenario: A child cannot be addressed over a direct message route
+- **WHEN** 消息返回无可用直接路由
+- **THEN** 接口明确路由失败不证明目标已终态或已清理，调用方可按任务身份继续状态核对，不绕过直接父级权限。
+
+### Requirement: Answering sessions consume consultation evidence durably
+A new-contract successful incoming inquiry's canonical terminal SHALL establish one context-synchronization obligation in its original answering Session. Its structured proof SHALL bind the asking Session, original target Session, inquiry, actual Sideband and its frozen source. Only that original target's runtime SHALL materialize the obligation through the existing Timeline notification receipt/consumption path, validating the Sideband owner against the proof. Receipt identity SHALL be derived from canonical inquiry identity, and source version SHALL bind the successful terminal. Consumption and its exact model input SHALL be committed together before a request may include that input. Historical Answered observations without this new proof and UI presentation SHALL NOT establish obligations.
+
+#### Scenario: Completed consultation is consumed
+- **WHEN** an answering Session reaches an eligible sampling boundary after a successful incoming inquiry
+- **THEN** it commits one consumed receipt with the exact attributed question and answer before building the request, without synthesizing a human permission or model-authored tool call.
+
+#### Scenario: Consultation consumption omits model input
+- **WHEN** live append or strict replay encounters a Consumed event selecting an InquiryAnswered receipt with no materialized input
+- **THEN** it rejects the event rather than clearing the obligation without making consultation context visible; other sources retain their existing tool-result input-none rules.
+
+#### Scenario: Success is durable but receipt is missing
+- **WHEN** live reconciliation, same-identity retry or replacement-writer recovery finds a successful canonical inquiry terminal without its derived receipt
+- **THEN** it reconstructs only the missing receipt from that exact terminal/Sideband evidence, without running the inquiry again or replacing Answered with Failed; the obligation is coordinated before subsequent foreground sampling.
+
+#### Scenario: Consumption acknowledgement is unavailable
+- **WHEN** consumption cannot be durably confirmed
+- **THEN** no request claims to contain the unconfirmed input, the runtime follows existing Timeline ownership/reconciliation rules, and a confirmed historical consumption is not appended a second time.
+
+#### Scenario: Receipt identity conflicts
+- **WHEN** an existing inquiry-derived receipt is presented with conflicting source, terminal or payload
+- **THEN** the conflict is rejected without rewriting the original receipt or guessing a new identity from question text.
+
+#### Scenario: Historical success has no new-contract proof
+- **WHEN** a stored Answered observation predates the structured synchronization proof, even if its UI shows the full question and answer
+- **THEN** it remains historical consultation evidence and does not create a new synchronization obligation or trigger a backfill from presentation data.
+
+#### Scenario: Read-only observation encounters an incomplete synchronization
+- **WHEN** a session list, full/light observation, trajectory viewer or UI replay reads a valid success with a missing derived receipt
+- **THEN** it remains read-only without acquiring writer ownership or appending the missing receipt; reconciliation belongs to the legitimate runtime writer.
+
+### Requirement: Required notification consumption failures block dependent requests
+The shared sampling-boundary notification path SHALL distinguish an empty eligible set from failure to read required payloads or confirm their consumption. A first request, successor Step or final-response continuation that depends on that boundary SHALL NOT dispatch after such failure. The existing fatal storage-boundary error path SHALL preserve the cause rather than treating the failure as ordinary completion recovery. This applies to existing notification sources using the same required-consumption path as well as consultation evidence.
+
+#### Scenario: Required payload cannot be read
+- **WHEN** a selected notification payload is unavailable while preparing the first or a subsequent model request
+- **THEN** the request is not dispatched and the actual boundary error remains observable; the missing payload is not treated as an empty inbox.
+
+#### Scenario: Final-response consumption fails
+- **WHEN** a captured candidate requires consumption to continue the same Turn but the durable consumption fails or its acknowledgement is unavailable
+- **THEN** no dependent continuation request is dispatched, the failure is not interpreted as a successful empty drain, and canonical committed facts are preserved.
+
+### Requirement: Context-only receipts remain passive across execution boundaries
+A context-only receipt SHALL NOT open an idle Turn or abort active execution. It SHALL remain pending across Turn cancellation, idle time and suspension until an otherwise authorized Turn/Step consumes it. Final-response settlement SHALL capture exact candidate receipt identities at an actor-owned boundary; only those candidates may justify a further Step while the original owner, budget and Behavior still authorize continuation. Later arrivals SHALL NOT be back-inserted into that candidate decision. If a successor Step is admitted, later arrivals may join its next normal boundary; if final closure wins, they SHALL wait for a later authorized Turn. Receipt ownership SHALL NOT move to a fork as actionable pending work.
+
+#### Scenario: Idle Session receives only consultation context
+- **WHEN** the answering Session is idle and its only new receipt is context-only
+- **THEN** no Turn or provider request starts; a later otherwise authorized Turn can include it at its first sampling boundary.
+
+#### Scenario: Consultation races the final response
+- **WHEN** context-only receipt admission races the Turn's final-close cutoff
+- **THEN** only the captured candidates may justify a next Step when continuation is otherwise authorized; later arrivals wait for a subsequent authorized boundary, and if final closure wins they wait for a later Turn. Neither outcome cancels the in-flight request, overrides a budget/termination gate or adds input to an ended Turn.
+
+#### Scenario: A later receipt joins an already-admitted successor
+- **WHEN** one receipt is captured before the final-response candidate snapshot, a second arrives afterward, and the first legitimately causes a successor Step in the same Turn
+- **THEN** the second does not change the old candidate decision but may be consumed at the successor's normal safe boundary, without a new Turn or a new durable minimum-Turn route.
+
+#### Scenario: Passive delivery races loss of continuation authority
+- **WHEN** a passive receipt exists before final-close but cancellation, exhausted budget or a committed control transition closes the original Turn's continuation authority
+- **THEN** the receipt remains pending for later authorized consumption and cannot reopen that Turn, change the Goal state or force a provider request.
+
+#### Scenario: Consumption commits before a request can be sent
+- **WHEN** a receipt's Consumed fact is durable but the process stops before sending the intended model request
+- **THEN** recovery reconstructs the committed Surface without consuming again or claiming the model observed it; subsequent authorized requests use normal context projection and admission.
+
+#### Scenario: Cancel or suspend occurs before consumption
+- **WHEN** the owning Turn is cancelled or the Session is suspended while consultation context is pending
+- **THEN** the original Session retains the unconsumed receipt and no passive delivery wakes it; restoring the Session does not create a synthetic Turn solely for that receipt.
+
+#### Scenario: Fork inherits history
+- **WHEN** a Session is forked with already-consumed consultation history and other pending receipts
+- **THEN** its inherited context follows existing fork history/provenance rules without inheriting the original Session's pending delivery or consumption authority.
+
+#### Scenario: Fork inherits an unanswered synchronization obligation
+- **WHEN** a fork contains historical evidence of a successful consultation owned by the source Session but no derived local receipt
+- **THEN** the fork does not reconstruct a local pending receipt from that inherited evidence; only the original answering Session may fulfill the obligation.
+
+### Requirement: Subagent tools separate enumeration detail and completion waiting
+模型工具 SHALL 分离为list_subagent、get_subagent_status和wait_subagent。list_subagent SHALL 使用scope=active或all枚举当前来源授权的任务，仅返回subagent_id、类型、描述、基本状态、适用时间与错误信息，不含工具调用明细或最终答案。active SHALL 包括未终态或观察未知的任务；all SHALL 包括同一来源可见的持久历史。详情 SHALL 使用非空subagent_ids数组查询状态、计数和时间（不读取答案）；等待及适用最终结果交付 SHALL 仅通过wait_subagent调用，同样保留全部目标身份；详情与枚举不消费完成通知。command SHALL 通过get_command_output独立读取，不注册旧get_task_output/get_command_or_subagent_output混合入口，不保留空数组发现协议。
+
+#### Scenario: List active and historical children without loading payloads
+- **WHEN** 当前来源具有初始化、运行、挂起、收尾与历史终态child，并选择active或all
+- **THEN** active返回未终态和未知身份，all还返回可验证历史终态；基本结果不含tool调用或最终输出，不依赖完成缓存保留或答案artifact存在。
+
+#### Scenario: List across runtime loss or invalid history
+- **WHEN** coordinator不可达但source有canonical Spawn/Ended/Result，或某个链接损坏
+- **THEN** 可信历史终态保留，开放Spawn保持观察未知，损坏项明确无效证据；source历史不可读不能返回一份伪称all的runtime缓存清单。
+
+#### Scenario: Query multiple child details with known and unknown metrics
+- **WHEN** get_subagent_status接收一个或多个已授权subagent_ids
+- **THEN** 每项返回真实状态、持续时间和可确认的调用次数等统计；未取得的字段明确未知，不伪造0，失败或取消的已有统计仍保留。
+
+#### Scenario: Wait without mixing observation and execution outcomes
+- **WHEN** wait_subagent接收目标ID组和等待预算
+- **THEN** 它在共享期限内等待，分段Running不被当作结束，返回真实耗时/结束原因/各项目标状态；中断不取消任务或丢掉完成通知责任。
+
+#### Scenario: Command and subagent capabilities remain distinct
+- **WHEN** 工具preset、能力依赖、通知提示和等待UI生成新的工具集合
+- **THEN** command使用get_command_output，subagent分别使用三个专用入口；无Terminal资源的subagent查询仍可运行，详情/列表不被误标阻塞等待。
+
+#### Scenario: Metadata observation does not consume completion payloads
+- **WHEN** list_subagent或get_subagent_status确认一个任务已终态但只交付基本信息或统计
+- **THEN** 它们不消费该任务的完成通知；wait_subagent交付真实终态结果后才按原收据机制确认消费。
+
+#### Scenario: Command output has one concise registered name
+- **WHEN** 当前工具集注册、发现或调用后台命令输出工具
+- **THEN** 仅使用get_command_output；旧get_terminal_command_output不作为别名提供，参数、权限与command-only行为保持。
+
+### Requirement: Persisted output reader panics are isolated to their observation
+When the build enables panic unwinding, the subagent coordinator SHALL isolate an unwind from one persisted-output reader to that deduplicated read. Every query or inspection waiting on that read SHALL receive `Unavailable`; the reader's owned permit SHALL be released as its future unwinds; and the coordinator SHALL continue servicing unrelated requests. The panic boundary SHALL NOT include child lifecycle, validation, or other coordinator owners, and the failed read SHALL NOT be retried automatically.
+
+#### Scenario: A persisted-output reader panics
+- **WHEN** a query or inspection awaits persisted output and the reader future panics with unwinding enabled
+- **THEN** all targets attached to that read receive `Unavailable`, a later request can use the released reader slot, and the coordinator remains available for unrelated lifecycle and observation messages.
+
+#### Scenario: Build uses panic abort
+- **WHEN** the selected build profile uses panic=abort
+- **THEN** the existing process-abort policy remains authoritative; this observation boundary does not promise recovery from an abort.

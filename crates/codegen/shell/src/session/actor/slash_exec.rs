@@ -515,8 +515,8 @@ impl SessionActor {
 
     /// Resolve and execute a slash command from the out-of-band command plane.
     ///
-    /// Only goal controls are allowed to mutate a session while a turn is in
-    /// flight. Other host commands receive an explicit response instead of
+    /// Goal controls and independent memory flush work may run while a turn is
+    /// in flight. Other host commands receive an explicit response instead of
     /// being reclassified as model input. A successful control that invalidates
     /// the running turn returns a structured cancellation trigger; read-only or
     /// non-invalidating controls leave the turn running.
@@ -559,6 +559,22 @@ impl SessionActor {
         };
 
         match action {
+            BuiltinAction::FlushMemory => {
+                if !self.memory.is_enabled() {
+                    return Err("memory system is not enabled".into());
+                }
+                let activity = self
+                    .session_activities
+                    .try_start("memory_flush_command")
+                    .ok_or("session activity admission is closed")?;
+                let session = self.clone();
+                tokio::task::spawn_local(async move {
+                    let _activity = activity;
+                    session.run_memory_flush("slash_command", None).await;
+                    session.idle_arbiter.notify_one();
+                });
+                Ok(None)
+            }
             action @ (BuiltinAction::GoalSet { .. }
             | BuiltinAction::GoalEdit { .. }
             | BuiltinAction::GoalEnter

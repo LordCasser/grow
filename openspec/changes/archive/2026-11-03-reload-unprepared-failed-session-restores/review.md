@@ -1,0 +1,6 @@
+## 独立对抗性审查
+reviewer /root/rules_recovery_review，独立静态复核，未跑Cargo。
+
+初审发现ACK后等待writer drain仍保留resident，取消/超时后可能被supervisor当异常resident，最终发送逻辑TeardownSession。修正为ACK立即detach，原thread继续持有writer；ACK前取消以现有ResidentResources记录未准备失败候选，后续显式load重试其退休。
+
+复审补出ACK后detach清除原因、随后thread panic仍会进入普通panic teardown。修正为原因保留到thread drain/join，supervisor及下一load在持有lifecycle guard时消费该原因，只物理退休。新增ACK前/后×clean/panic四组取消测试。最终静态复核未发现新阻断问题；原source gate、prepared/partial owner、Freeze同operation和逻辑任务保留均核对。

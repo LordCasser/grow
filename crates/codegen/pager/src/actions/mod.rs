@@ -111,7 +111,7 @@ pub enum ActionId {
     DashboardSelectPrev,
     DashboardTogglePin,
     DashboardBeginRename,
-    DashboardStop,
+    SessionCommands,
     DashboardToggleGrouping,
     DashboardReorderUp,
     DashboardReorderDown,
@@ -119,7 +119,6 @@ pub enum ActionId {
     DashboardOverlayExit,
     DashboardOverlayPrev,
     DashboardOverlayNext,
-    DashboardOverlayStop,
     DashboardOpenLocationPicker,
     DashboardToggleWorktree,
 }

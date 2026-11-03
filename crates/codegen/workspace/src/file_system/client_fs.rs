@@ -772,4 +772,80 @@ mod tests {
         let res = list(&ws, &list_req("")).await.unwrap();
         assert!(res.nodes.iter().any(|n| n.name == "rooted.txt"));
     }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn client_list_preserves_entry_and_symlink_metadata_through_workspace_operation() {
+        use crate::workspace_ops::WorkspaceOp;
+
+        let ws = make_handle();
+        let root = ws.root_cwd().unwrap();
+        std::fs::write(root.join("regular.txt"), b"regular").unwrap();
+        std::fs::create_dir(root.join("real_dir")).unwrap();
+        std::fs::write(root.join("real_dir/inside.txt"), b"inside").unwrap();
+        std::os::unix::fs::symlink("regular.txt", root.join("linked_file.txt")).unwrap();
+        std::os::unix::fs::symlink("real_dir", root.join("linked_dir")).unwrap();
+        std::os::unix::fs::symlink("missing.txt", root.join("dangling.txt")).unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("escape_dir")).unwrap();
+
+        let req = FsListReq {
+            depth: 2,
+            ..list_req("")
+        };
+        let full = req.execute(&ws, None).await.unwrap();
+        let regular = full
+            .nodes
+            .iter()
+            .find(|node| node.name == "regular.txt")
+            .unwrap();
+        assert_eq!(regular.node_type, FsNodeType::File);
+        assert_eq!(regular.size, Some(7));
+        assert_eq!(regular.is_symlink, None);
+        let directory = full
+            .nodes
+            .iter()
+            .find(|node| node.name == "real_dir")
+            .unwrap();
+        assert_eq!(directory.node_type, FsNodeType::Directory);
+        let linked_file = full
+            .nodes
+            .iter()
+            .find(|node| node.name == "linked_file.txt")
+            .unwrap();
+        assert_eq!(linked_file.node_type, FsNodeType::File);
+        assert_eq!(linked_file.size, Some(7));
+        assert_eq!(linked_file.is_symlink, Some(true));
+        let linked_dir = full
+            .nodes
+            .iter()
+            .find(|node| node.name == "linked_dir")
+            .unwrap();
+        assert_eq!(linked_dir.node_type, FsNodeType::Directory);
+        assert_eq!(linked_dir.is_symlink, Some(true));
+        assert!(!full.nodes.iter().any(|node| node.name == "dangling.txt"));
+        assert!(
+            !full
+                .nodes
+                .iter()
+                .any(|node| node.path.contains("escape_dir"))
+        );
+        assert!(!full.nodes.iter().any(|node| node.name == "secret.txt"));
+
+        let mut paged = Vec::new();
+        for offset in (0..full.nodes.len()).step_by(2) {
+            let page = FsListReq {
+                limit: 2,
+                offset: offset as u64,
+                ..req.clone()
+            }
+            .execute(&ws, None)
+            .await
+            .unwrap();
+            paged.extend(page.nodes);
+        }
+        assert_eq!(paged, full.nodes);
+    }
 }

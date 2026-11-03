@@ -600,7 +600,7 @@ async fn handle_prompt_status_inner(agent: &MvpAgent, args: &acp::ExtRequest) ->
     }
 }
 
-enum DurableSubagentLifecycle {
+pub(crate) enum DurableSubagentLifecycle {
     NotSubagent,
     AwaitingParentEnd {
         parent_timeline_id: String,
@@ -626,8 +626,11 @@ async fn observe_subagent_lifecycle(
 
     let is_live = agent.is_live_subagent_session(child_session_id);
     let child_id = child_session_id.0.to_string();
-    let lifecycle =
-        bounded_shared_read(move || read_durable_subagent_lifecycle(child_id, is_live)).await;
+    let lifecycle = bounded_shared_read(move || {
+        let storage = JsonlStorageAdapter::with_root(crate::util::grow_home::grow_home());
+        read_durable_subagent_lifecycle(&storage, child_id, is_live)
+    })
+    .await;
     let source = if is_live { "runtime" } else { "durable" };
     let lifecycle = match lifecycle {
         Ok(lifecycle) => lifecycle,
@@ -753,7 +756,8 @@ async fn observe_subagent_lifecycle(
     }
 }
 
-fn read_durable_subagent_lifecycle(
+pub(crate) fn read_durable_subagent_lifecycle(
+    storage: &JsonlStorageAdapter,
     child_session_id: String,
     require_subagent: bool,
 ) -> std::io::Result<DurableSubagentLifecycle> {
@@ -761,8 +765,7 @@ fn read_durable_subagent_lifecycle(
         NotificationEvent, NotificationSource, SubagentEvent, SubagentOutcome, TimelineEventKind,
     };
 
-    let storage = JsonlStorageAdapter::with_root(crate::util::grow_home::grow_home());
-    let Some(child) = storage.open_session_by_id_shared_read_bounded(&child_session_id)? else {
+    let Some(child) = storage.open_session_by_id_shared_read(&child_session_id)? else {
         if require_subagent {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -791,9 +794,7 @@ fn read_durable_subagent_lifecycle(
         }
         return Ok(DurableSubagentLifecycle::NotSubagent);
     }
-    let child_timeline = child
-        .bounded_validated_timeline(&child_session_id)?
-        .timeline;
+    let child_timeline = child.reference_timeline()?;
     let seeds: Vec<_> = child_timeline
         .events()
         .iter()
@@ -815,8 +816,7 @@ fn read_durable_subagent_lifecycle(
             "child session parent identity did not match its durable seed",
         ));
     }
-    let Some(parent) = storage.open_session_by_id_shared_read_bounded(&seed.parent_timeline_id)?
-    else {
+    let Some(parent) = storage.open_session_by_id_shared_read(&seed.parent_timeline_id)? else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "subagent seed parent session is unavailable",
@@ -828,9 +828,7 @@ fn read_durable_subagent_lifecycle(
             "parent Timeline identity did not match the child seed",
         ));
     }
-    let parent_timeline = parent
-        .bounded_validated_timeline(&seed.parent_timeline_id)?
-        .timeline;
+    let parent_timeline = parent.reference_timeline()?;
     let spawn_event = parent_timeline.events().iter().find(|event| {
         event.seq.get() == seed.parent_spawn_seq
             && matches!(
@@ -954,11 +952,11 @@ fn prompt_status_from_subagent_inspection(
     use tools::implementations::grow_build::task::types::SubagentSnapshotStatus;
 
     match status {
-        SubagentSnapshotStatus::Running { .. } | SubagentSnapshotStatus::Initializing => {
-            PromptStatus::Running {
-                turn_start_ms: started_at_epoch_ms,
-            }
-        }
+        SubagentSnapshotStatus::Running { .. }
+        | SubagentSnapshotStatus::RunningProgressUnavailable
+        | SubagentSnapshotStatus::Initializing => PromptStatus::Running {
+            turn_start_ms: started_at_epoch_ms,
+        },
         SubagentSnapshotStatus::Suspended { .. } => PromptStatus::Settling,
         SubagentSnapshotStatus::FinalizationPending { .. }
         | SubagentSnapshotStatus::Completed { .. }
@@ -1843,6 +1841,16 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
 // session/delete
 
+/// Error receipt: this request invalidated the old runtime binding, not necessarily its writer.
+pub const SESSION_DELETE_RUNTIME_INVALIDATED_KEY: &str = "grow/sessionDeleteRuntimeInvalidated";
+
+fn session_delete_error(error: impl std::fmt::Display, runtime_invalidated: bool) -> acp::Error {
+    acp::Error::internal_error().data(serde_json::json!({
+        "detail": error.to_string(),
+        (SESSION_DELETE_RUNTIME_INVALIDATED_KEY): runtime_invalidated,
+    }))
+}
+
 /// Delete a session from history.
 async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(Deserialize)]
@@ -1857,19 +1865,26 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
     let session_id = acp::SessionId::new(Arc::from(req.session_id.as_str()));
 
-    // Tear down any live actor first (cancel turn/subagents/bg tasks,
-    // process-scope kill, flush). Then wipe history so shutdown cannot
-    // rewrite the session directory after delete.
-    let _delete_lifecycle = agent
-        .teardown_live_session_before_delete(&session_id)
-        .await
-        .map_err(|error| acp::Error::internal_error().data(error))?;
+    let _delete_lifecycle = agent.lock_session_lifecycle(&session_id).await;
+    let preflight_id = req.session_id.clone();
+    let preflight_cwd = req.cwd.clone();
+    tokio::task::spawn_blocking(move || {
+        JsonlStorageAdapter::default()
+            .preflight_session_delete_by_id_sync(&preflight_id, preflight_cwd.as_deref())
+    })
+    .await
+    .map_err(|error| session_delete_error(error, false))?
+    .map_err(|error| session_delete_error(error, false))?;
 
-    // Local delete: disk + FTS eviction.
-    // Mirrored by the `grow sessions delete <id>` CLI path.
+    // The same lifecycle guard remains held through teardown, writer drain and
+    // final storage qualification. Shutdown may commit facts after preflight.
+    agent
+        .teardown_live_session_before_delete_locked(&session_id)
+        .await
+        .map_err(|error| session_delete_error(error, true))?;
     crate::session::persistence::delete_session_history(&req.session_id, req.cwd.as_deref())
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|error| session_delete_error(error, true))?;
 
     tracing::info!(session_id = %req.session_id, "Session deleted");
 
