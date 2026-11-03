@@ -54,7 +54,14 @@ fn delegate(
 fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
     const HOME: &str = "GROW_TEST_CHILD_AUTHORITY_HOME";
     let Ok(home) = std::env::var(HOME) else {
-        for birth_case in ["empty", "narrow", "removed", "alias", "changed-model"] {
+        for birth_case in [
+            "empty",
+            "narrow",
+            "removed",
+            "alias",
+            "changed-model",
+            "unavailable",
+        ] {
             let temp = tempfile::tempdir().unwrap();
             for phase in [
                 "suspend",
@@ -142,7 +149,7 @@ fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
                 .output().unwrap();
                 assert!(
                     output.status.success(),
-                    "{phase} failed:\n{}\n{}",
+                    "{phase} (birth_case={birth_case}) failed:\n{}\n{}",
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
@@ -175,13 +182,19 @@ fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
         let phase = std::env::var("GROW_TEST_CHILD_AUTHORITY_PHASE").unwrap();
         let restore = phase != "suspend";
         let birth_case = std::env::var("GROW_TEST_CHILD_MCP_BIRTH").unwrap();
+        let gate_parent_mcp_initialize = phase == "restore" && birth_case == "narrow";
+        let (parent_mcp_initialize_gate, parent_mcp_initialize_gate_rx) =
+            tokio::sync::watch::channel(!gate_parent_mcp_initialize);
+        let parent_mcp_initialize_started = Arc::new(tokio::sync::Notify::new());
         let expected_birth = if birth_case == "empty" {
             std::collections::BTreeSet::new()
         } else {
             std::collections::BTreeSet::from(["birth".to_owned()])
         };
-        let available_birth = if matches!(birth_case.as_str(), "narrow" | "alias" | "changed-model")
-        {
+        let available_birth = if matches!(
+            birth_case.as_str(),
+            "narrow" | "alias" | "changed-model" | "unavailable"
+        ) {
             expected_birth.clone()
         } else {
             std::collections::BTreeSet::new()
@@ -232,13 +245,34 @@ fn suspended_child_cold_restore_retains_birth_authority_end_to_end() {
             usize,
         >::new()));
         let observed_calls = mcp_calls.clone();
+        let initialize_gate = parent_mcp_initialize_gate_rx.clone();
+        let initialize_started = parent_mcp_initialize_started.clone();
+        let reject_birth_initialize = restore && birth_case == "unavailable";
         let app = app.route("/mcp/{name}", axum::routing::post(move |axum::extract::Path(name): axum::extract::Path<String>, axum::Json(message): axum::Json<serde_json::Value>| {
             use axum::response::IntoResponse as _;
             let calls = observed_calls.clone();
+            let initialize_gate = initialize_gate.clone();
+            let initialize_started = initialize_started.clone();
             async move {
                 if message.get("id").is_none() { return axum::http::StatusCode::ACCEPTED.into_response(); }
                 let result = match message["method"].as_str().unwrap() {
-                    "initialize" => serde_json::json!({"protocolVersion":message["params"]["protocolVersion"], "capabilities":{"tools":{}}, "serverInfo":{"name":name,"version":"1"}}),
+                    "initialize" => {
+                        if reject_birth_initialize && name == "birth" {
+                            return axum::Json(serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": message["id"],
+                                "error": {"code": -32603, "message": "controlled MCP initialize failure"}
+                            })).into_response();
+                        }
+                        let mut gate = initialize_gate;
+                        while !*gate.borrow_and_update() {
+                            initialize_started.notify_one();
+                            if gate.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        serde_json::json!({"protocolVersion":message["params"]["protocolVersion"], "capabilities":{"tools":{}}, "serverInfo":{"name":name,"version":"1"}})
+                    },
                     "tools/list" => serde_json::json!({"tools":[{"name":"probe","description":"Birth membership probe","inputSchema":{"type":"object","properties":{}}, "annotations":{"readOnlyHint":true,"destructiveHint":false}}]}),
                     "tools/call" => {
                         *calls.lock().unwrap().entry(name.clone()).or_default() += 1;
@@ -442,7 +476,7 @@ max_depth = 3
                     .constrain_mode(Mode::All),
                 Mode::ReadOnly
             );
-            assert_mcp_membership(&child, &root, &expected_birth).await;
+            assert_mcp_membership(&child, &root, &expected_birth, false).await;
             let (operation, nodes) = cold_recovery_stage(
                 "authority.suspend",
                 agent.suspend_session_tree(
@@ -488,14 +522,90 @@ max_depth = 3
             drop(pending);
         } else {
             root_id = acp::SessionId::new(std::fs::read_to_string(home.join("root-id")).unwrap());
-            let loaded = cold_recovery_stage(
-                "authority.cold_load",
-                agent.load_session(
-                    acp::LoadSessionRequest::new(root_id.clone(), cwd.clone())
-                        .mcp_servers(mcp_servers.clone()),
-                ),
-            )
-            .await;
+            let load_request = acp::LoadSessionRequest::new(root_id.clone(), cwd.clone())
+                .mcp_servers(mcp_servers.clone());
+            let loaded = if gate_parent_mcp_initialize {
+                let (loaded, initialize_reached, remained_pending, command_executor_responded, snapshot_cancelled) =
+                    cold_recovery_stage("authority.cold_load", async {
+                        let load_future = agent.load_session(load_request);
+                        tokio::pin!(load_future);
+                        let initialize_wait = parent_mcp_initialize_started.notified();
+                        tokio::pin!(initialize_wait);
+                        let mut early_result = tokio::select! {
+                            _ = &mut initialize_wait => None,
+                            result = &mut load_future => Some(result),
+                        };
+                        let initialize_reached = early_result.is_none();
+
+                        let (command_executor_responded, snapshot_cancelled) = if initialize_reached {
+                            if let Some(root) = agent.control_session_handle(&root_id) {
+                                let responsive = tokio::time::timeout(
+                                    std::time::Duration::from_millis(100),
+                                    root.snapshot_mcp_pool(),
+                                )
+                                .await
+                                .is_ok_and(|pool| pool.is_some());
+                                let cancellation = tokio_util::sync::CancellationToken::new();
+                                let snapshot = root.snapshot_initialized_mcp_pool(&cancellation);
+                                tokio::pin!(snapshot);
+                                let pending = tokio::time::timeout(
+                                    std::time::Duration::from_millis(100), &mut snapshot,
+                                ).await.is_err();
+                                cancellation.cancel();
+                                let cancelled = tokio::time::timeout(
+                                    std::time::Duration::from_millis(100), snapshot,
+                                ).await.is_ok_and(|pool| pool.is_none());
+                                (responsive, pending && cancelled)
+                            } else {
+                                (false, false)
+                            }
+                        } else {
+                            (false, false)
+                        };
+                        if initialize_reached
+                            && let Ok(result) = tokio::time::timeout(
+                                std::time::Duration::from_millis(100),
+                                &mut load_future,
+                            )
+                            .await
+                        {
+                            early_result = Some(result);
+                        }
+                        let remained_pending = early_result.is_none();
+
+                        // Always release before assertions so a failing
+                        // observation cannot strand the root initializer.
+                        parent_mcp_initialize_gate.send_replace(true);
+                        let loaded = match early_result {
+                            Some(result) => result,
+                            None => load_future.await,
+                        };
+                        (
+                            loaded,
+                            initialize_reached,
+                            remained_pending,
+                            command_executor_responded,
+                            snapshot_cancelled,
+                        )
+                    })
+                    .await;
+                assert!(
+                    initialize_reached,
+                    "parent MCP initialize must begin while cold load is pending"
+                );
+                assert!(
+                    remained_pending,
+                    "cold load must remain pending while parent MCP initialize is gated"
+                );
+                assert!(
+                    command_executor_responded,
+                    "root command executor must answer a pool snapshot while MCP initialize is gated"
+                );
+                assert!(snapshot_cancelled, "cancelling one initialized snapshot must finish without releasing the parent handshake gate");
+                loaded
+            } else {
+                cold_recovery_stage("authority.cold_load", agent.load_session(load_request)).await
+            };
             if phase == "plugin-fallback" {
                 let error = format!(
                     "{:?}",
@@ -705,7 +815,8 @@ max_depth = 3
                 assert!(runtime.resume_committed);
             }
             wait_for_mcp_pool(&root, mcp_servers.len()).await;
-            assert_mcp_membership(&child, &root, &available_birth).await;
+            assert_mcp_membership(&child, &root, &available_birth, birth_case == "unavailable")
+                .await;
             let expected_model = if birth_case == "changed-model" {
                 "test/second"
             } else if birth_case == "alias" {
@@ -806,7 +917,13 @@ max_depth = 3
             let grandchild = agent
                 .control_session_handle(&acp::SessionId::new("authority-grandchild"))
                 .unwrap();
-            assert_mcp_membership(&grandchild, &root, &available_birth).await;
+            assert_mcp_membership(
+                &grandchild,
+                &root,
+                &available_birth,
+                birth_case == "unavailable",
+            )
+            .await;
             assert_eq!(
                 grandchild
                     .delegable_capability_ceiling
@@ -860,6 +977,18 @@ max_depth = 3
                     .as_ref(),
                 Some(&available_birth)
             );
+            if birth_case == "unavailable" {
+                assert_eq!(
+                    mcp_calls
+                        .lock()
+                        .unwrap()
+                        .get("birth")
+                        .copied()
+                        .unwrap_or_default(),
+                    0,
+                    "a rejected initialization must not dispatch a tool call"
+                );
+            }
             assert_eq!(
                 mcp_calls
                     .lock()
@@ -906,6 +1035,7 @@ async fn assert_mcp_membership(
     child: &crate::session::SessionHandle,
     root: &crate::session::SessionHandle,
     expected: &std::collections::BTreeSet<String>,
+    birth_initialize_failed: bool,
 ) {
     let child_pool = child.snapshot_mcp_pool().await;
     let actual: std::collections::BTreeSet<_> = child_pool
@@ -934,7 +1064,12 @@ async fn assert_mcp_membership(
             child.call_mcp_tool(name.into(), None, "probe".into(), serde_json::json!({})),
         )
         .await;
-        if expected.contains(name) {
+        if name == "birth" && birth_initialize_failed {
+            assert!(
+                called.is_err(),
+                "failed discovery must not answer a tool call"
+            );
+        } else if expected.contains(name) {
             called.unwrap();
         } else {
             assert!(

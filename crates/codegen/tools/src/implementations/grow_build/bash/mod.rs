@@ -4717,12 +4717,12 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     mod background_check {
         use super::*;
 
         /// Mid-command `&` is rejected (Unix/Git Bash only;
         /// PowerShell/cmd give `&` other meanings — see `ampersand_semantics`).
-        #[cfg(unix)]
         #[tokio::test]
         async fn rejects_mid_command_ampersand() {
             let resources = make_resources_reject_bg_op(MockTerminal::success("", 0));

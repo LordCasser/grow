@@ -4,18 +4,19 @@ impl SessionActor {
     /// If initialization is in progress by another task, this will poll until complete.
     pub(super) async fn wait_for_mcp_initialized(&self) {
         loop {
-            {
+            let initializing = {
                 let mcp_state = self.mcp_state.lock().await;
                 if mcp_state.is_initialized() {
                     return;
                 }
-                if !mcp_state.is_initializing() {
-                    break;
-                }
+                mcp_state.is_initializing()
+            };
+            if initializing {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            } else {
+                self.ensure_mcp_tools_initialized().await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        self.ensure_mcp_tools_initialized().await;
     }
     /// Register tools from shared (inherited) MCP clients on this session's ToolBridge.
     ///

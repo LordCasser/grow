@@ -2763,6 +2763,30 @@ pub(super) async fn run_session(
                             crate::session::mcp_servers::SharedMcpPool::from_state(&mcp_state),
                         ));
                     }
+                    SessionCommand::SnapshotInitializedMcpPool { mut respond_to } => {
+                        let Some(activity) = session.session_activities.try_start("snapshot_initialized_mcp_pool") else {
+                            continue;
+                        };
+                        let session = session.clone();
+                        tokio::task::spawn_local(async move {
+                            let _activity = activity;
+                            tokio::select! {
+                                biased;
+                                _ = respond_to.closed() => {},
+                                _ = session.sideband_cancel.cancelled() => {},
+                                pool = async {
+                                    session.wait_for_mcp_initialized().await;
+                                    // Initial clients become visible before the final
+                                    // catalog publication releases this existing owner.
+                                    let _publication = session.mcp.publication_bridge.lock().await;
+                                    let state = session.mcp_state.lock().await;
+                                    crate::session::mcp_servers::SharedMcpPool::from_state(&state)
+                                } => {
+                                    let _ = respond_to.send(Some(pool));
+                                }
+                            }
+                        });
+                    }
                     SessionCommand::SnapshotClientHooks { respond_to } => {
                         let _ = respond_to.send(session.hooks.client_hooks.borrow().clone());
                     }

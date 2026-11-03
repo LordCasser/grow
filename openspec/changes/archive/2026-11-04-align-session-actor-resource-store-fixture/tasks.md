@@ -1,0 +1,4 @@
+- [x] Route the shared Shell actor test Agent fixture through `ContainedDirectory` and `SessionResourcesStateStore`.
+- [x] Review shared fixture callers for assumptions specific to `ResourcesPersistence::local`.
+- [x] Run the affected Windows image-recovery selectors; native Windows CI is the evidence for this platform fix.
+- [x] Run strict OpenSpec validation and record verification; do not archive until platform validation is complete.

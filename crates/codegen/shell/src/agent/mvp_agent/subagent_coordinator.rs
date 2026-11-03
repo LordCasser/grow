@@ -112,6 +112,25 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                 &delegation_handle,
             )
             .await;
+            // Cold restoration knows the original birth membership. Sample
+            // its new transport identities after the direct parent finishes
+            // discovery, rather than permanently freezing a transient empty pool.
+            ctx.parent_mcp_pool = if let Some(checkpoint) = restore.as_ref() {
+                let Some(pool) = delegation_handle.snapshot_initialized_mcp_pool(&cancellation).await else {
+                    return tools::implementations::grow_build::task::coordinator::ChildRunOutcome::RestoreBlocked {
+                        checkpoint: checkpoint.clone(),
+                        error: if cancellation.is_cancelled() {
+                            "Original child MCP preparation was cancelled".into()
+                        } else {
+                            "Original child MCP preparation lost its parent response".into()
+                        },
+                        completion_data: crate::agent::subagent::ShellCompletionData::not_admitted(),
+                    };
+                };
+                Some(pool)
+            } else {
+                delegation_handle.snapshot_mcp_pool().await
+            };
             crate::agent::subagent::run_shell_child_with_restore(
                 request,
                 ctx,
@@ -764,7 +783,6 @@ impl MvpAgent {
             .and_then(|settings| settings.inference_idle_timeout_secs);
         ctx.inference_idle_timeout_secs = per_model.or(remote).unwrap_or(600).max(10);
 
-        ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
         ctx.client_hooks = handle.snapshot_client_hooks().await;
     }
 }

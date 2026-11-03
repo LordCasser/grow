@@ -59,7 +59,7 @@
 
 已完成并归档 [align-dashboard-header-focus-test](../archive/2026-11-04-align-dashboard-header-focus-test/verification.md)，fixture 使用可区分颜色的固定 `Theme::grownight()`。彩色环境 Pager 全组 7566 passed / 0 failed / 15 ignored；最终 header 4 项通过。该修复仅调整夹具和陈旧注释，不改生产输入/渲染行为。
 
-同一轮平台状态：Windows storage run [41672827626](https://github.com/LordCasser/grow/actions/runs/41672827626) 成功；Linux native job [126045425871](https://github.com/LordCasser/grow/actions/runs/41672827694/job/126045425871) 成功。macOS native job [126045426896](https://github.com/LordCasser/grow/actions/runs/41672827694/job/126045426896) 也已成功。Windows native 的 Shell coordination 组为 61 passed / 3 failed；三项 image-recovery 测试在模型能力状态 durable write 后收到 LocalResourcesStateStore 的 PublishedPersistenceError（OS 5）。日志见 `/tmp/grow-260-candidate-windows-ci-failure-excerpt.log`。该 store 强制目录同步；Shell 生产会话实际使用的 SessionResourcesStateStore 采用既有平台策略，不对 Windows 目录 handle 伪造 Unix fsync。独立 [fixture change](../align-session-actor-resource-store-fixture/design.md) 将 Shell actor 测试接到实际会话 store，保留真实文件 flush/rename/ACK，不改变 Local store 的严格错误语义；需由下一轮 Windows native CI 验证。
+同一轮平台状态：Windows storage run [41672827626](https://github.com/LordCasser/grow/actions/runs/41672827626) 成功；Linux native job [126045425871](https://github.com/LordCasser/grow/actions/runs/41672827694/job/126045425871) 成功。macOS native job [126045426896](https://github.com/LordCasser/grow/actions/runs/41672827694/job/126045426896) 也已成功。Windows native 的 Shell coordination 组为 61 passed / 3 failed；三项 image-recovery 测试在模型能力状态 durable write 后收到 LocalResourcesStateStore 的 PublishedPersistenceError（OS 5）。日志见 `/tmp/grow-260-candidate-windows-ci-failure-excerpt.log`。该 store 强制目录同步；Shell 生产会话实际使用的 SessionResourcesStateStore 采用既有平台策略，不对 Windows 目录 handle 伪造 Unix fsync。独立 [fixture change](../archive/2026-11-04-align-session-actor-resource-store-fixture/design.md) 将 Shell actor 测试接到实际会话 store，保留真实文件 flush/rename/ACK，不改变 Local store 的严格错误语义；需由下一轮 Windows native CI 验证。
 
 首轮 Core CI 失败后的 candidate 尚未完成复验，也未发布。普通本地 release build、代码签名和散列记录仍不是官方 asset provenance；需等待 header fixture 彩色回归、重跑 required CI 与后续正式发布流程。
 
@@ -68,3 +68,15 @@
 ## CI 夹具修正后的本机复验
 
 Header 固定主题与三个焦点状态的四项定向测试通过，彩色 Pager 全组 7566/0/15。Shell actor 改用真实 session resources store 后，standalone Shell 全组 4572 passed / 0 failed / 9 ignored（`/tmp/grow-260-session-resource-fixture-shell-final.log`），含 Windows 首轮失败的三个图片协调 selector；此前 combined core 的 Shell 4576 计数属于不同 feature unification，不能合并或替换。两项修正均为测试/注释维护，生产行为不变。静态 strict 19/19、归档 strict 837/837；新候选仍须重新跑 required CI。
+
+## 第二轮候选 CI
+
+源码为 `f1ce5f35661ffe620855bb218656072b6e669ce4`。Header 修正已通过 Core 的 Pager library gate；Core [41679387890](https://github.com/LordCasser/grow/actions/runs/41679387890) 随后在 Shell 出生权限 cold-restore 用例失败：4572 passed / 1 failed / 9 ignored，child pool 为空而应保留 birth。`/tmp/grow-260-candidate2-core-ci-failure-excerpt.log` 保留详细记录。新发现是父 MCP 后台初始连接发布前冻结空 grant 的真实竞态，由 [独立行为 change](../archive/2026-11-04-await-parent-mcp-before-cold-child-grant/design.md) 修复；不是缺出生事实，也不通过扩大权限解除。
+
+Native [41679387744](https://github.com/LordCasser/grow/actions/runs/41679387744) 的 Linux/macOS jobs 已成功；Windows Shell coordination 64/64（含三个原失败 selector）、Pager coordination 47/47、Pager-minimal 4/4 均成功，确认 session-resource fixture 修正。Windows 随后编译 Tools lib tests 时失败：两个 Unix parser tests 引用 Windows 不编译的函数，见 [平台测试维护](../gate-unix-only-terminal-tests/proposal.md)。整个 Native workflow 仍是失败。
+
+## 第三候选的本机准备
+
+父 MCP 初始化冻结竞态已由独立行为 change 合入规范。完整六种出生状态回归（含慢初始化、初始化拒绝）1/1 通过；最终调用方取消与即时命令响应性按真实 narrow suspend/restore 两阶段分别 1/1 通过。Shell 4572/0/9、MCP179/0、Unix parser2/2、background1/1、workspace all-target 与格式检查均通过。各阶段源码边界和完整日志见 [MCP 初始化修复验证](../archive/2026-11-04-await-parent-mcp-before-cold-child-grant/verification.md)。只读对抗性复审核对了普通 Spawn 即时路径、取消/关闭的 None 返回、原 checkpoint 保留及 publication→state 锁顺序；没有发现当前范围的生产缺陷。父 actor 在该 waiter pending 时的关闭仅有源码验证，不冒称专项动态故障注入通过。
+
+Windows 的 Unix-only parser 编译修正仍待下一轮原生 CI；该等待记录在活动维护 change，未改成已通过。正式 tag、preflight、十平台构建与发布均尚未执行。

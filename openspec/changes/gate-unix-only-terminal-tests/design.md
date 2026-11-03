@@ -1,0 +1,1 @@
+Apply `#[cfg(unix)]` directly to the two terminal parser tests because their shared test module contains cross-platform tests. Apply it to the Bash `background_check` module because that module has only one test and the test uses Unix shell syntax. Keep the target-specific boundary at the narrowest containing scope and leave Windows tests compiled.

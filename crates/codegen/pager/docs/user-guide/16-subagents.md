@@ -186,6 +186,8 @@ Children inherit the parent's connected and enabled MCP catalog by default. Inhe
 
 The inherited ceiling stays live: removing a parent server or hiding a tool immediately makes it ineligible for descendants.
 
+Cold restoration waits for the direct parent's initial MCP discovery before binding surviving birth members to new connections. The original durable membership, current Agent profile and parent ceiling still bound the restored grant; newly configured services cannot enlarge it. Missing birth membership blocks execution, while a known empty set stays empty. See the [cold-restore contract](../../../../../openspec/specs/tool-authorization/spec.md#requirement-cold-child-grants-wait-for-initial-parent-mcp-discovery).
+
 Agent frontmatter controls inheritance:
 
 | Value | Effect |

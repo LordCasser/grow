@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-04
+skip_specs: true
+reason: Test configuration maintenance only. Unix-specific parser tests and their sole Unix-only bash test module will be gated on Unix; no runtime behavior changes.

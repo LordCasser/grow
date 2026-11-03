@@ -6,6 +6,6 @@ Shell actor tests currently construct each test Agent with `ResourcesPersistence
 
 `LocalResourcesStateStore` remains a strict non-session store: a failed parent-directory barrier after publication is surfaced as `PublishedPersistenceError`; its behavior must not be weakened to make Shell tests pass.
 
-## Scope
+## What Changes
 
 Make the shared Shell actor test Agent fixture use the same pinned session-directory resource store as production. Preserve real file synchronization, atomic publication, durable acknowledgements, and the LocalResourcesStateStore contract. This changes no product behavior.

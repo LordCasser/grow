@@ -701,3 +701,5 @@ Prompt cache key 的 rewind 锚点由 Timeline accepted-event fold 派生；prep
 健康请求复用完整性检查已有的owned Surface副本；实际修复和新MemoryContext仍等各自durable ACK后才能返回请求，push-user保持原复制成本。副本不跨请求缓存。[真实ACK与差分验证](../openspec/changes/archive/2026-11-03-reuse-healthy-request-integrity-snapshot/verification.md)。
 
 持久结果 reader 的 unwind 通过既有 coordinator observation owner 结算为 Unavailable，释放读取许可后可继续服务。该隔离仅适用于启用 unwind 的构建（如库测试）；release/release-dist 保留 `panic=abort`，不宣称能在进程 abort 后继续运行。
+
+冷恢复在冻结 child 当前 MCP client-ID grant 前，通过 actor 的 initialized-pool snapshot 等待直接父的初始握手收尾；等待由可取消的 session activity 承担，command executor 继续处理即时 snapshot。普通新 Task 仍取即时池。出生名字、当前 profile、父 ceiling 和后续 live authority 继续求交，不从当前配置补造出生事实。见 [冷恢复 MCP 初始化边界](../openspec/changes/archive/2026-11-04-await-parent-mcp-before-cold-child-grant/design.md)。

@@ -674,6 +674,10 @@ pub enum SessionCommand {
     SnapshotMcpPool {
         respond_to: oneshot::Sender<Option<crate::session::mcp_servers::SharedMcpPool>>,
     },
+    /// Wait for initial MCP discovery before a cold child samples current bindings.
+    SnapshotInitializedMcpPool {
+        respond_to: oneshot::Sender<Option<crate::session::mcp_servers::SharedMcpPool>>,
+    },
     /// Snapshot the session's client-registered hooks so a subagent inherits the same
     /// PreToolUse gate and observe hooks over the parent's connection.
     SnapshotClientHooks {

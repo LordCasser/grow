@@ -1,0 +1,5 @@
+- [x] Trace the failed Linux restore through the parent snapshot, live authority and immutable grant freeze.
+- [x] Add the controlled delayed-parent regression and reproduce the failure before the fix.
+- [x] Obtain a settled parent pool for cold restoration without blocking commands or changing normal Spawn.
+- [x] Verify real cold lifecycle and relevant Shell/MCP regressions; record platform boundaries.
+- [x] Validate and archive the behavior change after the local contract evidence is complete; retain native CI in the release closure.

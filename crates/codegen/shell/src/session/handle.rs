@@ -431,6 +431,20 @@ impl SessionHandle {
             .ok()?;
         rx.await.ok().flatten()
     }
+    pub(crate) async fn snapshot_initialized_mcp_pool(
+        &self,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Option<crate::session::mcp_servers::SharedMcpPool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SnapshotInitializedMcpPool { respond_to: tx })
+            .ok()?;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            result = rx => result.ok().flatten(),
+        }
+    }
     /// Snapshot the session's client-registered hooks for subagent inheritance. A dead actor
     /// or dropped reply fails open to no hooks, warned since it drops the inherited deny gate.
     pub(crate) async fn snapshot_client_hooks(&self) -> crate::extensions::hooks::ClientHooks {
