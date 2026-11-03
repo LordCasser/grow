@@ -11,4 +11,3 @@ SEARCH_COST turns=2048 bytes=4924203 output=137804 samples_ns=[[390553917, 59973
 ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4490 filtered out; finished in 7.10s
-

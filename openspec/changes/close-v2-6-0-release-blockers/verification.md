@@ -48,3 +48,5 @@
 ## 尚未完成的最终门禁
 
 本机 tests、workspace/format、settings、active/archive strict OpenSpec 和普通 release build 已通过。仍未完成 native 平台 CI、clean committed HEAD 与 annotated tag 一致性检查、官方十平台构建/资产 provenance，以及 `bash scripts/validate-release.sh v2.6.0`。正式发布授权已存在，但这些条件未满足前不能把候选标成已发布，也不能把本地二进制用作发布资产。
+
+提交核对包含所有新增归档文件；四份历史文本产物仅移除行尾空白/多余 EOF 空行，保留测试结果和正文。`git diff --check` 的最终检查覆盖完整候选 diff。

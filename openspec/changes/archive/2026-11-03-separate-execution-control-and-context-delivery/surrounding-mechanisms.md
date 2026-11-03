@@ -27,4 +27,3 @@
 | 权限/问题答复与 Sideband（现有） | 回复原 pending operation；是否停止由该操作的结构化结果决定 | 精确调用许可不等于新用户任务；Sideband 输出按 purpose 处理，分类/标题/摘要/咨询不能一律 inject | `session/pending_interaction.rs`、`session/actor/coordination.rs`；tool-authorization / local-coordination |
 
 表内 Shell 路径以 `crates/codegen/shell/src/` 为根；某些行为跨多个实现点，主规范仍是已实现契约权威。
-
