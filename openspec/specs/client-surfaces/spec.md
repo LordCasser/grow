@@ -4908,12 +4908,88 @@ Pager SHALL release a finished, idle, unselected child's resident transcript, to
 
 ### Requirement: Canonical tool metadata versions its closed vocabulary
 
-Canonical `grow/tool` metadata SHALL identify its closed kind and namespace vocabulary with one shared version. The subagent enumeration, status and wait kinds SHALL be emitted as version 6, distinct from the version 5 vocabulary shipped in v2.5.5. The checked-in schema and published interface notes SHALL describe the emitted vocabulary. Metadata SHALL remain descriptive and SHALL NOT grant tool authority.
+Canonical `grow/tool` metadata SHALL identify its closed kind and namespace vocabulary with one shared version. The current vocabulary SHALL use version 7 and include the native TODO read kind `plan_read`, distinct from the planning write kind. Subagent enumeration, status and wait SHALL retain their respective kinds in that same version 7 envelope. The checked-in schema and published interface notes SHALL describe the emitted vocabulary. Metadata SHALL remain descriptive and SHALL NOT grant tool authority.
 
 #### Scenario: A subagent observation tool is presented
 - **WHEN** canonical metadata is constructed for list_subagent, get_subagent_status or wait_subagent
-- **THEN** it emits version 6 and the corresponding subagent_list, subagent_status or subagent_wait kind through the existing shared envelope.
+- **THEN** it emits version 7 and the corresponding subagent_list, subagent_status or subagent_wait kind through the existing shared envelope.
+
+#### Scenario: A native TODO read is presented
+- **WHEN** canonical metadata is constructed for todo_read, including a renamed client-facing tool
+- **THEN** it emits version 7 with kind plan_read and the actual registered name; the read completes its tool row without emitting an ACP Plan update.
 
 #### Scenario: A closed vocabulary changes
 - **WHEN** a new kind is added to the public metadata vocabulary
 - **THEN** the emitted shared version and checked-in schema advance together; a stale schema fails the existing regression instead of silently accepting drift.
+
+### Requirement: Session setup and Agent catalogs do not require Git configuration
+
+Session creation/loading, Agent catalog discovery and configuration inspection SHALL NOT open Git configuration solely to locate the checkout or Git directory. An unavailable Git config SHALL NOT prevent those discovery steps. Operations that actually consume Git contents SHALL retain their own errors rather than declaring the repository healthy from a path-only result.
+
+#### Scenario: Checkout config is a cloud placeholder
+- **WHEN** session setup or Agent catalog discovery runs in a valid checkout whose Git config cannot be read
+- **THEN** root-only discovery completes without triggering config reads, allowing session setup and catalog publication to continue.
+
+#### Scenario: Actual Git content is unavailable
+- **WHEN** a Git content operation needs configuration or other unavailable repository data
+- **THEN** the existing Git operation reports its failure; path discovery does not synthesize content or suppress that failure.
+
+### Requirement: Hunk action projections commit only after the action succeeds
+
+Hunk action statistics, turn membership removal and affected identifiers SHALL reflect only successfully applied actions. A failing single action or file batch SHALL retain that file's pending hunks and action projections. Multi-file batches SHALL retain already committed successful files and SHALL NOT project a failing file as successful or simulate an all-project rollback.
+
+#### Scenario: Single reject write fails
+- **WHEN** the public hunk action encounters a write or delete failure
+- **THEN** it returns the error with the hunk, its turn membership and action statistics still pending, without a successful removal projection.
+
+#### Scenario: A file batch fails
+- **WHEN** a file-scoped, turn-scoped or all-files batch cannot apply one file
+- **THEN** that file's hunks are not counted or removed from their turn, while earlier successfully committed files remain represented by their actual result.
+
+#### Scenario: Normal accept or reject succeeds
+- **WHEN** a single hunk or file batch is successfully accepted or rejected
+- **THEN** its content, statistics, turn membership and affected identifiers agree and the action is counted once.
+
+### Requirement: Hunk rejection detects an already changed disk target
+
+Before reverting a displayed hunk or file batch, the hunk owner SHALL compare the actual target's complete content and existence against the current-content snapshot used for that action. A differing target SHALL produce an explicit stale-content failure without overwriting or deleting the external content or projecting the action as successful. All reject scopes SHALL share this boundary. This contract SHALL NOT be described as providing atomic compare-and-swap isolation against arbitrary non-cooperating writes after that comparison.
+
+#### Scenario: External edit precedes a reject
+- **WHEN** a file changes on disk after its displayed hunks are cached but before a reject reads the target
+- **THEN** reject reports a stale conflict, preserves the changed file and leaves its pending hunk, turn membership and statistics uncommitted.
+
+#### Scenario: Creation or deletion is stale
+- **WHEN** reject would delete a newly tracked file that has since changed, or restore a deleted file that now exists
+- **THEN** it rejects the stale action and preserves the external state.
+
+#### Scenario: File, turn or all reject includes a conflict
+- **WHEN** a batch encounters a file whose disk state differs from its displayed snapshot
+- **THEN** that file fails without mutation or success projection, while any earlier successfully applied files remain represented by their actual result.
+
+#### Scenario: Target still matches
+- **WHEN** the actual content and existence match the displayed snapshot
+- **THEN** rejection applies the selected reversal through the existing successful action path and counts it once.
+
+### Requirement: Incremental code navigation retains final removals
+
+When the codebase index processes an ordered file-event batch, a path whose final effective event is removal SHALL be absent from the resulting definitions, references and file metadata. Earlier creation or modification in that batch SHALL NOT erase the removal. Rename source and destination paths SHALL retain their respective final effects. A later creation or modification after removal SHALL preserve the existing reindexing behavior. Unknown-path removal SHALL be harmless, unrelated paths SHALL remain available, and an already published index snapshot SHALL remain unchanged.
+
+#### Scenario: Indexed file is modified then removed
+- **WHEN** an indexed file is deleted and one accepted batch contains its modification followed by removal
+- **THEN** the next index snapshot contains no definitions, references or metadata for that file.
+
+#### Scenario: Creation does not prove an empty initial index
+- **WHEN** a path ends a batch with removal after creation, including create-modify-remove or remove-create-remove sequences for a previously indexed path
+- **THEN** its previous and intermediate index entries are removed rather than retained because the events were cancelled.
+
+#### Scenario: Renamed destination is deleted
+- **WHEN** a batch renames a file onto a previously indexed destination and then removes the destination
+- **THEN** the resulting snapshot has no definitions, references or metadata for either path, while unrelated paths remain indexed.
+
+#### Scenario: Recreated file and immutable earlier snapshot
+- **WHEN** a removed path is later recreated with new content before the batch ends
+- **THEN** the resulting snapshot reflects the new indexed content, and an earlier published snapshot retains its original content.
+
+#### Scenario: Newly created file is removed before indexing
+- **WHEN** a batch creates and removes a previously unknown path
+- **THEN** processing succeeds with that path absent and does not remove unrelated entries.

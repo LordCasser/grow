@@ -1,5 +1,6 @@
 //! Tests for HunkTrackerActor hunk management.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -7,8 +8,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::actor::HunkTrackerActor;
-use crate::events::HunkEvent;
-use crate::types::{FileContentStatus, Hunk, HunkAction, TrackingMode};
+use crate::events::{HunkEvent, HunkRemovalReason};
+use crate::types::{
+    FileContentStatus, Hunk, HunkAction, HunkActionError, HunkId, HunkTrackerSnapshot,
+    SessionSummary, TrackingMode,
+};
 use test_utils::env::env_usize;
 
 /// Run a git command in the given directory with deterministic author/committer.
@@ -174,6 +178,61 @@ impl TestHarness {
             .hunk_action(hunk_id.clone(), HunkAction::Reject)
             .await
             .is_ok()
+    }
+
+    /// Reject through the public entry selected by a regression scenario.
+    async fn reject_scope(
+        &self,
+        scope: &str,
+        path: &Path,
+        hunk_id: &HunkId,
+        prompt_index: usize,
+    ) -> Result<Vec<HunkId>, HunkActionError> {
+        match scope {
+            "single" => self
+                .handle
+                .hunk_action(hunk_id.clone(), HunkAction::Reject)
+                .await
+                .map(|()| vec![hunk_id.clone()]),
+            "file" => {
+                self.handle
+                    .file_action(path.to_path_buf(), HunkAction::Reject)
+                    .await
+            }
+            "turn" => {
+                self.handle
+                    .turn_action(prompt_index, HunkAction::Reject)
+                    .await
+            }
+            "all" => self.handle.all_action(HunkAction::Reject).await,
+            _ => panic!("unknown reject scope: {scope}"),
+        }
+    }
+
+    async fn assert_pending_state_unchanged(
+        &mut self,
+        before: &HunkTrackerSnapshot,
+        before_summary: &SessionSummary,
+    ) {
+        let after = self.handle.snapshot_state().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&after.file_states).unwrap(),
+            serde_json::to_value(&before.file_states).unwrap(),
+            "failed reject changed file content, hunks or baseline state"
+        );
+        assert_eq!(after.turn_index, before.turn_index);
+        assert_eq!(
+            serde_json::to_value(&after.session_stats).unwrap(),
+            serde_json::to_value(&before.session_stats).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(self.handle.get_session_summary().await).unwrap(),
+            serde_json::to_value(before_summary).unwrap()
+        );
+        assert!(
+            self.drain_events().is_empty(),
+            "failed reject emitted events"
+        );
     }
 
     /// Drain and collect events (non-blocking)
@@ -393,6 +452,793 @@ async fn test_reject_hunk_reverts_file() {
 
     let hunks_after = harness.get_all_hunks().await;
     assert!(hunks_after.is_empty(), "Rejected hunk should be removed");
+}
+
+fn hunk_ids(hunks: &[Arc<Hunk>]) -> HashSet<HunkId> {
+    hunks.iter().map(|hunk| hunk.id.clone()).collect()
+}
+
+#[tokio::test]
+async fn test_reject_stale_content_keeps_projections() {
+    let baseline = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let modified = "1\nCHANGED_2\n3\n4\n5\n6\n7\n8\nCHANGED_9\n10\n";
+    for scope in ["single", "file", "turn", "all"] {
+        for change in [
+            "append",
+            "same_size",
+            "missing",
+            "empty",
+            "binary",
+            "too_large",
+        ] {
+            let mut harness = TestHarness::new();
+            harness.write_baseline("stale.rs", baseline);
+            harness.agent_write("stale.rs", modified, 7);
+            let displayed = harness.get_file_hunk_data("stale.rs").await;
+            assert_eq!(displayed.hunks.len(), 2);
+            assert_eq!(displayed.current.content.as_deref(), Some(modified));
+            let ids = hunk_ids(&displayed.hunks);
+            assert_eq!(hunk_ids(&harness.handle.get_turn_hunks(7).await), ids);
+            let before = harness.handle.snapshot_state().await.unwrap();
+            let before_summary = harness.handle.get_session_summary().await;
+            harness.drain_events();
+
+            let external = match change {
+                "append" => Some(format!("{modified}external append\n").into_bytes()),
+                "same_size" => {
+                    let text = modified.replace("CHANGED_2", "OUTSIDE_2");
+                    assert_eq!(text.len(), modified.len());
+                    Some(text.into_bytes())
+                }
+                "missing" => None,
+                "empty" => Some(Vec::new()),
+                "binary" => Some(b"external\0\xff\n".to_vec()),
+                "too_large" => {
+                    let mut bytes = modified.as_bytes().to_vec();
+                    bytes.resize(super::state::MAX_TRACKED_TEXT_BYTES + 1, b'x');
+                    Some(bytes)
+                }
+                _ => unreachable!(),
+            };
+            let path = harness.abs_path("stale.rs");
+            // The actor has no watcher; withhold notifications to keep the
+            // displayed snapshot stale while a separate writer changes disk.
+            match &external {
+                Some(bytes) => std::fs::write(&path, bytes).unwrap(),
+                None => std::fs::remove_file(&path).unwrap(),
+            }
+            let error = harness
+                .reject_scope(scope, &path, &displayed.hunks[0].id, 7)
+                .await
+                .expect_err("changed disk target must fail");
+            assert!(error.to_string().contains("stale"));
+            assert!(
+                matches!(
+                    error,
+                    HunkActionError::StaleContent { path: failed } if failed == path
+                ),
+                "{scope}, {change}"
+            );
+            match external {
+                Some(bytes) => assert_eq!(std::fs::read(&path).unwrap(), bytes),
+                None => assert_eq!(
+                    std::fs::symlink_metadata(&path).unwrap_err().kind(),
+                    std::io::ErrorKind::NotFound
+                ),
+            }
+            assert_eq!(hunk_ids(&harness.get_all_hunks().await), ids);
+            assert_eq!(hunk_ids(&harness.handle.get_turn_hunks(7).await), ids);
+            assert_eq!(
+                serde_json::to_value(harness.get_file_hunk_data("stale.rs").await).unwrap(),
+                serde_json::to_value(displayed).unwrap()
+            );
+            harness
+                .assert_pending_state_unchanged(&before, &before_summary)
+                .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_reject_stale_creation_and_deletion_keep_projections() {
+    for scope in ["single", "file", "turn", "all"] {
+        for change in [
+            "created_edited",
+            "deleted_rebuilt",
+            "deleted_empty",
+            "empty_removed",
+        ] {
+            let mut harness = TestHarness::new();
+            if change != "created_edited" {
+                harness.write_baseline("existence.rs", "original\n");
+            }
+            let current = if change == "empty_removed" {
+                ""
+            } else {
+                "agent content\n"
+            };
+            harness.agent_write("existence.rs", current, 7);
+            let path = harness.abs_path("existence.rs");
+            assert_eq!(harness.get_all_hunks().await.len(), 1);
+            if change.starts_with("deleted_") {
+                std::fs::remove_file(&path).unwrap();
+                // Deliver the deletion before display; the existing overlapping
+                // agent hunk keeps the deletion in turn 7 through the real API.
+                harness.handle.handle_file_deleted(path.clone());
+            }
+            let displayed = harness.get_file_hunk_data("existence.rs").await;
+            assert_eq!(displayed.hunks.len(), 1);
+            assert_eq!(
+                hunk_ids(&harness.handle.get_turn_hunks(7).await),
+                hunk_ids(&displayed.hunks)
+            );
+            if change.starts_with("deleted_") {
+                assert_eq!(displayed.current.status, FileContentStatus::Missing);
+            } else {
+                assert_eq!(displayed.current.status, FileContentStatus::Full);
+                assert_eq!(displayed.current.content.as_deref(), Some(current));
+            }
+            let before = harness.handle.snapshot_state().await.unwrap();
+            let before_summary = harness.handle.get_session_summary().await;
+            harness.drain_events();
+
+            let external = match change {
+                "created_edited" => Some(b"agent content\nexternal append\n".as_slice()),
+                "deleted_rebuilt" => Some(b"external rebuild\n".as_slice()),
+                "deleted_empty" => Some(b"".as_slice()),
+                "empty_removed" => None,
+                _ => unreachable!(),
+            };
+            match external {
+                Some(bytes) => std::fs::write(&path, bytes).unwrap(),
+                None => std::fs::remove_file(&path).unwrap(),
+            }
+            assert!(
+                matches!(
+                    harness.reject_scope(scope, &path, &displayed.hunks[0].id, 7).await,
+                    Err(HunkActionError::StaleContent { path: failed }) if failed == path
+                ),
+                "{scope}, {change}"
+            );
+            match external {
+                Some(bytes) => assert_eq!(std::fs::read(&path).unwrap(), bytes),
+                None => assert_eq!(
+                    std::fs::symlink_metadata(&path).unwrap_err().kind(),
+                    std::io::ErrorKind::NotFound
+                ),
+            }
+            assert_eq!(
+                serde_json::to_value(harness.get_file_hunk_data("existence.rs").await).unwrap(),
+                serde_json::to_value(displayed).unwrap()
+            );
+            harness
+                .assert_pending_state_unchanged(&before, &before_summary)
+                .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_reject_matching_content_applies_selected_hunks() {
+    let baseline = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let modified = "1\nCHANGED_2\n3\n4\n5\n6\n7\n8\nCHANGED_9\n10\n";
+    for scope in ["single", "file", "turn", "all"] {
+        let mut harness = TestHarness::new();
+        harness.write_baseline("matching.rs", baseline);
+        harness.agent_write("matching.rs", modified, 7);
+        let displayed = harness.get_file_hunk_data("matching.rs").await;
+        assert_eq!(displayed.hunks.len(), 2);
+        let selected = displayed
+            .hunks
+            .iter()
+            .find(|hunk| hunk.line_info.old_start == 2)
+            .unwrap();
+        let expected_ids = if scope == "single" {
+            HashSet::from([selected.id.clone()])
+        } else {
+            hunk_ids(&displayed.hunks)
+        };
+        let path = harness.abs_path("matching.rs");
+        harness.drain_events();
+        // Rewriting the same bytes is admissible; metadata is not the version.
+        std::fs::write(&path, modified).unwrap();
+        let affected = harness
+            .reject_scope(scope, &path, &selected.id, 7)
+            .await
+            .unwrap();
+        assert_eq!(affected.len(), expected_ids.len());
+        assert_eq!(affected.into_iter().collect::<HashSet<_>>(), expected_ids);
+        let expected_content = if scope == "single" {
+            "1\n2\n3\n4\n5\n6\n7\n8\nCHANGED_9\n10\n"
+        } else {
+            baseline
+        };
+        assert_eq!(std::fs::read(&path).unwrap(), expected_content.as_bytes());
+        let remaining_ids: HashSet<_> = displayed
+            .hunks
+            .iter()
+            .filter(|hunk| !expected_ids.contains(&hunk.id))
+            .map(|hunk| hunk.id.clone())
+            .collect();
+        assert_eq!(hunk_ids(&harness.get_all_hunks().await), remaining_ids);
+        assert_eq!(
+            hunk_ids(&harness.handle.get_turn_hunks(7).await),
+            remaining_ids
+        );
+        let summary = harness.handle.get_session_summary().await;
+        assert_eq!(summary.stats.rejected_hunks, expected_ids.len());
+        assert_eq!(summary.stats.rejected_lines_added, expected_ids.len());
+        assert_eq!(summary.stats.rejected_lines_removed, expected_ids.len());
+        assert_eq!(summary.stats.accepted_hunks, 0);
+        assert_eq!(summary.pending_hunks, remaining_ids.len());
+        let removed: Vec<_> = harness
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                HunkEvent::HunkRemoved {
+                    hunk_id, reason, ..
+                } => {
+                    assert!(matches!(reason, HunkRemovalReason::Rejected));
+                    Some(hunk_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed.len(), expected_ids.len());
+        assert_eq!(removed.into_iter().collect::<HashSet<_>>(), expected_ids);
+    }
+}
+
+#[tokio::test]
+async fn test_reject_matching_creation_deletion_and_empty_content() {
+    for scope in ["single", "file", "turn", "all"] {
+        for change in ["created", "deleted", "empty"] {
+            let mut harness = TestHarness::new();
+            if change != "created" {
+                harness.write_baseline("matching.rs", "original");
+            }
+            harness.agent_write(
+                "matching.rs",
+                if change == "empty" {
+                    ""
+                } else {
+                    "agent content"
+                },
+                7,
+            );
+            let path = harness.abs_path("matching.rs");
+            assert_eq!(harness.get_all_hunks().await.len(), 1);
+            if change == "deleted" {
+                std::fs::remove_file(&path).unwrap();
+                harness.handle.handle_file_deleted(path.clone());
+            }
+            let displayed = harness.get_file_hunk_data("matching.rs").await;
+            assert_eq!(displayed.hunks.len(), 1);
+            assert_eq!(
+                hunk_ids(&harness.handle.get_turn_hunks(7).await),
+                hunk_ids(&displayed.hunks)
+            );
+            harness.drain_events();
+            let affected = harness
+                .reject_scope(scope, &path, &displayed.hunks[0].id, 7)
+                .await
+                .unwrap();
+            assert_eq!(affected, vec![displayed.hunks[0].id.clone()]);
+            if change == "created" {
+                assert_eq!(
+                    std::fs::symlink_metadata(&path).unwrap_err().kind(),
+                    std::io::ErrorKind::NotFound
+                );
+            } else {
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            }
+            assert!(harness.get_all_hunks().await.is_empty());
+            assert!(harness.handle.get_turn_hunks(7).await.is_empty());
+            let summary = harness.handle.get_session_summary().await;
+            assert_eq!(summary.stats.rejected_hunks, 1);
+            assert_eq!(summary.stats.accepted_hunks, 0);
+            assert_eq!(summary.pending_hunks, 0);
+            let events = harness.drain_events();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event,
+                        HunkEvent::HunkRemoved { hunk_id, reason: HunkRemovalReason::Rejected, .. }
+                        if hunk_id == &displayed.hunks[0].id
+                    ))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_reject_stale_then_refresh_and_retry_preserves_external_hunk() {
+    let mut harness = TestHarness::new();
+    let baseline = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let modified = "1\nCHANGED_2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    harness.write_baseline("retry.rs", baseline);
+    harness.agent_write("retry.rs", modified, 7);
+    let displayed = harness.get_file_hunk_data("retry.rs").await;
+    assert_eq!(displayed.hunks.len(), 1);
+    let selected_id = displayed.hunks[0].id.clone();
+    let before = harness.handle.snapshot_state().await.unwrap();
+    let before_summary = harness.handle.get_session_summary().await;
+    harness.drain_events();
+    let path = harness.abs_path("retry.rs");
+    let external = format!("{modified}external append\n");
+    std::fs::write(&path, &external).unwrap();
+    assert!(matches!(
+        harness.handle.hunk_action(selected_id.clone(), HunkAction::Reject).await,
+        Err(HunkActionError::StaleContent { path: failed }) if failed == path
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), external.as_bytes());
+    harness
+        .assert_pending_state_unchanged(&before, &before_summary)
+        .await;
+
+    // Watcher catch-up supplies a fresh snapshot. Retrying only the original
+    // agent hunk must preserve the newly displayed, separate external hunk.
+    harness.handle.handle_file_change(path.clone());
+    let refreshed = harness.get_file_hunk_data("retry.rs").await;
+    assert_eq!(
+        refreshed.current.content.as_deref(),
+        Some(external.as_str())
+    );
+    assert_eq!(refreshed.hunks.len(), 2);
+    assert!(refreshed.hunks.iter().any(|hunk| hunk.id == selected_id));
+    let external_hunk = refreshed
+        .hunks
+        .iter()
+        .find(|hunk| hunk.id != selected_id)
+        .unwrap();
+    assert!(external_hunk.source.is_external());
+    harness.drain_events();
+    harness
+        .handle
+        .hunk_action(selected_id.clone(), HunkAction::Reject)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        format!("{baseline}external append\n").as_bytes()
+    );
+    assert_eq!(
+        hunk_ids(&harness.get_all_hunks().await),
+        HashSet::from([external_hunk.id.clone()])
+    );
+    assert!(harness.handle.get_turn_hunks(7).await.is_empty());
+    let summary = harness.handle.get_session_summary().await;
+    assert_eq!(summary.stats.rejected_hunks, 1);
+    assert_eq!(summary.stats.rejected_lines_added, 1);
+    assert_eq!(summary.stats.rejected_lines_removed, 1);
+    assert_eq!(summary.pending_hunks, 0);
+    assert_eq!(summary.unattributed_pending, 1);
+    let events = harness.drain_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+                HunkEvent::HunkRemoved { hunk_id, reason: HunkRemovalReason::Rejected, .. }
+                if hunk_id == &selected_id
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        harness.handle.hunk_action(selected_id.clone(), HunkAction::Reject).await,
+        Err(HunkActionError::HunkNotFound(id)) if id == selected_id
+    ));
+    assert_eq!(
+        harness
+            .handle
+            .get_session_summary()
+            .await
+            .stats
+            .rejected_hunks,
+        1
+    );
+    assert!(harness.drain_events().is_empty());
+}
+
+#[tokio::test]
+async fn test_turn_reject_stale_file_preserves_other_turns() {
+    let mut harness = TestHarness::new();
+    let baseline = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let modified = "1\nCHANGED_2\n3\n4\n5\n6\n7\n8\nCHANGED_9\n10\n";
+    for (file, turn) in [("own.rs", 7), ("other.rs", 8)] {
+        harness.write_baseline(file, baseline);
+        harness.agent_write(file, modified, turn);
+    }
+    let own = harness.get_file_hunk_data("own.rs").await;
+    let other = harness.get_file_hunk_data("other.rs").await;
+    assert_eq!(own.hunks.len(), 2);
+    assert_eq!(other.hunks.len(), 2);
+    let before = harness.handle.snapshot_state().await.unwrap();
+    let before_summary = harness.handle.get_session_summary().await;
+    harness.drain_events();
+    let path = harness.abs_path("own.rs");
+    let external = format!("{modified}external append\n");
+    std::fs::write(&path, &external).unwrap();
+    assert!(matches!(
+        harness.handle.turn_action(7, HunkAction::Reject).await,
+        Err(HunkActionError::StaleContent { path: failed }) if failed == path
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), external.as_bytes());
+    harness
+        .assert_pending_state_unchanged(&before, &before_summary)
+        .await;
+
+    // Repair this turn's fixture; another turn's stale disk must not be
+    // processed, block this reject, or lose its pending membership.
+    std::fs::write(&path, modified).unwrap();
+    let other_path = harness.abs_path("other.rs");
+    std::fs::write(&other_path, &external).unwrap();
+    let affected = harness
+        .handle
+        .turn_action(7, HunkAction::Reject)
+        .await
+        .unwrap();
+    assert_eq!(affected.len(), own.hunks.len());
+    assert_eq!(
+        affected.into_iter().collect::<HashSet<_>>(),
+        hunk_ids(&own.hunks)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), baseline.as_bytes());
+    assert_eq!(std::fs::read(&other_path).unwrap(), external.as_bytes());
+    assert!(harness.handle.get_turn_hunks(7).await.is_empty());
+    assert_eq!(
+        hunk_ids(&harness.handle.get_turn_hunks(8).await),
+        hunk_ids(&other.hunks)
+    );
+    assert_eq!(
+        hunk_ids(&harness.get_all_hunks().await),
+        hunk_ids(&other.hunks)
+    );
+    let summary = harness.handle.get_session_summary().await;
+    assert_eq!(summary.stats.rejected_hunks, 2);
+    assert_eq!(summary.pending_hunks, 2);
+    let removed: Vec<_> = harness
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            HunkEvent::HunkRemoved {
+                hunk_id, reason, ..
+            } => {
+                assert!(matches!(reason, HunkRemovalReason::Rejected));
+                Some(hunk_id)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed.len(), own.hunks.len());
+    assert_eq!(
+        removed.into_iter().collect::<HashSet<_>>(),
+        hunk_ids(&own.hunks)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_reject_permission_failure_keeps_projections() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let baseline = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let modified = "1\nCHANGED_2\n3\n4\n5\n6\n7\n8\nCHANGED_9\n10\n";
+    for scope in ["single", "file", "turn", "all"] {
+        for failure in ["read", "missing_read", "write", "delete", "restore"] {
+            let mut harness = TestHarness::new();
+            if failure != "delete" {
+                harness.write_baseline("blocked/failure.rs", baseline);
+            }
+            harness.agent_write("blocked/failure.rs", modified, 7);
+            let path = harness.abs_path("blocked/failure.rs");
+            let initial_hunks = harness.get_all_hunks().await;
+            assert_eq!(initial_hunks.len(), if failure == "delete" { 1 } else { 2 });
+            if matches!(failure, "restore" | "missing_read") {
+                std::fs::remove_file(&path).unwrap();
+                harness.handle.handle_file_deleted(path.clone());
+            }
+            let displayed = harness.get_file_hunk_data("blocked/failure.rs").await;
+            assert_eq!(
+                hunk_ids(&harness.handle.get_turn_hunks(7).await),
+                hunk_ids(&displayed.hunks)
+            );
+            let before = harness.handle.snapshot_state().await.unwrap();
+            let before_summary = harness.handle.get_session_summary().await;
+            harness.drain_events();
+            let blocked_path = if matches!(failure, "delete" | "restore" | "missing_read") {
+                path.parent().unwrap()
+            } else {
+                path.as_path()
+            };
+            let original_permissions = std::fs::metadata(blocked_path).unwrap().permissions();
+            let mode = match failure {
+                "read" | "missing_read" => 0o000,
+                "write" => 0o444,
+                "delete" | "restore" => 0o555,
+                _ => unreachable!(),
+            };
+            std::fs::set_permissions(blocked_path, std::fs::Permissions::from_mode(mode)).unwrap();
+            // Full content still matches for write/delete; only the subsequent
+            // mutation is forbidden. No disk replacement masks the I/O stage.
+            let result = harness
+                .reject_scope(scope, &path, &displayed.hunks[0].id, 7)
+                .await;
+            std::fs::set_permissions(blocked_path, original_permissions).unwrap();
+            let (failed_path, source) = match (failure, result) {
+                ("read" | "missing_read", Err(HunkActionError::ReadError { path, source })) => {
+                    (path, source)
+                }
+                ("write" | "restore", Err(HunkActionError::WriteError { path, source })) => {
+                    (path, source)
+                }
+                ("delete", Err(HunkActionError::DeleteError { path, source })) => (path, source),
+                (_, other) => panic!(
+                    "{scope}, {failure}: expected permission failure (requires a permission-enforcing non-root user), got {other:?}"
+                ),
+            };
+            assert_eq!(failed_path, path);
+            assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            if matches!(failure, "restore" | "missing_read") {
+                assert_eq!(
+                    std::fs::symlink_metadata(&path).unwrap_err().kind(),
+                    std::io::ErrorKind::NotFound
+                );
+            } else {
+                assert_eq!(std::fs::read(&path).unwrap(), modified.as_bytes());
+            }
+            harness
+                .assert_pending_state_unchanged(&before, &before_summary)
+                .await;
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_reject_replaced_symlink_keeps_target() {
+    for scope in ["single", "file", "turn", "all"] {
+        let mut harness = TestHarness::new();
+        harness.write_baseline("link.rs", "original\n");
+        harness.agent_write("link.rs", "modified\n", 7);
+        let displayed = harness.get_file_hunk_data("link.rs").await;
+        let before = harness.handle.snapshot_state().await.unwrap();
+        let before_summary = harness.handle.get_session_summary().await;
+        harness.drain_events();
+        let path = harness.abs_path("link.rs");
+        let target = harness.abs_path("external.rs");
+        // Even identical target bytes do not make a symlink the Full file
+        // against which the displayed hunk was generated.
+        std::fs::write(&target, "modified\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(matches!(
+            harness.reject_scope(scope, &path, &displayed.hunks[0].id, 7).await,
+            Err(HunkActionError::StaleContent { path: failed }) if failed == path
+        ));
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"modified\n");
+        harness
+            .assert_pending_state_unchanged(&before, &before_summary)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn test_reject_io_failure_keeps_projections() {
+    for scope in ["single", "file", "turn", "all"] {
+        for created_file in [false, true] {
+            let mut harness = TestHarness::new();
+            let baseline = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+            let modified = "1\nCHANGED_2\n3\n4\n5\n6\n7\n8\nCHANGED_9\n10\n";
+            if !created_file {
+                harness.write_baseline("failure.rs", baseline);
+            }
+            harness.agent_write("failure.rs", modified, 7);
+            let hunks = harness.get_all_hunks().await;
+            assert_eq!(hunks.len(), if created_file { 1 } else { 2 });
+            let ids = hunk_ids(&hunks);
+            assert_eq!(hunk_ids(&harness.handle.get_turn_hunks(7).await), ids);
+            let before_summary = harness.handle.get_session_summary().await;
+            let before_file = harness.get_file_hunk_data("failure.rs").await;
+            harness.drain_events();
+
+            // Only this fixture's path is replaced; no watcher notification is sent.
+            let path = harness.abs_path("failure.rs");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            let result = match scope {
+                "single" => harness
+                    .handle
+                    .hunk_action(hunks[0].id.clone(), HunkAction::Reject)
+                    .await
+                    .map(|()| vec![hunks[0].id.clone()]),
+                "file" => {
+                    harness
+                        .handle
+                        .file_action(path.clone(), HunkAction::Reject)
+                        .await
+                }
+                "turn" => harness.handle.turn_action(7, HunkAction::Reject).await,
+                "all" => harness.handle.all_action(HunkAction::Reject).await,
+                _ => unreachable!(),
+            };
+            // Preflight sees the directory as a changed, non-patchable target.
+            // Actual read/write/delete failures are covered by the permission test.
+            assert!(matches!(
+                result,
+                Err(HunkActionError::StaleContent { path: failed }) if failed == path
+            ));
+
+            assert!(path.is_dir());
+            assert_eq!(hunk_ids(&harness.get_all_hunks().await), ids);
+            assert_eq!(hunk_ids(&harness.handle.get_turn_hunks(7).await), ids);
+            assert_eq!(
+                serde_json::to_value(harness.handle.get_session_summary().await).unwrap(),
+                serde_json::to_value(before_summary).unwrap(),
+                "{scope}, created={created_file}: failed action changed summary"
+            );
+            assert_eq!(
+                serde_json::to_value(harness.get_file_hunk_data("failure.rs").await).unwrap(),
+                serde_json::to_value(before_file).unwrap(),
+                "{scope}, created={created_file}: failed action changed file state"
+            );
+            assert!(
+                harness.drain_events().is_empty(),
+                "{scope}, created={created_file}: failed action emitted events"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_batch_reject_failure_retains_committed_files() {
+    for scope in ["all", "turn"] {
+        for failure in ["directory", "external_append"] {
+            let mut harness = TestHarness::new();
+            let baseline = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+            let modified = "1\nCHANGED_2\n3\n4\n5\n6\n7\n8\nCHANGED_9\n10\n";
+            let files = ["a.rs", "b.rs", "c.rs"];
+            for file in files {
+                harness.agent_write_with_previous(file, modified, 7, Some(baseline));
+            }
+            let hunks = harness.get_all_hunks().await;
+            assert_eq!(hunks.len(), 6);
+            // AllAction traverses the same file map as GetAllHunks. Blocking its last
+            // file guarantees a partial success there; TurnAction builds its own map.
+            let failed_path = hunks.last().unwrap().path.clone();
+            let before_failed = harness.handle.get_file_hunk_data(failed_path.clone()).await;
+            let external = format!("{modified}external append\n");
+            harness.drain_events();
+            if failure == "directory" {
+                std::fs::remove_file(&failed_path).unwrap();
+                std::fs::create_dir(&failed_path).unwrap();
+            } else {
+                std::fs::write(&failed_path, &external).unwrap();
+            }
+
+            let result = match scope {
+                "all" => harness.handle.all_action(HunkAction::Reject).await,
+                "turn" => harness.handle.turn_action(7, HunkAction::Reject).await,
+                _ => unreachable!(),
+            };
+            assert!(matches!(
+                result,
+                Err(HunkActionError::StaleContent { ref path }) if path == &failed_path
+            ));
+            if failure == "directory" {
+                assert!(failed_path.is_dir());
+            } else {
+                assert_eq!(std::fs::read(&failed_path).unwrap(), external.as_bytes());
+            }
+            assert_eq!(
+                serde_json::to_value(harness.handle.get_file_hunk_data(failed_path.clone()).await)
+                    .unwrap(),
+                serde_json::to_value(before_failed).unwrap()
+            );
+
+            // Use actual disk results rather than assuming a HashMap iteration order.
+            let committed_files: HashSet<PathBuf> = files
+                .iter()
+                .map(|file| harness.abs_path(file))
+                .filter(|path| std::fs::read_to_string(path).is_ok_and(|text| text == baseline))
+                .collect();
+            if scope == "all" {
+                assert_eq!(committed_files.len(), files.len() - 1);
+            }
+            let committed_hunks: Vec<_> = hunks
+                .iter()
+                .filter(|hunk| committed_files.contains(&hunk.path))
+                .cloned()
+                .collect();
+            let pending_hunks: Vec<_> = hunks
+                .iter()
+                .filter(|hunk| !committed_files.contains(&hunk.path))
+                .cloned()
+                .collect();
+            let pending_ids = hunk_ids(&pending_hunks);
+            assert_eq!(hunk_ids(&harness.get_all_hunks().await), pending_ids);
+            assert_eq!(
+                hunk_ids(&harness.handle.get_turn_hunks(7).await),
+                pending_ids
+            );
+            let summary = harness.handle.get_session_summary().await;
+            assert_eq!(summary.stats.accepted_hunks, 0);
+            assert_eq!(summary.stats.accepted_lines_added, 0);
+            assert_eq!(summary.stats.accepted_lines_removed, 0);
+            assert_eq!(summary.stats.rejected_hunks, committed_hunks.len());
+            assert_eq!(summary.stats.rejected_lines_added, committed_hunks.len());
+            assert_eq!(summary.stats.rejected_lines_removed, committed_hunks.len());
+            assert_eq!(summary.pending_hunks, pending_hunks.len());
+            assert_eq!(summary.pending_lines_added, pending_hunks.len());
+            assert_eq!(summary.pending_lines_removed, pending_hunks.len());
+            assert_eq!(
+                summary.files_with_pending,
+                files.len() - committed_files.len()
+            );
+            assert_eq!(summary.turns.len(), 1);
+            assert_eq!(hunk_ids(&summary.turns[0].pending_hunks), pending_ids);
+            for file in files {
+                let data = harness.get_file_hunk_data(file).await;
+                assert_eq!(data.baseline.content.as_deref(), Some(baseline));
+                if committed_files.contains(&harness.abs_path(file)) {
+                    assert_eq!(data.current.content.as_deref(), Some(baseline));
+                    assert!(data.hunks.is_empty());
+                } else {
+                    assert_eq!(data.current.content.as_deref(), Some(modified));
+                    assert_eq!(data.hunks.len(), 2);
+                }
+            }
+            let removed_ids: Vec<_> = harness
+                .drain_events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    HunkEvent::HunkRemoved {
+                        hunk_id, reason, ..
+                    } => {
+                        assert!(matches!(reason, HunkRemovalReason::Rejected));
+                        Some(hunk_id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(removed_ids.len(), committed_hunks.len());
+            assert_eq!(
+                removed_ids.into_iter().collect::<HashSet<_>>(),
+                hunk_ids(&committed_hunks)
+            );
+
+            // Retry through the same public batch entry after repairing this fixture.
+            if failure == "directory" {
+                std::fs::remove_dir(&failed_path).unwrap();
+            }
+            std::fs::write(&failed_path, modified).unwrap();
+            let affected = match scope {
+                "all" => harness.handle.all_action(HunkAction::Reject).await,
+                "turn" => harness.handle.turn_action(7, HunkAction::Reject).await,
+                _ => unreachable!(),
+            }
+            .unwrap();
+            assert_eq!(affected.len(), pending_ids.len());
+            assert_eq!(affected.into_iter().collect::<HashSet<_>>(), pending_ids);
+            assert!(harness.get_all_hunks().await.is_empty());
+            assert!(harness.handle.get_turn_hunks(7).await.is_empty());
+            let summary = harness.handle.get_session_summary().await;
+            assert_eq!(summary.stats.rejected_hunks, hunks.len());
+            assert_eq!(summary.stats.rejected_lines_added, hunks.len());
+            assert_eq!(summary.stats.rejected_lines_removed, hunks.len());
+            assert_eq!(summary.pending_hunks, 0);
+            assert!(summary.turns.is_empty());
+            for file in files {
+                assert_eq!(
+                    std::fs::read_to_string(harness.abs_path(file)).unwrap(),
+                    baseline
+                );
+            }
+        }
+    }
 }
 
 // =========================================================================
@@ -763,11 +1609,38 @@ line 5
         .id
         .clone();
 
-    harness.accept_hunk(&accept_hunk).await;
-    harness.settle().await;
+    harness.drain_events();
+    assert!(harness.accept_hunk(&accept_hunk).await);
+    let pending = harness.handle.get_turn_hunks(0).await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, reject_hunk);
+    let accepted = harness.handle.get_session_summary().await;
+    assert_eq!(accepted.stats.accepted_hunks, 1);
+    assert_eq!(accepted.stats.rejected_hunks, 0);
 
-    harness.reject_hunk(&reject_hunk).await;
-    harness.settle().await;
+    assert!(harness.reject_hunk(&reject_hunk).await);
+    assert!(harness.handle.get_turn_hunks(0).await.is_empty());
+    let removed: Vec<_> = harness
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            HunkEvent::HunkRemoved {
+                hunk_id, reason, ..
+            } => Some((hunk_id, reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed.len(), 2);
+    assert!(removed.iter().any(|(id, reason)| {
+        id == &accept_hunk && matches!(reason, HunkRemovalReason::Accepted)
+    }));
+    assert!(removed.iter().any(|(id, reason)| {
+        id == &reject_hunk && matches!(reason, HunkRemovalReason::Rejected)
+    }));
+    assert_eq!(
+        std::fs::read_to_string(harness.abs_path("accept_reject.rs")).unwrap(),
+        "line 1\nACCEPT_ME\nline 3\nline 4\nline 5\n"
+    );
 
     let summary = harness.handle.get_session_summary().await;
 
@@ -3455,17 +4328,109 @@ async fn test_batch_action_normal_text_regression() {
     assert_eq!(hunks.len(), 2, "Should have 2 hunks");
 
     // Accept all hunks for the file
-    let result = harness
+    harness.drain_events();
+    let affected = harness
         .handle
         .file_action(harness.abs_path("batch.rs"), HunkAction::Accept)
-        .await;
-    assert!(result.is_ok(), "Batch accept should succeed");
+        .await
+        .expect("Batch accept should succeed");
+    assert_eq!(affected.len(), hunks.len());
+    assert_eq!(
+        affected.into_iter().collect::<HashSet<_>>(),
+        hunk_ids(&hunks)
+    );
+    assert!(harness.handle.get_turn_hunks(0).await.is_empty());
+    let summary = harness.handle.get_session_summary().await;
+    assert_eq!(summary.stats.accepted_hunks, 2);
+    assert_eq!(summary.stats.accepted_lines_added, 2);
+    assert_eq!(summary.stats.accepted_lines_removed, 2);
+    assert_eq!(summary.stats.rejected_hunks, 0);
+    let removed: Vec<_> = harness
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            HunkEvent::HunkRemoved {
+                hunk_id, reason, ..
+            } => {
+                assert!(matches!(reason, HunkRemovalReason::Accepted));
+                Some(hunk_id)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed.len(), hunks.len());
+    assert_eq!(
+        removed.into_iter().collect::<HashSet<_>>(),
+        hunk_ids(&hunks)
+    );
+    assert!(harness.get_all_hunks().await.is_empty());
 
-    // All hunks should be removed
-    let hunks_after = harness.get_all_hunks().await;
+    // New changes are rejected against the accepted baseline.
+    harness.agent_write(
+        "batch.rs",
+        "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\n",
+        1,
+    );
+    let hunks = harness.get_all_hunks().await;
+    assert_eq!(hunks.len(), 2);
+    harness.drain_events();
+    let affected = harness
+        .handle
+        .file_action(harness.abs_path("batch.rs"), HunkAction::Reject)
+        .await
+        .expect("Batch reject should succeed");
+    assert_eq!(affected.len(), hunks.len());
+    assert_eq!(
+        affected.into_iter().collect::<HashSet<_>>(),
+        hunk_ids(&hunks)
+    );
+    assert!(harness.handle.get_turn_hunks(1).await.is_empty());
+    let summary = harness.handle.get_session_summary().await;
+    assert_eq!(summary.stats.accepted_hunks, 2);
+    assert_eq!(summary.stats.rejected_hunks, 2);
+    assert_eq!(summary.stats.rejected_lines_added, 2);
+    assert_eq!(summary.stats.rejected_lines_removed, 2);
+    assert_eq!(summary.pending_hunks, 0);
+    assert!(summary.turns.is_empty());
+    let removed: Vec<_> = harness
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            HunkEvent::HunkRemoved {
+                hunk_id, reason, ..
+            } => {
+                assert!(matches!(reason, HunkRemovalReason::Rejected));
+                Some(hunk_id)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed.len(), hunks.len());
+    assert_eq!(
+        removed.into_iter().collect::<HashSet<_>>(),
+        hunk_ids(&hunks)
+    );
+    assert_eq!(
+        std::fs::read_to_string(harness.abs_path("batch.rs")).unwrap(),
+        "line 1\nCHANGE_A\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nCHANGE_B\nline 10\n"
+    );
+    assert!(harness.get_all_hunks().await.is_empty());
     assert!(
-        hunks_after.is_empty(),
-        "All hunks should be removed after batch accept"
+        harness
+            .handle
+            .file_action(harness.abs_path("batch.rs"), HunkAction::Reject)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        harness
+            .handle
+            .get_session_summary()
+            .await
+            .stats
+            .rejected_hunks,
+        2
     );
 }
 

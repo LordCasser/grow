@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use tokio::sync::{Semaphore, mpsc, oneshot};
+use tool_types::planning::PlanningReadSnapshot;
 
+use super::parent_planning::{ParentPlanningReadError, ParentPlanningRequest};
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
     SubagentEvent, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
@@ -32,6 +34,15 @@ use tool_types::{SubagentDetails, SubagentListScope, SubagentStatus, SubagentSum
 /// identically regardless of the underlying transport.
 #[async_trait::async_trait]
 pub trait SubagentBackend: Send + Sync + 'static {
+    /// Read the session-bound caller's immediate parent's plan without changing
+    /// either session. `Ok(None)` means the available parent has no local plan.
+    async fn read_parent_plan(
+        &self,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<PlanningReadSnapshot>, ParentPlanningReadError> {
+        Err(ParentPlanningReadError::Unavailable)
+    }
+
     async fn interact(
         &self,
         _id: String,
@@ -40,6 +51,18 @@ pub trait SubagentBackend: Send + Sync + 'static {
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<super::interaction::AgentInteractionOutput, String> {
         Err("This host does not support parent-child communication.".into())
+    }
+
+    /// Queue a sampling selection for an active directly owned child. The host
+    /// owns the actor-admission receipt and must not wait for application.
+    async fn set_model(
+        &self,
+        _subagent_id: String,
+        _model: Option<String>,
+        _effort: Option<sampling_types::ReasoningEffort>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<(), String> {
+        Err("This host does not support subagent model control.".into())
     }
 
     /// Spawn a subagent and await its result.
@@ -472,6 +495,68 @@ impl Drop for CancelResultReceiverOnDrop {
 
 #[async_trait::async_trait]
 impl SubagentBackend for ChannelBackend {
+    async fn read_parent_plan(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<PlanningReadSnapshot>, ParentPlanningReadError> {
+        let source_session_id = self
+            .parent_session_id()
+            .ok_or(ParentPlanningReadError::Unavailable)?;
+        if cancellation.is_cancelled() {
+            return Err(ParentPlanningReadError::Unavailable);
+        }
+        let (respond_to, response) = oneshot::channel();
+        self.tx
+            .send(SubagentEvent::ReadParentPlanning(ParentPlanningRequest {
+                source_session_id,
+                cancellation: cancellation.clone(),
+                respond_to,
+            }))
+            .map_err(|_| ParentPlanningReadError::Unavailable)?;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ParentPlanningReadError::Unavailable),
+            result = tokio::time::timeout(OBSERVATION_DEADLINE, response) => {
+                result
+                    .map_err(|_| ParentPlanningReadError::TimedOut)?
+                    .map_err(|_| ParentPlanningReadError::Unavailable)?
+            }
+        }
+    }
+
+    async fn set_model(
+        &self,
+        subagent_id: String,
+        model: Option<String>,
+        effort: Option<sampling_types::ReasoningEffort>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<(), String> {
+        let source_session_id = self
+            .parent_session_id()
+            .ok_or("Unbound subagent model-control source")?;
+        if cancellation.is_cancelled() {
+            return Err("Subagent model control cancelled".into());
+        }
+        let (respond_to, response) = oneshot::channel();
+        self.tx
+            .send(SubagentEvent::SetModel(
+                super::super::set_subagent_model::SubagentModelControlRequest {
+                    source_session_id,
+                    subagent_id,
+                    model,
+                    effort,
+                    cancellation,
+                    respond_to,
+                },
+            ))
+            .map_err(|_| "Subagent coordinator closed before confirming admission")?;
+        // Once forwarded, the host owns the admission/cancellation race. Keeping
+        // this receiver open lets it report the actual target actor receipt.
+        response
+            .await
+            .map_err(|_| "Subagent model-control endpoint closed before confirming admission")?
+    }
+
     async fn list_running(&self) -> Result<Vec<SubagentInspection>, SubagentObservationError> {
         let Some(parent_session_id) = self.parent_session_id.as_deref() else {
             return Err(SubagentObservationError::Unauthorized);

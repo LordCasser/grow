@@ -1526,6 +1526,7 @@ pub(super) async fn run_session(
                         | SessionCommand::CompactSession { .. }
                         | SessionCommand::Rewind { .. }
                         | SessionCommand::SetSessionModel { .. }
+                        | SessionCommand::AdmitToolSampling { .. }
                         | SessionCommand::PatchSessionEffort { .. }
                         | SessionCommand::BehaviorChange { .. }
                         | SessionCommand::ReceiveAgentMessage { .. }
@@ -1773,6 +1774,7 @@ pub(super) async fn run_session(
                             | chat_state::NotificationSource::TaskStillRunning { .. }
                             | chat_state::NotificationSource::PlanHandoff { .. }
                             | chat_state::NotificationSource::ParentMessage { .. }
+                | chat_state::NotificationSource::PlanGuidance { .. }
                 | chat_state::NotificationSource::AgentReply { .. }
                             | chat_state::NotificationSource::InquiryAnswered { .. }
                             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
@@ -1936,6 +1938,9 @@ pub(super) async fn run_session(
                             terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
+                    }
+                    SessionCommand::AdmitToolSampling { selection, admitted, responds_to } => {
+                        session.admit_tool_sampling(selection, admitted, responds_to).await;
                     }
                     SessionCommand::SetSessionModel { route, catalog, intent, responds_to } => {
                         session

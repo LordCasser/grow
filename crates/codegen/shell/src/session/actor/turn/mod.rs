@@ -86,6 +86,110 @@ mod planning_completion_gate_tests {
 }
 
 #[cfg(test)]
+mod runtime_context_tests {
+    use crate::session::actor::tests::support::build_actor;
+    use sampling_types::ConversationItem;
+    use tool_types::planning::{LocalPlan, PlanPriority, PlanStep, PlanStepStatus};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn turn_request_keeps_local_planning_out_of_stored_messages() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = build_actor().await;
+                // The shared fixture starts with a zero-token provider anchor.
+                // Align it to this request before comparing exact local costs.
+                let initial = actor.build_turn_request(vec![], None, None).await.unwrap();
+                actor.chat_state_handle.record_provider_context_anchor(
+                    chat_state::estimate_request_input_tokens(&initial),
+                );
+                actor
+                    .chat_state_handle
+                    .push_user_message_durably(ConversationItem::user("inspect the change"))
+                    .await
+                    .unwrap();
+                let mut plan = LocalPlan::new(actor.session_id_string(), "work:runtime-context");
+                plan.steps.push(PlanStep {
+                    id: "request-only".into(),
+                    content: "Build the isolated request context".into(),
+                    priority: PlanPriority::Normal,
+                    status: PlanStepStatus::InProgress,
+                    requirements: None,
+                    removed: false,
+                });
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                        chat_state::timeline::PlanningEvent {
+                            previous: None,
+                            plan: Box::new(plan),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                let baseline = actor.chat_state_handle.timeline_events().await.unwrap();
+                let before = actor
+                    .chat_state_handle
+                    .materialize_timeline(actor.session_id_string())
+                    .await
+                    .unwrap();
+                for _ in 0..2 {
+                    let request = actor.build_turn_request(vec![], None, None).await.unwrap();
+                    assert_eq!(request.items.len(), before.surface.len() + 1);
+                    assert!(
+                        request
+                            .items
+                            .last()
+                            .unwrap()
+                            .text_content()
+                            .contains("Build the isolated request context")
+                    );
+                    assert!(matches!(
+                        request.items.last(),
+                        Some(ConversationItem::User(user))
+                            if user.synthetic_reason
+                                == Some(sampling_types::SyntheticReason::SystemReminder)
+                    ));
+                    assert_eq!(
+                        actor.chat_state_handle.get_projected_tokens().await,
+                        chat_state::estimate_request_input_tokens(&request)
+                    );
+                }
+                let after = actor
+                    .chat_state_handle
+                    .materialize_timeline(actor.session_id_string())
+                    .await
+                    .unwrap();
+                assert_eq!(after.surface_ids, before.surface_ids);
+                assert_eq!(
+                    serde_json::to_value(&after.surface).unwrap(),
+                    serde_json::to_value(&before.surface).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(actor.chat_state_handle.timeline_events().await.unwrap())
+                        .unwrap(),
+                    serde_json::to_value(&baseline).unwrap()
+                );
+                let cold = chat_state::Timeline::from_events(baseline).unwrap();
+                assert_eq!(
+                    serde_json::to_value(cold.surface()).unwrap(),
+                    serde_json::to_value(&before.surface).unwrap()
+                );
+                assert_eq!(
+                    actor
+                        .memory
+                        .injection_count
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    0
+                );
+            })
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod planning_context_tests;
+
+#[cfg(test)]
 mod structured_output_recovery_tests {
     use super::{
         PlannedCompletionPreflight, STRUCTURED_OUTPUT_TOOL, next_structured_output_retry_count,
@@ -983,6 +1087,45 @@ impl SessionActor {
             crate::session::helpers::memory_context::format_memory_reminder(&results)
         })
     }
+    async fn build_turn_request(
+        &self,
+        tool_definitions: Vec<ToolSpec>,
+        memory_reminder: Option<String>,
+        json_output: Option<sampling_types::JsonOutputFormat>,
+    ) -> Result<sampling_types::ConversationRequest, acp::Error> {
+        let runtime_context = self
+            .local_planning_context()
+            .await
+            .map_err(|error| acp::Error::internal_error().data(error))?;
+        // A control commit and request preparation share authority.
+        // Keep a captured Goal tag from outliving a pause/clear
+        // across the asynchronous image-mode query below.
+        let _boundary = self.step_control_gate.lock().await;
+        let active_goal = self.active_goal_directive_tag();
+        self.chat_state_handle
+            .build_request_for_image_mode(
+                self.session_info.id.0.as_ref(),
+                tool_definitions,
+                memory_reminder,
+                runtime_context,
+                active_goal,
+                json_output,
+                self.unsupported_current_model_for_images().await.is_some(),
+            )
+            .await
+            .map_err(|error| {
+                let message = if matches!(
+                    error,
+                    chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
+                ) {
+                    Self::image_projection_failure_message(&error)
+                } else {
+                    format!("failed to durably prepare model context: {error}")
+                };
+                acp::Error::internal_error().data(message)
+            })
+    }
+
     async fn check_planning_completion_gate(
         &self,
         completed_turns: usize,
@@ -1760,17 +1903,6 @@ impl SessionActor {
                 self.flush_pending_system_reminders().await;
                 self.drain_active_notifications().await?;
                 let memory_reminder = self.first_turn_memory_reminder().await;
-                let memory_reminder = match self
-                    .local_planning_context()
-                    .await
-                    .map_err(|error| acp::Error::internal_error().data(error))?
-                {
-                    Some(planning) => Some(match memory_reminder {
-                        Some(memory) => format!("{memory}\n\n{planning}"),
-                        None => planning,
-                    }),
-                    None => memory_reminder,
-                };
                 if memory_reminder.is_some() {
                     self.memory
                         .injection_count
@@ -1813,34 +1945,9 @@ impl SessionActor {
                     })
                     .flatten();
                 let build_req_start = std::time::Instant::now();
-                let mut request = {
-                    // A control commit and request preparation share authority.
-                    // Keep a captured Goal tag from outliving a pause/clear
-                    // across the asynchronous image-mode query below.
-                    let _boundary = self.step_control_gate.lock().await;
-                    let active_goal = self.active_goal_directive_tag();
-                    self.chat_state_handle
-                        .build_request_for_image_mode(
-                            self.session_info.id.0.as_ref(),
-                            effective_tools,
-                            memory_reminder,
-                            active_goal,
-                            request_json_output,
-                            self.unsupported_current_model_for_images().await.is_some(),
-                        )
-                        .await
-                }
-                .map_err(|error| {
-                    let message = if matches!(
-                        error,
-                        chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
-                    ) {
-                        Self::image_projection_failure_message(&error)
-                    } else {
-                        format!("failed to durably prepare model context: {error}")
-                    };
-                    acp::Error::internal_error().data(message)
-                })?;
+                let mut request = self
+                    .build_turn_request(effective_tools, memory_reminder, request_json_output)
+                    .await?;
                 ::diagnostics::unified_log::debug(
                     "shell.turn.build_request_done",
                     Some(self.session_info.id.0.as_ref()),

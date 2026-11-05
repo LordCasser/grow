@@ -872,6 +872,7 @@ impl Drop for SessionLifecycleGuard<'_> {
 }
 mod code_nav;
 mod coordination;
+mod session_model;
 mod session_lifecycle;
 mod runtime_handoff;
 mod subagent_coordinator;

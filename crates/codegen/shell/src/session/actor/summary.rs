@@ -407,6 +407,7 @@ mod title_source_tests {
             surface_revision: timeline.surface_revision(),
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
+            unconsumed_skill_load_ids: vec![],
             direct_user_inputs: vec![],
             permission_context: vec![],
             active_control_contexts: Default::default(),

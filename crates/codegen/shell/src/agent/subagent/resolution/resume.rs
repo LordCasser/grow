@@ -1,7 +1,7 @@
 //! Resume identity validation for subagents.
 //!
-//! The source agent type is stable across resume. Model overrides are
-//! soft-ignored because the source model is pinned by the host.
+//! The source agent type is stable across resume. The child runner owns
+//! model/effort selection after canonical source validation.
 
 use super::types::ResumeSourceData;
 

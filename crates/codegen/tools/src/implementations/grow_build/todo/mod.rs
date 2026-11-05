@@ -12,7 +12,9 @@ use tool_types::{DependencyKind, LocalPlan, PlanLink, PlanPriority, PlanStepStat
 #[cfg(test)]
 use tool_types::{WaitCondition, WaitDependency};
 
+mod read;
 pub mod runtime;
+pub use read::{TODO_READ_TOOL_NAME, TodoReadTool};
 pub use runtime::{LocalPlanProjection, PlanningAction, PlanningCommand, PlanningRuntimeHandle};
 
 #[derive(thiserror::Error, Debug)]
@@ -684,6 +686,7 @@ mod tests {
                     });
                     respond_to.send(Ok(plan)).unwrap();
                 }
+                PlanningCommand::Read { .. } => panic!("unexpected read command"),
                 PlanningCommand::Link { .. } => panic!("unexpected link command"),
                 PlanningCommand::Undispatched { .. } => {
                     panic!("unexpected undispatched command")

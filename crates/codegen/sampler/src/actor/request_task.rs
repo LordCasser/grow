@@ -170,8 +170,10 @@ impl Drop for AttemptPreview {
 
 /// Run a single sampling request to completion (or final failure).
 ///
-/// Returns the request id so the actor can clean it up from
-/// `active_requests` via [`tokio::task::JoinSet::join_next`].
+/// Returns the logical request id retained for request and event identity.
+/// The actor cleans `active_requests` by the tracked Tokio task id from
+/// `JoinSet::join_next_with_id` or `JoinError::id`, independently of this
+/// reusable request id.
 pub(crate) async fn run_request_task(
     request_id: RequestId,
     request: ConversationRequest,

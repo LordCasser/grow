@@ -85,11 +85,8 @@ pub async fn list_skills_with_plugins(
     )
     .await;
 
-    let git_root = working_directory.and_then(|wd| {
-        git2::Repository::discover(wd)
-            .ok()
-            .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
-    });
+    let git_root =
+        working_directory.and_then(|wd| crate::repo::discover_worktree_root(Path::new(wd)).ok());
     skills.extend(collect_config_skills(&config.paths, git_root.as_deref()));
 
     skills.extend(collect_injected_skills(
@@ -141,10 +138,9 @@ pub fn collect_skill_config_dirs(
         cwd.map(|path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
     let cwd = resolved_cwd.as_deref();
     let git_root = cwd.and_then(|c| {
-        git2::Repository::discover(c).ok().and_then(|repo| {
-            repo.workdir()
-                .map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-        })
+        crate::repo::discover_worktree_root(c)
+            .ok()
+            .map(|p| dunce::canonicalize(&p).unwrap_or(p))
     });
 
     let mut dirs = Vec::new();
@@ -380,10 +376,9 @@ async fn list_skills_with_roots(
         .map(|path| dunce::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)));
 
     let git_root = cwd.as_ref().and_then(|c| {
-        git2::Repository::discover(c).ok().and_then(|repo| {
-            repo.workdir()
-                .map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-        })
+        crate::repo::discover_worktree_root(c)
+            .ok()
+            .map(|p| dunce::canonicalize(&p).unwrap_or(p))
     });
 
     let config_dirs =

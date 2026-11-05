@@ -1,6 +1,22 @@
 use super::*;
 use crate::session::{PromptOrigin, TurnKind};
 
+#[cfg(test)]
+#[path = "parent_plan_binding_tests.rs"]
+mod parent_plan_binding_tests;
+
+fn parent_plan_binding_from_spawn(
+    spawn: &chat_state::SubagentSpawnEvent,
+) -> Option<crate::session::acp_types::ParentPlanBinding> {
+    spawn.parent_step_id.as_ref().map(|parent_step_id| {
+        crate::session::acp_types::ParentPlanBinding {
+            parent_session_id: spawn.security_parent_session_id.clone(),
+            task_id: spawn.subagent_id.clone(),
+            parent_step_id: parent_step_id.clone(),
+        }
+    })
+}
+
 /// Scoped ACP control route for a live child actor. Terminal child runs remove
 /// the route; a suspended run transfers its registration to the coordinator.
 struct ActiveChildRegistration {
@@ -136,11 +152,11 @@ pub(super) async fn record_subagent_usage_before(
 pub(super) fn task_model_override_error(
     requested: Option<&str>,
     provenance: ModelOverrideProvenance,
-    is_resume: bool,
+    is_checkpoint_restore: bool,
     available: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
     _is_session_auth: bool,
 ) -> Option<String> {
-    if provenance != ModelOverrideProvenance::Tool || is_resume {
+    if provenance != ModelOverrideProvenance::Tool || is_checkpoint_restore {
         return None;
     }
     let requested = requested?;
@@ -366,6 +382,12 @@ async fn run_shell_child_inner(
         else {
             unreachable!()
         };
+        if request.parent_step_id != spawn.parent_step_id {
+            return child_run_output(
+                failure_result(&request, "original parent Spawn planning binding changed"),
+                completion_data,
+            );
+        }
         restored_capability_mode = Some(
             match crate::agent::subagent::resolution::restored_birth_capability(
                 spawn.capability_mode.as_deref(),
@@ -604,13 +626,6 @@ async fn run_shell_child_inner(
         None
     };
     if let Some(ref source) = resume_source {
-        if request.runtime_overrides.model.is_some() {
-            tracing::debug!(
-                subagent_id = %request.id,
-                "Ignoring caller model override on resume; source model will be pinned"
-            );
-        }
-        effective_runtime.model = None;
         if let Err(e) = crate::agent::subagent::resolution::validate_resume_identity(
             &request.subagent_type,
             &source.data,
@@ -623,12 +638,30 @@ async fn run_shell_child_inner(
         {
             return child_run_output(failure_result(&request, &message), completion_data);
         }
+        // Ordinary resume patches each explicit field over the validated
+        // source selection. Definition/model defaults must not replace an
+        // omitted source effort, even when that actual value is unset.
+        effective_runtime.model = Some(source.model_id.clone());
+        effective_runtime.reasoning_effort =
+            Some(source.reasoning_effort.map(|effort| effort.to_string()));
+        if !request.owner.is_workflow() {
+            if let Some(model) = &request.runtime_overrides.model {
+                effective_runtime.model = Some(model.clone());
+            }
+            if let Some(effort) = &request.runtime_overrides.reasoning_effort {
+                effective_runtime.reasoning_effort = Some(effort.clone());
+            }
+        }
     }
     if !request.owner.is_workflow()
         && let Some(error) = task_model_override_error(
             request.runtime_overrides.model.as_deref(),
-            request.runtime_overrides.model_override_provenance,
-            resume_source.is_some(),
+            if resume_source.is_some() {
+                ModelOverrideProvenance::Tool
+            } else {
+                request.runtime_overrides.model_override_provenance
+            },
+            restore.is_some(),
             &ctx.available_models,
             false,
         )
@@ -788,7 +821,11 @@ async fn run_shell_child_inner(
     // it with the parent's later model selection would make phases of one Run
     // nondeterministic. The forked conversation remains valid without cache
     // reuse, so Workflow ownership wins here.
-    if restore.is_none() && request.fork_context && !request.owner.is_workflow() {
+    if restore.is_none()
+        && resume_source.is_none()
+        && request.fork_context
+        && !request.owner.is_workflow()
+    {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
     let workflow_model = resume_source
@@ -824,75 +861,20 @@ async fn run_shell_child_inner(
             }
         })
     };
-    let mut effective_route = match resolved_model {
+    let effective_route = match resolved_model {
         Ok(resolved) => resolved,
         Err(error) => {
             return child_run_output(failure_result(&request, &error), completion_data);
         }
     };
     let mut effective_sampling_config = effective_route.sampling_config.clone();
-    let mut effective_model_id = effective_route.model_id.clone();
+    let effective_model_id = effective_route.model_id.clone();
     let subagent_max_turns = resolve_subagent_max_turns(definition.max_turns, ctx.parent_max_turns);
     // Workflow routes came from the immutable Run catalog; ordinary explicit
     // routes came from the live catalog. The remaining route is an
     // actor-committed parent snapshot. None may be reassembled from separately
     // observed catalog epochs.
-    if let Some(ref source) = resume_source
-        && effective_model_id.0.as_ref() != source.model_id.as_str()
-    {
-        let source_model = &source.model_id;
-        if request.owner.is_workflow() {
-            let resolved = match resolve_workflow_sampler(&request, source_model, &ctx) {
-                Ok(resolved) => resolved,
-                Err(message) => {
-                    return child_run_output(failure_result(&request, &message), completion_data);
-                }
-            };
-            effective_route = resolved;
-            effective_sampling_config = effective_route.sampling_config.clone();
-            effective_model_id = effective_route.model_id.clone();
-        } else if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
-            tracing::info!(
-                subagent_id = %request.id,
-                resolved_model = %effective_model_id.0,
-                source_model = source_model,
-                "Pinning resumed child to source model"
-            );
-            effective_sampling_config = resolved.0;
-            effective_model_id = resolved.1;
-            effective_route.model_id = effective_model_id.clone();
-            effective_route.sampling_config = effective_sampling_config.clone();
-            effective_route.auto_compact_threshold_percent =
-                ctx.resolve_auto_compact_threshold_percent(&effective_model_id.0);
-            effective_route.inference_idle_timeout = std::time::Duration::from_secs(
-                ctx.resolve_inference_idle_timeout_secs(&effective_model_id.0),
-            );
-            effective_route.max_retries =
-                sampler::resolve_max_retries(effective_sampling_config.max_retries);
-        } else {
-            let msg = format!(
-                "Cannot resume from subagent '{}': source model '{source_model}' \
-                 is no longer available in the model catalogue.",
-                source.subagent_id,
-            );
-            return child_run_output(failure_result(&request, &msg), completion_data);
-        }
-    }
-    if let Some(source) = resume_source.as_ref() {
-        if !request.owner.is_workflow()
-            && let Some(effort) = source.reasoning_effort
-            && !ctx
-                .models_manager
-                .model_offers_reasoning_effort(effective_model_id.0.as_ref(), effort)
-        {
-            let message = format!(
-                "Cannot resume from subagent '{}': source reasoning effort '{}' is no longer offered by model '{}'.",
-                source.subagent_id, effort, effective_model_id.0,
-            );
-            return child_run_output(failure_result(&request, &message), completion_data);
-        }
-        effective_sampling_config.reasoning_effort = source.reasoning_effort;
-    } else if let Some(policy) = effective_runtime.reasoning_effort.as_ref() {
+    if let Some(policy) = effective_runtime.reasoning_effort.as_ref() {
         if let Some(raw) = policy.as_deref() {
             let effort = match raw.parse::<ReasoningEffort>() {
                 Ok(effort) => effort,
@@ -908,8 +890,15 @@ async fn run_shell_child_inner(
             };
             if !request.owner.is_workflow()
                 && !ctx
-                    .models_manager
-                    .model_offers_reasoning_effort(effective_model_id.0.as_ref(), effort)
+                    .available_models
+                    .get(effective_model_id.0.as_ref())
+                    .is_some_and(|entry| {
+                        entry
+                            .info
+                            .reasoning_efforts
+                            .iter()
+                            .any(|option| option.value == effort)
+                    })
             {
                 return child_run_output(
                     failure_result(
@@ -933,8 +922,12 @@ async fn run_shell_child_inner(
         &effective_sampling_config.base_url,
         &effective_sampling_config.query_params,
     );
+    let explicit_resume_model = resume_source.is_some()
+        && !request.owner.is_workflow()
+        && request.runtime_overrides.model.is_some();
     let expected_transport_key = resume_source
         .as_ref()
+        .filter(|_| !explicit_resume_model)
         .map(|source| &source.model_transport_key)
         .or(request.runtime_overrides.model_transport_key.as_ref());
     if let Some(expected) = expected_transport_key
@@ -1240,8 +1233,14 @@ async fn run_shell_child_inner(
             }
         }
     };
+    let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
+        &parent_spawn.kind
+    else {
+        unreachable!("parent_spawn is the committed or validated Spawn");
+    };
+    let delegated_parent_plan = parent_plan_binding_from_spawn(spawn);
     completion_data.spawn_admitted = true;
-    completion_data.expected_parent_step_id = request.parent_step_id.clone();
+    completion_data.expected_parent_step_id = spawn.parent_step_id.clone();
     completion_data.terminal_committed = false;
     let subagent_seed = chat_state::SubagentSeedEvent {
         parent_timeline_id: ctx.parent_session_id.clone(),
@@ -1670,6 +1669,7 @@ async fn run_shell_child_inner(
             inherited_prefix_len: Some(inherited_prefix_len),
             is_subagent: true,
             parent_session_id: Some(ctx.parent_session_id.clone()),
+            delegated_parent_plan,
             subagent_type: Some(request.subagent_type.clone()),
             workflow_run_id: request.owner.workflow_run_id().map(str::to_owned),
             workflow_runtime_route,
@@ -1824,12 +1824,21 @@ async fn run_shell_child_inner(
         child_session_id.clone(),
         child_handle.clone(),
     );
-    if restore.is_none()
-        && let Err(error) = catch_up_child_catalog_generation(&ctx, &child_handle).await
-    {
+    let child_model_setup = async {
+        if restore.is_none() {
+            catch_up_child_catalog_generation(&ctx, &child_handle)
+                .await
+                .map_err(|error| format!("Failed to converge child model catalog: {error}"))?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    if let Err(message) = child_model_setup {
         let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
         drop(child_thread);
-        let message = format!("Failed to converge child model catalog: {error}");
+        if restore.is_some() {
+            return child_run_output(failure_result(&request, &message), completion_data);
+        }
         let mut result = fail_subagent(
             &message,
             &subagent_id,

@@ -1,0 +1,23 @@
+# Design
+
+父亲自核对api::remove_worktree→remove_worktree_from_disk在633读取.git指针、658任意remove_dir_all且忽略错误。Workspace remove(force)和Shell失败清理都调用该API；现git/worktree.rs已有common-dir和backlink解析（包括Git相对backlink）用于scoped stale cleanup，可复用语义，不能对整个repo运行git worktree prune。
+
+## Decision
+
+删除owner仍在fast-worktree，公开remove函数签名不变。先用symlink_metadata识别checkout：普通symlink删除自身而不沿它解析.git目标；正常checkout若有.git文件，读到的gitdir只是候选。验证其为真实common Git dir下worktrees的直接registration子目录、commondir解析到同一common实体、registration gitdir backlink解析到正在删除checkout的.git（相对路径均按所属文件目录），且不能把common/main .git/separate元数据当registration。canonical只用于实体比较，不单独产生删除权。具体采用gix现接口或原Git helper由coder选，不增加通用路径/清理框架。
+
+非linked/separate/伪造且不能证明registration归属：允许删除已明确请求的checkout自身，保留所有未验证目标；不以一条未知.git指针导致删除额外目录。读取/身份异常先于checkout副作用返回明确错误，或作为无registration的情况仅删checkout，须保证不会通过错误分支获得更大删除范围。真linked registration删失败传播partial failure，不更新metadata DB成成功。缺失目标/路径重试保持幂等；locked注册遵循既有语义，不添加跨工作树prune。metadata feature下若checkout缺失但有creation_mode=linked的托管记录，必须从已有source_repo重新取得common-dir，再以exact checkout backlink验证/清理对应registration；确认清除或读取成功证明不存在后才可注销记录。source无法读取、身份不符或扫描失败保持未完成，不能用现best-effort helper返回0代替证明；缺失checkout且无记录保持原幂等，不猜外部目录。此规则保留第一次checkout已删/registration清理失败后的重试责任，不增持久字段。Linux overlay/btrfs先行删除通道不在此重写，需核对它们有无共用本helper依赖。
+
+## Review correction：后置 stale 清理共用身份保证
+
+独立review后父核对`git/worktree.rs::remove_stale_worktree_registrations`只按backlink路径和checkout不存在筛选，再直接删除；未核对commondir。`shell/session/worktree.rs::cleanup_worktree_on_failure`在pristine确认及公共remove成功后调用此helper，`git/checkout.rs` linked rehydrate前置/失败清理也直接调用。新verifier拒绝的mismatched-commondir entry因此可能在后置清理中被删除。此为同一fast-worktree registration删除owner的未收敛路径，不能靠Shell额外guard或仅删除一个调用点掩盖。
+
+本次增量将旧stale helper的删除许可也收敛到已存在的common Git dir、直接真实registration、commondir与exact recorded checkout/.git backlink验证。来源common、worktrees/entry和路径规范化异常时保留该entry，不让symlink或best-effort错误分支扩大权限。保持Path/UnderPrefix作用域、live/locked保护及best-effort计数返回，记录无法验证原因；metadata缺checkout的严格重试仍返回Err，不以best-effort的0替代完成证明。复用现registration验证与checked normalization，不建新清理框架/持久字段。
+
+新回归至少从公开remove→公开stale清理的复合链覆盖mismatched commondir、合法linked、relative、entry symlink和读取失败；并核对真实rehydrate调用路径。Shell pristine gate的可达性须以真实fixture或精确说明保留，不能把静态链当作已经运行。当前32项证据仍证明旧冻结版本的普通API边界，不能证明这条遗漏路径已安全，也不能自动归到修正后源码。
+
+## Coder Task Spec and Review Plan
+
+一项功能：绑定registration清理身份；write fast-worktree api/Git worktree owner和同crate tests，必要注释；父拥有本change/spec/docs/backlog，其他crate不改。若证明source身份必须新增上游输入才能满足要求，先回父定接口，不私自跨模块改。真实公共API同三对照：合法git worktree add保持checkout/对应registration删且兄弟/主repo不变；git init --separate-git-dir只删checkout保留元数据marker；任意gitfile目标只删checkout保留目标。补relative gitdir/commondir/backlink、不匹配backlink、symlink checkout及失败情况，不能只测私有parser。git测试只在/tmp自建repo，禁用全局Git配置污染，不调用真实目录。
+
+Tier3独立luna审身份和失败边界，父核对Workspace force/cleanup不绕过并在数据里程碑集成。所有Cargo固定Rust/Cargo/rustdoc1.93.1和独立GROW_HOME，父安排串行编译窗口。未经父窗口前只落源码/轻量rustfmt/git diff --check与小隔离Git机制，准备冻结后通知父。默认不增加依赖/兼容别名，不重写整个worktree层。

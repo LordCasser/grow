@@ -1,6 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 mod delegation_identity_tests;
 mod observation_tests;
+mod workflow_recovery_tests;
 use super::*;
 use super::handle_request::{
     canonical_total_tokens, child_task_prompt_identity, record_subagent_usage,
@@ -1432,6 +1433,16 @@ async fn recovery_parent(
             chat_state::SubagentEvent::Spawned(Box::new(spawn.clone())),
         ))
         .unwrap();
+    recovery_parent_from_timeline(session_dir, timeline).await
+}
+
+async fn recovery_parent_from_timeline(
+    session_dir: &Path,
+    timeline: chat_state::Timeline,
+) -> (
+    chat_state::ChatStateHandle,
+    chat_state::MockPersistenceReceiver,
+) {
     let journal = crate::session::storage::JsonlStorageAdapter::encode_journal(
         timeline.events(),
         &[],
@@ -2048,6 +2059,7 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
                 &crate::session::storage::SubagentProjectionState::default(),
                 false,
                 true,
+                &[],
                 &backend,
                 &parent_id,
                 &parent,
@@ -2254,6 +2266,7 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         true,
+        &[],
         &backend,
         &parent_id,
         &parent,
@@ -2334,6 +2347,7 @@ async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         true,
+        &[],
         &backend,
         &parent_id,
         &parent,
@@ -2410,6 +2424,7 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         true,
+        &[],
         &backend,
         &parent_id,
         &parent,
@@ -2462,6 +2477,7 @@ async fn missing_unpublished_child_preserves_spawn_without_forging_terminal() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         true,
+        &[],
         &backend,
         &parent_id,
         &parent,
@@ -3451,7 +3467,7 @@ fn fresh_tool_model_rejects_unavailable_exact_key_over_visible_slug_collision() 
             .as_deref(),
             Some(
                 "Unknown Task.model ID 'collision'. Valid model IDs: visible-alias. \
-                 Omit `model` to inherit the parent model."
+                 Omit `model` to retain the inherited selection for this call."
             ),
             "validation must inspect the unavailable exact-key entry selected by execution"
         );
@@ -3474,7 +3490,7 @@ fn fresh_tool_model_rejects_routing_slug_even_when_a_visible_model_uses_it() {
             .as_deref(),
             Some(
                 "Unknown Task.model ID 'shared-routing-slug'. Valid model IDs: \
-                 visible-second. Omit `model` to inherit the parent model."
+                 visible-second. Omit `model` to retain the inherited selection for this call."
             ),
             "validation must never select by routing slug"
         );
@@ -3513,7 +3529,7 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
                 error,
                 format!(
                     "Unknown Task.model ID '{requested}'. Valid model IDs: alpha, alternate, zeta. \
-                     Omit `model` to inherit the parent model."
+                     Omit `model` to retain the inherited selection for this call."
                 )
             );
         assert!(!error.contains("grow models"));
@@ -3544,12 +3560,12 @@ fn fresh_tool_model_reports_empty_valid_list() {
             .as_deref(),
             Some(
                 "Unknown Task.model ID 'anything'. No valid model IDs are currently \
-                 available. Omit `model` to inherit the parent model."
+                 available. Omit `model` to retain the inherited selection for this call."
             )
         );
 }
 #[test]
-fn resumed_tool_model_override_is_ignored() {
+fn checkpoint_restore_keeps_its_persisted_route_without_task_selection() {
     let empty = indexmap::IndexMap::new();
     assert!(
             super::handle_request::task_model_override_error(
@@ -3560,7 +3576,7 @@ fn resumed_tool_model_override_is_ignored() {
                 false,
             )
             .is_none(),
-            "resume must preserve source-model pinning"
+            "original-identity restore resolves the checkpoint destination independently of Task selection"
         );
 }
 #[test]

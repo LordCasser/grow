@@ -72,7 +72,7 @@ fn actual_child_tool_wait_survives_consultation_until_original_result_settles() 
             let first = server.expect_response("start real waiting tool",
                 test_support::InferenceRequestMatcher::foreground(test_support::InferenceEndpoint::Messages),
                 messages_turn(&[tool_use_block("waiting-child-tool", "spawn_subagent",
-                    r#"{"prompt":"inspect the target","description":"inspect target","subagent_type":"explore","background":false,"capability_mode":"read-only"}"#)], "tool_use"));
+                    r#"{"parent_step_id":"waiting-child-step","prompt":"inspect the target","description":"inspect target","subagent_type":"explore","background":false,"capability_mode":"read-only"}"#)], "tool_use"));
             let successor = server.expect_response("after original child result",
                 test_support::InferenceRequestMatcher::foreground(test_support::InferenceEndpoint::Messages),
                 messages_turn(&[text_block("Both the child result and consultation are visible.")], END_TURN));
@@ -88,6 +88,25 @@ fn actual_child_tool_wait_survives_consultation_until_original_result_settles() 
             bridge.update_resource(SubagentDepthCounter(0)).await;
             bridge.update_resource(MaxSubagentDepth(1)).await;
             bridge.update_resource(SessionIdResource(actor.session_id_string())).await;
+            let mut plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:waiting-child");
+            plan.steps.push(tool_types::PlanStep {
+                id: "waiting-child-step".into(), content: "Inspect the target".into(),
+                priority: tool_types::PlanPriority::Normal, status: tool_types::PlanStepStatus::InProgress,
+                requirements: None, removed: false,
+            });
+            actor.chat_state_handle.record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                chat_state::timeline::PlanningEvent { previous: None, plan: Box::new(plan) },
+            )).await.unwrap();
+            let (planning_tx, mut planning_rx) = mpsc::unbounded_channel();
+            bridge.update_resource(tools::implementations::grow_build::todo::runtime::PlanningRuntimeHandle(planning_tx)).await;
+            bridge.update_resource(tools::implementations::grow_build::task::types::CurrentPromptIdResource("waiting-child-consultation".into())).await;
+            let planning_actor = Arc::downgrade(&actor);
+            tokio::task::spawn_local(async move {
+                while let Some(command) = planning_rx.recv().await {
+                    let Some(actor) = planning_actor.upgrade() else { break };
+                    actor.handle_planning_command(command).await;
+                }
+            });
             let (result, ()) = tokio::join!(run_user_turn(&actor, "waiting-child-consultation"), async {
                 let child = tokio::time::timeout(std::time::Duration::from_secs(5), starts.recv()).await.unwrap().unwrap();
                 assert!(!child.is_empty());

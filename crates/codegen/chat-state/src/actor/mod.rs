@@ -537,6 +537,7 @@ impl ChatStateActor {
                                 && (!matches!(
                                     source,
                                     crate::NotificationSource::ParentMessage { .. }
+                                        | crate::NotificationSource::PlanGuidance { .. }
                                         | crate::NotificationSource::AgentReply { .. }
                                 ) || existing_source == &source),
                         )),
@@ -667,6 +668,23 @@ impl ChatStateActor {
                         error.map_or(Ok(committed), Err)
                     }
                 };
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::SettleInterruptedWorkflowsDurably { expected, reply } => {
+                let result = async {
+                    let mut committed = Vec::new();
+                    for (run_id, execution_epoch) in expected {
+                        if let Some(event) = self
+                            .state
+                            .timeline
+                            .prepare_interrupted_workflow_settlement(&run_id, execution_epoch)?
+                        {
+                            committed.push(self.commit_timeline_event(event).await?);
+                        }
+                    }
+                    Ok(committed)
+                }
+                .await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::SettleOpenCompactionDurably { reason, reply } => {
@@ -1036,6 +1054,7 @@ impl ChatStateActor {
                 timeline_id,
                 tool_definitions,
                 memory_reminder,
+                runtime_context,
                 active_goal,
                 json_output,
                 use_image_descriptions,
@@ -1046,6 +1065,7 @@ impl ChatStateActor {
                         &timeline_id,
                         tool_definitions,
                         memory_reminder,
+                        runtime_context,
                         active_goal,
                         json_output,
                         use_image_descriptions,
@@ -1144,6 +1164,7 @@ impl ChatStateActor {
                         surface_revision: self.state.timeline.surface_revision(),
                         surface: self.state.timeline.surface().to_vec(),
                         surface_ids: self.state.timeline.surface_ids().to_vec(),
+                        unconsumed_skill_load_ids: self.state.timeline.unconsumed_skill_load_ids(),
                         direct_user_inputs: self.state.timeline.direct_user_permission_evidence(),
                         permission_context: self.state.timeline.permission_classifier_context(),
                         active_control_contexts: self.state.timeline.active_control_contexts(),

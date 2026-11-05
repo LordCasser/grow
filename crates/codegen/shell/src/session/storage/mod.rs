@@ -3929,7 +3929,7 @@ fn with_prepared_history<R>(
     f: impl FnOnce(&[SessionUpdate]) -> io::Result<R>,
 ) -> io::Result<Option<R>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
-    let Some(opened) = storage.open_session_by_id(session_id)? else {
+    let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
         return Ok(None);
     };
     let identity = opened.summary().info.id.clone();
@@ -5426,6 +5426,137 @@ mod tests {
 
         assert_eq!(emission, ReplayEmission::Empty);
         assert_eq!(count, 0);
+        assert_eq!(
+            stream_session_history_at("does-not-exist", grow_home.path(), |_| count += 1).unwrap(),
+            ReplayEmission::Empty,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn child_history_stream_rejects_invalid_sources_before_emission() {
+        for case in [
+            "corrupt-history",
+            "timeline-directory",
+            "session-file",
+            "identity",
+            "duplicate-id",
+        ] {
+            let grow_home = tempfile::tempdir().unwrap();
+            let info = Info {
+                id: acp::SessionId::new("child-history"),
+                cwd: "/test".into(),
+            };
+            let writer = JsonlStorageAdapter::with_root(grow_home.path().to_path_buf());
+            writer
+                .init_session(&info, crate::session::persistence::default_model_id())
+                .await
+                .unwrap();
+            for event in replay_timeline("child-history-request", 1).events() {
+                writer
+                    .append_timeline_event_durable(&info, event)
+                    .await
+                    .unwrap();
+            }
+            let session_dir = grow_home
+                .path()
+                .join("sessions")
+                .join(crate::util::grow_home::encode_cwd_dirname(&info.cwd))
+                .join(info.id.0.as_ref());
+            let timeline_path = session_dir.join(TIMELINE_FILE);
+            let summary_path = session_dir.join(SUMMARY_FILE);
+            drop(writer);
+            match case {
+                "corrupt-history" => {
+                    let mut bytes = std::fs::read(&timeline_path).unwrap();
+                    bytes.extend_from_slice(b"{not-json}\n");
+                    std::fs::write(&timeline_path, bytes).unwrap();
+                }
+                "timeline-directory" => {
+                    std::fs::remove_file(&timeline_path).unwrap();
+                    std::fs::create_dir(&timeline_path).unwrap();
+                }
+                "session-file" => {
+                    std::fs::remove_dir_all(&session_dir).unwrap();
+                    std::fs::write(&session_dir, b"not a session directory").unwrap();
+                }
+                "identity" => {
+                    let mut summary: Summary =
+                        serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+                    summary.info.id = acp::SessionId::new("different-child");
+                    std::fs::write(&summary_path, serde_json::to_vec(&summary).unwrap()).unwrap();
+                }
+                "duplicate-id" => {
+                    let duplicate = JsonlStorageAdapter::with_root(grow_home.path().to_path_buf());
+                    duplicate
+                        .init_session(
+                            &Info {
+                                cwd: "/other".into(),
+                                ..info.clone()
+                            },
+                            crate::session::persistence::default_model_id(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let timeline_before = std::fs::read(&timeline_path).ok();
+            let summary_before = std::fs::read(&summary_path).ok();
+            let mut emitted = 0;
+            let error =
+                stream_session_history_at(info.id.0.as_ref(), grow_home.path(), |_| emitted += 1)
+                    .expect_err(
+                        "invalid child history must fail before emitting canonical content",
+                    );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{case}: {error}");
+            assert_eq!(emitted, 0, "{case}");
+            assert!(
+                load_updates_for_replay_at(info.id.0.as_ref(), grow_home.path()).is_err(),
+                "{case}"
+            );
+            assert_eq!(
+                std::fs::read(&timeline_path).ok(),
+                timeline_before,
+                "{case}"
+            );
+            assert_eq!(std::fs::read(&summary_path).ok(), summary_before, "{case}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_history_stream_rejects_symlinked_session_entities() {
+        let grow_home = tempfile::tempdir().unwrap();
+        let info = Info {
+            id: acp::SessionId::new("child-history"),
+            cwd: "/test".into(),
+        };
+        let writer = JsonlStorageAdapter::with_root(grow_home.path().to_path_buf());
+        writer
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
+        let session_dir = grow_home
+            .path()
+            .join("sessions")
+            .join(crate::util::grow_home::encode_cwd_dirname(&info.cwd))
+            .join(info.id.0.as_ref());
+        drop(writer);
+        let target = grow_home.path().join("retained-child");
+        std::fs::rename(&session_dir, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &session_dir).unwrap();
+        let timeline_before = std::fs::read(target.join(TIMELINE_FILE)).unwrap();
+        let mut emitted = 0;
+        let error =
+            stream_session_history_at(info.id.0.as_ref(), grow_home.path(), |_| emitted += 1)
+                .expect_err("child history cannot follow a symlinked session directory");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(emitted, 0);
+        assert_eq!(
+            std::fs::read(target.join(TIMELINE_FILE)).unwrap(),
+            timeline_before
+        );
     }
 
     /// A resolvable session whose mandatory Timeline journal is not a regular

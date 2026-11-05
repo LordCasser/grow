@@ -44,6 +44,122 @@ macro_rules! recv_event {
 }
 
 #[tokio::test]
+async fn model_control_backend_stamps_bound_source_and_preserves_host_receipt() {
+    use sampling_types::ReasoningEffort;
+    use tokio_util::sync::CancellationToken;
+
+    for accepted in [true, false] {
+        let (sender, mut commands) = mpsc::unbounded_channel();
+        let backend =
+            ChannelBackend::for_session(sender, "actual-parent").with_history_query(|_| async {
+                panic!("read-only history cannot grant model control");
+            });
+        let cancellation = CancellationToken::new();
+        let call = backend.set_model(
+            "exact-child".into(),
+            Some("catalog-model".into()),
+            Some(ReasoningEffort::None),
+            cancellation.clone(),
+        );
+        tokio::pin!(call);
+        assert!(futures::poll!(call.as_mut()).is_pending());
+        let request = recv_event!(commands, SetModel);
+        assert_eq!(request.source_session_id, "actual-parent");
+        assert_eq!(request.subagent_id, "exact-child");
+        assert_eq!(request.model.as_deref(), Some("catalog-model"));
+        assert_eq!(request.effort, Some(ReasoningEffort::None));
+        cancellation.cancel();
+        assert!(request.cancellation.is_cancelled());
+        assert!(futures::poll!(call.as_mut()).is_pending());
+        let admission = if accepted {
+            Ok(())
+        } else {
+            Err("host refused admission".into())
+        };
+        request.respond_to.send(admission.clone()).unwrap();
+        assert_eq!(call.await, admission);
+        assert!(commands.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn model_control_backend_rejects_unbound_observer_and_predispatch_cancellation() {
+    use tokio_util::sync::CancellationToken;
+
+    let (sender, mut commands) = mpsc::unbounded_channel();
+    let observer =
+        ChannelBackend::for_authorized_observer(sender.clone()).with_history_query(|_| async {
+            panic!("history access is not control authority");
+        });
+    assert!(
+        observer
+            .set_model(
+                "child".into(),
+                Some("catalog-model".into()),
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .contains("Unbound")
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert!(
+        ChannelBackend::for_session(sender, "parent")
+            .set_model(
+                "child".into(),
+                Some("catalog-model".into()),
+                None,
+                cancellation,
+            )
+            .await
+            .unwrap_err()
+            .contains("cancelled")
+    );
+    assert!(commands.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn model_control_backend_closed_command_or_admission_channel_fails() {
+    use tokio_util::sync::CancellationToken;
+
+    let (sender, receiver) = mpsc::unbounded_channel();
+    drop(receiver);
+    let backend = ChannelBackend::for_session(sender, "parent");
+    assert!(
+        backend
+            .set_model(
+                "child".into(),
+                Some("catalog-model".into()),
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .contains("before confirming admission")
+    );
+
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let backend = ChannelBackend::for_session(sender, "parent");
+    let call = backend.set_model(
+        "child".into(),
+        Some("catalog-model".into()),
+        None,
+        CancellationToken::new(),
+    );
+    tokio::pin!(call);
+    assert!(futures::poll!(call.as_mut()).is_pending());
+    let request = recv_event!(receiver, SetModel);
+    drop(request.respond_to);
+    assert!(
+        call.await
+            .unwrap_err()
+            .contains("before confirming admission")
+    );
+}
+
+#[tokio::test]
 async fn ask_cancellation_intent_preserves_the_host_response_receiver() {
     use super::super::interaction::{AgentInteraction, AgentInteractionOutput};
     for host_fails in [false, true] {

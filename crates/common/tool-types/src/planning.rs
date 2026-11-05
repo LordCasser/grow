@@ -8,6 +8,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
+pub mod read;
+pub use read::{
+    PlanDelegation, PlanReadCounts, PlanReadError, PlanReadInput, PlanReadOutput, PlanReadPage,
+    PlanReadQuery, PlanReadTarget, PlanningReadSnapshot, project_plan_read,
+};
+
 const MAX_PLAN_ITEMS: usize = 4096;
 const MAX_PLAN_ID_BYTES: usize = 128;
 const MAX_REPLAN_ID_BYTES: usize = MAX_PLAN_ID_BYTES * 2 + 22;
@@ -157,6 +163,11 @@ impl LocalPlan {
                     return Err("terminal replan outcome needs a bounded reason".into());
                 }
                 ReplanProgress::Handled {
+                    outcome: ReplanOutcome::Stopping,
+                } if !replan.is_stop() => {
+                    return Err("only a stop replan can acknowledge stopping".into());
+                }
+                ReplanProgress::Handled {
                     outcome: ReplanOutcome::Updated { plan_revision },
                 } if replan.child_session_id == self.session_id
                     && *plan_revision > self.revision =>
@@ -207,8 +218,10 @@ impl LocalPlan {
             let Some(link) = links_by_id.get(review.link_id.as_str()) else {
                 return Err("delivery review references an unknown link".into());
             };
+            let released_without_result =
+                review.decision == ReviewDecision::Released && review.result_id.is_none();
             if review.reviewed_source_revision > self.revision
-                || review.result_id != link.result_id
+                || (!released_without_result && review.result_id != link.result_id)
                 || review
                     .reason
                     .as_deref()
@@ -243,9 +256,9 @@ impl LocalPlan {
         Ok(())
     }
 
-    /// Validate the durable transition from the previous snapshot. Pending
-    /// replans may be replaced by a newer coalesced pending batch; once claimed
-    /// or received, their identity and payload remain fixed.
+    /// Validate the durable transition from the previous snapshot. Ordinary
+    /// pending replans may coalesce; stops and claimed or received payloads
+    /// retain their identity and cannot restart their execution's objective.
     pub fn validate_transition_from(&self, previous: &Self) -> Result<(), String> {
         self.validate()?;
         previous.validate()?;
@@ -330,12 +343,12 @@ impl LocalPlan {
                                 link.terminal || link.dispatch_failure.is_some()
                             });
                     if !old.same_identity_payload(current)
-                        || (!old.progress.can_advance_to(&current.progress) && !terminalized)
+                        || (!old.can_advance_to(&current.progress) && !terminalized)
                     {
                         return Err("planning transition rewrote or regressed a replan".into());
                     }
                 }
-                None if old.progress == ReplanProgress::Pending => {
+                None if old.progress == ReplanProgress::Pending && !old.is_stop() => {
                     let coalesced = self.replans.iter().any(|current| {
                         current.link_id == old.link_id
                             && current.child_session_id == old.child_session_id
@@ -350,7 +363,38 @@ impl LocalPlan {
                 None => return Err("planning transition erased an immutable replan receipt".into()),
             }
         }
+        for current in &self.replans {
+            if previous.replans.iter().any(|old| old.id == current.id) {
+                continue;
+            }
+            if current.is_stop()
+                && matches!(
+                    &current.progress,
+                    ReplanProgress::Handled { outcome } if *outcome != ReplanOutcome::Stopping
+                )
+            {
+                return Err("a new stop acknowledgement must accept stopping".into());
+            }
+            let follows_stop = self.replans.iter().any(|earlier| {
+                earlier.link_id == current.link_id
+                    && earlier.is_stop()
+                    && earlier.source_revision < current.source_revision
+            });
+            if follows_stop && !matches!(current.progress, ReplanProgress::Unapplied { .. }) {
+                return Err(
+                    "planning transition resumed an execution after its stop request".into(),
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// Whether this execution has ever been requested to stop, including
+    /// handled or unapplied requests. Reopening its step cannot revoke the fact.
+    pub fn link_stop_requested(&self, link_id: &str) -> bool {
+        self.replans
+            .iter()
+            .any(|record| record.link_id == link_id && record.is_stop())
     }
 
     /// Apply a full-step merge or replacement and report only effective
@@ -441,36 +485,40 @@ impl LocalPlan {
                 None => continue,
             };
             let source_revision = self.revision;
-            let links: Vec<_> =
-                self.links
-                    .iter_mut()
-                    .filter(|link| link.parent_step_id == change.step_id)
-                    .map(|link| {
-                        let unapplied_reason = if link.terminal {
-                            Some("child is already terminal".to_owned())
-                        } else {
-                            link.dispatch_failure.clone()
-                        };
-                        if unapplied_reason.is_none() {
-                            link.pending_source_revision = Some(source_revision);
-                        }
-                        if change.fields.iter().any(|field| {
-                            matches!(field, StepField::Content | StepField::Requirements)
-                        }) {
-                            link.review_required_revision = source_revision;
-                        }
-                        (
-                            link.id.clone(),
-                            link.child_session_id.clone(),
-                            unapplied_reason,
-                        )
-                    })
-                    .collect();
+            let links: Vec<_> = self
+                .links
+                .iter()
+                .filter(|link| link.parent_step_id == change.step_id)
+                .map(|link| {
+                    let unapplied_reason = if link.terminal {
+                        Some("child is already terminal".to_owned())
+                    } else if let Some(reason) = &link.dispatch_failure {
+                        Some(reason.clone())
+                    } else if self.link_stop_requested(&link.id) {
+                        Some("this execution has already been requested to stop".to_owned())
+                    } else {
+                        None
+                    };
+                    (
+                        link.id.clone(),
+                        link.child_session_id.clone(),
+                        unapplied_reason,
+                    )
+                })
+                .collect();
             for (link_id, child_session_id, unapplied_reason) in links {
+                if change
+                    .fields
+                    .iter()
+                    .any(|field| matches!(field, StepField::Content | StepField::Requirements))
+                    && let Some(link) = self.links.iter_mut().find(|link| link.id == link_id)
+                {
+                    link.review_required_revision = source_revision;
+                }
                 let id = format!("{link_id}:{}:{source_revision}", change.step_id);
                 let record = ReplanChange {
                     id,
-                    link_id,
+                    link_id: link_id.clone(),
                     child_session_id,
                     step_id: change.step_id.clone(),
                     source_revision,
@@ -487,15 +535,18 @@ impl LocalPlan {
                     self.replans.push(record);
                 } else if let Some(index) = self.replans.iter().position(|existing| {
                     existing.link_id == record.link_id
+                        && existing.child_session_id == record.child_session_id
                         && existing.step_id == record.step_id
                         && existing.progress == ReplanProgress::Pending
+                        && !existing.is_stop()
                 }) {
-                    // Pending has not been claimed for dispatch, so it may
-                    // coalesce. Dispatching and Received payloads are immutable.
+                    // Only undispatched ordinary intent may coalesce. A stop
+                    // stays attached to this execution even if the step reopens.
                     self.replans[index] = record;
                 } else {
                     self.replans.push(record);
                 }
+                self.refresh_pending_source_revision(&link_id);
             }
         }
 
@@ -522,21 +573,28 @@ impl LocalPlan {
             .iter_mut()
             .find(|record| record.id == id)
             .ok_or_else(|| ReplanError::UnknownId(id.to_owned()))?;
-        if !record.progress.can_advance_to(&next) {
+        if !record.can_advance_to(&next) {
             return Err(ReplanError::InvalidProgress);
         }
         record.progress = next;
         let link_id = record.link_id.clone();
-        let pending = self
-            .replans
-            .iter()
-            .filter(|record| record.link_id == link_id && !record.progress.is_settled())
-            .map(|record| record.source_revision)
-            .max();
-        if let Some(link) = self.links.iter_mut().find(|link| link.id == link_id) {
-            link.pending_source_revision = pending;
-        }
+        self.refresh_pending_source_revision(&link_id);
         Ok(())
+    }
+
+    fn refresh_pending_source_revision(&mut self, link_id: &str) {
+        if let Some(link) = self.links.iter_mut().find(|link| link.id == link_id) {
+            link.pending_source_revision = self
+                .replans
+                .iter()
+                .filter(|record| {
+                    record.link_id == link.id
+                        && record.child_session_id == link.child_session_id
+                        && !record.progress.is_settled()
+                })
+                .map(|record| record.source_revision)
+                .max();
+        }
     }
 
     /// Deduplicate an incoming delivery by immutable identity and payload.
@@ -865,6 +923,24 @@ pub struct ReplanChange {
 }
 
 impl ReplanChange {
+    /// Termination guidance is derived from the committed step payload.
+    pub fn is_stop(&self) -> bool {
+        self.removed || self.status == PlanStepStatus::Cancelled
+    }
+
+    fn can_advance_to(&self, next: &ReplanProgress) -> bool {
+        self.progress.can_advance_to(next)
+            && match next {
+                ReplanProgress::Handled {
+                    outcome: ReplanOutcome::Stopping,
+                } => self.is_stop(),
+                // Preserve exact historical handled facts, but a new stop ACK
+                // must accept wrap-up rather than continuing the objective.
+                ReplanProgress::Handled { .. } => !self.is_stop() || self.progress == *next,
+                _ => true,
+            }
+    }
+
     fn same_identity_payload(&self, other: &Self) -> bool {
         self.id == other.id
             && self.link_id == other.link_id
@@ -919,9 +995,17 @@ impl ReplanProgress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplanOutcome {
-    Updated { plan_revision: u64 },
-    NoChange { reason: String },
-    NotApplied { reason: String },
+    Updated {
+        plan_revision: u64,
+    },
+    NoChange {
+        reason: String,
+    },
+    NotApplied {
+        reason: String,
+    },
+    /// The child accepted termination and wrap-up; execution may still be live.
+    Stopping,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1198,6 +1282,9 @@ pub enum ReviewDecision {
     NeedsRevision,
     Released,
 }
+
+#[cfg(test)]
+mod stop_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1785,6 +1872,8 @@ mod tests {
     #[test]
     fn reasoned_release_closes_gate_before_result_without_ending_child() {
         let mut plan = linked_plan();
+        plan.validate().unwrap();
+        let previous = plan.clone();
         plan.reviews.push(DeliveryReview {
             link_id: "l1".into(),
             result_id: None,
@@ -1793,8 +1882,126 @@ mod tests {
             reason: Some("parent no longer requires this execution".into()),
             verification_refs: Vec::new(),
         });
+        plan.validate_transition_from(&previous).unwrap();
         assert!(plan.unresolved_required_deliveries().is_empty());
         assert!(!plan.links[0].terminal);
+        assert_eq!(plan.links[0].result_id, None);
+        assert!(
+            LocalPlan::new("parent", "next-work")
+                .validate_transition_from(&plan)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn late_result_after_release_preserves_review_and_settles_pending_replan() {
+        let mut plan = linked_plan();
+        plan.validate().unwrap();
+        let initial = plan.clone();
+        plan.reviews.push(DeliveryReview {
+            link_id: "l1".into(),
+            result_id: None,
+            reviewed_source_revision: plan.revision,
+            decision: ReviewDecision::Released,
+            reason: Some("another review covers this delivery".into()),
+            verification_refs: vec!["independent-review".into()],
+        });
+        plan.validate_transition_from(&initial).unwrap();
+        let released = plan.clone();
+
+        plan.update_steps(
+            PlanUpdateMode::Merge,
+            vec![step(
+                "s1",
+                "changed while child is live",
+                PlanStepStatus::Pending,
+            )],
+        )
+        .unwrap();
+        plan.validate_transition_from(&released).unwrap();
+        assert!(plan.unresolved_required_deliveries().is_empty());
+        assert!(!plan.links[0].terminal);
+        assert_eq!(plan.links[0].result_id, None);
+        assert_eq!(plan.links[0].pending_source_revision, Some(plan.revision));
+        assert_eq!(plan.replans[0].progress, ReplanProgress::Pending);
+        let next_scope = LocalPlan::new("parent", "next-work");
+        assert!(next_scope.validate_transition_from(&plan).is_err());
+        let pending = plan.clone();
+
+        let result_ref = r#"{"timeline_id":"child","first_seq":42,"last_seq":42}"#;
+        plan.links[0].result_id = Some(result_ref.into());
+        let reason = "execution ended before further parent updates could be confirmed";
+        plan.mark_link_terminal("l1", reason).unwrap();
+        plan.validate_transition_from(&pending).unwrap();
+        assert!(plan.links[0].terminal);
+        assert_eq!(plan.links[0].result_id.as_deref(), Some(result_ref));
+        assert_eq!(plan.links[0].pending_source_revision, None);
+        let mut unapplied = pending.replans[0].clone();
+        unapplied.progress = ReplanProgress::Unapplied {
+            reason: reason.into(),
+        };
+        assert_eq!(plan.replans, vec![unapplied]);
+        assert_eq!(plan.reviews, released.reviews);
+        assert!(plan.unresolved_required_deliveries().is_empty());
+        next_scope.validate_transition_from(&plan).unwrap();
+    }
+
+    #[test]
+    fn result_reviews_still_require_a_matching_terminal_result() {
+        for decision in [ReviewDecision::Accepted, ReviewDecision::NeedsRevision] {
+            let mut plan = linked_plan();
+            plan.mark_link_terminal("l1", "child ended without a result")
+                .unwrap();
+            plan.reviews.push(DeliveryReview {
+                link_id: "l1".into(),
+                result_id: None,
+                reviewed_source_revision: plan.revision,
+                decision,
+                reason: Some("explicit result review".into()),
+                verification_refs: Vec::new(),
+            });
+            assert!(plan.validate().is_err(), "{decision:?} needs a result");
+
+            plan.links[0].result_id = Some("result-1".into());
+            assert!(plan.validate().is_err(), "{decision:?} needs a reference");
+            plan.reviews[0].result_id = Some("another-result".into());
+            assert!(
+                plan.validate().is_err(),
+                "{decision:?} needs an exact match"
+            );
+            plan.reviews[0].result_id = plan.links[0].result_id.clone();
+            plan.validate().unwrap();
+            plan.links[0].terminal = false;
+            assert!(
+                plan.validate().is_err(),
+                "{decision:?} needs a terminal link"
+            );
+        }
+    }
+
+    #[test]
+    fn release_after_result_still_requires_the_exact_reference() {
+        let mut plan = linked_plan();
+        plan.validate().unwrap();
+        let initial = plan.clone();
+        let result_ref = r#"{"timeline_id":"child","first_seq":42,"last_seq":42}"#;
+        plan.links[0].result_id = Some(result_ref.into());
+        plan.mark_link_terminal("l1", "canonical result arrived")
+            .unwrap();
+        plan.validate_transition_from(&initial).unwrap();
+        let delivered = plan.clone();
+        plan.reviews.push(DeliveryReview {
+            link_id: "l1".into(),
+            result_id: Some(r#"{"timeline_id":"child","first_seq":43,"last_seq":43}"#.into()),
+            reviewed_source_revision: plan.revision,
+            decision: ReviewDecision::Released,
+            reason: Some("parent no longer requires this delivery".into()),
+            verification_refs: Vec::new(),
+        });
+        assert!(plan.validate_transition_from(&delivered).is_err());
+        plan.reviews[0].result_id = Some(result_ref.into());
+        plan.validate_transition_from(&delivered).unwrap();
+        assert!(plan.unresolved_required_deliveries().is_empty());
     }
 
     #[test]

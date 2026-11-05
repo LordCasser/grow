@@ -886,6 +886,11 @@ pub enum NotificationSource {
         message_id: String,
         interrupt: bool,
     },
+    /// Host-owned planning control, consumed as exact agent-message context.
+    PlanGuidance {
+        parent_session_id: String,
+        message_id: String,
+    },
     MonitorProgress {
         task_id: String,
         owner: NotificationOwner,
@@ -937,6 +942,10 @@ enum NotificationSourceIdentity {
         parent_session_id: String,
         message_id: String,
     },
+    PlanGuidance {
+        parent_session_id: String,
+        message_id: String,
+    },
     MonitorProgress {
         task_id: String,
     },
@@ -973,6 +982,10 @@ impl NotificationSource {
                 message_id,
                 interrupt,
             } => Some((parent_session_id, message_id, None, *interrupt)),
+            Self::PlanGuidance {
+                parent_session_id,
+                message_id,
+            } => Some((parent_session_id, message_id, None, true)),
             Self::AgentReply {
                 source_session_id,
                 message_id,
@@ -984,9 +997,9 @@ impl NotificationSource {
     fn subject_id(&self) -> &str {
         match self {
             Self::InquiryAnswered { inquiry_id, .. } => inquiry_id,
-            Self::ParentMessage { message_id, .. } | Self::AgentReply { message_id, .. } => {
-                message_id
-            }
+            Self::ParentMessage { message_id, .. }
+            | Self::PlanGuidance { message_id, .. }
+            | Self::AgentReply { message_id, .. } => message_id,
             Self::MonitorProgress { task_id, .. }
             | Self::TaskStillRunning { task_id, .. }
             | Self::TaskCompleted { task_id, .. } => task_id,
@@ -1013,6 +1026,7 @@ impl NotificationSource {
             },
             Self::WorkflowHandoff { .. }
             | Self::ParentMessage { .. }
+            | Self::PlanGuidance { .. }
             | Self::AgentReply { .. }
             | Self::InquiryAnswered { .. } => NotificationOwner::Session,
         }
@@ -1027,6 +1041,7 @@ impl NotificationSource {
             Self::PlanHandoff { .. }
             | Self::WorkflowHandoff { .. }
             | Self::ParentMessage { .. }
+            | Self::PlanGuidance { .. }
             | Self::AgentReply { .. }
             | Self::InquiryAnswered { .. } => {}
         }
@@ -1055,6 +1070,13 @@ impl NotificationSource {
                 message_id,
                 ..
             } => NotificationSourceIdentity::ParentMessage {
+                parent_session_id: parent_session_id.clone(),
+                message_id: message_id.clone(),
+            },
+            Self::PlanGuidance {
+                parent_session_id,
+                message_id,
+            } => NotificationSourceIdentity::PlanGuidance {
                 parent_session_id: parent_session_id.clone(),
                 message_id: message_id.clone(),
             },
@@ -2306,6 +2328,7 @@ impl Timeline {
                 matches!(
                     source,
                     NotificationSourceIdentity::ParentMessage { .. }
+                        | NotificationSourceIdentity::PlanGuidance { .. }
                         | NotificationSourceIdentity::AgentReply { .. }
                 )
             })
@@ -2326,6 +2349,7 @@ impl Timeline {
             if matches!(
                 source,
                 NotificationSourceIdentity::ParentMessage { .. }
+                    | NotificationSourceIdentity::PlanGuidance { .. }
                     | NotificationSourceIdentity::AgentReply { .. }
             ) && let Some(TimelineEvent {
                 kind:
@@ -3081,6 +3105,69 @@ impl Timeline {
             .map(Some)
     }
 
+    /// Settle only the captured Workflow executions, without recovering any
+    /// other open work. Missing, advanced, terminal, child-owned or checkpoint-
+    /// preserved executions are no-ops; duplicate targets are idempotent.
+    pub fn settle_interrupted_workflows(
+        &mut self,
+        expected: &[(String, u64)],
+    ) -> Result<Vec<TimelineEvent>, TimelineError> {
+        let start = self.events.len();
+        for (run_id, execution_epoch) in expected {
+            if let Some(event) =
+                self.prepare_interrupted_workflow_settlement(run_id, *execution_epoch)?
+            {
+                self.accept(event)?;
+            }
+        }
+        Ok(self.events[start..].to_vec())
+    }
+
+    /// Prepare one terminal against the current owner fold. The durable actor
+    /// accepts this exact candidate only after persistence acknowledges it.
+    pub(crate) fn prepare_interrupted_workflow_settlement(
+        &self,
+        run_id: &str,
+        execution_epoch: u64,
+    ) -> Result<Option<TimelineEvent>, TimelineError> {
+        if self.runtime.preserves_open_turn() {
+            return Ok(None);
+        }
+        let Some(lifecycle) = self.lifecycle.workflows.get(run_id) else {
+            return Ok(None);
+        };
+        if lifecycle.execution_epoch != execution_epoch
+            || !lifecycle.open
+            || lifecycle.closed
+            || self
+                .lifecycle
+                .open_subagents
+                .values()
+                .any(|subagent| subagent.workflow_run_id.as_deref() == Some(run_id))
+        {
+            return Ok(None);
+        }
+        self.prepare(self.interrupted_workflow_terminal(run_id, execution_epoch, wall_time_ms()))
+            .map(Some)
+    }
+
+    fn interrupted_workflow_terminal(
+        &self,
+        run_id: &str,
+        execution_epoch: u64,
+        now: i64,
+    ) -> TimelineEventKind {
+        TimelineEventKind::Workflow(WorkflowEvent::Ended {
+            run_id: run_id.into(),
+            execution_epoch,
+            status: WorkflowExecutionStatus::Interrupted,
+            execution_suspended: false,
+            handoff: WorkflowTurnHandoff::Completion,
+            duration_ms: duration_since(self.workflow_started_at(run_id, execution_epoch), now),
+            message: Some("process_interrupted".into()),
+        })
+    }
+
     pub fn recover_interrupted(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
         if self.runtime.preserves_open_turn() {
             return Ok(Vec::new());
@@ -3247,17 +3334,7 @@ impl Timeline {
             self.record(TimelineEventKind::Compaction(terminal))?;
         }
         for (run_id, execution_epoch) in workflows {
-            let duration_ms =
-                duration_since(self.workflow_started_at(&run_id, execution_epoch), now);
-            self.record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
-                run_id,
-                execution_epoch,
-                status: WorkflowExecutionStatus::Interrupted,
-                execution_suspended: false,
-                handoff: WorkflowTurnHandoff::Completion,
-                duration_ms,
-                message: Some("process_interrupted".into()),
-            }))?;
+            self.record(self.interrupted_workflow_terminal(&run_id, execution_epoch, now))?;
         }
         self.settle_unconsumed_skill_loads()?;
         if let Some((step, started)) = self
@@ -3957,6 +4034,7 @@ impl Timeline {
                         self.pending_notifications.insert(id.clone(), notification);
                     }
                     NotificationSource::ParentMessage { .. }
+                    | NotificationSource::PlanGuidance { .. }
                     | NotificationSource::InquiryAnswered { .. }
                     | NotificationSource::AgentReply { .. }
                     | NotificationSource::SubagentCompleted { .. }
@@ -4716,6 +4794,7 @@ impl Timeline {
                     matches!(
                         self.pending_notifications[id].source,
                         NotificationSource::AgentReply { .. }
+                            | NotificationSource::PlanGuidance { .. }
                     )
                 }) && !matches!(input, Some(ConversationItem::AgentMessage(_)))
                 {
@@ -5137,6 +5216,15 @@ impl Timeline {
                     .is_none_or(|response| origin.is_some_and(|origin| response < origin))
                     .then_some(index)
             })
+            .collect()
+    }
+
+    /// Project unconsumed skills for this selected branch and current Surface.
+    /// Materializers must pair these identities with this same Timeline's IDs.
+    pub fn unconsumed_skill_load_ids(&self) -> Vec<SurfaceId> {
+        self.unconsumed_skill_load_indices()
+            .into_iter()
+            .map(|index| self.surface_ids[index])
             .collect()
     }
 
@@ -7111,6 +7199,10 @@ fn valid_notification_source_version(
                 parent_session_id,
                 message_id,
                 ..
+            }
+            | NotificationSource::PlanGuidance {
+                parent_session_id,
+                message_id,
             },
             NotificationSourceVersion::Ordinal { value },
         ) => {
@@ -11959,6 +12051,374 @@ mod tests {
         assert_eq!(lifecycle.message.as_deref(), Some("process_interrupted"));
     }
 
+    fn spawn_settlement_workflow(timeline: &mut Timeline, run_id: &str) {
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: run_id.into(),
+                execution_epoch: 0,
+                name: "research".into(),
+                objective: "settle only historical work".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
+            }))
+            .unwrap();
+    }
+
+    #[test]
+    fn settle_interrupted_workflows_preserves_live_notification_turn_and_scopes() {
+        let mut timeline = Timeline::default();
+        append_unconsumed_model_skill(&mut timeline);
+        spawn_settlement_workflow(&mut timeline, "wf_historical");
+        let expected = vec![("wf_historical".into(), 0)];
+        spawn_settlement_workflow(&mut timeline, "wf_new");
+        let source = NotificationSource::AgentReply {
+            source_session_id: "other-session".into(),
+            message_id: "reply-1".into(),
+            reply_to: sampling_types::AgentMessageRef {
+                source_session_id: "session-1".into(),
+                message_id: "original-message".into(),
+            },
+        };
+        let version = NotificationSourceVersion::Ordinal {
+            value: PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        let body = "the requested evidence";
+        let receipt = receive_notification(&mut timeline, source.clone(), version.clone(), body);
+        let turn = TurnId(901);
+        start_notification_turn(&mut timeline, turn);
+        let step = start_tool(&mut timeline, turn, "live-tool");
+        timeline
+            .record(TimelineEventKind::Request(RequestEvent::Started {
+                id: "live-request".into(),
+                turn,
+                step,
+                model_id: "model".into(),
+                input_message_count: timeline.surface_len(),
+                tool_count: 0,
+            }))
+            .unwrap();
+        submit_human_input(&mut timeline, "live-input", InputIntent::Prompt);
+        let hook = trigger_user_prompt(&mut timeline, "live-input", Vec::new());
+        let events_before = serde_json::to_value(timeline.events()).unwrap();
+        let surface_before = serde_json::to_value(timeline.surface()).unwrap();
+        let ids_before = timeline.surface_ids().to_vec();
+        let revision_before = timeline.surface_revision();
+        let skills_before = timeline.unconsumed_skill_load_ids();
+        assert!(!skills_before.is_empty());
+
+        let settled = timeline.settle_interrupted_workflows(&expected).unwrap();
+        assert_eq!(settled.len(), 1);
+        assert!(matches!(
+            &settled[0].kind,
+            TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id,
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Interrupted,
+                execution_suspended: false,
+                handoff: WorkflowTurnHandoff::Completion,
+                message: Some(message),
+                ..
+            }) if run_id == "wf_historical" && message == "process_interrupted"
+        ));
+        assert_eq!(
+            timeline.events().len(),
+            events_before.as_array().unwrap().len() + 1
+        );
+        assert_eq!(
+            serde_json::to_value(&timeline.events()[..timeline.events().len() - 1]).unwrap(),
+            events_before
+        );
+        assert_eq!(timeline.active_turn(), Some(turn));
+        assert_eq!(timeline.active_step(), Some(step));
+        assert_eq!(
+            timeline.open_request_ids().collect::<Vec<_>>(),
+            vec!["live-request"]
+        );
+        assert_eq!(
+            timeline.open_tool_call_ids().collect::<Vec<_>>(),
+            vec!["live-tool"]
+        );
+        assert!(timeline.hook_projection(&hook).unwrap().decision.is_none());
+        assert!(matches!(
+            timeline.input_state("live-input").unwrap().state,
+            InputState::Submitted
+        ));
+        assert!(timeline.workflow_lifecycle("wf_new").unwrap().open);
+        assert_eq!(timeline.surface_revision(), revision_before);
+        assert_eq!(timeline.surface_ids(), ids_before);
+        assert_eq!(
+            serde_json::to_value(timeline.surface()).unwrap(),
+            surface_before
+        );
+        assert_eq!(timeline.unconsumed_skill_load_ids(), skills_before);
+        assert_eq!(timeline.pending_notifications()[0].id, receipt);
+
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![receipt.clone()],
+                    turn,
+                    input: Some(ConversationItem::received_agent_message(
+                        sampling_types::AgentMessage {
+                            receipt_id: receipt,
+                            source_session_id: "other-session".into(),
+                            target_session_id: "session-1".into(),
+                            message_id: "reply-1".into(),
+                            reply_to: match &source {
+                                NotificationSource::AgentReply { reply_to, .. } => {
+                                    Some(reply_to.clone())
+                                }
+                                _ => unreachable!(),
+                            },
+                            message: body.into(),
+                        },
+                    )),
+                },
+            ))
+            .expect("the same receipt must remain consumable by its original live Turn");
+        assert!(timeline.pending_notifications().is_empty());
+        assert_eq!(
+            timeline.consumed_notification_turn(&source, &version),
+            Some(turn)
+        );
+        assert_bulk_matches(&timeline);
+    }
+
+    #[test]
+    fn settle_interrupted_workflows_waits_for_child_terminal() {
+        let mut timeline = Timeline::default();
+        spawn_settlement_workflow(&mut timeline, "wf_children");
+        let mut spawn = subagent_spawn("sa-child", "child-session");
+        spawn.workflow_run_id = Some("wf_children".into());
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                Box::new(spawn),
+            )))
+            .unwrap();
+        let expected = vec![("wf_children".into(), 0)];
+        let before = serde_json::to_value(timeline.events()).unwrap();
+        assert!(
+            timeline
+                .settle_interrupted_workflows(&expected)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(serde_json::to_value(timeline.events()).unwrap(), before);
+        assert!(timeline.workflow_lifecycle("wf_children").unwrap().open);
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Ended(
+                SubagentTerminalEvent {
+                    subagent_id: "sa-child".into(),
+                    child_session_id: "child-session".into(),
+                    outcome: SubagentOutcome::Cancelled,
+                    duration_ms: 1,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: Some("backend reconciliation".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                },
+            )))
+            .unwrap();
+        assert_eq!(
+            timeline
+                .settle_interrupted_workflows(&expected)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            timeline.workflow_lifecycle("wf_children").unwrap().status,
+            Some(WorkflowExecutionStatus::Interrupted)
+        );
+        assert_bulk_matches(&timeline);
+    }
+
+    #[test]
+    fn settle_interrupted_workflows_matches_epoch_and_is_idempotent() {
+        let mut timeline = Timeline::default();
+        for id in [
+            "wf_old",
+            "wf_new_epoch",
+            "wf_terminal",
+            "wf_closed",
+            "wf_unrelated",
+        ] {
+            spawn_settlement_workflow(&mut timeline, id);
+        }
+        for id in ["wf_new_epoch", "wf_terminal", "wf_closed"] {
+            timeline
+                .record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                    run_id: id.into(),
+                    execution_epoch: 0,
+                    status: WorkflowExecutionStatus::Failed,
+                    execution_suspended: false,
+                    handoff: WorkflowTurnHandoff::Completion,
+                    duration_ms: 1,
+                    message: None,
+                }))
+                .unwrap();
+        }
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+                run_id: "wf_new_epoch".into(),
+                execution_epoch: 1,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Closed {
+                run_id: "wf_closed".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Cancelled,
+                handoff: WorkflowTurnHandoff::None,
+                duration_ms: 1,
+                message: None,
+            }))
+            .unwrap();
+        let expected = vec![
+            ("wf_old".into(), 0),
+            ("wf_old".into(), 0),
+            ("wf_absent".into(), 0),
+            ("wf_new_epoch".into(), 0),
+            ("wf_terminal".into(), 0),
+            ("wf_closed".into(), 0),
+        ];
+        let before = timeline.events().len();
+        let settled = timeline.settle_interrupted_workflows(&expected).unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(timeline.events().len(), before + 1);
+        assert!(timeline.workflow_lifecycle("wf_new_epoch").unwrap().open);
+        assert!(timeline.workflow_lifecycle("wf_unrelated").unwrap().open);
+        assert_eq!(
+            timeline.workflow_lifecycle("wf_terminal").unwrap().status,
+            Some(WorkflowExecutionStatus::Failed)
+        );
+        assert_eq!(
+            timeline.workflow_lifecycle("wf_closed").unwrap().status,
+            Some(WorkflowExecutionStatus::Cancelled)
+        );
+        let after = serde_json::to_value(timeline.events()).unwrap();
+        assert!(
+            timeline
+                .settle_interrupted_workflows(&expected)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            timeline
+                .settle_interrupted_workflows(&[])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(serde_json::to_value(timeline.events()).unwrap(), after);
+        assert_bulk_matches(&timeline);
+    }
+
+    #[test]
+    fn settle_interrupted_workflows_uses_same_epoch_duration() {
+        let mut timeline = Timeline::default();
+        spawn_settlement_workflow(&mut timeline, "wf_duration");
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_duration".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Failed,
+                execution_suspended: false,
+                handoff: WorkflowTurnHandoff::Completion,
+                duration_ms: 1,
+                message: None,
+            }))
+            .unwrap();
+        let mut resumed = timeline
+            .prepare(TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+                run_id: "wf_duration".into(),
+                execution_epoch: 1,
+            }))
+            .unwrap();
+        let resumed_at = wall_time_ms() - 1_000;
+        resumed.at_ms = resumed_at;
+        timeline.accept(resumed).unwrap();
+        let before = wall_time_ms();
+        let settled = timeline
+            .settle_interrupted_workflows(&[("wf_duration".into(), 1)])
+            .unwrap();
+        let after = wall_time_ms();
+        let TimelineEventKind::Workflow(WorkflowEvent::Ended { duration_ms, .. }) = settled[0].kind
+        else {
+            panic!("expected Workflow terminal");
+        };
+        assert!(
+            (duration_since(Some(resumed_at), before)..=duration_since(Some(resumed_at), after))
+                .contains(&duration_ms)
+        );
+        assert_bulk_matches(&timeline);
+    }
+
+    #[test]
+    fn settle_interrupted_workflows_preserves_runtime_checkpoint() {
+        use crate::session_runtime::{RuntimeCheckpoint, SessionRuntimeEvent};
+
+        let mut timeline = Timeline::default();
+        spawn_settlement_workflow(&mut timeline, "wf_checkpoint");
+        for runtime in [
+            SessionRuntimeEvent::SuspendRequested {
+                operation_id: "workflow-checkpoint".into(),
+                root_session_id: "session-1".into(),
+            },
+            SessionRuntimeEvent::CommandsSettled {
+                operation_id: "workflow-checkpoint".into(),
+                commands: Vec::new(),
+            },
+        ] {
+            timeline
+                .record(TimelineEventKind::Runtime(runtime))
+                .unwrap();
+        }
+        timeline
+            .record(TimelineEventKind::Runtime(
+                SessionRuntimeEvent::Checkpoint {
+                    operation_id: "workflow-checkpoint".into(),
+                    checkpoint: Box::new(RuntimeCheckpoint {
+                        frontier: timeline.events().last().unwrap().seq,
+                        runtime_source_hash: "a".repeat(64),
+                        turn: None,
+                        step: None,
+                    }),
+                },
+            ))
+            .unwrap();
+        let expected = vec![("wf_checkpoint".into(), 0)];
+        for transition in [
+            None,
+            Some(SessionRuntimeEvent::RestorePrepared {
+                operation_id: "workflow-checkpoint".into(),
+                instance_id: "restore-1".into(),
+            }),
+            Some(SessionRuntimeEvent::Resumed {
+                operation_id: "workflow-checkpoint".into(),
+                instance_id: "restore-1".into(),
+            }),
+        ] {
+            if let Some(runtime) = transition {
+                timeline
+                    .record(TimelineEventKind::Runtime(runtime))
+                    .unwrap();
+            }
+            let before = serde_json::to_value(timeline.events()).unwrap();
+            assert!(
+                timeline
+                    .settle_interrupted_workflows(&expected)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(serde_json::to_value(timeline.events()).unwrap(), before);
+            assert!(timeline.workflow_lifecycle("wf_checkpoint").unwrap().open);
+            assert_bulk_matches(&timeline);
+        }
+    }
+
     #[test]
     fn interrupted_subagent_is_left_open_for_backend_reconciliation() {
         let mut timeline = Timeline::default();
@@ -15457,6 +15917,402 @@ mod tests {
                 redirect_kind: None,
             }))
             .unwrap();
+    }
+
+    fn plan_guidance_source(message_id: &str) -> NotificationSource {
+        NotificationSource::PlanGuidance {
+            parent_session_id: "parent".into(),
+            message_id: message_id.into(),
+        }
+    }
+
+    fn plan_guidance_message(
+        id: &str,
+        message_id: &str,
+        body: &str,
+    ) -> sampling_types::AgentMessage {
+        sampling_types::AgentMessage {
+            receipt_id: id.into(),
+            source_session_id: "parent".into(),
+            target_session_id: "session-1".into(),
+            message_id: message_id.into(),
+            reply_to: None,
+            message: body.into(),
+        }
+    }
+
+    #[test]
+    fn notification_consumer_query_plan_guidance_identity_owner_and_version_are_distinct() {
+        let guidance = plan_guidance_source("change-1");
+        let ordinary = NotificationSource::ParentMessage {
+            parent_session_id: "parent".into(),
+            message_id: "change-1".into(),
+            interrupt: false,
+        };
+        let version = NotificationSourceVersion::Ordinal {
+            value: PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        assert_eq!(
+            guidance.agent_message(),
+            Some(("parent", "change-1", None, true))
+        );
+        assert_eq!(guidance.subject_id(), "change-1");
+        assert_eq!(guidance.owner(), NotificationOwner::Session);
+        assert_eq!(
+            guidance.clone().with_owner(NotificationOwner::Goal {
+                goal_id: "goal-1".into(),
+                definition_revision: 3,
+            }),
+            guidance
+        );
+        assert_eq!(
+            serde_json::to_value(&guidance).unwrap(),
+            serde_json::json!({
+                "kind": "plan_guidance", "parent_session_id": "parent", "message_id": "change-1"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<NotificationSource>(serde_json::to_value(&guidance).unwrap())
+                .unwrap(),
+            guidance
+        );
+        let mut injected_interrupt = serde_json::to_value(&guidance).unwrap();
+        injected_interrupt["interrupt"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<NotificationSource>(injected_interrupt).is_err());
+
+        let typed_id = notification_id("session-1", &guidance, &version).unwrap();
+        let ordinary_id = notification_id("session-1", &ordinary, &version).unwrap();
+        assert_ne!(typed_id, ordinary_id);
+        let interrupting = NotificationSource::ParentMessage {
+            parent_session_id: "parent".into(),
+            message_id: "change-1".into(),
+            interrupt: true,
+        };
+        assert_eq!(
+            notification_id("session-1", &interrupting, &version).unwrap(),
+            ordinary_id
+        );
+        assert_eq!(interrupting.identity(), ordinary.identity());
+        let reply = NotificationSource::AgentReply {
+            source_session_id: "parent".into(),
+            message_id: "change-1".into(),
+            reply_to: sampling_types::AgentMessageRef {
+                source_session_id: "session-1".into(),
+                message_id: "original".into(),
+            },
+        };
+        assert_ne!(
+            notification_id("session-1", &reply, &version).unwrap(),
+            typed_id
+        );
+        for invalid_version in [
+            NotificationSourceVersion::Ordinal { value: 1 },
+            NotificationSourceVersion::Ordinal { value: 3 },
+            NotificationSourceVersion::Opaque { value: "2".into() },
+        ] {
+            assert!(matches!(
+                notification_id("session-1", &guidance, &invalid_version),
+                Err(TimelineError::InvalidNotification)
+            ));
+        }
+        for invalid in [
+            NotificationSource::PlanGuidance {
+                parent_session_id: " ".into(),
+                message_id: "change-1".into(),
+            },
+            NotificationSource::PlanGuidance {
+                parent_session_id: "parent".into(),
+                message_id: "".into(),
+            },
+        ] {
+            assert!(matches!(
+                notification_id("session-1", &invalid, &version),
+                Err(TimelineError::InvalidNotification)
+            ));
+        }
+    }
+
+    #[test]
+    fn notification_consumer_query_plan_guidance_ignores_an_ordinary_same_id_consumer() {
+        let mut timeline = Timeline::default();
+        let version = NotificationSourceVersion::Ordinal {
+            value: PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        let ordinary = NotificationSource::ParentMessage {
+            parent_session_id: "parent".into(),
+            message_id: "change-1".into(),
+            interrupt: false,
+        };
+        let ordinary_id =
+            receive_notification(&mut timeline, ordinary.clone(), version.clone(), "ordinary");
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![ordinary_id.clone()],
+                    turn,
+                    input: Some(ConversationItem::received_agent_message(
+                        plan_guidance_message(&ordinary_id, "change-1", "ordinary"),
+                    )),
+                },
+            ))
+            .unwrap();
+        let guidance = plan_guidance_source("change-1");
+        let typed_id =
+            receive_notification(&mut timeline, guidance.clone(), version.clone(), "wrap up.");
+        assert_ne!(ordinary_id, typed_id);
+        assert_eq!(
+            timeline.consumed_agent_messages(&["change-1".into()]),
+            BTreeSet::from(["change-1".into()])
+        );
+        assert_eq!(
+            timeline.consumed_notification_turn(&ordinary, &version),
+            Some(turn)
+        );
+        assert_eq!(
+            timeline.consumed_notification_turn(&guidance, &version),
+            None
+        );
+        assert_eq!(timeline.parent_message_receipts().len(), 2);
+        let mut replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(replayed.pending_notifications()[0].id, typed_id);
+        assert_eq!(
+            replayed.consumed_notification_turn(&guidance, &version),
+            None
+        );
+        let before_duplicate = serde_json::to_value(replayed.events()).unwrap();
+        assert!(
+            replayed
+                .record(TimelineEventKind::Notification(
+                    NotificationEvent::Received {
+                        id: typed_id.clone(),
+                        owner_session_id: "session-1".into(),
+                        source: guidance.clone(),
+                        source_version: version.clone(),
+                        payload_ref: notification_payload("wrap up."),
+                    }
+                ))
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(replayed.events()).unwrap(),
+            before_duplicate
+        );
+        replayed
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![typed_id],
+                    turn,
+                    input: Some(ConversationItem::received_agent_message(
+                        plan_guidance_message(
+                            &replayed.pending_notifications()[0].id,
+                            "change-1",
+                            "wrap up.",
+                        ),
+                    )),
+                },
+            ))
+            .unwrap();
+        let replayed = Timeline::from_events(replayed.events().to_vec()).unwrap();
+        assert_eq!(
+            replayed.consumed_notification_turn(&guidance, &version),
+            Some(turn)
+        );
+        assert_eq!(
+            replayed.consumed_notification_turn(&ordinary, &version),
+            Some(turn)
+        );
+        assert!(replayed.pending_notifications().is_empty());
+        assert_eq!(replayed.surface().len(), 2);
+    }
+
+    #[test]
+    fn agent_message_consumption_plan_guidance_requires_a_complete_exact_typed_batch() {
+        let mut timeline = Timeline::default();
+        let version = NotificationSourceVersion::Ordinal {
+            value: PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        let ids = ["change-1", "change-2"].map(|operation| {
+            receive_notification(
+                &mut timeline,
+                plan_guidance_source(operation),
+                version.clone(),
+                "wrap up.",
+            )
+        });
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        let exact = ConversationItem::agent_message(vec![
+            plan_guidance_message(&ids[0], "change-1", "wrap up."),
+            plan_guidance_message(&ids[1], "change-2", "wrap up."),
+        ]);
+        let mut invalid_inputs = vec![
+            ("none", None),
+            ("user", Some(ConversationItem::user("wrap up."))),
+            (
+                "generic notification",
+                Some(ConversationItem::notification_drain("wrap up.")),
+            ),
+            (
+                "empty batch",
+                Some(ConversationItem::agent_message(Vec::new())),
+            ),
+            (
+                "partial batch",
+                Some(ConversationItem::received_agent_message(
+                    plan_guidance_message(&ids[0], "change-1", "wrap up."),
+                )),
+            ),
+        ];
+        for field in [
+            "receipt",
+            "source",
+            "target",
+            "operation",
+            "reply",
+            "hash",
+            "bytes",
+            "order",
+            "duplicate",
+        ] {
+            let mut tampered = exact.clone();
+            let ConversationItem::AgentMessage(batch) = &mut tampered else {
+                unreachable!()
+            };
+            match field {
+                "receipt" => batch.messages[0].receipt_id = "wrong-receipt".into(),
+                "source" => batch.messages[0].source_session_id = "other-parent".into(),
+                "target" => batch.messages[0].target_session_id = "other-session".into(),
+                "operation" => batch.messages[0].message_id = "other-change".into(),
+                "reply" => {
+                    batch.messages[0].reply_to = Some(sampling_types::AgentMessageRef {
+                        source_session_id: "session-1".into(),
+                        message_id: "original".into(),
+                    })
+                }
+                "hash" => batch.messages[0].message = "keep up.".into(),
+                "bytes" => batch.messages[0].message = "wrap up. ".into(),
+                "order" => batch.messages.reverse(),
+                "duplicate" => batch.messages[1] = batch.messages[0].clone(),
+                _ => unreachable!(),
+            }
+            invalid_inputs.push((field, Some(tampered)));
+        }
+        let events_before = serde_json::to_value(timeline.events()).unwrap();
+        let pending_before = timeline.pending_notifications();
+        let surface_before = timeline.surface_ids().to_vec();
+        for (case, input) in invalid_inputs {
+            assert!(
+                matches!(
+                    timeline.record(TimelineEventKind::Notification(
+                        NotificationEvent::Consumed {
+                            notification_ids: ids.to_vec(),
+                            turn,
+                            input,
+                        }
+                    )),
+                    Err(TimelineError::InvalidNotification)
+                ),
+                "case {case}"
+            );
+            assert_eq!(
+                serde_json::to_value(timeline.events()).unwrap(),
+                events_before,
+                "case {case}"
+            );
+            assert_eq!(
+                timeline.pending_notifications(),
+                pending_before,
+                "case {case}"
+            );
+            assert_eq!(timeline.surface_ids(), surface_before, "case {case}");
+        }
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: ids.to_vec(),
+                    turn,
+                    input: Some(exact),
+                },
+            ))
+            .unwrap();
+        assert!(timeline.pending_notifications().is_empty());
+        assert_eq!(timeline.surface().len(), 1);
+        assert_eq!(timeline.surface_ids().len(), 1);
+        for operation in ["change-1", "change-2"] {
+            assert_eq!(
+                timeline.consumed_notification_turn(&plan_guidance_source(operation), &version),
+                Some(turn)
+            );
+        }
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+    }
+
+    #[test]
+    fn parent_receipt_history_plan_guidance_retains_consumed_payload_through_replay() {
+        let mut timeline = Timeline::default();
+        let source = plan_guidance_source("change-1");
+        let version = NotificationSourceVersion::Ordinal {
+            value: PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        let body = "收尾\tretain exact evidence.\r\n";
+        let id = receive_notification(&mut timeline, source.clone(), version.clone(), body);
+        let other = receive_notification(
+            &mut timeline,
+            NotificationSource::TaskCompleted {
+                task_id: "task-1".into(),
+                task_kind: NotificationTaskKind::Task,
+                owner: NotificationOwner::Session,
+            },
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "ephemeral completion",
+        );
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![id.clone()],
+                    turn,
+                    input: Some(ConversationItem::received_agent_message(
+                        plan_guidance_message(&id, "change-1", body),
+                    )),
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![other],
+                    turn,
+                    input: None,
+                },
+            ))
+            .unwrap();
+        let serialized = serde_json::to_vec(timeline.events()).unwrap();
+        let replayed = Timeline::from_events(serde_json::from_slice(&serialized).unwrap()).unwrap();
+        assert!(replayed.pending_notifications().is_empty());
+        assert_eq!(
+            replayed.retained_notification_payload_hashes(),
+            BTreeSet::from([notification_payload(body).blake3])
+        );
+        let receipts = replayed.parent_message_receipts();
+        assert_eq!(receipts.len(), 1);
+        assert!(
+            matches!(&receipts[0].kind, TimelineEventKind::Notification(NotificationEvent::Received { id: actual, source: actual_source, payload_ref, .. })
+            if actual == &id && actual_source == &source && payload_ref == &notification_payload(body))
+        );
+        assert_eq!(
+            replayed.consumed_notification_turn(&source, &version),
+            Some(turn)
+        );
+        assert_eq!(replayed.surface().len(), 1);
+        assert_eq!(replayed.surface()[0].text_content(), body);
     }
 
     #[test]

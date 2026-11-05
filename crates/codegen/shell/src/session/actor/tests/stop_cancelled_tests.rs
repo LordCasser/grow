@@ -16,6 +16,9 @@ use tokio::sync::mpsc;
 
 const END_TURN: &str = "end_turn";
 
+#[path = "stop_cancelled_tests/continuation_tests.rs"]
+mod continuation_tests;
+
 /// Run a test body on a dedicated thread with an 8MB stack (the turn loop's
 /// async state-machine chain needs 2–4MB; see `truncation_recovery_tests.rs`).
 fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {

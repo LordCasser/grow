@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use tokio::task::Id;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{RetryPolicy, SamplerConfig};
@@ -14,10 +15,12 @@ use crate::types::RequestId;
 
 /// In-flight request bookkeeping.
 ///
-/// `cancel_token` is owned by the actor (cloned into the spawned
-/// per-request task). The completion oneshot is moved into the
-/// per-request task at spawn time and is therefore not stored here.
+/// `task_id` identifies this submission while it remains tracked by the
+/// actor's JoinSet, even after its public request id has been reused.
+/// `cancel_token` is shared with the submitting handle and per-request task.
+/// The completion oneshot is moved into the task at spawn time.
 pub(crate) struct ActiveRequest {
+    pub(crate) task_id: Id,
     pub(crate) cancel_token: CancellationToken,
 }
 
@@ -38,8 +41,8 @@ impl ActorState {
     }
 
     /// Register a newly-spawned request. Returns the previous entry if
-    /// the same `request_id` was already in flight (callers should
-    /// cancel the previous token before overwriting).
+    /// the same `request_id` was already in flight; callers cancel that
+    /// submission while retaining its task in the JoinSet.
     pub(crate) fn register(
         &mut self,
         request_id: RequestId,
@@ -48,11 +51,11 @@ impl ActorState {
         self.active_requests.insert(request_id, active)
     }
 
-    /// Remove a request from the active set without cancelling its
-    /// token. Used by the cleanup signal sent from per-request tasks
-    /// when they exit normally.
-    pub(crate) fn remove(&mut self, request_id: &RequestId) -> Option<ActiveRequest> {
-        self.active_requests.remove(request_id)
+    /// Remove only the registration owned by this completed task. A replaced
+    /// task remains in the JoinSet but no longer owns its public request id.
+    pub(crate) fn remove_task(&mut self, task_id: Id) {
+        self.active_requests
+            .retain(|_, active| active.task_id != task_id);
     }
 
     /// Cancel and remove an in-flight request.
@@ -112,13 +115,15 @@ mod tests {
         assert!(!state.cancel(&RequestId::from("unknown")));
     }
 
-    #[test]
-    fn register_then_cancel_removes() {
+    #[tokio::test]
+    async fn register_then_cancel_removes() {
         let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut tasks = tokio::task::JoinSet::new();
         let id = RequestId::from("req-1");
         state.register(
             id.clone(),
             ActiveRequest {
+                task_id: tasks.spawn(async {}).id(),
                 cancel_token: CancellationToken::new(),
             },
         );
@@ -127,14 +132,17 @@ mod tests {
         assert_eq!(state.active_requests.len(), 0);
     }
 
-    #[test]
-    fn register_returns_previous_when_same_id() {
+    #[tokio::test]
+    async fn register_returns_previous_when_same_id() {
         let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut tasks = tokio::task::JoinSet::new();
         let id = RequestId::from("req-1");
         let first = ActiveRequest {
+            task_id: tasks.spawn(async {}).id(),
             cancel_token: CancellationToken::new(),
         };
         let second = ActiveRequest {
+            task_id: tasks.spawn(async {}).id(),
             cancel_token: CancellationToken::new(),
         };
         assert!(state.register(id.clone(), first).is_none());

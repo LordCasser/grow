@@ -43,6 +43,22 @@ the API unless its `model` field overrides that value.
 
 These constraints keep provider configuration global while model selection remains session-local.
 
+## Agent control of a running child
+
+The native `set_subagent_model` tool lets a parent Agent queue a model or effort change for an active child it directly delegated:
+
+```json
+{"subagent_id":"<child task ID>","model":"provider/model","effort":"high"}
+```
+
+Use the exact task ID returned by `spawn_subagent` and a selectable catalog model ID. At least one of `model` or `effort` is required. A model-only call uses the same effort defaults as user model selection. An effort-only call applies to the child's newest pending model choice. Omission or JSON null leaves a field unspecified; `"none"` is an explicit effort value that the target model must offer.
+
+The result `{"subagent_id":"<child task ID>","status":"queued"}` confirms target actor admission. The child's current provider request finishes under its original route, and Grow applies the selection at a closed Step boundary before the next admitted request. A later user or parent selection can supersede it. This operation leaves the parent's model and effort unchanged.
+
+Only active directly owned children can be controlled. Unrelated tasks, siblings, grandchildren, initializing or stopped children, and Workflow-owned children are rejected. Hidden or disallowed models and unsupported efforts also return an error. Sampling changes preserve the child's tools, workspace, MCP and permission limits.
+
+For child creation and continuation, see [subagent model and effort selection](16-subagents.md#resume-semantics).
+
 ## API backends
 
 `api_backend` selects the request protocol, not a vendor name:

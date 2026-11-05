@@ -88,6 +88,7 @@ jobs:
           set -euo pipefail
           python -m unittest discover -s scripts/tests
           python scripts/run_exact_cargo_test.py --package shell --lib session::storage::jsonl::tests::session_creation_round_trip_commits_and_reopens_the_timeline
+          python scripts/run_exact_cargo_test.py --package shell --lib session::storage::jsonl::tests::child_history_stream_coexists_with_delete_capable_publication_handle
           python scripts/run_exact_cargo_test.py --package shell --lib session::storage::jsonl::tests::long_windows_cwds_roundtrip_under_long_storage_root
           python scripts/run_exact_cargo_test.py --package shell --lib session::storage::jsonl::tests::scan_opened_sessions_skips_non_sessions_and_invalid_summaries
           python scripts/run_exact_cargo_test.py --package shell --lib session::storage::tests::contained_no_replace_rename_preserves_both_existing_entities

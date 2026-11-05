@@ -1,0 +1,11 @@
+# Independent static review
+
+magpie/gpt-6-luna在原只读根因调查后，独立审查稳定修复diff，无生产阻塞发现。其未运行Cargo/测试，运行证据由父核对。
+
+已核对Timeline投影复用原branch canonical消费判定，无第二状态；live actor和两个JSONL冷构造各从同一已验证Timeline提供surface/IDs/pins。planner严格exact pins与Model唯一call/result，保留Reasoning/BackendToolCall/整批assistant及所有后续result；User保留同prompt输入。结构截断后检查source，budget fit只在原safe范围内缩小。Shell prepare与async预检均用同snapshot字段，source不足先于summary生成退出。原最终guard/终止settlement不变，rawassistant/Sideband不消费skill。
+
+两条Shell真实入口测试源码的触发/断言符合契约：Responses真实load、PostToolUse gate、run_compact_only、足量旧prefix摘要或零summary、下一主请求收到原body/call身份且load1次，后续canonical消费解pin。静态review不等于这些入口已运行；首次Shell编译暴露缺stackhelper，父交原coder补齐。同次新增冷materialization消费前后回归曾只准备在/tmp，已纳入skill_loading_tests，待正确工具链运行；两个生产构造真实pins接线已核对。
+
+父补充检查：newpublic只读投影因ChatState和Shell冷物化跨crate共享契约必需，仅9行方法/文档，无统一构造框架；cold caller各增1行，无解码/锁/写入改动。ChatState实际26次筛选日志已亲自读取，含重叠不称26不同场景。主/child复用同选区路径，scheduled reminder分支不影响技能消费。
+
+父已按上述验收要求核对最终4个Shell exact的真实成功日志：两入口、cold和原User guard均1/1，默认CLI check/build及跨特性3+1进程集成也通过。最终只修测试夹具的stack helper、合法internal turn与Observe通知/既有Step gate屏障，production boundary未变化；完整结果见verification。独立静态结论与实际运行证据合并后，本特性验收通过。

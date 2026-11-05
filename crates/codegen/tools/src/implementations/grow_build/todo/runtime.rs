@@ -9,6 +9,10 @@ use super::TodoWriteInput;
 
 /// Typed operations sent to the owning session actor.
 pub enum PlanningCommand {
+    Read {
+        respond_to:
+            oneshot::Sender<Result<Option<tool_types::planning::PlanningReadSnapshot>, String>>,
+    },
     Write {
         prompt_id: String,
         input: TodoWriteInput,
@@ -31,6 +35,7 @@ pub enum PlanningCommand {
 impl std::fmt::Debug for PlanningCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Read { .. } => f.debug_struct("Read").finish_non_exhaustive(),
             Self::Write {
                 prompt_id, input, ..
             } => f

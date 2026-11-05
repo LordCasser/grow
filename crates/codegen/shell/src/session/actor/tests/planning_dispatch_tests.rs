@@ -136,6 +136,14 @@ async fn received_replan_ack_loss_cold_retry_reuses_receipt_and_consumed_input()
                 .expect("test child is uniquely owned")
                 .session_info
                 .id = acp::SessionId::new("planning-ack-child");
+            std::sync::Arc::get_mut(&mut child)
+                .unwrap()
+                .startup_hints
+                .delegated_parent_plan = Some(crate::session::acp_types::ParentPlanBinding {
+                parent_session_id: parent.session_id_string(),
+                task_id: "link-ack".into(),
+                parent_step_id: "step-ack".into(),
+            });
             let child_id = child.session_id_string();
 
             let mut parent_plan = tool_types::LocalPlan::new(parent.session_id_string(), "work:test");
@@ -194,15 +202,28 @@ async fn received_replan_ack_loss_cold_retry_reuses_receipt_and_consumed_input()
                 .await
                 .expect("source update response")
                 .expect("source update must commit");
-            let source = parent
+            let claimed = parent
                 .chat_state_handle
                 .planning_state()
                 .await
                 .unwrap()
-                .unwrap()
-                .plan
-                .replans[0]
-                .clone();
+                .unwrap();
+            let mut parent_plan = claimed.plan;
+            let change_id = parent_plan.replans[0].id.clone();
+            parent_plan
+                .advance_replan(&change_id, tool_types::ReplanProgress::Dispatching)
+                .unwrap();
+            let source = parent_plan.replans[0].clone();
+            parent
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: Some(claimed.seq),
+                        plan: Box::new(parent_plan),
+                    },
+                ))
+                .await
+                .unwrap();
 
             let probe = install_planning_ack_fault(
                 std::sync::Arc::get_mut(&mut child).unwrap(),
@@ -239,18 +260,30 @@ async fn received_replan_ack_loss_cold_retry_reuses_receipt_and_consumed_input()
                 .pending_notifications()
                 .await
                 .expect("restored notification inbox");
-            assert_eq!(pending_before.len(), 1);
-            let receipt_id = pending_before[0].id.clone();
+            assert!(pending_before.is_empty(), "the lost plan ACK must precede notification admission");
+            assert!(!*child.parent_message_interrupt.borrow());
+            let receipt_id = child
+                .receive_plan_guidance(parent.session_id_string(), source.clone())
+                .await
+                .expect("exact delivery retry must fill the missing receipt");
+            let pending_after = child.chat_state_handle.pending_notifications().await.unwrap();
+            assert_eq!(pending_after.len(), 1);
+            assert_eq!(pending_after[0].id, receipt_id);
+            assert!(matches!(&pending_after[0].source,
+                chat_state::NotificationSource::PlanGuidance { parent_session_id, .. }
+                    if parent_session_id == &parent.session_id_string()));
             assert_eq!(
                 child
                     .receive_plan_guidance(parent.session_id_string(), source.clone())
                     .await
-                    .expect("exact delivery retry must be accepted"),
+                    .expect("exact completed receipt retry must be accepted"),
                 receipt_id,
                 "cold retry must reuse the durable receipt identity"
             );
             let after_retry = child.chat_state_handle.timeline_events().await.unwrap();
-            assert_eq!(after_retry.len(), committed_prefix.len());
+            assert_eq!(after_retry.len(), committed_prefix.len() + 1);
+            assert_eq!(child.chat_state_handle.parent_message_receipts().await.unwrap().len(), 1);
+            assert_eq!(parent.chat_state_handle.planning_state().await.unwrap().unwrap().plan.replans[0], source);
             assert_eq!(
                 child
                     .chat_state_handle
@@ -1835,15 +1868,7 @@ async fn task_link_and_parent_commit_exchange_order_without_losing_latest_requir
                 let SubagentEvent::Spawn(spawn) = backend_rx.recv().await.unwrap() else {
                     panic!("Task must submit the linked child to its real backend boundary");
                 };
-                let (_, encoded) = spawn
-                    .request
-                    .prompt
-                    .split_once("\n\nCurrent delegated parent step:\n")
-                    .expect("child must receive the committed parent requirement");
-                let guidance: serde_json::Value = serde_json::from_str(encoded).unwrap();
-                assert_eq!(guidance["session_id"], parent.session_id_string());
-                assert_eq!(guidance["scope_id"], "work:test");
-                assert_eq!(guidance["step"]["id"], "linked-step");
+                assert_eq!(spawn.request.prompt, "original task prompt");
                 let committed = parent
                     .chat_state_handle
                     .planning_state()
@@ -1853,14 +1878,46 @@ async fn task_link_and_parent_commit_exchange_order_without_losing_latest_requir
                 let binding = &committed.plan.links[0];
                 assert_eq!(binding.child_session_id, "linked-task");
                 assert_eq!(binding.parent_step_id, "linked-step");
+                assert_eq!(committed.plan.revision, 1);
+                assert_eq!(binding.review_required_revision, committed.plan.revision);
+                let timeline = parent.chat_state_handle.timeline_events().await.unwrap();
+                let admission = timeline
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Planning(event)
+                            if event.plan.links.iter().any(|link| link.id == "linked-task") =>
+                        {
+                            Some(&event.plan)
+                        }
+                        _ => None,
+                    })
+                    .expect("the admitted task must have a durable Link fact");
+                let admitted_binding = admission
+                    .links
+                    .iter()
+                    .find(|link| link.id == "linked-task")
+                    .unwrap();
+                let admitted_revision = if edit_first {
+                    committed.plan.revision
+                } else {
+                    0
+                };
+                assert_eq!(admission.revision, admitted_revision);
+                assert_eq!(admitted_binding.review_required_revision, admitted_revision);
+                assert_eq!(committed.plan.scope_id, "work:test");
+                assert_eq!(
+                    committed
+                        .plan
+                        .steps
+                        .iter()
+                        .find(|step| step.id == "linked-step")
+                        .unwrap()
+                        .content,
+                    "latest requirement"
+                );
                 if edit_first {
-                    assert_eq!(guidance["step"]["content"], "latest requirement");
-                    assert_eq!(guidance["revision"], committed.plan.revision);
-                    assert_eq!(binding.review_required_revision, committed.plan.revision);
                     assert!(committed.plan.replans.is_empty());
                 } else {
-                    assert_eq!(guidance["step"]["content"], "original requirement");
-                    assert_eq!(guidance["revision"], 0);
                     assert_eq!(committed.plan.replans.len(), 1);
                     let responsibility = &committed.plan.replans[0];
                     assert_eq!(responsibility.link_id, "linked-task");
@@ -1908,6 +1965,14 @@ async fn linked_parent_update_is_dispatched_received_handled_and_completion_is_n
                 .expect("test child has no other owners yet")
                 .session_info
                 .id = acp::SessionId::new("planning-direct-child");
+            std::sync::Arc::get_mut(&mut child)
+                .unwrap()
+                .startup_hints
+                .delegated_parent_plan = Some(crate::session::acp_types::ParentPlanBinding {
+                parent_session_id: parent.session_id_string(),
+                task_id: "task-1".into(),
+                parent_step_id: "step-1".into(),
+            });
             let child_id = child.session_id_string();
 
             // Seed the exact parent-step/task/child relation in one durable

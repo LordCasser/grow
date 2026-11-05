@@ -1529,10 +1529,24 @@ async fn response_projection_production_read_only_cores_preserve_unified_timelin
         ).unwrap(),
         crate::session::storage::ReplayEmission::Emitted,
     );
+    let mut history = Vec::new();
+    assert_eq!(
+        crate::session::storage::stream_session_history_at(
+            info.id.0.as_ref(),
+            root.path(),
+            |update| history.push(update),
+        ).unwrap(),
+        crate::session::storage::ReplayEmission::Emitted,
+    );
     let materialized = crate::session::storage::load_updates_for_replay_at(
         info.id.0.as_ref(),
         root.path(),
     ).unwrap().unwrap();
+    let history = loaded_child_acp_updates(history).into_iter().map(|notification| {
+        assert_eq!(notification.session_id, info.id);
+        notification.update
+    }).collect();
+    assert_eq!(response_projection_production_texts(history), [canonical, later]);
     assert_eq!(response_projection_production_texts(streamed), [canonical, later]);
     assert_eq!(response_projection_production_texts(materialized), [canonical, later]);
     assert_eq!(std::fs::read(&timeline_path).unwrap(), physical_before);
@@ -1542,6 +1556,99 @@ async fn response_projection_production_read_only_cores_preserve_unified_timelin
     assert!(!contender.try_acquire_writer_lease(&info).unwrap());
     drop(writer);
     assert!(contender.try_acquire_writer_lease(&info).unwrap());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn child_history_stream_coexists_with_delete_capable_publication_handle() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    let timeline = response_projection_production_timeline("child-history-request", 2, "canonical response");
+    append_response_projection_production_timeline(&writer, &info, &timeline).await;
+    writer.append_update(&info, &response_projection_production_update(
+        &info,
+        "",
+        serde_json::json!({
+            "samplingRequestId": "child-history-request",
+            "samplingAttempt": 2,
+        }).as_object().cloned().unwrap(),
+    )).await.unwrap();
+    writer.append_update(&info, &response_projection_production_update(
+        &info,
+        "later independent message",
+        serde_json::json!({ "eventId": "child-history-later" }).as_object().cloned().unwrap(),
+    )).await.unwrap();
+    let session_dir = writer.session_dir(&info);
+    let timeline_path = writer.timeline_file(&info);
+    let timeline_before = std::fs::read(&timeline_path).unwrap();
+    let summary_path = writer.summary_file(&info);
+    let summary_before = std::fs::read(&summary_path).unwrap();
+    // Close the ordinary writer pin before retaining the publication access;
+    // otherwise acquiring DELETE would itself fail the bidirectional share check.
+    drop(writer);
+    let publishing = std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ.0 | DELETE.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(&session_dir)
+        .unwrap();
+    assert!(publishing.metadata().unwrap().is_dir());
+
+    let pin_error = std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(&session_dir)
+        .expect_err("an ordinary namespace pin cannot coexist with publication DELETE access");
+    assert_eq!(pin_error.raw_os_error(), Some(32));
+    let ordinary = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = ordinary.open_session_by_id(info.id.0.as_ref()).err().unwrap();
+    assert!(error.to_string().contains("os error 32"), "{error}");
+    assert!(ordinary.opened_sessions.lock().unwrap().is_empty());
+
+    let mut history = Vec::new();
+    assert_eq!(
+        crate::session::storage::stream_session_history_at(
+            info.id.0.as_ref(), root.path(), |update| history.push(update),
+        ).unwrap(),
+        crate::session::storage::ReplayEmission::Emitted,
+    );
+    let history = loaded_child_acp_updates(history).into_iter().map(|notification| {
+        assert_eq!(notification.session_id, info.id);
+        notification.update
+    }).collect();
+    let mut replay = Vec::new();
+    assert_eq!(
+        crate::session::storage::stream_replay_updates_at(
+            info.id.0.as_ref(), root.path(), |update| replay.push(update),
+        ).unwrap(),
+        crate::session::storage::ReplayEmission::Emitted,
+    );
+    let materialized = crate::session::storage::load_updates_for_replay_at(
+        info.id.0.as_ref(), root.path(),
+    ).unwrap().unwrap();
+    for updates in [history, replay, materialized] {
+        assert_eq!(response_projection_production_texts(updates), ["canonical response", "later independent message"]);
+    }
+    let observer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let opened = observer.open_session_by_id_shared_read(info.id.0.as_ref()).unwrap().unwrap();
+    assert_eq!(opened.summary().info.id, info.id);
+    assert!(observer.opened_sessions.lock().unwrap().is_empty());
+    assert!(observer.writer_leases.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(&timeline_path).unwrap(), timeline_before, "history observation must not append recovery facts");
+    assert_eq!(std::fs::read(&summary_path).unwrap(), summary_before);
+    assert!(!session_dir.join(super::super::UPDATES_FILE).exists());
+    drop(opened);
+    drop(publishing);
+    assert!(ordinary.open_session_by_id(info.id.0.as_ref()).unwrap().is_some());
 }
 
 async fn append_control_snapshot(
@@ -6632,6 +6739,9 @@ async fn coordination_observer_preserves_live_sideband_and_new_writer_recovers_o
     let observer = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let light = observer.load_session_without_updates(&info).await.unwrap();
     let full = observer.load_session(&info).await.unwrap();
+    let _ = crate::session::storage::stream_session_history_at(
+        info.id.0.as_ref(), temp_dir.path(), |_| {},
+    ).unwrap();
     assert_eq!(light.summary.display_title(), "Canonical title");
     assert_eq!(full.summary.display_title(), "Canonical title");
     assert_eq!(std::fs::read(&summary_path).unwrap(), summary_before);

@@ -171,8 +171,10 @@ pub(super) fn project_call_access(
         ToolInput::MCPTool(_) | ToolInput::UseTool(_) => mcp_max.unwrap_or(ToolAccess::All),
         ToolInput::Dynamic(_) => mcp_max.unwrap_or(descriptor_max),
         ToolInput::TodoWrite(_)
+        | ToolInput::TodoRead(_)
         | ToolInput::SearchTool(_)
         | ToolInput::PlanControl(_)
+        | ToolInput::SetSubagentModel(_)
         | ToolInput::AskUserQuestion(_) => ToolAccess::None,
     }
 }
@@ -732,6 +734,27 @@ pub(super) async fn read_plan_artifact_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todo_read_projects_no_filesystem_or_process_authority() {
+        use tool_protocol::ToolAccess;
+        use tool_types::planning::{PlanReadInput, PlanReadTarget};
+        for target in [PlanReadTarget::SelfPlan, PlanReadTarget::Parent] {
+            let input = ToolInput::TodoRead(PlanReadInput {
+                target,
+                ..Default::default()
+            });
+            assert_eq!(
+                project_call_access(&input, ToolAccess::None, None),
+                ToolAccess::None
+            );
+        }
+        assert_eq!(
+            tool_runtime::Tool::capabilities(&tools::implementations::grow_build::TodoReadTool)
+                .max_access,
+            ToolAccess::None
+        );
+    }
 
     #[test]
     fn write_permission_evidence_is_exact_canonical_and_bounded() {

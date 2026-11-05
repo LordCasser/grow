@@ -80,13 +80,6 @@ impl HunkTrackerActor {
             return Err(HunkActionError::HunkNotFound(hunk_id.clone()));
         };
 
-        // Update session stats before removing the hunk
-        let accepted = matches!(action, HunkAction::Accept);
-        self.update_session_stats(&hunk.line_info, accepted);
-
-        // Remove from turn_index
-        self.remove_from_turn_index(hunk_id, &hunk.source);
-
         match action {
             HunkAction::Accept => {
                 self.accept_hunk(&path, &hunk).await?;
@@ -95,6 +88,10 @@ impl HunkTrackerActor {
                 self.reject_hunk(&path, &hunk).await?;
             }
         }
+
+        // Commit projections only after the action has succeeded.
+        self.update_session_stats(&hunk.line_info, matches!(action, HunkAction::Accept));
+        self.remove_from_turn_index(hunk_id, &hunk.source);
 
         Ok(())
     }
@@ -166,6 +163,62 @@ impl HunkTrackerActor {
         Ok(())
     }
 
+    /// Check the disk target against the snapshot used to display its hunks.
+    /// This detects prior edits, not writes racing the subsequent write/remove.
+    async fn ensure_reject_target_matches(
+        path: &Path,
+        expected: &FileContentState,
+    ) -> Result<(), HunkActionError> {
+        use std::io::ErrorKind;
+        use tokio::io::AsyncReadExt;
+
+        let stale = || HunkActionError::StaleContent {
+            path: path.to_path_buf(),
+        };
+        let read_error = |source| HunkActionError::ReadError {
+            path: path.to_path_buf(),
+            source,
+        };
+        let metadata = match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return if matches!(expected, FileContentState::Missing) {
+                    Ok(())
+                } else {
+                    Err(stale())
+                };
+            }
+            Err(error) => return Err(read_error(error)),
+        };
+
+        let FileContentState::Full(expected) = expected else {
+            return Err(stale());
+        };
+        // Symlinks and other non-text targets must not be followed or removed.
+        if !metadata.is_file() {
+            return Err(stale());
+        }
+
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Err(stale()),
+            Err(error) => return Err(read_error(error)),
+        };
+        // A longer file cannot match. Bound consumption even if it grew since
+        // caching, and require EOF when every expected byte matches.
+        let limit = expected.len() as u64 + 1;
+        let mut actual = Vec::with_capacity(expected.len() + 1);
+        file.take(limit)
+            .read_to_end(&mut actual)
+            .await
+            .map_err(read_error)?;
+        if actual.as_slice() == expected.as_bytes() {
+            Ok(())
+        } else {
+            Err(stale())
+        }
+    }
+
     /// Reject a single hunk: patch current content to revert this hunk's changes.
     async fn reject_hunk(&mut self, path: &Path, hunk: &Arc<Hunk>) -> Result<(), HunkActionError> {
         // First, determine what action to take and collect data
@@ -181,6 +234,7 @@ impl HunkTrackerActor {
             let Some(state) = state else {
                 return Ok(());
             };
+            Self::ensure_reject_target_matches(path, &state.current_content).await?;
 
             if matches!(state.current_content, FileContentState::Missing)
                 && matches!(state.baseline, FileContentState::Full(_))
@@ -377,19 +431,7 @@ impl HunkTrackerActor {
         let mut affected_hunk_ids = Vec::new();
 
         for (path, hunks) in files_with_hunks {
-            // Process all hunks for this file in one go
-            for hunk in hunks {
-                // Update session stats
-                let accepted = matches!(action, HunkAction::Accept);
-                self.update_session_stats(&hunk.line_info, accepted);
-
-                // Remove from turn_index
-                self.remove_from_turn_index(&hunk.id, &hunk.source);
-
-                affected_hunk_ids.push(hunk.id.clone());
-            }
-
-            // Apply all patches for this file at once
+            // Apply all patches for this file at once.
             match action {
                 HunkAction::Accept => {
                     self.accept_hunks_batch(path, hunks).await?;
@@ -397,6 +439,13 @@ impl HunkTrackerActor {
                 HunkAction::Reject => {
                     self.reject_hunks_batch(path, hunks).await?;
                 }
+            }
+
+            // Commit each successful file even if a later file fails.
+            for hunk in hunks {
+                self.update_session_stats(&hunk.line_info, matches!(action, HunkAction::Accept));
+                self.remove_from_turn_index(&hunk.id, &hunk.source);
+                affected_hunk_ids.push(hunk.id.clone());
             }
         }
 
@@ -509,6 +558,7 @@ impl HunkTrackerActor {
         let Some(state) = self.file_states.get(path) else {
             return Ok(());
         };
+        Self::ensure_reject_target_matches(path, &state.current_content).await?;
 
         if matches!(state.current_content, FileContentState::Missing)
             && matches!(state.baseline, FileContentState::Full(_))

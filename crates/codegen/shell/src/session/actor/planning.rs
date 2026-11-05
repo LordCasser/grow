@@ -1,5 +1,17 @@
 //! Session-owned local planning. Tool Resources are read-only projections.
 
+mod context;
+mod control;
+#[cfg(test)]
+#[path = "planning/handle_control_tests.rs"]
+mod handle_control_tests;
+#[cfg(test)]
+#[path = "planning/receive_control_tests.rs"]
+mod receive_control_tests;
+#[cfg(test)]
+#[path = "planning/request_context_tests.rs"]
+mod request_context_tests;
+
 use super::*;
 use tool_types::planning::{
     DependencyKind, LocalPlan, PlanLink, PlanPriority, PlanStep, PlanStepStatus, PlanUpdateMode,
@@ -25,39 +37,68 @@ impl SessionActor {
     /// Request-only, bounded view of the latest owner facts. It goes through
     /// normal request construction, so token accounting includes the view.
     pub(crate) async fn local_planning_context(&self) -> Result<Option<String>, String> {
-        let Some(snapshot) = self.chat_state_handle.planning_state().await? else {
-            return Ok(None);
+        use tool_types::planning::PlanningReadSnapshot;
+        use tools::implementations::grow_build::task::{
+            backend::SubagentBackendResource, parent_planning::ParentPlanningReadError,
         };
-        let plan = snapshot.plan;
-        let steps: Vec<_> = plan
-            .steps
-            .iter()
-            .filter(|step| !step.removed)
-            .take(12)
-            .map(|step| {
-                json!({
-                    "id":step.id,"status":step.status,"priority":step.priority,
-                    "content":step.content.chars().take(256).collect::<String>(),
-                })
-            })
-            .collect();
-        let links: Vec<_> = plan.links.iter().rev().take(12).map(|link| json!({
-            "task_id":link.id,"step_id":link.parent_step_id,"child_session_id":link.child_session_id,
-            "terminal":link.terminal,"required":link.required,
-            "review_binding":review_binding(&plan, link),
-            "pending_source_revision":link.pending_source_revision,
-        })).collect();
-        let replans: Vec<_> = plan.replans.iter().filter(|change| !matches!(change.progress, ReplanProgress::Handled{..}|ReplanProgress::Unapplied{..}))
-            .take(12).map(|change| json!({"id":change.id,"source_revision":change.source_revision,"progress":change.progress})).collect();
-        Ok(Some(format!(
-            "Current local work (guidance, not permission). Use todo_write with {{\"todos\":[]}} to inspect responsibilities. Copy review_binding fields into actions[].review.review and add decision, reason and verificationRefs; do not guess resultId from a task ID or sequence number.\n{}",
-            json!({
-                "session_id":plan.session_id,"scope_id":plan.scope_id,"revision":plan.revision,
-                "timeline_seq":snapshot.seq,"steps":steps,"step_count":plan.steps.len(),
-                "links":links,"link_count":plan.links.len(),"pending_replans":replans,
-                "wait_ids":plan.waits.iter().take(12).map(|wait| &wait.id).collect::<Vec<_>>(),
-            })
-        )))
+
+        let own = self
+            .chat_state_handle
+            .planning_state()
+            .await?
+            .map(|snapshot| PlanningReadSnapshot {
+                timeline_seq: snapshot.seq.get(),
+                plan: snapshot.plan,
+                delegation: None,
+            });
+        let binding = self.startup_hints.delegated_parent_plan.as_ref();
+        if own.is_none() && binding.is_none() {
+            return Ok(None);
+        }
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        // Tool-name resolution and backend lookup also wait on Resources. One
+        // absolute deadline bounds that preparation and the parent read together.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let cancellation = self.background_service_shutdown.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        // Registration is a separate observation from the parent read. Retain a
+        // resolved name locally even if that read exhausts the shared deadline.
+        let mut read_tool_name = None;
+        let observation = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => binding.map(|_| Err(ParentPlanningReadError::Unavailable)),
+            result = tokio::time::timeout_at(deadline, async {
+                read_tool_name = bridge.tool_for_kind(tools::types::tool::ToolKind::PlanRead).await;
+                if binding.is_some() {
+                    // The clone leaves Resources before waiting on the backend.
+                    // Its own read deadline remains in force inside this budget.
+                    Some(match bridge.read_resource::<SubagentBackendResource>().await {
+                        Some(backend) => backend.backend().read_parent_plan(cancellation.clone()).await,
+                        None => Err(ParentPlanningReadError::Unavailable),
+                    })
+                } else {
+                    None
+                }
+            }) => match result {
+                Ok(observed) => observed,
+                Err(_) => binding.map(|_| Err(ParentPlanningReadError::TimedOut)),
+            },
+        };
+        let parent = binding
+            .zip(observation.as_ref())
+            .map(|(binding, observation)| {
+                context::ParentPlanContext::from_observation(
+                    binding,
+                    self.session_info.id.0.as_ref(),
+                    observation,
+                )
+            });
+        context::render_planning_context(
+            self.session_info.id.0.as_ref(),
+            own.as_ref(),
+            parent,
+            read_tool_name.as_deref(),
+        )
     }
     pub(crate) async fn accept_planning_task_result(
         &self,
@@ -199,6 +240,7 @@ impl SessionActor {
         let Some(snapshot) = self.chat_state_handle.planning_state().await? else {
             return Ok(());
         };
+        let mut unconfirmed = None;
         for mut change in snapshot.plan.replans {
             if !self.state.lock().await.execution_open() {
                 break;
@@ -207,50 +249,37 @@ impl SessionActor {
                 if let ReplanProgress::Handled { outcome } = &change.progress
                     && !acknowledged_handled.contains(&change.id)
                 {
-                    let receipts = self
-                        .chat_state_handle
-                        .parent_message_receipts()
-                        .await
-                        .unwrap_or_default();
-                    let reference = receipts.iter().find_map(|event| {
-                        let chat_state::TimelineEventKind::Notification(
-                            chat_state::NotificationEvent::Received { source, .. },
-                        ) = &event.kind
-                        else {
-                            return None;
-                        };
-                        let (parent, message_id, _, _) = source.agent_message()?;
-                        (message_id == replan_message_id(&change.id)).then(|| {
-                            sampling_types::AgentMessageRef {
-                                source_session_id: parent.to_owned(),
-                                message_id: message_id.to_owned(),
-                            }
-                        })
-                    });
-                    if let Some(reply_to) = reference {
-                        let cancellation = self.background_service_shutdown.child_token();
-                        let response = tokio::select! {
-                            _ = self.background_service_shutdown.cancelled() => {
-                                cancellation.cancel();
-                                break;
-                            }
-                            response = tokio::time::timeout_at(
-                                deadline,
-                                backend.backend().interact(
-                                format!("handled-{}", blake3::hash(change.id.as_bytes()).to_hex()),
-                                None,
-                                AgentInteraction::ReplanHandled {
-                                    change_id: change.id.clone(),
-                                    outcome: outcome.clone(),
-                                    reply_to,
-                                },
-                                cancellation.clone(),
-                                ),
-                            ) => response,
-                        };
-                        if matches!(response, Ok(Ok(ref result)) if result.status == "received") {
-                            acknowledged_handled.insert(change.id.clone());
+                    let reply_to = match self.consumed_replan_guidance_reference(&change).await {
+                        Ok(reference) => reference,
+                        Err(error) => {
+                            // Keep this responsibility unconfirmed without
+                            // starving independent ACKs or child controls.
+                            unconfirmed.get_or_insert(error);
+                            continue;
                         }
+                    };
+                    let cancellation = self.background_service_shutdown.child_token();
+                    let response = tokio::select! {
+                        _ = self.background_service_shutdown.cancelled() => {
+                            cancellation.cancel();
+                            break;
+                        }
+                        response = tokio::time::timeout_at(
+                            deadline,
+                            backend.backend().interact(
+                            format!("handled-{}", blake3::hash(change.id.as_bytes()).to_hex()),
+                            None,
+                            AgentInteraction::ReplanHandled {
+                                change_id: change.id.clone(),
+                                outcome: outcome.clone(),
+                                reply_to,
+                            },
+                            cancellation.clone(),
+                            ),
+                        ) => response,
+                    };
+                    if matches!(response, Ok(Ok(ref result)) if result.status == "received") {
+                        acknowledged_handled.insert(change.id.clone());
                     }
                 }
                 continue;
@@ -314,7 +343,7 @@ impl SessionActor {
                 break;
             }
         }
-        Ok(())
+        unconfirmed.map_or(Ok(()), Err)
     }
 
     pub(crate) async fn receive_replan_handled(
@@ -366,22 +395,34 @@ impl SessionActor {
         parent_session_id: String,
         mut change: tool_types::ReplanChange,
     ) -> Result<String, crate::session::notification_inbox::AgentMessageDeliveryError> {
-        use crate::session::notification_inbox::AgentMessageDeliveryError;
-        if change.child_session_id != self.session_info.id.0.as_ref() {
+        use crate::session::notification_inbox::{
+            AgentMessageDeliveryError, agent_message_receipt,
+        };
+
+        let _boundary = self.step_control_gate.lock().await;
+        let child_session_id = self.session_info.id.0.as_ref();
+        if change.child_session_id != child_session_id {
             return Err(AgentMessageDeliveryError::rejected(
                 "wrong_replan_target",
                 "Replanning belongs to a different child",
             ));
         }
-        change.progress = ReplanProgress::Received;
-        let body = serde_json::to_string(&change).map_err(|error| {
-            AgentMessageDeliveryError::rejected("invalid_replan", error.to_string())
-        })?;
-        let message_id = replan_message_id(&change.id);
-        let receipt = self.receive_agent_message(parent_session_id, message_id, format!(
-            "The delegating agent changed a linked TODO. Re-evaluate your own local plan at a safe boundary. Preserve valid completed work; acknowledge this source with todo_write HandleReplans, or record a reasoned no-change decision. Do not restart commands solely because the parent changed.\n{body}"
-        ), true, None).await?;
-        let _boundary = self.step_control_gate.lock().await;
+        if parent_session_id == child_session_id
+            || self
+                .startup_hints
+                .delegated_parent_plan
+                .as_ref()
+                .is_none_or(|binding| {
+                    binding.parent_session_id != parent_session_id
+                        || binding.task_id != change.link_id
+                        || binding.parent_step_id != change.step_id
+                })
+        {
+            return Err(AgentMessageDeliveryError::rejected(
+                "invalid_replan_binding",
+                "Replanning does not match this execution's direct parent binding",
+            ));
+        }
         let snapshot = self
             .chat_state_handle
             .planning_state()
@@ -398,24 +439,105 @@ impl SessionActor {
             .unwrap_or("delegated")
             .to_owned();
         let mut plan = snapshot.map_or_else(
-            || {
-                LocalPlan::new(
-                    self.session_info.id.0.to_string(),
-                    format!("work:{prompt_id}"),
-                )
-            },
+            || LocalPlan::new(child_session_id.to_owned(), format!("work:{prompt_id}")),
             |snapshot| snapshot.plan,
         );
-        if plan.receive_replan(change).map_err(|error| {
-            AgentMessageDeliveryError::rejected("replan_conflict", format!("{error:?}"))
-        })? {
-            self.commit_local_plan(previous, plan)
-                .await
-                .map_err(|error| {
-                    AgentMessageDeliveryError::unconfirmed("planning_unconfirmed", error)
-                })?;
+        if plan.session_id != child_session_id {
+            return Err(AgentMessageDeliveryError::rejected(
+                "invalid_replan_binding",
+                "Local planning belongs to a different session",
+            ));
         }
-        Ok(receipt)
+        // Validate the complete immutable responsibility before consulting its
+        // receipt. Exact confirmation must never hide a missing or changed plan.
+        change.progress = ReplanProgress::Received;
+        let inserted = plan.receive_replan(change.clone()).map_err(|error| {
+            AgentMessageDeliveryError::rejected("replan_conflict", format!("{error:?}"))
+        })?;
+        plan.validate()
+            .map_err(|error| AgentMessageDeliveryError::rejected("invalid_replan", error))?;
+        if !plan.replans.iter().any(|record| {
+            record.id == change.id
+                && matches!(
+                    record.progress,
+                    ReplanProgress::Received
+                        | ReplanProgress::Consumed
+                        | ReplanProgress::Handled { .. }
+                )
+        }) {
+            return Err(AgentMessageDeliveryError::rejected(
+                "replan_conflict",
+                "The existing planning fact is not a received responsibility",
+            ));
+        }
+        let body = control::guidance_body(&parent_session_id, &change)
+            .map_err(|error| AgentMessageDeliveryError::rejected("invalid_replan", error))?;
+        let source = chat_state::NotificationSource::PlanGuidance {
+            parent_session_id,
+            message_id: replan_message_id(&change.id),
+        };
+        let receipts = self
+            .chat_state_handle
+            .parent_message_receipts()
+            .await
+            .ok_or_else(|| {
+                AgentMessageDeliveryError::unconfirmed(
+                    "receipt_unavailable",
+                    "Receipt history is unavailable",
+                )
+            })?;
+        let receipt = agent_message_receipt(&receipts, child_session_id, &source, &body)?;
+        if !inserted && let Some(id) = receipt.as_ref() {
+            return Ok(id.clone());
+        }
+        {
+            let state = self.state.lock().await;
+            if !state.execution_open()
+                || !state
+                    .foreground
+                    .regular()
+                    .is_some_and(|task| !task.is_finished() && task.steering_open)
+            {
+                return Err(AgentMessageDeliveryError::rejected(
+                    "target_inactive",
+                    "Target is not accepting planning controls",
+                ));
+            }
+        }
+        if inserted {
+            self.commit_local_plan(previous, plan).await
+        } else {
+            // A prior attempt may have committed the plan but failed during
+            // hydration. Finish that prefix before admitting its notification.
+            self.hydrate_local_plan().await.map(|()| plan)
+        }
+        .map_err(|error| AgentMessageDeliveryError::unconfirmed("planning_unconfirmed", error))?;
+        if let Some(id) = receipt {
+            return Ok(id);
+        }
+        let id = self
+            .receive_notification_detailed(
+                source,
+                chat_state::NotificationSourceVersion::Ordinal {
+                    value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+                },
+                body,
+                None,
+            )
+            .await?;
+        // Only the existing soft signal follows both durable facts. Commands,
+        // child executions and their result owners retain their real lifecycle.
+        if self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|item| item.id == id)
+        {
+            self.parent_message_interrupt.send_replace(true);
+        }
+        Ok(id)
     }
     pub(crate) async fn hydrate_local_plan(&self) -> Result<(), String> {
         if let Some(snapshot) = self.chat_state_handle.planning_state().await? {
@@ -507,8 +629,27 @@ impl SessionActor {
     }
 
     pub(crate) async fn handle_planning_command(self: &Arc<Self>, command: PlanningCommand) {
+        // Tools can read their own plan while the current Step owns the mutation gate.
+        if let PlanningCommand::Read { respond_to } = command {
+            let result = self
+                .chat_state_handle
+                .planning_state()
+                .await
+                .map(|snapshot| {
+                    snapshot.map(|snapshot| tool_types::planning::PlanningReadSnapshot {
+                        timeline_seq: snapshot.seq.get(),
+                        plan: snapshot.plan,
+                        delegation: None,
+                    })
+                });
+            let _ = respond_to.send(result);
+            return;
+        }
         let _boundary = self.step_control_gate.lock().await;
         match command {
+            PlanningCommand::Read { .. } => {
+                unreachable!("read commands return before step control")
+            }
             PlanningCommand::Write {
                 prompt_id,
                 input,
@@ -537,12 +678,21 @@ impl SessionActor {
                         return Err("create the local parent step before linking a task".into());
                     };
                     let mut plan = snapshot.plan;
-                    if !plan
-                        .steps
-                        .iter()
-                        .any(|step| step.id == step_id && !step.removed)
-                    {
-                        return Err("parent step is not in the current local work scope".into());
+                    if plan.session_id != self.session_info.id.0.as_ref() {
+                        return Err("local parent plan belongs to a different session".into());
+                    }
+                    if !plan.steps.iter().any(|step| {
+                        step.id == step_id
+                            && !step.removed
+                            && matches!(
+                                step.status,
+                                PlanStepStatus::Pending | PlanStepStatus::InProgress
+                            )
+                    }) {
+                        return Err(
+                            "parent step must be pending or in_progress in the current local work scope"
+                                .into(),
+                        );
                     }
                     if task_id == self.session_info.id.0.as_ref()
                         || plan.links.iter().any(|link| link.id == task_id)
@@ -596,6 +746,52 @@ impl SessionActor {
         self.schedule_planning_delivery();
     }
 
+    /// Only the current delegation's typed, durably consumed receipt can
+    /// authorize handling or supply its direct-parent acknowledgement reference.
+    async fn consumed_replan_guidance_reference(
+        &self,
+        change: &tool_types::ReplanChange,
+    ) -> Result<sampling_types::AgentMessageRef, String> {
+        let child_session_id = self.session_info.id.0.as_ref();
+        if change.child_session_id != child_session_id {
+            return Err("only the receiving child may acknowledge replanning".into());
+        }
+        let binding = self
+            .startup_hints
+            .delegated_parent_plan
+            .as_ref()
+            .ok_or_else(|| {
+                "replanning requires this execution's direct parent binding".to_string()
+            })?;
+        if binding.parent_session_id == child_session_id
+            || binding.task_id != change.link_id
+            || binding.parent_step_id != change.step_id
+        {
+            return Err("replanning does not match this execution's direct parent binding".into());
+        }
+        let message_id = replan_message_id(&change.id);
+        let consumed = self
+            .chat_state_handle
+            .consumed_notification_turn(
+                chat_state::NotificationSource::PlanGuidance {
+                    parent_session_id: binding.parent_session_id.clone(),
+                    message_id: message_id.clone(),
+                },
+                chat_state::NotificationSourceVersion::Ordinal {
+                    value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+                },
+            )
+            .await
+            .ok_or_else(|| "planning guidance receipt owner is unavailable".to_string())?;
+        if consumed.is_none() {
+            return Err("replanning guidance has not been consumed as model context".into());
+        }
+        Ok(sampling_types::AgentMessageRef {
+            source_session_id: binding.parent_session_id.clone(),
+            message_id,
+        })
+    }
+
     async fn apply_local_plan_command(
         &self,
         prompt_id: &str,
@@ -645,11 +841,9 @@ impl SessionActor {
                 removed: update.removed.unwrap_or(false),
             });
         }
-        // Persist model-context consumption before a command can also change
-        // the plan revision and acknowledge the replan. Timeline validation
-        // deliberately requires the durable Received -> Consumed -> Handled
-        // progression; combining both transitions in one Planning event would
-        // skip the auditable consumption fact.
+        // Preflight every handling action before committing any consumption or
+        // TODO edits. A later invalid stop/no-change must leave the whole command
+        // untouched, even when earlier IDs have genuine consumed receipts.
         let mut replan_ids = Vec::new();
         for action in &input.actions {
             if let PlanningAction::HandleReplans {
@@ -666,37 +860,41 @@ impl SessionActor {
                 {
                     return Err("handling a replan needs a non-empty no-change reason".into());
                 }
-                replan_ids.extend(ids.iter().cloned());
+                for id in ids {
+                    let record = plan
+                        .replans
+                        .iter()
+                        .find(|change| change.id == *id)
+                        .ok_or_else(|| format!("replan {id} was not received"))?;
+                    self.consumed_replan_guidance_reference(record).await?;
+                    if !matches!(
+                        record.progress,
+                        ReplanProgress::Received | ReplanProgress::Consumed
+                    ) {
+                        return Err(format!("replan {id} is not awaiting handling"));
+                    }
+                    if record.is_stop() && no_change_reason.is_some() {
+                        return Err(
+                            "stop guidance cannot be handled with a no-change reason".into()
+                        );
+                    }
+                    replan_ids.push(id);
+                }
             }
         }
+        // Keep Received -> Consumed independently durable before changing steps
+        // or recording Handled; Timeline validates these causal prefixes.
         if !replan_ids.is_empty() {
-            let consumed = self
-                .chat_state_handle
-                .consumed_agent_messages(
-                    replan_ids.iter().map(|id| replan_message_id(id)).collect(),
-                )
-                .await?;
             let mut advanced = false;
-            for id in &replan_ids {
-                let record = plan
+            for id in replan_ids {
+                if plan
                     .replans
                     .iter()
-                    .find(|change| change.id == *id)
-                    .ok_or_else(|| format!("replan {id} was not received"))?;
-                if record.child_session_id != self.session_info.id.0.as_ref() {
-                    return Err("only the receiving child may acknowledge replanning".into());
-                }
-                if !consumed.contains(&replan_message_id(id)) {
-                    return Err("replanning guidance has not been consumed as model context".into());
-                }
-                match record.progress {
-                    ReplanProgress::Received => {
-                        plan.advance_replan(id, ReplanProgress::Consumed)
-                            .map_err(|error| format!("{error:?}"))?;
-                        advanced = true;
-                    }
-                    ReplanProgress::Consumed => {}
-                    _ => return Err(format!("replan {id} is not awaiting handling")),
+                    .any(|record| record.id == *id && record.progress == ReplanProgress::Received)
+                {
+                    plan.advance_replan(id, ReplanProgress::Consumed)
+                        .map_err(|error| format!("{error:?}"))?;
+                    advanced = true;
                 }
             }
             if advanced {
@@ -743,43 +941,26 @@ impl SessionActor {
                     ids,
                     no_change_reason,
                 } => {
-                    if ids.is_empty() {
-                        return Err("handling requires source identities".into());
-                    }
-                    let consumed = self
-                        .chat_state_handle
-                        .consumed_agent_messages(
-                            ids.iter().map(|id| replan_message_id(id)).collect(),
-                        )
-                        .await?;
+                    // All identities, typed consumption and decisions were
+                    // checked before the independent Consumed commit above.
                     for id in ids {
                         let record = plan
                             .replans
                             .iter()
                             .find(|change| change.id == id)
                             .ok_or_else(|| format!("replan {id} was not received"))?;
-                        if record.child_session_id != self.session_info.id.0.as_ref() {
-                            return Err(
-                                "only the receiving child may acknowledge replanning".into()
-                            );
-                        }
-                        if !consumed.contains(&replan_message_id(&id)) {
-                            return Err(
-                                "replanning guidance has not been consumed as model context".into(),
-                            );
-                        }
-                        if matches!(record.progress, ReplanProgress::Received) {
-                            plan.advance_replan(&id, ReplanProgress::Consumed)
-                                .map_err(|error| format!("{error:?}"))?;
-                        }
-                        let outcome = no_change_reason.as_ref().map_or(
-                            ReplanOutcome::Updated {
-                                plan_revision: plan.revision,
-                            },
-                            |reason| ReplanOutcome::NoChange {
-                                reason: reason.clone(),
-                            },
-                        );
+                        let outcome = if record.is_stop() {
+                            ReplanOutcome::Stopping
+                        } else {
+                            no_change_reason.as_ref().map_or(
+                                ReplanOutcome::Updated {
+                                    plan_revision: plan.revision,
+                                },
+                                |reason| ReplanOutcome::NoChange {
+                                    reason: reason.clone(),
+                                },
+                            )
+                        };
                         plan.advance_replan(&id, ReplanProgress::Handled { outcome })
                             .map_err(|error| format!("replan handling rejected: {error:?}"))?;
                     }

@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use sampling_types::{ConversationRequest, ConversationResponse, SamplingError, TokenUsage};
 
@@ -107,6 +108,7 @@ impl SamplerHandle {
         }
         let _ = self.cmd_tx.send(SamplerCommand::Submit {
             request_id,
+            cancel_token: CancellationToken::new(),
             request: Box::new(request),
             config: None,
             completion_tx: None,
@@ -130,6 +132,7 @@ impl SamplerHandle {
         }
         let _ = self.cmd_tx.send(SamplerCommand::Submit {
             request_id,
+            cancel_token: CancellationToken::new(),
             request: Box::new(request),
             config: Some(Box::new(config)),
             completion_tx: None,
@@ -193,30 +196,15 @@ impl SamplerHandle {
                 "sampler actor is shutting down".into(),
             ));
         }
-        // RAII guard: when this future is dropped (cancel, panic, or normal return),
-        // tell the sampler actor to cancel the in-flight request_id. No-op if the
-        // actor already finished and removed it from its active set.
-        struct CancelOnDrop {
-            cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
-            request_id: RequestId,
-        }
-        impl Drop for CancelOnDrop {
-            fn drop(&mut self) {
-                // fire-and-forget the send.
-                let _ = self.cmd_tx.send(SamplerCommand::Cancel {
-                    request_id: self.request_id.clone(),
-                });
-            }
-        }
-
         let (completion_tx, completion_rx) = oneshot::channel();
-        let cancel_id = request_id.clone();
+        let cancel_token = CancellationToken::new();
 
-        // Only arm the guard if Submit actually reached the actor.
+        // The guard owns this submission, including a drop before actor admission.
         let _guard = self
             .cmd_tx
             .send(SamplerCommand::Submit {
                 request_id,
+                cancel_token: cancel_token.clone(),
                 request: Box::new(request),
                 config: None,
                 completion_tx: Some(completion_tx),
@@ -226,10 +214,7 @@ impl SamplerHandle {
                 recovery: None,
             })
             .ok()
-            .map(|_| CancelOnDrop {
-                cmd_tx: self.cmd_tx.clone(),
-                request_id: cancel_id,
-            });
+            .map(|_| cancel_token.drop_guard());
         completion_rx.await.unwrap_or_else(|_| {
             Err(SamplingError::Lifecycle(
                 "sampler actor dropped before completion".into(),
@@ -254,23 +239,13 @@ impl SamplerHandle {
                 "sampler actor is shutting down".into(),
             ));
         }
-        struct CancelOnDrop {
-            cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
-            request_id: RequestId,
-        }
-        impl Drop for CancelOnDrop {
-            fn drop(&mut self) {
-                let _ = self.cmd_tx.send(SamplerCommand::Cancel {
-                    request_id: self.request_id.clone(),
-                });
-            }
-        }
         let (completion_tx, completion_rx) = oneshot::channel();
-        let cancel_id = request_id.clone();
+        let cancel_token = CancellationToken::new();
         let _guard = self
             .cmd_tx
             .send(SamplerCommand::Submit {
                 request_id,
+                cancel_token: cancel_token.clone(),
                 request: Box::new(request),
                 config: None,
                 completion_tx: Some(completion_tx),
@@ -280,10 +255,7 @@ impl SamplerHandle {
                 recovery: Some(recovery),
             })
             .ok()
-            .map(|_| CancelOnDrop {
-                cmd_tx: self.cmd_tx.clone(),
-                request_id: cancel_id,
-            });
+            .map(|_| cancel_token.drop_guard());
         completion_rx.await.unwrap_or_else(|_| {
             Err(SamplingError::Lifecycle(
                 "sampler actor dropped before completion".into(),

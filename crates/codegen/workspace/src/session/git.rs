@@ -188,11 +188,11 @@ pub enum GitDiscoveryResult {
     /// The path is definitively not inside a git repository.
     NotARepo,
     /// libgit2 failed for a reason other than "not found" (e.g. permissions,
-    /// unsupported extensions, corrupt repo). The user may or may not be in a
+    /// invalid or unreadable topology). The user may or may not be in a
     /// git repo — we can't tell.
     DiscoveryFailed(anyhow::Error),
 }
-/// Discover whether `path` is inside a git repository.
+/// Discover checkout topology without opening Git configuration.
 ///
 /// Returns [`GitDiscoveryResult::Found`] with the worktree root on success,
 /// [`GitDiscoveryResult::NotARepo`] when the path is definitively outside any
@@ -200,14 +200,8 @@ pub enum GitDiscoveryResult {
 /// an unexpected reason (so callers can avoid false-positive "not a repo"
 /// decisions).
 pub fn discover_git_root(path: &Path) -> GitDiscoveryResult {
-    match Repository::discover(path) {
-        Ok(repo) => match repo.workdir() {
-            Some(root) => GitDiscoveryResult::Found(root.to_path_buf()),
-            None => GitDiscoveryResult::DiscoveryFailed(anyhow::anyhow!(
-                "bare git repository: {}",
-                path.display()
-            )),
-        },
+    match agent::repo::discover_worktree_root(path) {
+        Ok(root) => GitDiscoveryResult::Found(root),
         Err(e) => {
             let is_not_found =
                 e.code() == git2::ErrorCode::NotFound && e.class() == git2::ErrorClass::Repository;

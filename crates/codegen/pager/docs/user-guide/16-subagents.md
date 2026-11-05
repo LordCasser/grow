@@ -33,11 +33,12 @@ enabled = false
 
 When the parent calls `spawn_subagent`, Grow:
 
-1. commits the spawn fact to the parent Timeline;
-2. atomically creates the child session with a seed-source fact;
-3. runs the child against its own Timeline and runtime;
-4. commits the child's terminal result;
-5. closes the parent spawn by referencing that exact child event.
+1. validates and durably links an eligible TODO in the direct parent's current scope;
+2. commits the spawn fact to the parent Timeline;
+3. atomically creates the child session with a seed-source fact;
+4. runs the child against its own Timeline and runtime;
+5. commits the child's terminal result;
+6. closes the parent spawn by referencing that exact child event.
 
 Successful non-empty output is stored once as an immutable content-addressed artifact. There is no parallel metadata or output-file lifecycle.
 
@@ -66,6 +67,8 @@ A child can use `ask_parent` to ask its immediate delegating agent for clarifica
 To change a running child's instructions, the primary agent uses `send_subagent_message` with `subagent_id`, `message` and an explicit `interrupt` boolean. `false` queues the attributed message for the next step's sampling. `true` safely preempts the model request or interruptible wait before resampling; tools with non-interruptible side effects finish safely. Success means the target durably received the message, not that it finished the task. A receipt that races terminal closure is rejected rather than silently accepted and lost. Parent messages do not grant human authorization or expand child permissions.
 
 Questions do not enter the target foreground conversation; interventions do. Children cannot send intervention messages upward or contact unrelated sessions. Received interventions use Timeline notification receipt/consumption and survive restoration without duplicate delivery. An interrupted inquiry is closed during restoration rather than automatically reissuing the model request.
+
+To change a running child's sampling, the parent uses `set_subagent_model` with that child's `subagent_id` and `model`, `effort`, or both. The tool returns `queued` after the child actor accepts the selection; it takes effect at the child's closed Step boundary without restarting the current request. The parent's selection and the child's execution permissions stay unchanged. This controls only active directly delegated children; it cannot select another primary session or a grandchild, restore a stopped task, or override a Workflow route. See [model control](11-custom-models.md#agent-control-of-a-running-child) for field defaults and errors.
 
 ---
 
@@ -98,8 +101,9 @@ Project and user definitions can add new types. Project definitions can shadow a
 | `resume_from` | Continue a completed child by ID. |
 | `cwd` | Child working directory; mutually exclusive with worktree isolation. |
 | `model` | Optional explicit model selector. Use an exact configured catalog ID from the Task tool's offered model list; a provider-facing wire-model name alone does not select a route. |
-| `parent_step_id` | Optional weak link to one TODO in the direct parent's current work scope. |
-| `required_deliverable` | Require explicit parent review of the linked result; requires `parent_step_id`. |
+| `effort` | Optional reasoning effort for the selected model, or the model resolved by default. It may be set with or without `model`, subject to the model's offered effort levels. Fresh calls use the existing default when omitted; resume calls retain the source's last durable effort when omitted. |
+| `parent_step_id` | Required TODO identity in the direct parent's current scope. The item must be pending or in progress and not removed. |
+| `required_deliverable` | Require explicit parent review of the linked result. Both optional and required deliveries need `parent_step_id`. |
 
 Observe children with three separate tools:
 
@@ -117,17 +121,27 @@ A timeout or steering message can end the wait while the child continues. Check 
 
 ### Resume semantics
 
-`resume_from` creates a new child from a terminal canonical lifecycle, including a canonically cancelled child. It retains the source transcript, model and existing stable system head; the current Agent role and tool runtime are rebuilt under the current constraints. In-memory permits and transport incarnations are never copied. The original runtime must finish retiring before the new child can start.
+`resume_from` creates a new child from a terminal canonical lifecycle, including a canonically cancelled child. It retains the source transcript and existing stable system head; the current Agent role and tool runtime are rebuilt under the current constraints. In-memory permits and transport incarnations are never copied. The original runtime must finish retiring before the new child can start.
 
-The source must belong to the current parent session and use the same Agent type.
+Optional `model` and `effort` independently override the source's last durable selection, including changes made while the source was running. Omission or JSON null retains that source field; `effort: "none"` selects an explicit effort. If only `model` is supplied, the source effort is retained and the request fails if the new model does not offer it. Supplying a new model selects its current configured route; without a model override, the source transport must still be available. Invalid overrides fail rather than starting a fresh child or substituting defaults. The source history remains unchanged.
+
+For example, `{"resume_from":"child-id","parent_step_id":"review-step","description":"Continue review","prompt":"Check the remaining cases.","model":"provider/model","effort":"high"}` resumes on the chosen model and effort, linked to the currently eligible `review-step`. The source must belong to the authorized parent lineage and use the same Agent type. These overrides apply to ordinary `resume_from`; recovery of a suspended child under its original identity keeps the checkpoint's route and limits.
+
+The parent can use [`set_subagent_model`](11-custom-models.md#agent-control-of-a-running-child) while the child is running. A later ordinary resume that omits model or effort inherits the child's last durable selection for each omitted field.
 
 ---
 
 ## Local TODOs and delegated work
 
-Each session owns its durable local TODO plan. A child can split its work into its own steps; a parent-step link does not copy the parent's list or let the parent overwrite the child's list. Several children may support one parent step, and simple tasks need no TODO or Goal.
+Each session owns its durable local TODO plan. Create an eligible parent TODO before ordinary `spawn_subagent` or `resume_from`; Grow confirms that binding before starting the child. A child can split its work into its own steps. Linking a parent item does not copy the parent's list or let the parent overwrite the child's list. Several children may support one parent step. A simple task that does not delegate can proceed without a TODO or Goal.
 
-An actual change to a linked parent item's content, requirements, priority, non-completion status, removal, or cancellation requests child-owned replanning. Completion alone, identical writes, sorting, and receipt updates do not trigger it. The child evaluates the change at a safe boundary, keeps still-applicable completed work, and updates only affected steps or confirms that no change is needed. Receiving the message is not the same as finishing that evaluation. A parent edit does not restart the child, replay its prompt, kill a running command, or revive a terminal child. Immediate cancellation uses the existing explicit task control. Changes reach a grandchild only through an actual edit to the child's own linked step.
+Use `todo_read` to inspect plans without changing them. `target: "self"` is the default; `target: "parent"` reads the immediate delegating parent's plan. An optional `step_id` selects the item and its related obligations. Follow `next_cursor` for further pages and restart the read if the snapshot becomes stale. The tool reports an unavailable owner separately from an available owner with no plan. Each child request also receives a bounded summary identifying its current parent item and position in the overall plan, including the first request after a resume. This summary is request context and does not become part of the authored task prompt or chat history.
+
+An actual change to a linked parent's content, requirements, priority or non-completion status creates objective-change guidance for its unfinished children. The child reads the current TODO, preserves applicable completed work and adjusts affected steps, or records a reasoned no-change decision. Completion alone, identical writes, sorting and receipt updates stay quiet. Receiving or consuming guidance does not acknowledge handling it.
+
+Removing or cancelling the parent item tells each linked unfinished child to stop advancing that objective, preserve work, settle outstanding operations and report completed work, remaining work and uncertainty. Reopening the TODO cannot revoke that instruction for the original execution; new work requires a new delegation. `HandleReplans` acknowledges this instruction with a stopping outcome. Commands, descendant tasks, results and required reviews retain their actual owners until they settle. Use the existing explicit task control for immediate cancellation.
+
+Grow generates these controls from committed planning facts and safely interrupts sampling or an interruptible wait after durable receipt. The internal control is hidden from ordinary coordination chat notices in live and restored history, while its receipt, model consumption and handling remain inspectable through the plan. Ordinary intervention messages retain their visible provenance even if their text copies the control wording. Changes reach a grandchild through an actual edit to its immediate parent's linked step.
 
 The Agent can register structured waits for real task, command, question, or permission identities with any/all wake conditions. A yielded child remains unfinished and continues under the same owner and limits when the dependency changes; prose such as “waiting for tests” alone does not register a wait. Failed or interrupted dependencies wake a decision, not a claim of success.
 

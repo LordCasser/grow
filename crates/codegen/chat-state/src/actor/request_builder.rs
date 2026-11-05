@@ -14,7 +14,7 @@ impl ChatStateActor {
     /// Build a `ConversationRequest` from the current actor state.
     ///
     /// 1. Repair Surface and append retrieved memory context exactly once
-    /// 2. Apply request-only Goal and target-model image projections
+    /// 2. Apply request-only Goal, runtime context and target-model image projections
     /// 3. Evict oldest projected images when the request nears 50 MB
     /// 4. Assemble the final request and project its complete input envelope
     ///
@@ -29,6 +29,7 @@ impl ChatStateActor {
         timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
+        runtime_context: Option<String>,
         active_goal: Option<GoalDirectiveTag>,
         json_output: Option<JsonOutputFormat>,
         use_image_descriptions: bool,
@@ -74,6 +75,20 @@ impl ChatStateActor {
                 |error| crate::TimelineWriteError::ImageDescriptionUnavailable(error.into()),
             )?;
         }
+
+        let source_items_len = items.len();
+        let runtime_context = runtime_context
+            .as_deref()
+            .map(str::trim)
+            .filter(|context| !context.is_empty())
+            .map(ConversationItem::system_reminder);
+        let runtime_context_tokens = runtime_context
+            .as_ref()
+            .map_or(0, super::state::estimate_item_tokens);
+        let runtime_context_index = runtime_context.map(|context| {
+            items.push(context);
+            source_items_len
+        });
 
         let surface_ids = self.state.timeline.surface_ids().to_vec();
         let route = sampling_types::model_image_input_key(&self.state.sampling_config);
@@ -154,15 +169,17 @@ impl ChatStateActor {
             });
         }
 
+        // Runtime context has no Surface identity. Reconcile only the source
+        // projection so its request-only tail cannot reset or consume a native span.
         let projection_is_aligned = self
             .state
             .continuation
-            .reconcile_projection(&surface_ids, &items);
+            .reconcile_projection(&surface_ids, &items[..source_items_len]);
         let native_continuation = Some(if projection_is_aligned {
             self.state.continuation.request_projection(&surface_ids)
         } else {
             sampling_types::NativeContinuationProjection {
-                portable_prefix_len: items.len(),
+                portable_prefix_len: source_items_len,
                 spans: Vec::new(),
                 portable_reasoning_backend: self.state.continuation.portable_reasoning_backend(),
             }
@@ -175,6 +192,10 @@ impl ChatStateActor {
                 "timeline_id": timeline_id,
                 "source_seq": self.state.timeline.events().last().map(|event| event.seq.get()),
                 "surface_ids": surface_ids,
+                "runtime_context": runtime_context_index.map(|item_index| serde_json::json!({
+                    "item_index": item_index,
+                    "estimated_tokens": runtime_context_tokens,
+                })),
                 "active_goal": active_goal,
                 "image_budget": {
                     "before_bytes": body_bytes,
@@ -209,8 +230,11 @@ impl ChatStateActor {
             native_continuation,
         };
         let request_input_tokens = super::state::estimate_request_input_tokens(&request);
+        // Pressure refreshes rebuild from durable Surface. Keep the current
+        // request-only context cost with the envelope, without retaining its text.
         self.state.request_envelope_tokens = request_input_tokens.saturating_sub(
-            super::state::estimate_effective_conversation_tokens(&request),
+            super::state::estimate_effective_conversation_tokens(&request)
+                .saturating_sub(runtime_context_tokens),
         );
         self.state.request_active_goal = active_goal.clone();
         self.state.image_budget = Some(selection);

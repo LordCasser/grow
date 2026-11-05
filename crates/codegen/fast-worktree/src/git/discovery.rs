@@ -39,8 +39,8 @@ pub(crate) fn find_worktree_git_dir(worktree_path: &Path) -> Result<PathBuf> {
 
         // git may write a RELATIVE pointer (worktrees added with a relative
         // path). Resolve it against the worktree dir — otherwise downstream
-        // index lookups join it against the CWD and break (mirrors
-        // `read_worktree_gitdir` in api.rs).
+        // index lookups join it against the CWD and break. Each Git pointer
+        // resolves relative to the directory containing its file.
         let raw_path = Path::new(raw);
         let resolved = if raw_path.is_relative() {
             worktree_path.join(raw_path)

@@ -149,11 +149,11 @@ pub(crate) fn task_model_error_for_catalog(
         .collect::<Vec<_>>();
     catalog_ids.sort_unstable();
     let guidance = if catalog_ids.is_empty() {
-        "No valid model IDs are currently available. Omit `model` to inherit the parent model."
+        "No valid model IDs are currently available. Omit `model` to retain the inherited selection for this call."
             .to_string()
     } else {
         format!(
-            "Valid model IDs: {}. Omit `model` to inherit the parent model.",
+            "Valid model IDs: {}. Omit `model` to retain the inherited selection for this call.",
             catalog_ids.join(", ")
         )
     };

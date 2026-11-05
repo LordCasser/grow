@@ -1471,3 +1471,109 @@ AI shell suggestion, prompt suggestion, and memory note rewrite SHALL resolve th
 
 - **WHEN** one of these auxiliary calls runs under a Workflow Run with a frozen sampler snapshot
 - **THEN** the exact Run image-description selector uses its dedicated frozen image sampler, another selector resolves only through a sampler captured by that Run with credential-only refresh, and a missing/changed selector fails without consulting live catalog routing.
+
+### Requirement: Subagent tool calls can select reasoning effort
+
+The model-facing subagent spawn tool SHALL expose optional `effort` alongside optional `model`. Fresh task calls SHALL forward a supplied effort through the existing subagent runtime policy, with precedence over Agent/model defaults. The resolved model's existing effort validation, sampling configuration and durable spawn projection SHALL remain authoritative. Omission or JSON null SHALL preserve existing fresh-task default resolution. The canonical `"none"` token SHALL remain an explicit effort value. Ordinary `resume_from` calls SHALL independently override supplied model and effort fields and retain the validated source's actual selection for each omitted field, including unset effort. The final model SHALL admit the final effort. An explicit model SHALL use the current selectable route; without one the source transport constraint SHALL remain in force. Original-identity checkpoint restoration SHALL retain its existing route constraints.
+
+#### Scenario: Select model and effort together
+- **WHEN** a fresh subagent tool call supplies a selectable model and an effort offered by that model
+- **THEN** the child uses that model and effort through the existing runtime and provider request path.
+
+#### Scenario: Select effort on the resolved model
+- **WHEN** a fresh tool call supplies effort without model
+- **THEN** the existing model resolution is retained and that model's offered-effort validation applies to the explicit effort.
+
+#### Scenario: Omit effort
+- **WHEN** a fresh tool call omits effort or supplies JSON null
+- **THEN** existing Agent/model effort defaults apply without an explicit runtime policy.
+
+#### Scenario: Explicit none
+- **WHEN** a fresh or resume tool call supplies `effort: "none"`
+- **THEN** it remains an explicit policy for runtime/model validation rather than being discarded as an absent argument.
+
+#### Scenario: Invalid or unsupported effort
+- **WHEN** the supplied token is invalid or the resolved model does not offer the final explicit or retained effort
+- **THEN** the child runtime returns its effort failure and does not issue a child provider request using a substituted effort.
+
+#### Scenario: Resume retains the source selection
+- **WHEN** a resume call omits both model and effort, or supplies JSON null for both
+- **THEN** the resumed child retains its validated source model, transport and actual effort, including unset effort.
+
+#### Scenario: Resume overrides either or both selections
+- **WHEN** a resume call supplies model, effort or both
+- **THEN** each supplied field replaces the source value, omitted effort retains the source actual effort, omitted model retains the source route, and the final valid selection reaches the derived child's provider request.
+
+#### Scenario: Resume follows the source final durable selection
+- **WHEN** the source changed model or effort during its run and later completed with a validated durable route observation
+- **THEN** omitted resume fields use that final durable selection, including unset effort, rather than the original Spawn selection; the source Timeline is unchanged.
+
+#### Scenario: Explicit replacement for an unavailable source route
+- **WHEN** a canonical resume source's model route is unavailable but the caller supplies a currently selectable model with an admitted final effort
+- **THEN** the derived child may use the explicit replacement, while omission of model continues to fail for that unavailable source route.
+
+证据与验证入口：`crates/common/tool-types/src/task.rs`、`crates/codegen/tools/src/implementations/grow_build/task/mod.rs::TaskTool::run`、`crates/codegen/shell/src/agent/subagent/handle_request.rs::run_shell_child_inner`。
+
+### Requirement: Native model control uses the session step boundary
+
+Grow SHALL expose a native `set_subagent_model` tool accepting a required subagent_id and optional model/effort for an active directly owned child. It SHALL replace the caller-self `set_session_model` tool without an alias. It SHALL require at least one selection and reject unknown fields, malformed effort, unavailable/hidden/unselectable models and unsupported effort. Model-only SHALL use user-selection effort defaults. Effort-only SHALL compose with the target actor's newest desired model. It SHALL return queued only after target actor admission, without claiming application or waiting for that child's current Step. Accepted changes SHALL use the same closed-Step application, latest-wins ordering, durable route/native-continuation/failure boundaries as user controls. Rejection SHALL not mutate parent or child selection. Parent selection SHALL remain unchanged on success.
+
+#### Scenario: Tool switches the next request
+- **WHEN** a parent calls the native tool for its running direct child
+- **THEN** admission returns queued without interrupting/restarting the child's current provider attempt, and the child's next admitted request uses the applied selection while the parent retains its route.
+
+#### Scenario: Effort patch follows a pending user model
+- **WHEN** a user model change is pending on the child and the parent tool supplies only effort
+- **THEN** the target actor composes effort with that newest desired model without restoring its older route.
+
+#### Scenario: Invalid selection has no mutation
+- **WHEN** selections are absent, malformed/unsupported or target model is unknown, hidden or unselectable
+- **THEN** the tool fails explicitly and neither parent nor child receives a substituted selection or provider request.
+
+#### Scenario: Application fails or a later control supersedes it
+- **WHEN** a child's admitted selection fails application or a newer target control supersedes it
+- **THEN** existing authoritative target control semantics record the outcome and queued does not become evidence of application.
+
+#### Scenario: Resume follows a runtime-controlled child
+- **WHEN** the child completes after an applied parent runtime selection and a later ordinary resume omits selections
+- **THEN** it inherits that child's latest durable model/effort, including unset effort, without rewriting source birth facts.
+
+### Requirement: A cancelled Turn retires its sampling continuation
+
+After the session owner durably terminates a Turn through cancellation, it SHALL retire that Turn's transient sampling continuation before admitting a different Turn. A new user Turn SHALL receive a fresh logical sampling allowance and deadline. Retiring the continuation SHALL NOT rewrite prior attempt identities, erase evidence, cancel settlement ownership or convert unknown usage into known usage. An unconfirmed cancellation or a suspension that preserves the same Turn SHALL NOT constitute this terminal retirement.
+
+#### Scenario: New prompt retries after cancellation
+- **WHEN** an admitted sampling attempt is cancelled and its Turn terminal is confirmed, then a new user prompt in the same resident session receives one transient failure followed by success
+- **THEN** the new prompt records attempts 1 and 2 under its own RequestId and has its configured allowance, while the cancelled attempt retains its original identity and settlement.
+
+#### Scenario: Repeated cancelled Turns
+- **WHEN** several user Turns each begin sampling and then durably terminate through cancellation
+- **THEN** a subsequent new Turn starts at attempt 1 rather than accumulating the cancelled Turns' attempts or deadlines.
+
+#### Scenario: Same Turn is suspended instead
+- **WHEN** suspension preserves a Turn and its unfinished model step for restoration
+- **THEN** restoration retains that step's consumed attempt allowance, absolute deadline and replay restrictions.
+
+#### Scenario: Terminal acknowledgement is unavailable
+- **WHEN** cancellation cannot confirm the Turn terminal
+- **THEN** the owner reports the existing terminal failure and does not admit new work as though successful cancellation had established a fresh sampling allowance.
+
+### Requirement: Sampler cleanup and owned cancellation bind to the submitted task
+
+A reusable public RequestId SHALL select the current registration for explicit cancel and activity queries. Replacing that registration SHALL cooperatively cancel the preceding task without allowing its later completion, panic, abort cleanup or collect-future destruction to remove or cancel the replacement. A collect future's owned cancellation SHALL apply only to its own submission, including destruction before actor admission. Actor shutdown SHALL retain ownership of all admitted tasks through their existing cancellation and settlement boundaries.
+
+#### Scenario: Replaced task ends late
+- **WHEN** A is replaced by B under the same RequestId and A finishes after B is registered
+- **THEN** B remains active and controllable until B itself completes or is explicitly cancelled.
+
+#### Scenario: Old collect future is destroyed
+- **WHEN** a plain or accounted collect future for A returns or is dropped after B replaced A
+- **THEN** only A's submission can be cancelled by that guard, and B is unaffected.
+
+#### Scenario: Request task panics
+- **WHEN** one request task panics or is aborted
+- **THEN** its own active registration is reclaimed without removing another task or inventing successful usage settlement, and the actor can continue serving requests.
+
+#### Scenario: Cancellation precedes command processing
+- **WHEN** a collect future is destroyed after its Submit is sent but before the actor processes it
+- **THEN** that submission observes its own cancellation without starting a new provider attempt.

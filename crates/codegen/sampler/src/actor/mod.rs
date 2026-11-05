@@ -10,7 +10,6 @@ pub(crate) mod state;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
 
 use crate::commands::SamplerCommand;
 use crate::config::{RetryPolicy, SamplerConfig};
@@ -29,10 +28,8 @@ pub struct SamplerActor {
     event_tx: mpsc::UnboundedSender<SamplingEvent>,
     preview_budget: Option<PreviewEventBudget>,
     state: ActorState,
-    /// Per-request tasks. The actor's run loop selects on
-    /// `cmd_rx.recv()` and `tasks.join_next()`; when a task finishes
-    /// it returns its `RequestId` so the actor can clean up
-    /// `active_requests`.
+    /// Per-request tasks, including replaced submissions that are still
+    /// settling. JoinSet task ids identify the exact registration to clean up.
     tasks: JoinSet<RequestId>,
 }
 
@@ -157,15 +154,11 @@ impl SamplerActor {
                 // Prefer cleaning up finished tasks before processing
                 // new commands -- prevents `active_requests` from
                 // staying stale longer than necessary.
-                Some(joined) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                Some(joined) = self.tasks.join_next_with_id(), if !self.tasks.is_empty() => {
                     match joined {
-                        Ok(request_id) => {
-                            // Task finished normally; remove from
-                            // active set unless the user has already
-                            // cancelled it (Cancel removes it too).
-                            self.state.remove(&request_id);
-                        }
+                        Ok((task_id, _)) => self.state.remove_task(task_id),
                         Err(join_err) => {
+                            self.state.remove_task(join_err.id());
                             tracing::warn!(
                                 error = %join_err,
                                 "request task panicked or was aborted"
@@ -191,12 +184,11 @@ impl SamplerActor {
         for (_, active) in self.state.active_requests.drain() {
             active.cancel_token.cancel();
         }
-        while let Some(joined) = self.tasks.join_next().await {
+        while let Some(joined) = self.tasks.join_next_with_id().await {
             match joined {
-                Ok(request_id) => {
-                    self.state.remove(&request_id);
-                }
+                Ok((task_id, _)) => self.state.remove_task(task_id),
                 Err(join_err) => {
+                    self.state.remove_task(join_err.id());
                     tracing::warn!(
                         error = %join_err,
                         "request task panicked or was aborted during sampler shutdown"
@@ -211,6 +203,7 @@ impl SamplerActor {
             SamplerCommand::Shutdown => unreachable!("shutdown is handled by the run loop"),
             SamplerCommand::Submit {
                 request_id,
+                cancel_token,
                 request,
                 config,
                 completion_tx,
@@ -219,15 +212,6 @@ impl SamplerActor {
                 evidence_sink,
                 recovery,
             } => {
-                let cancel_token = CancellationToken::new();
-                let active = ActiveRequest {
-                    cancel_token: cancel_token.clone(),
-                };
-                if let Some(prev) = self.state.register(request_id.clone(), active) {
-                    // Caller submitted a duplicate id; cancel the
-                    // previous one so we don't leak its task.
-                    prev.cancel_token.cancel();
-                }
                 let effective_config = config
                     .map(|b| *b)
                     .unwrap_or_else(|| self.state.config.clone());
@@ -235,20 +219,31 @@ impl SamplerActor {
                 let preview_budget = self.preview_budget.clone();
                 let retry_policy = self.state.retry_policy.clone();
                 let request_inner = *request;
-                self.tasks.spawn(request_task::run_request_task(
-                    request_id,
-                    request_inner,
-                    effective_config,
-                    retry_policy,
-                    event_tx,
+                let task_id = self
+                    .tasks
+                    .spawn(request_task::run_request_task(
+                        request_id.clone(),
+                        request_inner,
+                        effective_config,
+                        retry_policy,
+                        event_tx,
+                        cancel_token.clone(),
+                        completion_tx,
+                        scope_capture,
+                        usage_sink,
+                        evidence_sink,
+                        recovery,
+                        preview_budget,
+                    ))
+                    .id();
+                let active = ActiveRequest {
+                    task_id,
                     cancel_token,
-                    completion_tx,
-                    scope_capture,
-                    usage_sink,
-                    evidence_sink,
-                    recovery,
-                    preview_budget,
-                ));
+                };
+                if let Some(prev) = self.state.register(request_id, active) {
+                    // The replaced task stays tracked through its settlement.
+                    prev.cancel_token.cancel();
+                }
             }
             SamplerCommand::Cancel { request_id } => {
                 self.state.cancel(&request_id);

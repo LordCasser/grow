@@ -208,6 +208,8 @@ fn default_grow_build_toolset() -> ToolServerConfig {
         (&grow_build::GrepTool).into(),
         kill_task_tool_config(),
         (&grow_build::TodoWriteTool).into(),
+        (&grow_build::TodoReadTool).into(),
+        (&grow_build::set_subagent_model::SetSubagentModelTool).into(),
         (&grow_build::LoadSkillTool).into(),
         command_output_tool_config(),
         task_tool_config(),
@@ -237,6 +239,8 @@ fn grow_build_concise_toolset() -> ToolServerConfig {
         (&grow_build::GrepTool).into(),
         kill_task_tool_config(),
         (&grow_build::TodoWriteTool).into(),
+        (&grow_build::TodoReadTool).into(),
+        (&grow_build::set_subagent_model::SetSubagentModelTool).into(),
         (&grow_build::LoadSkillTool).into(),
         command_output_tool_config(),
         (&grow_build::SchedulerCreateTool).into(),
@@ -268,6 +272,8 @@ pub fn grow_build_hashline_toolset(
         (&grow_build::ListDirTool).into(),
         kill_task_tool_config(),
         (&grow_build::TodoWriteTool).into(),
+        (&grow_build::TodoReadTool).into(),
+        (&grow_build::set_subagent_model::SetSubagentModelTool).into(),
         (&grow_build::LoadSkillTool).into(),
         command_output_tool_config(),
         task_tool_config(),
@@ -1454,6 +1460,31 @@ mod tests {
         }
         assert!(toolset_for_preset("does-not-exist").is_none());
     }
+    #[test]
+    fn standard_toolsets_author_native_todo_read_as_its_own_kind() {
+        use tools::types::tool::ToolKind;
+        for config in [
+            default_grow_build_toolset(),
+            grow_build_concise_toolset(),
+            grow_build_hashline_toolset(Vec::new()),
+            workspace_grow_build_toolset(),
+        ] {
+            let reads: Vec<_> = config
+                .tools
+                .iter()
+                .filter(|tool| tool.id == "Grow:todo_read")
+                .collect();
+            assert_eq!(reads.len(), 1);
+            assert_eq!(reads[0].kind, Some(ToolKind::PlanRead));
+            assert!(
+                config
+                    .tools
+                    .iter()
+                    .any(|tool| tool.id == "Grow:todo_write" && tool.kind == Some(ToolKind::Plan))
+            );
+        }
+    }
+
     #[test]
     fn presets_select_distinct_toolsets_by_size() {
         let gb = toolset_for_preset("grow-build").unwrap();

@@ -756,6 +756,8 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::KillTaskTool>();
         b.register::<grow_build::KillTerminalCommandTool>();
         b.register::<grow_build::TodoWriteTool>();
+        b.register::<grow_build::TodoReadTool>();
+        b.register::<grow_build::set_subagent_model::SetSubagentModelTool>();
         b.register::<grow_build::CreateGoalTool>();
         b.register::<grow_build::GetGoalTool>();
         b.register::<grow_build::UpdateGoalTool>();
@@ -2289,6 +2291,303 @@ mod tests {
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }
+    fn todo_read_snapshot(owner: &str) -> tool_types::planning::PlanningReadSnapshot {
+        use tool_types::planning::*;
+        let mut plan = LocalPlan::new(owner, "registry-scope");
+        plan.revision = 9;
+        plan.steps = (0..12)
+            .map(|index| PlanStep {
+                id: format!("step-{index}"),
+                content: format!("Full record {index}: 文\n\"quoted\""),
+                priority: PlanPriority::High,
+                status: PlanStepStatus::InProgress,
+                requirements: Some(vec![format!("Exact requirement {index}")]),
+                removed: index == 11,
+            })
+            .collect();
+        plan.links.push(PlanLink {
+            id: "registry-task".into(),
+            parent_step_id: "step-11".into(),
+            child_session_id: "registry-child".into(),
+            terminal: true,
+            required: true,
+            pending_source_revision: None,
+            review_required_revision: 8,
+            result_id: Some(
+                r#"{"timeline_id":"registry-child","first_seq":81,"last_seq":81}"#.into(),
+            ),
+            dispatch_failure: None,
+        });
+        plan.waits.push(PlanWait {
+            id: "registry-wait".into(),
+            step_ids: vec!["step-11".into()],
+            dependencies: vec![WaitDependency {
+                kind: DependencyKind::Task,
+                id: "registry-task".into(),
+            }],
+            condition: WaitCondition::All,
+        });
+        plan.replans.push(ReplanChange {
+            id: "registry-change".into(),
+            link_id: "registry-task".into(),
+            child_session_id: "registry-child".into(),
+            step_id: "step-11".into(),
+            source_revision: 8,
+            content: "Full changed objective".into(),
+            requirements: Some(vec!["Full changed requirement".into()]),
+            priority: PlanPriority::High,
+            status: PlanStepStatus::Cancelled,
+            removed: true,
+            progress: ReplanProgress::Unapplied {
+                reason: "Child already terminal".into(),
+            },
+        });
+        plan.reviews.push(DeliveryReview {
+            link_id: "registry-task".into(),
+            result_id: plan.links[0].result_id.clone(),
+            reviewed_source_revision: 8,
+            decision: ReviewDecision::Accepted,
+            reason: Some("Exact result checked".into()),
+            verification_refs: vec!["tests/complete:81".into()],
+        });
+        plan.validate().unwrap();
+        PlanningReadSnapshot {
+            timeline_seq: 223,
+            plan,
+            delegation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn todo_read_public_registry_schema_is_flat_strict_and_renamable() {
+        use crate::implementations::grow_build::todo::TodoReadTool;
+        let tmp = TempDir::new().unwrap();
+        let read = ToolConfig::for_tool::<TodoReadTool>()
+            .with_name("inspect_plan")
+            .with_param_rename("target", "owner")
+            .with_param_rename("step_id", "step")
+            .with_param_rename("cursor", "page")
+            .with_param_rename("limit", "page_size");
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![
+                        read,
+                        ToolConfig::for_tool::<grow_build::TodoWriteTool>().with_name("write_plan"),
+                    ],
+                },
+                test_session_context(&tmp),
+            )
+            .unwrap();
+        let definition = toolset
+            .tool_definitions()
+            .into_iter()
+            .find(|definition| definition.function.name == "inspect_plan")
+            .unwrap();
+        let schema = definition.function.parameters;
+        assert_eq!(schema["additionalProperties"], false);
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), 4);
+        for name in ["owner", "step", "page", "page_size"] {
+            assert!(properties.contains_key(name));
+        }
+        let parsed = toolset
+            .try_parse(
+                "inspect_plan",
+                &serde_json::json!({
+                    "owner": "parent", "step": "step-11", "page_size": 3,
+                }),
+            )
+            .await
+            .unwrap();
+        let ToolInput::TodoRead(input) = &parsed else {
+            panic!("native typed input required");
+        };
+        assert_eq!(input.target, tool_types::planning::PlanReadTarget::Parent);
+        assert_eq!(input.step_id.as_deref(), Some("step-11"));
+        assert_eq!(input.limit, Some(3));
+        assert!(matches!(
+            toolset
+                .try_parse("inspect_plan", &serde_json::json!({}))
+                .await
+                .unwrap(),
+            ToolInput::TodoRead(_)
+        ));
+        for forged in [
+            "session_id",
+            "subagent_id",
+            "source_session_id",
+            "query",
+            "unknown",
+        ] {
+            assert!(
+                toolset
+                    .try_parse(
+                        "inspect_plan",
+                        &serde_json::json!({(forged): "forged-owner"})
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            toolset
+                .try_parse("todo_read", &serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            toolset.tool_name_for_kind(ToolKind::PlanRead).as_deref(),
+            Some("inspect_plan")
+        );
+        assert_eq!(
+            toolset.tool_name_for_kind(ToolKind::Plan).as_deref(),
+            Some("write_plan")
+        );
+        assert_eq!(
+            toolset.template_param_names()[&ToolKind::PlanRead]["step_id"],
+            "step"
+        );
+        let identity = toolset.tool_identity("inspect_plan").unwrap();
+        assert_eq!(identity.tool_kind, ToolKind::PlanRead);
+        assert_eq!(identity.max_access, tool_protocol::ToolAccess::None);
+        let meta =
+            crate::normalization::merge_tool_meta(&toolset, None, "inspect_plan", Some(&parsed))
+                .unwrap();
+        assert_eq!(meta[crate::tool_taxonomy::TOOL_META_KEY]["version"], 7);
+        assert_eq!(
+            meta[crate::tool_taxonomy::TOOL_META_KEY]["kind"],
+            "plan_read"
+        );
+        assert_eq!(
+            meta[crate::tool_taxonomy::TOOL_META_KEY]["name"],
+            "inspect_plan"
+        );
+        assert_eq!(
+            meta[crate::tool_taxonomy::TOOL_META_KEY]["max_access"],
+            "none"
+        );
+        assert!(
+            meta[crate::tool_taxonomy::TOOL_META_KEY]
+                .get("input")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn todo_read_public_registry_dispatch_preserves_complete_self_and_parent_output() {
+        use crate::implementations::grow_build::task::{
+            backend::ChannelBackend,
+            types::{SessionIdResource, SubagentEvent},
+        };
+        use crate::implementations::grow_build::todo::{
+            PlanningCommand, PlanningRuntimeHandle, TodoReadTool,
+        };
+        use tool_types::planning::PlanReadTarget;
+        for target in [PlanReadTarget::SelfPlan, PlanReadTarget::Parent] {
+            let tmp = TempDir::new().unwrap();
+            let toolset = Arc::new(
+                ToolRegistryBuilder::new()
+                    .finalize(
+                        ToolServerConfig {
+                            tools: vec![
+                                ToolConfig::for_tool::<TodoReadTool>()
+                                    .with_name("inspect_plan")
+                                    .with_param_rename("target", "owner")
+                                    .with_param_rename("limit", "page_size"),
+                            ],
+                        },
+                        test_session_context(&tmp),
+                    )
+                    .unwrap(),
+            );
+            let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (parent_tx, mut parent_rx) = tokio::sync::mpsc::unbounded_channel();
+            toolset
+                .update_resource(SessionIdResource("registry-reader".into()))
+                .await;
+            toolset
+                .update_resource(PlanningRuntimeHandle(local_tx))
+                .await;
+            toolset
+                .update_resource(
+                    ChannelBackend::for_session(parent_tx, "registry-reader").into_resource(),
+                )
+                .await;
+            toolset
+                .update_resource(crate::types::resources::SystemRemindersEnabled(false))
+                .await;
+            for forged in ["session_id", "subagent_id", "query"] {
+                assert!(
+                    toolset
+                        .call(
+                            "inspect_plan",
+                            serde_json::json!({(forged): "arbitrary"}),
+                            "forged-plan-read",
+                            None
+                        )
+                        .await
+                        .is_err()
+                );
+                assert!(local_rx.try_recv().is_err());
+                assert!(parent_rx.try_recv().is_err());
+            }
+            let source = todo_read_snapshot(if target == PlanReadTarget::SelfPlan {
+                "registry-reader"
+            } else {
+                "immediate-parent"
+            });
+            let before = serde_json::to_vec(&source).unwrap();
+            let call = toolset.call(
+                "inspect_plan",
+                serde_json::json!({"owner": target, "page_size": 50}),
+                "registry-plan-read",
+                None,
+            );
+            tokio::pin!(call);
+            match target {
+                PlanReadTarget::SelfPlan => {
+                    let command = tokio::select! { command = local_rx.recv() => command.unwrap(), result = &mut call => panic!("read must reach local owner: {result:?}") };
+                    let PlanningCommand::Read { respond_to } = command else {
+                        panic!("read must not write or link");
+                    };
+                    respond_to.send(Ok(Some(source.clone()))).unwrap();
+                }
+                PlanReadTarget::Parent => {
+                    let event = tokio::select! { event = parent_rx.recv() => event.unwrap(), result = &mut call => panic!("read must reach parent owner: {result:?}") };
+                    let SubagentEvent::ReadParentPlanning(request) = event else {
+                        panic!("read must not mutate lifecycle or send messages");
+                    };
+                    assert_eq!(request.source_session_id, "registry-reader");
+                    request.respond_to.send(Ok(Some(source.clone()))).unwrap();
+                }
+            }
+            let result = call.await.unwrap();
+            let ToolOutput::TodoRead(output) = result.output else {
+                panic!("native typed output required");
+            };
+            assert_eq!(output.target, target);
+            let page = output.plan.as_ref().unwrap();
+            assert_eq!(page.session_id, source.plan.session_id);
+            assert_eq!(page.scope_id, source.plan.scope_id);
+            assert_eq!(page.revision, source.plan.revision);
+            assert_eq!(page.timeline_seq, source.timeline_seq);
+            assert_eq!(page.steps, source.plan.steps);
+            assert_eq!(page.links, source.plan.links);
+            assert_eq!(page.waits, source.plan.waits);
+            assert_eq!(page.replans, source.plan.replans);
+            assert_eq!(page.reviews, source.plan.reviews);
+            assert!(page.next_cursor.is_none());
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&result.prompt_text).unwrap(),
+                serde_json::to_value(&output).unwrap()
+            );
+            assert_eq!(serde_json::to_vec(&source).unwrap(), before);
+            assert!(local_rx.try_recv().is_err());
+            assert!(parent_rx.try_recv().is_err());
+        }
+    }
+
     #[tokio::test]
     async fn missing_mcp_tool_reports_local_registration_without_remote_claims() {
         let tmp = TempDir::new().unwrap();
@@ -3674,6 +3973,52 @@ mod tests {
             assert!(error.message.contains(missing), "{error:?}");
         }
     }
+    #[tokio::test]
+    async fn task_tool_registration_requires_parent_step_id_after_param_rename() {
+        for field in ["parent_step_id", "parent_todo"] {
+            let tmp = TempDir::new().unwrap();
+            let builder = ToolRegistryBuilder::new();
+            let config = ToolServerConfig {
+                tools: vec![
+                    ToolConfig::for_tool::<grow_build::TaskTool>()
+                        .with_name("spawn_subagent")
+                        .with_param_rename("parent_step_id", field),
+                    ToolConfig::for_tool::<grow_build::ListSubagentTool>(),
+                    ToolConfig::for_tool::<grow_build::GetSubagentStatusTool>(),
+                    ToolConfig::for_tool::<grow_build::WaitSubagentTool>(),
+                    ToolConfig::for_tool::<grow_build::KillTaskTool>(),
+                ],
+            };
+            let toolset = builder
+                .finalize(config, test_session_context(&tmp))
+                .unwrap();
+            let definitions = toolset.tool_definitions();
+            let task = definitions
+                .iter()
+                .find(|definition| definition.function.name == "spawn_subagent")
+                .unwrap();
+            let schema = &task.function.parameters;
+            assert_eq!(schema["properties"][field]["type"], "string");
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|key| key == field)
+            );
+            if field != "parent_step_id" {
+                assert!(schema["properties"].get("parent_step_id").is_none());
+                assert!(
+                    !schema["required"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|key| key == "parent_step_id")
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn task_tool_is_accepted_with_subagent_observation_and_kill_tools() {
         let tmp = TempDir::new().unwrap();

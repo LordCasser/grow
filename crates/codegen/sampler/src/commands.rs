@@ -5,6 +5,7 @@
 //! not a public type. External callers always go through `SamplerHandle`.
 
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use sampling_types::ConversationRequest;
 
@@ -25,6 +26,7 @@ pub(crate) enum SamplerCommand {
     /// signals that channel for `submit_and_collect` callers.
     Submit {
         request_id: RequestId,
+        cancel_token: CancellationToken,
         request: Box<ConversationRequest>,
         config: Option<Box<SamplerConfig>>,
         completion_tx: Option<oneshot::Sender<crate::actor::request_task::CompletionResult>>,

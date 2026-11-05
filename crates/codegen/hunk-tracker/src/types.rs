@@ -129,6 +129,11 @@ pub enum HunkActionError {
     #[error("Hunk not found: {0}")]
     HunkNotFound(HunkId),
 
+    #[error(
+        "Cannot reject stale content for {path}: the file changed since its hunks were displayed"
+    )]
+    StaleContent { path: PathBuf },
+
     #[error("Failed to write file {path}: {source}")]
     WriteError {
         path: PathBuf,
@@ -242,8 +247,7 @@ pub enum HunkAction {
     /// Accept the hunk - update baseline to include this change.
     /// After accept: baseline = current_content for the affected lines.
     Accept,
-    /// Reject the hunk - revert file content back to baseline.
-    /// After reject: file on disk is overwritten with baseline content.
+    /// Reject the hunk - revert its changes if disk still matches current_content.
     Reject,
 }
 

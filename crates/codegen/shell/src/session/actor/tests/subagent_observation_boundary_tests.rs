@@ -181,6 +181,51 @@ fn live_consultation(
     )
 }
 
+async fn install_task_planning(actor: &Arc<SessionActor>, prompt_id: &str) {
+    let mut plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:task-test");
+    plan.steps.push(tool_types::PlanStep {
+        id: "task-step".into(),
+        content: "Run the observed child task".into(),
+        priority: tool_types::PlanPriority::Normal,
+        status: tool_types::PlanStepStatus::InProgress,
+        requirements: None,
+        removed: false,
+    });
+    actor
+        .chat_state_handle
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+            chat_state::timeline::PlanningEvent {
+                previous: None,
+                plan: Box::new(plan),
+            },
+        ))
+        .await
+        .unwrap();
+    let bridge = actor.agent.borrow().tool_bridge().clone();
+    let (planning_tx, mut planning_rx) = tokio::sync::mpsc::unbounded_channel();
+    bridge
+        .update_resource(
+            tools::implementations::grow_build::todo::runtime::PlanningRuntimeHandle(planning_tx),
+        )
+        .await;
+    bridge
+        .update_resource(
+            tools::implementations::grow_build::task::types::CurrentPromptIdResource(
+                prompt_id.into(),
+            ),
+        )
+        .await;
+    let planning_actor = Arc::downgrade(actor);
+    tokio::task::spawn_local(async move {
+        while let Some(command) = planning_rx.recv().await {
+            let Some(actor) = planning_actor.upgrade() else {
+                break;
+            };
+            actor.handle_planning_command(command).await;
+        }
+    });
+}
+
 async fn actual_session_wait_order(intervention_precedes_terminal: bool) {
     use test_support::{InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer};
     use tools::implementations::grow_build::task::TaskTool;
@@ -205,7 +250,7 @@ async fn actual_session_wait_order(intervention_precedes_terminal: bool) {
             &[tool_use_block(
                 call_id,
                 "spawn_subagent",
-                r#"{"prompt":"inspect target","description":"inspect target","subagent_type":"explore","background":false,"capability_mode":"read-only"}"#,
+                r#"{"parent_step_id":"task-step","prompt":"inspect target","description":"inspect target","subagent_type":"explore","background":false,"capability_mode":"read-only"}"#,
             )],
             "tool_use",
         ),
@@ -261,6 +306,7 @@ async fn actual_session_wait_order(intervention_precedes_terminal: bool) {
         .await;
 
     let prompt_id = format!("wait-order-{call_id}");
+    install_task_planning(&actor, &prompt_id).await;
     let turn = tokio::task::spawn_local({
         let actor = actor.clone();
         let prompt_id = prompt_id.clone();
@@ -679,7 +725,9 @@ async fn kill_task_session_dispatch_persists_backend_cancel_receipts() {
                     kind: "function".into(),
                     function: crate::sampling::types::ToolCallFunction::new(name, input),
                 };
+            install_task_planning(&actor, "cancel-receipt-turn").await;
             let spawn_input = serde_json::json!({
+                "parent_step_id": "task-step",
                 "prompt": "wait for cancellation",
                 "description": "cancel receipt test",
                 "subagent_type": "explore",

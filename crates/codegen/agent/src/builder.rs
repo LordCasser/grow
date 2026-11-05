@@ -847,9 +847,7 @@ impl AgentBuilder {
                 .iter()
                 .map(|c| PathBuf::from(&c.file_path))
                 .collect();
-            let git_root = git2::Repository::discover(&self.working_directory)
-                .ok()
-                .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()));
+            let git_root = crate::repo::discover_worktree_root(&self.working_directory).ok();
             let gitignore = crate::prompt::ignore::build_gitignore(git_root.as_deref());
             if let Some(gi) = gitignore.as_ref()
                 && let Some(root) = git_root.as_ref()

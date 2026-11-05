@@ -3,7 +3,7 @@
 //! Given a spawn request and a resolution context, this module resolves:
 //!
 //! - Effective runtime config (model, capability mode, isolation).
-//! - Resume identity validation (agent type; model is soft-ignored).
+//! - Resume identity validation (stable agent type).
 //!
 //! Definition discovery, gating, prompt context, runtime defaults, and
 //! capability/depth tool policy are shared here. Model catalog selection and

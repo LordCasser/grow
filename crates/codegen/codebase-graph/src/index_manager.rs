@@ -830,9 +830,9 @@ impl IndexManager {
     /// Process a command with event coalescing and time-throttled cache saving.
     ///
     /// For file events: drains pending events from the channel and coalesces
-    /// by path (last-writer-wins) before processing. A `Removed` after a
-    /// `Created`/`Modified` cancels both. A `Created`/`Modified` after
-    /// `Removed` processes as `Created` (file was replaced).
+    /// by path (last-writer-wins). A final `Removed` is retained to clear any
+    /// previously indexed entries. A `Created`/`Modified` after `Removed`
+    /// processes as `Created` (file was replaced).
     ///
     /// Returns false if shutdown was requested.
     fn process_command_coalesced(
@@ -1514,7 +1514,7 @@ fn intern_symbols_directly(
 ///
 /// Semantics:
 /// - `Created` + `Modified` → `Modified` (already exists, just reindex)
-/// - `Created/Modified` + `Removed` → cancelled (nothing to do)
+/// - `Created/Modified` + `Removed` → `Removed` (clear previously indexed entries)
 /// - `Removed` + `Created/Modified` → `Created` (file was replaced)
 /// - Multiple `Modified` → single `Modified`
 struct CoalescedEvents {
@@ -1551,15 +1551,12 @@ impl CoalescedEvents {
             Entry::Occupied(mut e) => {
                 let prev = *e.get();
                 match (prev, kind) {
-                    // Created/Modified then Removed → cancel both
-                    (FileEventKind::Created | FileEventKind::Modified, FileEventKind::Removed) => {
-                        e.remove();
-                    }
                     // Removed then Created/Modified → file replaced, treat as Created
                     (FileEventKind::Removed, FileEventKind::Created | FileEventKind::Modified) => {
                         e.insert(FileEventKind::Created);
                     }
-                    // Same or compatible kinds → last writer wins
+                    // Last writer wins, including Removed: a preceding Created
+                    // does not prove that the path was absent from the index.
                     _ => {
                         e.insert(kind);
                     }
@@ -1935,22 +1932,315 @@ mod tests {
         handle.shutdown().unwrap();
     }
 
-    // ========== CoalescedEvents tests ==========
-
     #[test]
-    fn test_coalesce_create_then_remove_cancels() {
-        let mut c = CoalescedEvents::new();
-        c.add(FileEvent::created("/a.rs".into()));
-        c.add(FileEvent::removed("/a.rs".into()));
-        assert!(c.events.is_empty());
+    fn test_batch_modify_then_remove_clears_indexed_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("target.rs");
+        fs::write(
+            &file_path,
+            "fn removed_symbol() {}\nfn removed_caller() { removed_symbol(); }\n",
+        )
+        .unwrap();
+        let original_meta = FileMeta::from_metadata(&fs::metadata(&file_path).unwrap());
+        let config = IndexManagerConfig::new(dir.path().to_path_buf())
+            .without_cache_load()
+            .without_cache_save();
+        let handle = IndexManager::spawn(config);
+
+        let before = handle.get_snapshot().unwrap();
+        assert_eq!(
+            before.find_definitions("removed_symbol"),
+            vec![("target.rs", 1)]
+        );
+        assert_eq!(
+            before.find_references("removed_symbol"),
+            vec![("target.rs", 2)]
+        );
+        assert_eq!(before.get_file_meta("target.rs"), Some(&original_meta));
+        let original_stats = before.stats();
+        assert_eq!(original_stats.0, 1);
+        assert!(original_stats.1 > 0 && original_stats.2 > 0);
+
+        fs::remove_file(&file_path).unwrap();
+        handle
+            .send_events(vec![
+                FileEvent::modified(file_path.clone()),
+                FileEvent::removed(file_path),
+            ])
+            .unwrap();
+        let after = handle.get_snapshot().unwrap();
+
+        assert_eq!(
+            after.stats(),
+            (0, 0, 0),
+            "Modified -> Removed must clear all file metadata, definitions and references"
+        );
+        assert!(after.find_definitions("removed_symbol").is_empty());
+        assert!(after.find_definitions("removed_caller").is_empty());
+        assert!(after.find_references("removed_symbol").is_empty());
+        assert!(after.get_file_meta("target.rs").is_none());
+        assert_eq!(before.stats(), original_stats);
+        assert_eq!(before.get_file_meta("target.rs"), Some(&original_meta));
+        assert!(!Arc::ptr_eq(&before, &after));
+
+        handle.shutdown().unwrap();
+    }
+
+    fn assert_recursive_function_indexed(
+        index: &ScopeGraphIndex,
+        path: &str,
+        symbol: &str,
+        meta: &FileMeta,
+    ) {
+        assert_eq!(index.find_definitions(symbol), vec![(path, 1)]);
+        assert_eq!(index.find_references(symbol), vec![(path, 1)]);
+        assert_eq!(index.get_file_meta(path), Some(meta));
     }
 
     #[test]
-    fn test_coalesce_modify_then_remove_cancels() {
+    fn test_batches_ending_in_removal_clear_existing_facts() {
+        use FileEventKind::{Created, Modified, Removed};
+
+        let sequences: &[&[FileEventKind]] = &[
+            &[Created, Removed],
+            &[Created, Modified, Removed],
+            &[Removed, Created, Removed],
+            &[Removed, Modified, Removed],
+            &[Modified, Modified, Removed],
+            &[Removed, Removed],
+        ];
+        for &sequence in sequences {
+            let dir = tempdir().unwrap();
+            let file_path = dir.path().join("target.rs");
+            let unrelated_path = dir.path().join("unrelated.rs");
+            fs::write(&file_path, "fn removed() { removed(); }\n").unwrap();
+            fs::write(&unrelated_path, "fn unrelated() { unrelated(); }\n").unwrap();
+            let original_meta = FileMeta::from_metadata(&fs::metadata(&file_path).unwrap());
+            let unrelated_meta = FileMeta::from_metadata(&fs::metadata(&unrelated_path).unwrap());
+            let config = IndexManagerConfig::new(dir.path().to_path_buf())
+                .without_cache_load()
+                .without_cache_save();
+            let handle = IndexManager::spawn(config);
+            let before = handle.get_snapshot().unwrap();
+            assert_eq!(before.stats(), (2, 2, 2));
+            assert_recursive_function_indexed(&before, "target.rs", "removed", &original_meta);
+            assert_recursive_function_indexed(
+                &before,
+                "unrelated.rs",
+                "unrelated",
+                &unrelated_meta,
+            );
+
+            fs::remove_file(&file_path).unwrap();
+            handle
+                .send_events(
+                    sequence
+                        .iter()
+                        .map(|&kind| FileEvent::new(vec![file_path.clone()], kind))
+                        .collect(),
+                )
+                .unwrap();
+            let after = handle.get_snapshot().unwrap();
+
+            assert_eq!(after.stats(), (1, 1, 1), "batch: {sequence:?}");
+            assert!(after.find_definitions("removed").is_empty());
+            assert!(after.find_references("removed").is_empty());
+            assert!(after.get_file_meta("target.rs").is_none());
+            assert_recursive_function_indexed(&after, "unrelated.rs", "unrelated", &unrelated_meta);
+            assert_eq!(before.stats(), (2, 2, 2));
+            assert_recursive_function_indexed(&before, "target.rs", "removed", &original_meta);
+            assert_recursive_function_indexed(
+                &before,
+                "unrelated.rs",
+                "unrelated",
+                &unrelated_meta,
+            );
+            assert!(!Arc::ptr_eq(&before, &after));
+            handle.shutdown().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_batch_rename_over_indexed_target_then_remove_clears_both_paths() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("source.rs");
+        let target_path = dir.path().join("target.rs");
+        let unrelated_path = dir.path().join("unrelated.rs");
+        fs::write(&source_path, "fn source() { source(); }\n").unwrap();
+        fs::write(&target_path, "fn target() { target(); }\n").unwrap();
+        fs::write(&unrelated_path, "fn unrelated() { unrelated(); }\n").unwrap();
+        let source_meta = FileMeta::from_metadata(&fs::metadata(&source_path).unwrap());
+        let target_meta = FileMeta::from_metadata(&fs::metadata(&target_path).unwrap());
+        let unrelated_meta = FileMeta::from_metadata(&fs::metadata(&unrelated_path).unwrap());
+        let config = IndexManagerConfig::new(dir.path().to_path_buf())
+            .without_cache_load()
+            .without_cache_save();
+        let handle = IndexManager::spawn(config);
+        let before = handle.get_snapshot().unwrap();
+        assert_eq!(before.stats(), (3, 3, 3));
+        assert_recursive_function_indexed(&before, "source.rs", "source", &source_meta);
+        assert_recursive_function_indexed(&before, "target.rs", "target", &target_meta);
+        assert_recursive_function_indexed(&before, "unrelated.rs", "unrelated", &unrelated_meta);
+
+        fs::rename(&source_path, &target_path).unwrap();
+        fs::remove_file(&target_path).unwrap();
+        handle
+            .send_events(vec![
+                FileEvent::renamed(source_path, target_path.clone()),
+                FileEvent::removed(target_path),
+            ])
+            .unwrap();
+        let after = handle.get_snapshot().unwrap();
+
+        assert_eq!(after.stats(), (1, 1, 1));
+        for (path, symbol) in [("source.rs", "source"), ("target.rs", "target")] {
+            assert!(after.find_definitions(symbol).is_empty());
+            assert!(after.find_references(symbol).is_empty());
+            assert!(after.get_file_meta(path).is_none());
+        }
+        assert_recursive_function_indexed(&after, "unrelated.rs", "unrelated", &unrelated_meta);
+        assert_eq!(before.stats(), (3, 3, 3));
+        assert_recursive_function_indexed(&before, "source.rs", "source", &source_meta);
+        assert_recursive_function_indexed(&before, "target.rs", "target", &target_meta);
+        assert!(!Arc::ptr_eq(&before, &after));
+        handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn test_batch_create_then_remove_unknown_file_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let unrelated_path = dir.path().join("unrelated.rs");
+        fs::write(&unrelated_path, "fn unrelated() { unrelated(); }\n").unwrap();
+        let unrelated_meta = FileMeta::from_metadata(&fs::metadata(&unrelated_path).unwrap());
+        let config = IndexManagerConfig::new(dir.path().to_path_buf())
+            .without_cache_load()
+            .without_cache_save();
+        let handle = IndexManager::spawn(config);
+        let before = handle.get_snapshot().unwrap();
+        assert_eq!(before.stats(), (1, 1, 1));
+        assert_recursive_function_indexed(&before, "unrelated.rs", "unrelated", &unrelated_meta);
+        assert!(before.get_file_meta("unknown.rs").is_none());
+
+        let unknown_path = dir.path().join("unknown.rs");
+        fs::write(&unknown_path, "fn unknown() { unknown(); }\n").unwrap();
+        fs::remove_file(&unknown_path).unwrap();
+        handle
+            .send_events(vec![
+                FileEvent::created(unknown_path.clone()),
+                FileEvent::removed(unknown_path.clone()),
+            ])
+            .unwrap();
+        let after = handle.get_snapshot().unwrap();
+        assert_eq!(after.stats(), before.stats());
+        assert!(after.find_definitions("unknown").is_empty());
+        assert!(after.find_references("unknown").is_empty());
+        assert!(after.get_file_meta("unknown.rs").is_none());
+        assert_recursive_function_indexed(&after, "unrelated.rs", "unrelated", &unrelated_meta);
+
+        handle
+            .send_events(vec![FileEvent::removed(unknown_path)])
+            .unwrap();
+        let repeated = handle.get_snapshot().unwrap();
+        assert_eq!(repeated.stats(), before.stats());
+        assert!(repeated.find_definitions("unknown").is_empty());
+        assert!(repeated.find_references("unknown").is_empty());
+        assert!(repeated.get_file_meta("unknown.rs").is_none());
+        assert_recursive_function_indexed(&repeated, "unrelated.rs", "unrelated", &unrelated_meta);
+        assert_recursive_function_indexed(&before, "unrelated.rs", "unrelated", &unrelated_meta);
+        handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn test_batch_remove_then_recreate_indexes_new_content_and_preserves_snapshot() {
+        for kind in [FileEventKind::Created, FileEventKind::Modified] {
+            let dir = tempdir().unwrap();
+            let file_path = dir.path().join("target.rs");
+            let unrelated_path = dir.path().join("unrelated.rs");
+            fs::write(&file_path, "fn original() { original(); }\n").unwrap();
+            fs::write(&unrelated_path, "fn unrelated() { unrelated(); }\n").unwrap();
+            let original_meta = FileMeta::from_metadata(&fs::metadata(&file_path).unwrap());
+            let unrelated_meta = FileMeta::from_metadata(&fs::metadata(&unrelated_path).unwrap());
+            let config = IndexManagerConfig::new(dir.path().to_path_buf())
+                .without_cache_load()
+                .without_cache_save();
+            let handle = IndexManager::spawn(config);
+            let before = handle.get_snapshot().unwrap();
+            assert_eq!(before.stats(), (2, 2, 2));
+            assert_recursive_function_indexed(&before, "target.rs", "original", &original_meta);
+            assert_recursive_function_indexed(
+                &before,
+                "unrelated.rs",
+                "unrelated",
+                &unrelated_meta,
+            );
+
+            fs::remove_file(&file_path).unwrap();
+            fs::write(
+                &file_path,
+                "fn recreated_with_new_content() { recreated_with_new_content(); }\n",
+            )
+            .unwrap();
+            let recreated_meta = FileMeta::from_metadata(&fs::metadata(&file_path).unwrap());
+            assert_ne!(original_meta.size, recreated_meta.size);
+            handle
+                .send_events(vec![
+                    FileEvent::removed(file_path.clone()),
+                    FileEvent::new(vec![file_path], kind),
+                ])
+                .unwrap();
+            let after = handle.get_snapshot().unwrap();
+
+            assert_eq!(after.stats(), (2, 2, 2), "recreation event: {kind:?}");
+            assert!(after.find_definitions("original").is_empty());
+            assert!(after.find_references("original").is_empty());
+            assert_recursive_function_indexed(
+                &after,
+                "target.rs",
+                "recreated_with_new_content",
+                &recreated_meta,
+            );
+            assert_recursive_function_indexed(&after, "unrelated.rs", "unrelated", &unrelated_meta);
+            assert_eq!(before.stats(), (2, 2, 2));
+            assert_recursive_function_indexed(&before, "target.rs", "original", &original_meta);
+            assert_recursive_function_indexed(
+                &before,
+                "unrelated.rs",
+                "unrelated",
+                &unrelated_meta,
+            );
+            assert!(
+                before
+                    .find_definitions("recreated_with_new_content")
+                    .is_empty()
+            );
+            assert!(
+                before
+                    .find_references("recreated_with_new_content")
+                    .is_empty()
+            );
+            assert!(!Arc::ptr_eq(&before, &after));
+            handle.shutdown().unwrap();
+        }
+    }
+
+    // ========== CoalescedEvents tests ==========
+
+    #[test]
+    fn test_coalesce_create_then_remove_keeps_removal() {
+        let mut c = CoalescedEvents::new();
+        c.add(FileEvent::created("/a.rs".into()));
+        c.add(FileEvent::removed("/a.rs".into()));
+        assert_eq!(c.events.len(), 1);
+        assert_eq!(c.events[&PathBuf::from("/a.rs")], FileEventKind::Removed);
+    }
+
+    #[test]
+    fn test_coalesce_modify_then_remove_keeps_removal() {
         let mut c = CoalescedEvents::new();
         c.add(FileEvent::modified("/a.rs".into()));
         c.add(FileEvent::removed("/a.rs".into()));
-        assert!(c.events.is_empty());
+        assert_eq!(c.events.len(), 1);
+        assert_eq!(c.events[&PathBuf::from("/a.rs")], FileEventKind::Removed);
     }
 
     #[test]
@@ -1999,13 +2289,13 @@ mod tests {
     }
 
     #[test]
-    fn test_coalesce_rename_then_remove_target_cancels_target() {
+    fn test_coalesce_rename_then_remove_target_keeps_both_removals() {
         let mut c = CoalescedEvents::new();
         c.add(FileEvent::renamed("/a.rs".into(), "/b.rs".into()));
         c.add(FileEvent::removed("/b.rs".into()));
-        // /a.rs should still be Removed, /b.rs Created+Removed = cancelled
-        assert_eq!(c.events.len(), 1);
+        assert_eq!(c.events.len(), 2);
         assert_eq!(c.events[&PathBuf::from("/a.rs")], FileEventKind::Removed);
+        assert_eq!(c.events[&PathBuf::from("/b.rs")], FileEventKind::Removed);
     }
 
     #[test]

@@ -491,8 +491,20 @@ fn workspace_entity_identity(workspace_root: &Path) -> io::Result<WorkspaceEntit
         Ok(false) => None,
         Err(error) => return Err(error),
     };
-    let git_common_dir = match git2::Repository::open(&key) {
-        Ok(repo) => Some(filesystem_entity_identity(repo.commondir())?),
+    let git_common_dir = match git2::Repository::discover_path(&key, key.parent()) {
+        Ok(git_dir) => {
+            use bstr::ByteSlice;
+            let common_dir = match std::fs::read(git_dir.join("commondir")) {
+                Ok(path) => git_dir.join(
+                    path.trim_ascii_end()
+                        .to_path()
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                ),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => git_dir,
+                Err(error) => return Err(error),
+            };
+            Some(filesystem_entity_identity(&common_dir)?)
+        }
         Err(error) if git_marker.is_some() => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -522,19 +534,14 @@ pub fn workspace_identity_for_cwd(
     let current = workspace_entity_identity(workspace_key)?;
     let managed_source =
         if let Some(source_repo) = crate::worktree::source_repo_for_cwd(&cwd.to_string_lossy()) {
-            let repo = git2::Repository::discover(&source_repo).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("managed worktree source repository is unavailable: {error}"),
-                )
-            })?;
-            let source_root = repo.workdir().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "managed worktree source repository has no workdir",
-                )
-            })?;
-            Some(workspace_entity_identity(source_root)?)
+            let source_root = agent::repo::discover_worktree_root(Path::new(&source_repo))
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("managed worktree source repository is unavailable: {error}"),
+                    )
+                })?;
+            Some(workspace_entity_identity(&source_root)?)
         } else {
             None
         };
@@ -620,10 +627,8 @@ pub fn workspace_key(cwd: &Path) -> PathBuf {
 /// Git-topology-derived workspace key (pre-safety-guard); see [`workspace_key`],
 /// which rejects an over-broad derived root in favor of the cwd.
 fn git_derived_workspace_key(cwd: &Path) -> PathBuf {
-    if let Ok(repo) = git2::Repository::discover(cwd)
-        && let Some(workdir) = repo.workdir()
-    {
-        return canonicalize_or_owned(workdir);
+    if let Ok(workdir) = agent::repo::discover_worktree_root(cwd) {
+        return workdir;
     }
     canonicalize_or_owned(cwd)
 }
@@ -825,6 +830,30 @@ mod tests {
 
         assert!(!store.is_trusted(&repo));
         assert!(!TrustStore::load_from(store_path).is_trusted(&repo));
+    }
+
+    #[test]
+    fn git_config_is_not_part_of_workspace_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        git2::Repository::init(&repo).unwrap();
+        let original = workspace_identity(&repo).unwrap();
+        assert!(original.current.git_marker.is_some());
+        assert!(original.current.git_common_dir.is_some());
+        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&repo).unwrap();
+
+        std::fs::write(repo.join(".git/config"), "[invalid config").unwrap();
+        assert_eq!(workspace_identity(&repo).unwrap(), original);
+        assert!(store.is_trusted(&repo));
+        std::fs::remove_file(repo.join(".git/config")).unwrap();
+        std::fs::create_dir(repo.join(".git/config")).unwrap();
+        assert_eq!(workspace_identity(&repo).unwrap(), original);
+        assert!(store.is_trusted(&repo));
+
+        std::fs::write(repo.join(".git/commondir"), "missing-common-dir\n").unwrap();
+        assert!(workspace_identity(&repo).is_err());
+        assert!(!store.is_trusted(&repo));
     }
 
     #[test]
@@ -1316,6 +1345,29 @@ mod tests {
         store.set_trusted(&main_key).unwrap();
         assert!(!store.is_trusted_for_cwd(&wt1, &workspace_key(&wt1)));
         assert!(!store.is_trusted_for_cwd(&wt2, &workspace_key(&wt2)));
+
+        let original = workspace_identity(&wt1).unwrap();
+        let git_dir = git2::Repository::discover_path(&wt1, wt1.parent()).unwrap();
+        store.set_trusted(&wt1).unwrap();
+        std::fs::write(main.join(".git/config"), "[invalid config").unwrap();
+        assert_eq!(workspace_identity(&wt1).unwrap(), original);
+        assert_eq!(workspace_key(&nested), canonicalize_or_owned(&wt1));
+        assert!(store.is_trusted(&wt1));
+
+        let other = dir.path().join("other\u{3000}");
+        git2::Repository::init(&other).unwrap();
+        std::fs::write(
+            git_dir.join("commondir"),
+            format!("{}\n", other.join(".git").display()),
+        )
+        .unwrap();
+        let changed = workspace_identity(&wt1).unwrap();
+        assert_eq!(changed.current.git_marker, original.current.git_marker);
+        assert_ne!(
+            changed.current.git_common_dir,
+            original.current.git_common_dir
+        );
+        assert!(!store.is_trusted(&wt1));
     }
 
     #[test]

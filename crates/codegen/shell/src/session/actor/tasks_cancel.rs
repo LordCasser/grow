@@ -1038,6 +1038,13 @@ impl SessionActor {
             )
             .await
             .err();
+        if terminal_error.is_none() && had_active_turn {
+            // Aborting the producer skips the normal Turn epilogue. Retire its
+            // actor references at the durable terminal, before optional hooks;
+            // admitted attempts retain their own budget and settlement owners.
+            self.turn_continuation.borrow_mut().take();
+            self.sampling_continuation.borrow_mut().take();
+        }
         if terminal_error.is_none()
             && rewound_input.is_none()
             && let (Some(prompt_id), Some(turn)) =

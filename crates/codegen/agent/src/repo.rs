@@ -1,6 +1,6 @@
 //! Shared git-repo dir-chain primitive.
 //!
-//! One `git2` discovery + one cwd→root walk, reused across the many repo-local
+//! Path-only Git discovery + one cwd→root walk, reused across the many repo-local
 //! config marker checks the folder-trust gate runs back-to-back. Lives in its
 //! own module (rather than `discovery`) because it is a generic repo-walk
 //! primitive consumed cross-crate by `workspace`, not agent-definition
@@ -8,8 +8,38 @@
 
 use std::path::{Path, PathBuf};
 
+/// Find the checkout boundary without opening repository configuration.
+///
+/// `Repository::discover` also opens the repository, which can hydrate cloud
+/// files and fail on config that is irrelevant to directory discovery. Let
+/// libgit2 validate each level's topology, including gitfiles and worktrees,
+/// with the parent as ceiling so the returned checkout is unambiguous.
+pub fn discover_worktree_root(cwd: &Path) -> Result<PathBuf, git2::Error> {
+    let cwd =
+        dunce::canonicalize(cwd).map_err(|error| git2::Error::from_str(&error.to_string()))?;
+    for dir in cwd.ancestors() {
+        match git2::Repository::discover_path(dir, dir.parent()) {
+            Ok(git_dir) if git_dir == dir => {
+                return Err(git2::Error::from_str(
+                    "bare repository has no checkout root",
+                ));
+            }
+            Ok(_) => return Ok(dir.to_path_buf()),
+            Err(error)
+                if error.code() == git2::ErrorCode::NotFound
+                    && error.class() == git2::ErrorClass::Repository => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(git2::Error::new(
+        git2::ErrorCode::NotFound,
+        git2::ErrorClass::Repository,
+        "no Git checkout found",
+    ))
+}
+
 /// The git worktree root for `cwd` (if any) plus the directory chain from `cwd`
-/// up to that root (inclusive, cwd-first), resolved with ONE `git2` discovery
+/// up to that root (inclusive, cwd-first), resolved with path-only Git discovery
 /// and ONE upward walk.
 ///
 /// The folder-trust gate's `repo_configs_present` probes a dozen repo-local
@@ -40,11 +70,10 @@ pub struct RepoDirChain {
 }
 
 impl RepoDirChain {
-    /// Resolve the chain for `cwd`: ONE `git2` discovery + ONE upward walk.
+    /// Resolve the chain without opening Git configuration.
     pub fn resolve(cwd: &Path) -> Self {
-        let git_root = git2::Repository::discover(cwd)
+        let git_root = discover_worktree_root(cwd)
             .ok()
-            .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
             // Home-is-a-git-repo (dotfiles in $HOME): a discovery that walks up
             // to $HOME must NOT treat the whole home subtree as one repo, or
             // home-level `.grow`/`.mcp.json`/plugins would look repo-local. Drop
@@ -162,6 +191,79 @@ mod tests {
         assert_eq!(
             dunce::canonicalize(&root).unwrap(),
             dunce::canonicalize(tmp.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_require_readable_git_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), "[invalid config").unwrap();
+        assert!(git2::Repository::open(tmp.path()).is_err());
+        let nested = tmp.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let chain = RepoDirChain::resolve(&nested);
+        assert_eq!(
+            chain
+                .git_root
+                .map(|root| dunce::canonicalize(root).unwrap()),
+            Some(dunce::canonicalize(tmp.path()).unwrap()),
+        );
+        assert_eq!(
+            chain.dirs,
+            vec![nested, tmp.path().join("a"), tmp.path().to_path_buf()]
+        );
+    }
+
+    #[test]
+    fn discover_resolves_relative_gitfile_without_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        git2::Repository::init(&checkout).unwrap();
+        std::fs::rename(checkout.join(".git"), tmp.path().join("gitstore")).unwrap();
+        std::fs::write(checkout.join(".git"), "gitdir: ../gitstore\n").unwrap();
+        std::fs::write(tmp.path().join("gitstore/config"), "[invalid config").unwrap();
+        let nested = checkout.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            discover_worktree_root(&nested).unwrap(),
+            dunce::canonicalize(checkout).unwrap()
+        );
+    }
+
+    #[test]
+    fn discover_stops_at_bare_repository_inside_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let bare = tmp.path().join("bare.git");
+        git2::Repository::init_bare(&bare).unwrap();
+        let error = discover_worktree_root(&bare).unwrap_err();
+        assert_ne!(error.code(), git2::ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn discover_rejects_invalid_gitfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".git"), "invalid gitfile").unwrap();
+        assert!(discover_worktree_root(&nested).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_resolves_checkout_through_directory_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        git2::Repository::init(&checkout).unwrap();
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(checkout.join("src"), &alias).unwrap();
+        assert_eq!(
+            discover_worktree_root(&alias).unwrap(),
+            dunce::canonicalize(checkout).unwrap()
         );
     }
 

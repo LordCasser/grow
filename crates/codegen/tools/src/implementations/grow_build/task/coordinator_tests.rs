@@ -1,4 +1,5 @@
 use super::*;
+use crate::implementations::grow_build::set_subagent_model::SubagentModelControlRequest;
 use crate::implementations::grow_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grow_build::task::types::{
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentListActiveRequest,
@@ -10,8 +11,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio_util::sync::CancellationToken;
 
+#[path = "coordinator_model_control_tests.rs"]
+mod model_control_tests;
 #[path = "coordinator_observation_boundary_tests.rs"]
 mod observation_boundary_tests;
+#[path = "coordinator_parent_planning_tests.rs"]
+mod parent_planning_tests;
+
+type ModelControl = (SubagentModelControlRequest, String, CancellationToken);
+type ParentPlanRead = (ParentPlanningRequest, String, String, Option<String>);
 
 #[derive(Clone)]
 struct TestControl {
@@ -1065,6 +1073,9 @@ struct TestRunner {
     finish: tokio::sync::broadcast::Sender<()>,
     completions: mpsc::UnboundedSender<CompletionDisposition>,
     requests: mpsc::UnboundedSender<SubagentRequest>,
+    model_controls: mpsc::UnboundedSender<ModelControl>,
+    parent_plan_reads: mpsc::UnboundedSender<ParentPlanRead>,
+    interaction_calls: Arc<AtomicUsize>,
     security_parents: mpsc::UnboundedSender<Option<String>>,
     started: mpsc::UnboundedSender<String>,
     running_counts: mpsc::UnboundedSender<usize>,
@@ -1079,12 +1090,36 @@ struct TestRunner {
 }
 
 impl ChildRunner for TestRunner {
+    fn read_parent_plan(
+        &self,
+        request: ParentPlanningRequest,
+        parent_session_id: String,
+        task_id: String,
+        parent_step_id: Option<String>,
+    ) {
+        let _ = self
+            .parent_plan_reads
+            .send((request, parent_session_id, task_id, parent_step_id));
+    }
+
+    fn set_model(
+        &self,
+        request: SubagentModelControlRequest,
+        target: String,
+        target_cancellation: CancellationToken,
+    ) {
+        let _ = self
+            .model_controls
+            .send((request, target, target_cancellation));
+    }
+
     fn interact(
         &self,
         request: super::super::interaction::AgentInteractionRequest,
         target: String,
         subagent_task_name: String,
     ) {
+        self.interaction_calls.fetch_add(1, Ordering::SeqCst);
         let _ = request
             .respond_to
             .send(Ok(super::super::interaction::AgentInteractionOutput {
@@ -1130,6 +1165,7 @@ impl ChildRunner for TestRunner {
                 reporter,
             } = run;
             let completion_data = request.id.clone();
+            let child_session_id = test_child_session_id(&request);
             let _ = requests.send(request.clone());
             let _ = security_parents.send(security_parent);
             if request.id == "restore-blocked" {
@@ -1155,13 +1191,17 @@ impl ChildRunner for TestRunner {
             }
             if !reporter
                 .started(StartedChild {
-                    child_session_id: request.id.clone(),
+                    child_session_id: child_session_id.clone(),
                     resumed_from: request.resume_from.clone(),
                     // Mock definition resolution: this type declares background.
                     definition_background: request.subagent_type == "background-default",
                     control: TestControl {
                         cancellation: cancellation.clone(),
-                        session_id: request.id.clone(),
+                        session_id: if request.id == "model-control-context" {
+                            "exact-runtime-context".into()
+                        } else {
+                            child_session_id.clone()
+                        },
                         panic_notified,
                     },
                 })
@@ -1176,10 +1216,10 @@ impl ChildRunner for TestRunner {
                 reporter.execution_returned("completed");
             }
             let _ = started.send(request.id.clone());
-            if request.id == "retired-suspended-child" {
+            if request.id == "retired-suspended-child" || request.id == "parent-plan-suspended" {
                 return ChildRunOutcome::Suspended {
                     checkpoint: ChildCheckpoint {
-                        session_id: request.id.clone(),
+                        session_id: child_session_id.clone(),
                         operation_id: "suspend-retirement".into(),
                         checkpoint_seq: 1,
                     },
@@ -1207,7 +1247,7 @@ impl ChildRunner for TestRunner {
                         SubagentResult {
                             error: Some("injected terminal failure".into()),
                             subagent_id: request.id.clone(),
-                            child_session_id: request.id.clone(),
+                            child_session_id: child_session_id.clone(),
                             tool_calls: 5,
                             turns: 4,
                             total_tokens_used: 88,
@@ -1218,7 +1258,7 @@ impl ChildRunner for TestRunner {
                             success: true,
                             output: request.prompt.clone().into(),
                             subagent_id: request.id.clone(),
-                            child_session_id: request.id.clone(),
+                            child_session_id: child_session_id.clone(),
                             tool_calls: 3,
                             turns: 2,
                             ..Default::default()
@@ -1268,6 +1308,7 @@ impl ChildRunner for TestRunner {
         }
         let retired = completion_data == "retired-suspended-child"
             || ((completion_data == "retiring-completed-child"
+                || completion_data == "parent-plan-retiring"
                 || completion_data == "retiring-overlap-finalization"
                 || completion_data.starts_with("retiring-capacity-"))
                 && self.retirement_ready.load(Ordering::SeqCst));
@@ -1279,6 +1320,7 @@ impl ChildRunner for TestRunner {
 
     fn has_physical_retirement_owner(&self, completion_data: &Self::CompletionData) -> bool {
         completion_data == "retiring-completed-child"
+            || completion_data == "parent-plan-retiring"
             || completion_data == "retiring-overlap-finalization"
             || completion_data.starts_with("retiring-capacity-")
     }
@@ -1322,13 +1364,21 @@ impl ChildRunner for TestRunner {
     }
 }
 
+fn test_child_session_id(request: &SubagentRequest) -> String {
+    if request.subagent_type == "parent-plan-distinct-session" {
+        format!("session:{}", request.id)
+    } else {
+        request.id.clone()
+    }
+}
+
 fn cancelled_result(request: &SubagentRequest) -> SubagentResult {
     SubagentResult {
         success: false,
         cancelled: true,
         error: Some("cancelled".to_owned()),
         subagent_id: request.id.clone(),
-        child_session_id: request.id.clone(),
+        child_session_id: test_child_session_id(request),
         ..Default::default()
     }
 }
@@ -1420,6 +1470,9 @@ struct Harness {
     finish: tokio::sync::broadcast::Sender<()>,
     completions: mpsc::UnboundedReceiver<CompletionDisposition>,
     requests: mpsc::UnboundedReceiver<SubagentRequest>,
+    model_controls: mpsc::UnboundedReceiver<ModelControl>,
+    parent_plan_reads: mpsc::UnboundedReceiver<ParentPlanRead>,
+    interaction_calls: Arc<AtomicUsize>,
     security_parents: mpsc::UnboundedReceiver<Option<String>>,
     started: mpsc::UnboundedReceiver<String>,
     running_counts: mpsc::UnboundedReceiver<usize>,
@@ -1452,6 +1505,9 @@ fn harness_with_options(
     let (finish, _) = tokio::sync::broadcast::channel(4);
     let (completion_tx, completions) = mpsc::unbounded_channel();
     let (request_tx, requests) = mpsc::unbounded_channel();
+    let (model_control_tx, model_controls) = mpsc::unbounded_channel();
+    let (parent_plan_tx, parent_plan_reads) = mpsc::unbounded_channel();
+    let interaction_calls = Arc::new(AtomicUsize::new(0));
     let (security_parent_tx, security_parents) = mpsc::unbounded_channel();
     let (started_tx, started) = mpsc::unbounded_channel();
     let (running_count_tx, running_counts) = mpsc::unbounded_channel();
@@ -1473,6 +1529,9 @@ fn harness_with_options(
                 finish: finish.clone(),
                 completions: completion_tx,
                 requests: request_tx,
+                model_controls: model_control_tx,
+                parent_plan_reads: parent_plan_tx,
+                interaction_calls: interaction_calls.clone(),
                 security_parents: security_parent_tx,
                 started: started_tx,
                 running_counts: running_count_tx,
@@ -1498,6 +1557,9 @@ fn harness_with_options(
         finish,
         completions,
         requests,
+        model_controls,
+        parent_plan_reads,
+        interaction_calls,
         security_parents,
         started,
         running_counts,

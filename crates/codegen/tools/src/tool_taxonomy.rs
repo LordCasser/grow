@@ -28,7 +28,7 @@ pub mod field {
 pub const TOOL_META_KEY: &str = "grow/tool";
 /// Version of the canonical tool `_meta` contract. Bump on any breaking change
 /// to keys or value shapes so consumers can adapt.
-pub const TOOL_META_VERSION: u32 = 6;
+pub const TOOL_META_VERSION: u32 = 7;
 impl ToolKind {
     /// Unified, harness-independent display label for this semantic kind. A pure
     /// function of the kind, so equivalent tools across toolsets share it
@@ -48,6 +48,7 @@ impl ToolKind {
             ToolKind::Lsp => "Code Intelligence",
             ToolKind::Execute => "Run Command",
             ToolKind::Plan => "Plan",
+            ToolKind::PlanRead => "Read Plan",
             ToolKind::WebFetch => "Web Fetch",
             ToolKind::BackgroundTaskAction => "Background Task",
             ToolKind::SubagentList => "List Subagents",
@@ -88,7 +89,7 @@ pub struct ToolIdentity {
 ///
 /// ```json
 /// "grow/tool": {
-///   "version": 6,
+///   "version": 7,
 ///   "name": "read_file",
 ///   "kind": "read",
 ///   "namespace": "grow",
@@ -289,7 +290,25 @@ mod tests {
     }
 
     #[test]
-    fn subagent_observation_vocabulary_uses_version_six() {
+    fn todo_read_metadata_uses_independent_version_seven_kind() {
+        assert_eq!(ToolKind::PlanRead.as_key(), "plan_read");
+        let meta = CanonicalToolMeta::new(
+            "renamed_plan_reader",
+            &identity(ToolKind::PlanRead, ToolAccess::None),
+            None,
+        );
+        let wire = serde_json::to_value(meta).unwrap();
+        assert_eq!(wire["version"], 7);
+        assert_eq!(wire["kind"], "plan_read");
+        assert_eq!(wire["name"], "renamed_plan_reader");
+        assert_eq!(wire["namespace"], "grow");
+        assert_eq!(wire["max_access"], "none");
+        assert_eq!(wire["label"], "Read Plan");
+        assert!(wire.get("input").is_none());
+    }
+
+    #[test]
+    fn subagent_observation_vocabulary_uses_version_seven() {
         for (name, kind, wire_kind) in [
             ("list_subagent", ToolKind::SubagentList, "subagent_list"),
             (
@@ -301,7 +320,7 @@ mod tests {
         ] {
             let meta = CanonicalToolMeta::new(name, &identity(kind, ToolAccess::Read), None);
             let wire = serde_json::to_value(meta).unwrap();
-            assert_eq!(wire["version"], 6);
+            assert_eq!(wire["version"], 7);
             assert_eq!(wire["kind"], wire_kind);
             assert_eq!(wire["name"], name);
             assert_eq!(wire["max_access"], "read");

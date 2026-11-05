@@ -33,15 +33,14 @@ pub struct ResumeSourceData {
     /// Source subagent type (e.g. "general-purpose", "explore").
     /// Used by `validate_resume_identity` to check type match.
     pub subagent_type: String,
-    /// Effective model ID used by the source child session. Resume ignores a
-    /// caller override and pins this exact catalogue entry.
+    /// Last durable model ID used by the source child session. Ordinary resume
+    /// retains it unless the caller explicitly selects a replacement.
     pub model_id: String,
     /// Exact secret-free provider/model/endpoint identity used by the source.
-    /// Resume fails closed if the catalogue ID now resolves elsewhere.
+    /// Resume pins this transport when model is omitted.
     pub model_transport_key: sampling_types::ModelImageInputKey,
-    /// Effective reasoning policy used by the source child. Resume preserves
-    /// this together with the model instead of inheriting a later parent or
-    /// Workflow route.
+    /// Last durable reasoning policy used by the source child. Omitted resume
+    /// effort retains this actual value, including an unset value.
     pub reasoning_effort: Option<sampling_types::ReasoningEffort>,
     /// Effective cwd the source child used. Consumed by the shell's
     /// spawn orchestration for raw transcript continuation and worktree reuse.

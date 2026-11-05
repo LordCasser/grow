@@ -69,6 +69,7 @@ pub enum ToolKind {
     Lsp,
     Execute,
     Plan,
+    PlanRead,
     WebFetch,
     BackgroundTaskAction,
     SubagentList,

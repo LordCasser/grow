@@ -326,6 +326,12 @@ pub fn acp_tool_update(
                     .raw_output(raw_output_json(output, rewriter)),
             ))
         }
+        ToolOutput::TodoRead(_) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(raw_output_json(output, None)),
+        )),
         ToolOutput::MCP(mcp_output) => Some(
             acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),
@@ -528,7 +534,8 @@ pub fn acp_tool_update(
                     .raw_output(raw_output_json(output, rewriter)),
             ))
         }
-        ToolOutput::CreateGoal(_)
+        ToolOutput::SetSubagentModel(_)
+        | ToolOutput::CreateGoal(_)
         | ToolOutput::GetGoal(_)
         | ToolOutput::UpdateGoal(_)
         | ToolOutput::Workflow(_)
@@ -588,6 +595,60 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tools::types::output::*;
+
+    #[test]
+    fn todo_read_acp_completes_only_tool_row_with_complete_raw_facts() {
+        use tool_types::planning::{
+            LocalPlan, PlanPriority, PlanReadOutput, PlanReadQuery, PlanReadTarget, PlanStep,
+            PlanStepStatus, PlanningReadSnapshot, project_plan_read,
+        };
+        let mut plan = LocalPlan::new("reader", "scope");
+        plan.steps.push(PlanStep {
+            id: "removed".into(),
+            content: "Full fact /real/worktree/decision".into(),
+            priority: PlanPriority::High,
+            status: PlanStepStatus::Cancelled,
+            requirements: Some(vec!["Preserve /real/worktree/requirement".into()]),
+            removed: true,
+        });
+        let snapshot = PlanningReadSnapshot {
+            timeline_seq: 31,
+            plan,
+            delegation: None,
+        };
+        for target in [PlanReadTarget::SelfPlan, PlanReadTarget::Parent] {
+            for present in [false, true] {
+                let output = ToolOutput::TodoRead(PlanReadOutput {
+                    target,
+                    plan: present.then(|| {
+                        project_plan_read("reader", target, &snapshot, &PlanReadQuery::default())
+                            .unwrap()
+                    }),
+                });
+                let rewriter =
+                    PathRewriter::new("/real/worktree", Some("/display/project")).unwrap();
+                let update = acp_tool_update(&output, "read-call", Some(&rewriter), None).unwrap();
+                assert_eq!(update.tool_call_id.0.as_ref(), "read-call");
+                assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Completed));
+                assert!(update.fields.content.is_none());
+                assert!(update.fields.title.is_none());
+                assert_eq!(
+                    update.fields.raw_output,
+                    Some(serde_json::to_value(&output).unwrap())
+                );
+                assert!(acp_plan_update(&output).is_none());
+                let ToolOutput::TodoRead(decoded) =
+                    serde_json::from_value(update.fields.raw_output.unwrap()).unwrap()
+                else {
+                    panic!("native read output round trips");
+                };
+                assert_eq!(decoded.plan.is_some(), present);
+                if let Some(page) = decoded.plan {
+                    assert_eq!(page.steps, snapshot.plan.steps);
+                }
+            }
+        }
+    }
 
     #[test]
     fn goal_outputs_emit_completed_updates_with_original_identity() {

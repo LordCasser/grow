@@ -1,0 +1,25 @@
+# Verification
+
+## Original public Handle failure
+
+Parent inspected the exact regression and original log/result. `test_batch_modify_then_remove_clears_indexed_file` creates a real Rust file with one called function and its caller, spawns the production IndexManager with cache load/save disabled, and first confirms exact definition, reference and file metadata. It deletes the disk file, sends one public `send_events` batch containing Modified then Removed, and queries the same actor via `get_snapshot`.
+
+On the original production implementation, actual Cargo exit was 101, one test ran and failed (52 filtered), not a compile failure or empty selection. The resulting index statistics remained `(1, 2, 1)` instead of `(0, 0, 0)`, proving metadata, definitions and references survived the accepted removal. The first failing aggregate assertion precedes additional explicit absence assertions and immutable earlier snapshot checks. No production code changed for red: the runner first checks its prefix against HEAD and records production SHA256 `5ddf27d805a7419a734c7ac59e64cb9300fe2378f475362d9737de326001a8a2`.
+
+Evidence is retained in `/tmp/grow-ws01-index-removals.JS8Wbd/{red.log,red.json,baseline-index_manager.rs,red-index_manager.rs}`. Command: fixed 1.93.1 Cargo `test --locked --offline -p codebase-graph --lib index_manager::tests::test_batch_modify_then_remove_clears_indexed_file -- --exact --nocapture --test-threads=1`; 64.75 seconds, no timeout, source SHA256 `37d53c7e68423ad6a254c824945f99dda062254a3c22fca5e424fc9175acbc01` unchanged before/after. The five protected files (target source, graph implementation, lib, manifest and Cargo.lock) remained stable. Environment used isolated Grow/TMP/XDG/empty Git config/hooks/template, 16 MiB stack, two build jobs and default target.
+
+## Green and final source
+
+The unchanged failing public Handle regression passed after the minimum fix: exact run exit0, one passed and zero failed. The production change removes only the branch that erased `(Created|Modified, Removed)`; default last-writer behavior now retains Removed. Two comments and three old erroneous coalescer expectations were synchronized. No index-state cache, public API, dependency or event protocol was added.
+
+Four more public Handle tests cover six sequences ending in removal (including creation on an already indexed path), rename over an indexed destination then deletion, a previously unknown create/remove followed by another removal, and both Created/Modified recreation after removal. They confirm exact definitions/references/metadata, unrelated path survival, and immutable earlier snapshots. The final full `codebase-graph --lib` run actually completed with exit0: 57 passed, zero failed/ignored/filtered. The exact case is included in these 57 unique tests and is not counted twice. Existing navigation, COW, binary/oversize, hidden directory, query-version and actor lifetime tests also passed.
+
+Parent read the entire final diff and complete red/green/lib result logs, compared the red test body byte-for-byte with final, and recomputed all five protected files plus final source. Source SHA256 is `426ad5aa77bb6412ead734620258b5699ea96d17e3018b29d8aebdd6901af5fa`, production prefix `0e5cb3dcc4fbcdf5b650b69a7c3a757f7715ab4edd7686055e17ef0c80932796`. Exact and full run source snapshots were unchanged. Initial formatting check exit1 identified only new-test line wrapping; final fixed-toolchain formatting check exit0 and `git diff --check` succeeded. Original failure logs remain retained.
+
+Evidence additions in the same temporary directory: `green.log/json`, `lib.log/json`, `fmt-final.log/json`, `final-index_manager.rs`, `final.diff`, and parent-generated `parent-review-summary.json`. Cargo was reaped and the unique owner explicitly released source/Cargo scope. The Shell cancellation repair now owns the next Cargo window; it must preserve the frozen index source.
+
+## Feature accepted
+
+Luna independent review `01a1ab49-7ab6-7843-b6ad-fe78d9791344` completed against the exact source and related consumers with no actionable issues. It recomputed baseline/final/diff hashes, inspected deletion ownership and the batch/query barrier, and read the actual red/green/57-pass evidence; it did not rerun Cargo or claim OS watcher coverage. Parent accepted both coder and review using the real terminal result bindings (coder seq1086, reviewer seq502), after its own diff/log/hash review.
+
+This change's integrated chain is public Handle → actor → ScopeGraphIndex and is accepted. OS watcher delivery and a full Shell/CLI run are not claimed. Developer documentation has been synchronized. User then requested an immediate milestone and release preparation, stopping new reviews. The resolved backlog entry was removed and this change was archived locally after strict21/21. Post-archive strict20/20 and archive860/860 passed; the later combined milestone check passed strict17/17 and archive863/863. Publication continues under the separate 2.6.1 release change.

@@ -314,9 +314,7 @@ struct VcsDirs {
 
 fn discover_vcs(cwd: &Path, sapling: bool) -> VcsDirs {
     VcsDirs {
-        git_dir: git2::Repository::discover(cwd)
-            .ok()
-            .map(|r| r.path().to_path_buf()),
+        git_dir: git2::Repository::discover_path(cwd, std::iter::empty::<&std::ffi::OsStr>()).ok(),
         sl_dir: watcher::find_sl_dir(cwd),
         sapling,
     }

@@ -78,12 +78,24 @@ permission_mode = "always-approve"
     let b_release = project.path().join("b-release");
     let spawn = |description: &str| {
         json!({
+            "parent_step_id": "background-step",
             "prompt": description, "description": description,
             "subagent_type": "general-purpose", "background": true,
             "capability_mode": "all", "model": "mock/child"
         })
         .to_string()
     };
+    let _parent_todo = content.expect_response(
+        "create background parent TODO",
+        Matcher::foreground(Endpoint::Responses),
+        ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
+            "Track the background work",
+            "call_background_todo",
+            "todo_write",
+            &json!({"todos": [{"id": "background-step", "content": "Run background children", "status": "in_progress"}]}).to_string(),
+            "test-model",
+        )),
+    );
     let _spawn_b = content.expect_response(
         "spawn background B",
         Matcher::foreground(Endpoint::Responses),
@@ -399,6 +411,7 @@ async fn run_nested_tree_recovery(partial_leaf_release: bool, concurrent_resume:
         pid = pid_arg,
     );
     let root_task_a = json!({
+        "parent_step_id": "nested-step",
         "prompt": "Complete this task immediately without tools.",
         "description": "Complete child A before child B starts",
         "subagent_type": "general-purpose",
@@ -407,6 +420,7 @@ async fn run_nested_tree_recovery(partial_leaf_release: bool, concurrent_resume:
     })
     .to_string();
     let root_task_b = json!({
+        "parent_step_id": "nested-step",
         "prompt": "Delegate this task to one child and wait for it to finish.",
         "description": "Wait for child B",
         "subagent_type": "general-purpose",
@@ -415,6 +429,7 @@ async fn run_nested_tree_recovery(partial_leaf_release: bool, concurrent_resume:
     })
     .to_string();
     let child_b_task = json!({
+        "parent_step_id": "nested-step",
         "prompt": "Delegate this task to one grandchild and wait for it to finish.",
         "description": "Wait for B's grandchild",
         "subagent_type": "general-purpose",
@@ -427,11 +442,19 @@ async fn run_nested_tree_recovery(partial_leaf_release: bool, concurrent_resume:
         "description": "Run B's bounded child command"
     })
     .to_string();
+    let _root_todo = expect_tool_turn(
+        &content, "call_root_todo", "todo_write",
+        json!({"todos": [{"id": "nested-step", "content": "Run the nested child tree", "status": "in_progress"}]}).to_string(),
+    );
     let _root_child_a =
         expect_tool_turn(&content, "call_root_child_a", "spawn_subagent", root_task_a);
     let _child_a_completion = content.expect_agent_turn("child A completion", "CHILD_A_COMPLETED");
     let _root_child_b =
         expect_tool_turn(&content, "call_root_child_b", "spawn_subagent", root_task_b);
+    let _child_b_todo = expect_tool_turn(
+        &content, "call_b_todo", "todo_write",
+        json!({"todos": [{"id": "nested-step", "content": "Run the grandchild task", "status": "in_progress"}]}).to_string(),
+    );
     let _child_b_grandchild = expect_tool_turn(
         &content,
         "call_b_grandchild",

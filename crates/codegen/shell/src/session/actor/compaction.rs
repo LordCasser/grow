@@ -1224,6 +1224,7 @@ impl SessionActor {
         let range_plan = plan_compaction_range(
             &source_surface,
             &materialized.surface_ids,
+            &materialized.unconsumed_skill_load_ids,
             retain_tokens,
             MIN_COMPACTION_SOURCE_TOKENS,
         )
@@ -2330,6 +2331,7 @@ impl SessionActor {
         if plan_compaction_range(
             &materialized.surface,
             &materialized.surface_ids,
+            &materialized.unconsumed_skill_load_ids,
             config
                 .context_window
                 .get()
@@ -3965,7 +3967,7 @@ mod compaction_boundary_regressions {
             })
             .collect();
         let plan =
-            plan_compaction_range(&surface, &ids, 3_200, 5_000).expect("closed source exists");
+            plan_compaction_range(&surface, &ids, &[], 3_200, 5_000).expect("closed source exists");
         let actual_source = compaction_summary_source(
             &surface[plan.start_index..=plan.end_index],
             &surface[0],

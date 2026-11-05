@@ -29,17 +29,175 @@ pub(crate) fn worktree_add_no_checkout(source: &Path, dest: &str, git_ref: &str)
     Ok(())
 }
 
+/// Resolve a checkout's gitfile only when it identifies that checkout's linked
+/// registration. A gitfile alone never authorizes deleting its target.
+pub(crate) fn verified_worktree_registration(worktree_path: &Path) -> Result<Option<PathBuf>> {
+    let gitfile = worktree_path.join(".git");
+    match std::fs::symlink_metadata(&gitfile) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect worktree gitfile"),
+    }
+    let content = std::fs::read_to_string(&gitfile).context("read worktree gitfile")?;
+    let Some(gitdir) = content.trim().strip_prefix("gitdir: ") else {
+        return Ok(None);
+    };
+    let candidate = worktree_path.join(gitdir);
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect worktree registration candidate"),
+    }
+    let registration = dunce::canonicalize(&candidate).context("resolve registration candidate")?;
+    let Some(worktrees_dir) = registration.parent() else {
+        return Ok(None);
+    };
+    if worktrees_dir.file_name() != Some(std::ffi::OsStr::new("worktrees")) {
+        return Ok(None);
+    }
+    let Some(common_dir) = worktrees_dir.parent() else {
+        return Ok(None);
+    };
+    if !is_common_git_dir(common_dir) {
+        return Ok(None);
+    }
+    if registration_matches_worktree(&registration, common_dir, worktree_path)? {
+        Ok(Some(registration))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Structural discovery deliberately does not open repository configuration.
+fn is_common_git_dir(path: &Path) -> bool {
+    matches!(
+        gix::discover::is_git(path),
+        Ok(gix::discover::repository::Kind::PossiblyBare
+            | gix::discover::repository::Kind::SubmoduleGitDir
+            | gix::discover::repository::Kind::WorkTree {
+                linked_git_dir: None
+            })
+    )
+}
+
+fn registration_matches_worktree(
+    registration: &Path,
+    common_dir: &Path,
+    worktree_path: &Path,
+) -> Result<bool> {
+    // Compare physical entities, but require the registration's location as
+    // well: a symlink or a matching backlink cannot turn another dir into one.
+    if registration.parent() != Some(common_dir.join("worktrees").as_path()) {
+        return Ok(false);
+    }
+    let common_ref = std::fs::read_to_string(registration.join("commondir"))
+        .context("read registration commondir")?;
+    if common_ref.trim().is_empty() {
+        return Ok(false);
+    }
+    let recorded_common = dunce::canonicalize(registration.join(common_ref.trim()))
+        .context("resolve registration commondir")?;
+    if recorded_common != common_dir {
+        return Ok(false);
+    }
+    let backlink = std::fs::read_to_string(registration.join("gitdir"))
+        .context("read registration gitdir backlink")?;
+    if backlink.trim().is_empty() {
+        return Ok(false);
+    }
+    let recorded_gitfile = normalized_worktree_path(&registration.join(backlink.trim()))?;
+    let expected_gitfile = normalized_worktree_path(worktree_path)?.join(".git");
+    Ok(recorded_gitfile == expected_gitfile)
+}
+
+/// Retry a partially removed, metadata-tracked linked checkout. The saved
+/// source supplies the common repository; an absent checkout supplies no pointer.
+/// Unlike stale cleanup, any uncertainty must keep the tracking record alive.
+#[cfg(feature = "metadata")]
+pub(crate) fn remove_missing_worktree_registration(
+    source_repo: &Path,
+    worktree_path: &Path,
+) -> Result<()> {
+    let source_repo = dunce::canonicalize(source_repo)
+        .context("resolve source for incomplete worktree removal")?;
+    let (repository, _) = gix::discover::upwards(&source_repo)
+        .context("find source repository for incomplete worktree removal")?;
+    let (git_dir, _) = repository.into_repository_and_work_tree_directories();
+    let git_dir = dunce::canonicalize(git_dir).context("resolve source Git directory")?;
+    let common_dir =
+        match gix::discover::is_git(&git_dir).context("validate source Git directory")? {
+            gix::discover::repository::Kind::WorkTreeGitDir { .. } => {
+                let common_ref = std::fs::read_to_string(git_dir.join("commondir"))
+                    .context("read source commondir")?;
+                anyhow::ensure!(!common_ref.trim().is_empty(), "empty source commondir");
+                dunce::canonicalize(git_dir.join(common_ref.trim()))
+                    .context("resolve source commondir")?
+            }
+            _ => git_dir,
+        };
+    anyhow::ensure!(
+        is_common_git_dir(&common_dir),
+        "invalid source common Git directory"
+    );
+    let worktrees_dir = common_dir.join("worktrees");
+    match std::fs::symlink_metadata(&worktrees_dir) {
+        Ok(metadata) => anyhow::ensure!(metadata.is_dir(), "unverified source worktrees directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect source worktrees directory"),
+    }
+    let entries =
+        std::fs::read_dir(&worktrees_dir).context("scan source worktree registrations")?;
+    let expected_gitfile = normalized_worktree_path(worktree_path)?.join(".git");
+    for entry in entries {
+        let entry = entry.context("read source worktree registration entry")?;
+        let registration = entry.path();
+        anyhow::ensure!(
+            entry
+                .file_type()
+                .context("inspect source registration entry")?
+                .is_dir(),
+            "unverified worktree registration entry: {}",
+            registration.display()
+        );
+        let backlink = std::fs::read_to_string(registration.join("gitdir"))
+            .context("read source registration backlink")?;
+        anyhow::ensure!(
+            !backlink.trim().is_empty(),
+            "empty source registration backlink"
+        );
+        if normalized_worktree_path(&registration.join(backlink.trim()))? != expected_gitfile {
+            continue;
+        }
+        let registration =
+            dunce::canonicalize(registration).context("resolve source registration")?;
+        anyhow::ensure!(
+            registration_matches_worktree(&registration, &common_dir, worktree_path)?,
+            "registration identity does not match incomplete worktree removal"
+        );
+        std::fs::remove_dir_all(&registration).with_context(|| {
+            format!(
+                "worktree checkout is absent but registration removal is incomplete: {}",
+                registration.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Which stale registrations [`remove_stale_worktree_registrations`] removes.
 #[derive(Clone, Copy, Debug)]
 pub enum StaleWorktreeMatch<'a> {
     /// Exactly the registration whose recorded worktree path is this path.
     Path(&'a Path),
-    /// Every registration whose recorded worktree path is under this prefix
-    /// (e.g. a tool-owned base directory, proving ownership of the entries).
+    /// Every verified registration whose recorded worktree path is under this
+    /// prefix (e.g. a tool-owned base directory).
     UnderPrefix(&'a Path),
 }
 
-/// Remove stale `.git/worktrees/<id>` registrations matching `match_rule`.
+/// Remove stale `.git/worktrees/<id>` registrations matching `match_rule` only
+/// after verifying their direct location, common directory and exact backlink.
 ///
 /// Deliberately not `git worktree prune`: prune deletes every registration
 /// whose worktree path is not visible from the current mount namespace (git
@@ -52,74 +210,83 @@ pub fn remove_stale_worktree_registrations(
     source_repo: &Path,
     match_rule: StaleWorktreeMatch<'_>,
 ) -> u64 {
-    if let StaleWorktreeMatch::Path(p) = match_rule
-        && p.exists()
+    match try_remove_stale_worktree_registrations(source_repo, match_rule) {
+        Ok(removed) => removed,
+        Err(error) => {
+            tracing::warn!(
+                source_repo = %source_repo.display(),
+                error = %error,
+                "stale registration scrub skipped: cannot verify source or scope"
+            );
+            0
+        }
+    }
+}
+
+fn try_remove_stale_worktree_registrations(
+    source_repo: &Path,
+    match_rule: StaleWorktreeMatch<'_>,
+) -> Result<u64> {
+    if let StaleWorktreeMatch::Path(path) = match_rule
+        && path.try_exists().context("inspect stale worktree target")?
     {
-        return 0;
+        return Ok(0);
     }
 
-    let common_dir = match git_command()
+    let output = git_command()
         .current_dir(source_repo)
         .args(["rev-parse", "--git-common-dir"])
         .output()
-    {
-        Ok(o) if o.status.success() => {
-            let path = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
-            if path.is_absolute() {
-                path
-            } else {
-                source_repo.join(path)
-            }
-        }
-        Ok(o) => {
-            tracing::warn!(
-                source_repo = %source_repo.display(),
-                stderr = %String::from_utf8_lossy(&o.stderr),
-                "stale registration scrub skipped: git rev-parse --git-common-dir failed"
-            );
-            return 0;
-        }
-        Err(e) => {
-            tracing::warn!(
-                source_repo = %source_repo.display(),
-                error = %e,
-                "stale registration scrub skipped: git failed to spawn"
-            );
-            return 0;
-        }
-    };
-
-    let Ok(entries) = std::fs::read_dir(common_dir.join("worktrees")) else {
-        return 0;
-    };
+        .context("resolve stale registration source common directory")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git rev-parse --git-common-dir failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let common_ref = std::str::from_utf8(&output.stdout)
+        .context("decode source common directory")?
+        .trim();
+    anyhow::ensure!(!common_ref.is_empty(), "empty source common directory");
+    let common_dir = dunce::canonicalize(source_repo.join(common_ref))
+        .context("resolve source common Git directory")?;
+    anyhow::ensure!(
+        is_common_git_dir(&common_dir),
+        "invalid source common Git directory"
+    );
+    let worktrees_dir = common_dir.join("worktrees");
+    match std::fs::symlink_metadata(&worktrees_dir) {
+        Ok(metadata) => anyhow::ensure!(metadata.is_dir(), "unverified worktrees directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).context("inspect worktrees directory"),
+    }
+    let entries = std::fs::read_dir(&worktrees_dir).context("scan stale worktree registrations")?;
     let normalized_target = match match_rule {
-        StaleWorktreeMatch::Path(p) | StaleWorktreeMatch::UnderPrefix(p) => normalized_for_match(p),
+        StaleWorktreeMatch::Path(path) | StaleWorktreeMatch::UnderPrefix(path) => {
+            normalized_worktree_path(path)?
+        }
     };
     let mut removed = 0u64;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(%error, "cannot read stale registration entry; preserving it");
+                continue;
+            }
+        };
         let registration = entry.path();
-        if !registration.is_dir() || registration.join("locked").exists() {
-            continue;
-        }
-        let Ok(backlink) = std::fs::read_to_string(registration.join("gitdir")) else {
-            continue;
+        let recorded = match verified_stale_registration_worktree(&registration, &common_dir) {
+            Ok(Some(recorded)) => recorded,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    registration = %registration.display(),
+                    error = %error,
+                    "cannot verify stale registration ownership; preserving it"
+                );
+                continue;
+            }
         };
-        // The backlink names `<worktree>/.git`; under
-        // `worktree.useRelativePaths` (git >= 2.48) it is relative to the
-        // registration dir, not the CWD.
-        let backlink_path = Path::new(backlink.trim());
-        let backlink_abs = if backlink_path.is_relative() {
-            registration.join(backlink_path)
-        } else {
-            backlink_path.to_path_buf()
-        };
-        let Some(recorded) = backlink_abs.parent() else {
-            continue;
-        };
-        if recorded.exists() {
-            continue;
-        }
-        let recorded = normalized_for_match(recorded);
         let matched = match match_rule {
             StaleWorktreeMatch::Path(_) => recorded == normalized_target,
             StaleWorktreeMatch::UnderPrefix(_) => recorded.starts_with(&normalized_target),
@@ -136,16 +303,56 @@ pub fn remove_stale_worktree_registrations(
                 );
                 removed += 1;
             }
-            Err(e) => {
+            Err(error) => {
                 tracing::warn!(
                     registration = %registration.display(),
-                    error = %e,
+                    error = %error,
                     "failed to remove stale worktree registration"
                 );
             }
         }
     }
-    removed
+    Ok(removed)
+}
+
+/// Establish the same ownership proof as checkout removal before stale cleanup
+/// can delete an entry. A matching path only selects among verified owners.
+fn verified_stale_registration_worktree(
+    registration: &Path,
+    common_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    anyhow::ensure!(
+        std::fs::symlink_metadata(registration)
+            .context("inspect stale registration")?
+            .is_dir(),
+        "unverified registration directory"
+    );
+    if registration
+        .join("locked")
+        .try_exists()
+        .context("inspect stale registration lock")?
+    {
+        return Ok(None);
+    }
+    let backlink = std::fs::read_to_string(registration.join("gitdir"))
+        .context("read stale registration backlink")?;
+    anyhow::ensure!(!backlink.trim().is_empty(), "empty registration backlink");
+    // Relative backlinks are owned by the registration dir, including after
+    // the checkout has disappeared. Normalize the whole gitfile, not its parent.
+    let recorded_gitfile = normalized_worktree_path(&registration.join(backlink.trim()))?;
+    let recorded = recorded_gitfile
+        .parent()
+        .context("registration backlink has no checkout parent")?;
+    match std::fs::symlink_metadata(recorded) {
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect recorded stale checkout"),
+    }
+    anyhow::ensure!(
+        registration_matches_worktree(registration, common_dir, recorded)?,
+        "stale registration identity does not match source common directory and checkout"
+    );
+    Ok(Some(recorded.to_path_buf()))
 }
 
 /// [`remove_stale_worktree_registrations`] scoped to exactly one worktree path.
@@ -158,26 +365,29 @@ pub fn remove_stale_worktree_registrations_under(source_repo: &Path, prefix: &Pa
     remove_stale_worktree_registrations(source_repo, StaleWorktreeMatch::UnderPrefix(prefix))
 }
 
-/// Canonicalize the deepest existing ancestor and re-append the missing
-/// tail: git records the realpath at `worktree add` time, so a symlinked
-/// spelling must compare equal even after the path itself is deleted.
-fn normalized_for_match(path: &Path) -> PathBuf {
+/// Match a recorded checkout even after it has been removed, without turning
+/// access errors or unresolved ancestors into evidence of identity or absence.
+pub(crate) fn normalized_worktree_path(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path).context("make worktree identity absolute")?;
     let mut missing = Vec::new();
-    let mut cursor = path;
+    let mut cursor = absolute.as_path();
     loop {
-        if let Ok(canonical) = dunce::canonicalize(cursor) {
-            let mut result = canonical;
-            for component in missing.iter().rev() {
-                result.push(component);
+        match dunce::canonicalize(cursor) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
             }
-            return result;
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("resolve worktree identity"),
         }
         match (cursor.parent(), cursor.file_name()) {
             (Some(parent), Some(name)) => {
                 missing.push(name.to_os_string());
                 cursor = parent;
             }
-            _ => return path.to_path_buf(),
+            _ => anyhow::bail!("cannot resolve worktree identity: {}", path.display()),
         }
     }
 }

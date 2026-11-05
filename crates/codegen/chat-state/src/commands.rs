@@ -217,6 +217,13 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<Vec<crate::TimelineEvent>, TimelineWriteError>>,
     },
 
+    /// Settle only exact historical Workflow executions. This command grants
+    /// no interrupted-scope recovery authority over the actor's live work.
+    SettleInterruptedWorkflowsDurably {
+        expected: Vec<(String, u64)>,
+        reply: oneshot::Sender<Result<Vec<crate::TimelineEvent>, TimelineWriteError>>,
+    },
+
     /// Atomically close the one open compaction before an in-process Stop may
     /// close its Step/Turn. A fully committed Summary+Replacement becomes
     /// Completed; every earlier phase becomes Failed.
@@ -473,6 +480,8 @@ pub enum ChatStateCommand {
         timeline_id: String,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
+        /// Host-owned context projected into this request without a Timeline write.
+        runtime_context: Option<String>,
         active_goal: Option<GoalDirectiveTag>,
         json_output: Option<JsonOutputFormat>,
         use_image_descriptions: bool,
@@ -814,6 +823,7 @@ mod tests {
             timeline_id: "main".into(),
             tool_definitions: vec![],
             memory_reminder: None,
+            runtime_context: None,
             active_goal: None,
             json_output: None,
             use_image_descriptions: false,

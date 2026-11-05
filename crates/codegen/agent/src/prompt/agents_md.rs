@@ -165,9 +165,7 @@ async fn read_agents_config_with_roots(
     grow_home: PathBuf,
 ) -> Vec<AgentConfigFile> {
     let cwd = PathBuf::from(working_directory);
-    let git_root = git2::Repository::discover(&cwd)
-        .ok()
-        .and_then(|repo| repo.workdir().map(Path::to_path_buf));
+    let git_root = crate::repo::discover_worktree_root(&cwd).ok();
     let gitignore = build_gitignore(git_root.as_deref());
     let mut home_roots = Vec::new();
     add_discovery_root(&mut home_roots, grow_home, true, HOME_RULES_DIRS);

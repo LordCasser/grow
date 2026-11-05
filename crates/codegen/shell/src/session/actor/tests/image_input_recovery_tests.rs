@@ -1121,6 +1121,7 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
                     None,
                     None,
                     None,
+                    None,
                     actor.unsupported_current_model_for_images().await.is_some(),
                 )
                 .await
@@ -1150,6 +1151,7 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
                 .build_request_for_image_mode(
                     &actor.session_id_string(),
                     vec![],
+                    None,
                     None,
                     None,
                     None,

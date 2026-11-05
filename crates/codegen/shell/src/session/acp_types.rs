@@ -338,6 +338,15 @@ pub struct SessionInfoResponse {
 
 // ── Startup hints ───────────────────────────────────────────────────────
 
+/// Immutable identity from this execution's canonical parent Spawn. Plans,
+/// scopes and revisions are observed afresh for each provider request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParentPlanBinding {
+    pub(crate) parent_session_id: String,
+    pub(crate) task_id: String,
+    pub(crate) parent_step_id: String,
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupHints {
@@ -353,10 +362,14 @@ pub struct StartupHints {
     /// Whether this session is a subagent child.
     #[serde(default)]
     pub is_subagent: bool,
-    /// Parent session id when this session is a subagent child. Emitted as
-    /// `parent_agent_id` on the turn span for trace attribution.
+    /// Lifecycle-root session id for child trace attribution. This is not
+    /// necessarily the immediate delegating parent in a nested execution.
     #[serde(default)]
     pub parent_session_id: Option<String>,
+    /// Host-only route from this execution's durable Spawn, never from wire
+    /// hints or a resumed source's old task prompt.
+    #[serde(skip)]
+    pub(crate) delegated_parent_plan: Option<ParentPlanBinding>,
     /// The task's `subagent_type` when this session is a subagent child, used for hook
     /// payload attribution so it matches the `SubagentStart`/`SubagentStop` events the
     /// parent emits (which also key off the task type, not the resolved agent name).

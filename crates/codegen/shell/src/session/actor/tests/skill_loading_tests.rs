@@ -135,13 +135,27 @@ async fn configured_actor_with_skills_commit_fault_and_hook_gate(
                         .response_tx
                         .send(Ok(acp::ExtResponse::new(response)));
                 }
+                acp_transport::AcpClientMessage::ExtNotification(notification) => {
+                    if notification.request.method.as_ref() == "grow/hooks/event"
+                        && let Some((reached, _)) = &hook_gate
+                    {
+                        reached.notify_one();
+                    }
+                    let _ = notification.response_tx.send(Ok(()));
+                }
                 _ => {}
             }
         }
     });
     let (persistence_tx, mut persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    tokio::task::spawn_local(async move { while persistence_rx.recv().await.is_some() {} });
+    tokio::task::spawn_local(async move {
+        while let Some(message) = persistence_rx.recv().await {
+            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    });
 
     let (mut actor, injected) = match commit_fault {
         Some(fault) => {
@@ -910,6 +924,281 @@ async fn complete_skill_request_rejects_explicit_output_overflow_after_publicati
             );
         })
         .await;
+}
+
+fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(body)
+        .unwrap()
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
+#[test]
+fn cold_skill_materialization_projects_pending_and_consumed_ids() {
+    use crate::session::storage::jsonl::JsonlStorageAdapter;
+    use chat_state::{TimelineEventKind as K, *};
+
+    let dir = tempfile::tempdir().unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let skill = sampling_types::SkillLoadItem {
+        input_id: "model:cold-skill".into(),
+        reference_index: 0,
+        call_id: "cold-skill".into(),
+        skill_name: "review".into(),
+        source: sampling_types::SkillLoadSource::Model,
+        args: String::new(),
+        prepared_body: "complete cold guidance".into(),
+        prompt_index: Some(0),
+    };
+    let mut timeline = Timeline::from_seed(vec![
+        ConversationItem::system("system"),
+        ConversationItem::user("load guidance"),
+        ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "cold-skill".into(),
+            name: "load_skill".into(),
+            arguments: r#"{"name":"review","args":""}"#.into(),
+        }]),
+        ConversationItem::tool_result(
+            "cold-skill",
+            sampling_types::skill_load_result_content(&skill),
+        ),
+        ConversationItem::SkillLoad(skill),
+    ])
+    .unwrap();
+    let write_snapshot = |timeline: &Timeline| {
+        std::fs::write(
+            dir.path().join(crate::session::storage::TIMELINE_FILE),
+            JsonlStorageAdapter::encode_journal(timeline.events(), &[]).unwrap(),
+        )
+        .unwrap();
+    };
+    write_snapshot(&timeline);
+    let before = adapter
+        .materialize_timeline_from_dir(dir.path(), "cold-session")
+        .unwrap();
+    let skill_id = *before.surface_ids.last().unwrap();
+    assert_eq!(before.unconsumed_skill_load_ids, vec![skill_id]);
+    assert!(matches!(
+        before.surface.last(),
+        Some(ConversationItem::SkillLoad(_))
+    ));
+    let turn = TurnId(991);
+    let step = StepId { turn, index: 0 };
+    for kind in [
+        K::Turn(TurnEvent::Started {
+            id: turn,
+            prompt_id: "cold-consumer".into(),
+            input_ids: Vec::new(),
+            identity: TurnIdentity {
+                origin: "user".into(),
+                // This cold fixture consumes inherited seed history without
+                // admitting a new human input.
+                turn_kind: "internal".into(),
+                goal_id: None,
+                goal_definition_revision: None,
+                stage_id: None,
+            },
+            model_id: "test".into(),
+            input_message_count: timeline.surface_len(),
+            prompt_index: 0,
+            prompt_text: "consume guidance".into(),
+            input_kind: TurnInputKind::Prompt,
+            redirect_kind: None,
+        }),
+        K::Step(StepEvent::Started { id: step }),
+        K::Request(RequestEvent::Started {
+            id: "cold-request".into(),
+            turn,
+            step,
+            model_id: "test".into(),
+            input_message_count: timeline.surface_len(),
+            tool_count: 0,
+        }),
+        K::Request(RequestEvent::Completed {
+            id: "cold-request".into(),
+            duration_ms: 1,
+            time_to_first_token_ms: None,
+            usage: RequestUsage::default(),
+            response_message_count: 1,
+            attempt: 1,
+            provider_terminal: None,
+        }),
+        K::Messages(MessageEvent {
+            cause: MessageCause::Assistant,
+            items: vec![ConversationItem::assistant("canonical skill consumer")],
+            surface: SurfaceOp::Append,
+            response_admission: Some(ResponseAdmission {
+                identity: ResponseAdmissionIdentity {
+                    request_id: "cold-request".into(),
+                    attempt: 1,
+                },
+                quarantined_tool_exchanges: 0,
+            }),
+        }),
+    ] {
+        timeline.record(kind).unwrap();
+    }
+    write_snapshot(&timeline);
+    let after = adapter
+        .materialize_timeline_from_dir(dir.path(), "cold-session")
+        .unwrap();
+    assert!(after.unconsumed_skill_load_ids.is_empty());
+    assert_eq!(
+        &after.surface_ids[..before.surface_ids.len()],
+        &before.surface_ids
+    );
+}
+
+#[test]
+fn compaction_preserves_pending_model_skill_for_next_real_request() {
+    pending_model_skill_compaction_scenario(true);
+}
+
+#[test]
+fn compaction_without_safe_skill_prefix_never_requests_a_summary() {
+    pending_model_skill_compaction_scenario(false);
+}
+
+fn pending_model_skill_compaction_scenario(sufficient_prefix: bool) {
+    run_with_session_stack(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut first_response = server.expect_response_blocked(
+                "model skill call before its terminal",
+                test_support::InferenceRequestMatcher::foreground(test_support::InferenceEndpoint::Responses),
+                ScriptedResponse::sse(test_support::sse::responses_api_reasoning_then_tool_call_events(
+                    "load review guidance", "compact-pending-skill", "load_skill",
+                    r#"{"name":"review","args":"focus"}"#, "test",
+                )),
+            );
+            if sufficient_prefix {
+                server.enqueue_response("/v1/responses", ScriptedResponse::sse(
+                    test_support::sse::responses_api_script_exact(
+                        &"Earlier completed work and its verified evidence. ".repeat(35), "test",
+                    ),
+                ));
+            }
+            server.enqueue_response("/v1/responses", ScriptedResponse::sse(
+                test_support::sse::responses_api_script_exact("full guidance consumed", "test"),
+            ));
+            let hook_reached = Arc::new(tokio::sync::Notify::new());
+            let release_hook = Arc::new(tokio::sync::Notify::new());
+            let body = format!("{BODY}\n{}", "Complete pending guidance. ".repeat(1_200));
+            let ((actor, _), _) = configured_actor_with_skills_commit_fault_and_hook_gate(
+                &server, vec![review_skill("/skills/review/SKILL.md", &body)], None, None,
+                Some((hook_reached.clone(), release_hook.clone())), None,
+            ).await;
+            install_load_skill_hook(&actor, &[::hooks::event::HookEventName::PostToolUse]);
+            actor.compaction.pre_prune.set(false);
+            let mut old_prompt = ConversationItem::user("old completed task");
+            old_prompt.set_prompt_index(0);
+            actor.chat_state_handle.push_user_message_durably(old_prompt).await.unwrap();
+            actor.chat_state_handle.push_response_durably(
+                vec![ConversationItem::assistant("x".repeat(if sufficient_prefix { 24_000 } else { 64 }))], None,
+            ).await.unwrap();
+            let prompt_id = "compact-pending-model-skill";
+            let text = "load the review guidance";
+            let input_id = admit_prompt(&actor, prompt_id, text).await;
+            let turn_actor = actor.clone();
+            let mut turn = tokio::task::spawn_local(async move {
+                run_prompt_text(&turn_actor, prompt_id, input_id, text).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(10), first_response.wait_blocked())
+                .await.expect("the real tool-call response reaches its terminal barrier");
+            // Observe hooks are notifications. Hold the existing Step gate
+            // before releasing the provider so no consuming Step can start.
+            let step_gate = actor.step_control_gate.lock().await;
+            first_response.release();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    _ = hook_reached.notified() => {}
+                    result = &mut turn => panic!("turn ended before the real load PostToolUse notification: success={}; requests={}", result.as_ref().is_ok_and(|result| result.is_ok()), server.request_bodies().len()),
+                }
+            }).await.expect("real load executes and publishes before its PostToolUse notification");
+            // A newer prompt and raw assistant Surface text do not admit a
+            // canonical response consuming the load. Its suffix is large
+            // enough for the old planner to select the pending tool batch.
+            let mut newer_prompt = ConversationItem::user("newer active task ".repeat(12_000));
+            newer_prompt.set_prompt_index(actor.current_turn_number.get() as usize + 1);
+            actor.chat_state_handle.push_user_message_durably(newer_prompt).await.unwrap();
+            actor.chat_state_handle.push_response_durably(
+                vec![ConversationItem::assistant("raw assistant tail fact without response admission")], None,
+            ).await.unwrap();
+            let before = actor.chat_state_handle.materialize_timeline(actor.session_id_string()).await.unwrap();
+            assert_eq!(before.unconsumed_skill_load_ids.len(), 1);
+            let skill_id = before.unconsumed_skill_load_ids[0];
+            let expected_body = match &before.surface[before.surface_ids.iter().position(|id| *id == skill_id).unwrap()] {
+                ConversationItem::SkillLoad(skill) => skill.prepared_body.to_string(),
+                _ => panic!("pinned identity is a skill"),
+            };
+            let old_plan = chat_state::compaction_utils::plan_compaction_range(
+                &before.surface, &before.surface_ids, &[], 256_000 * 16 / 100, 5_000,
+            ).expect("ordinary selection overlaps pending skill");
+            assert!(old_plan.target.shadowed.contains(&skill_id));
+            let safe_plan = chat_state::compaction_utils::plan_compaction_range(
+                &before.surface, &before.surface_ids, &before.unconsumed_skill_load_ids,
+                256_000 * 16 / 100, 5_000,
+            );
+            assert_eq!(safe_plan.is_some(), sufficient_prefix);
+            eprintln!("pending-skill compaction sufficient={sufficient_prefix} old_selectedcount={} safe_selectedcount={}",
+                old_plan.target.shadowed.len(), safe_plan.as_ref().map_or(0, |plan| plan.target.shadowed.len()));
+            let compact = actor.run_compact_only(super::compaction::AutoCompactTriggerInfo {
+                tokens_used: 220_000, context_window: 256_000, percentage: 86,
+                source: "pending_skill_regression", max_output_tokens: None,
+            }).await;
+            if sufficient_prefix {
+                compact.expect("summary replaces only safe old history");
+                assert_eq!(server.request_bodies().len(), 2);
+                let summary_input = &server.request_bodies()[1];
+                assert!(!body_occurs(summary_input, &expected_body));
+                assert!(!body_occurs(summary_input, "compact-pending-skill"));
+            } else {
+                let error = compact.expect_err("no adequate safe source exists");
+                assert!(format!("{error:?}").contains("no closed Surface range"), "{error:?}");
+                assert_eq!(server.request_bodies().len(), 1, "no summary provider request starts");
+            }
+            let after = actor.chat_state_handle.materialize_timeline(actor.session_id_string()).await.unwrap();
+            assert_eq!(after.unconsumed_skill_load_ids, vec![skill_id]);
+            for (id, item) in before.surface_ids.iter().zip(&before.surface) {
+                if safe_plan.as_ref().is_some_and(|plan| plan.target.shadowed.contains(id)) {
+                    continue;
+                }
+                let index = after.surface_ids.iter().position(|candidate| candidate == id).expect("retained identity survives");
+                assert_eq!(serde_json::to_value(&after.surface[index]).unwrap(), serde_json::to_value(item).unwrap());
+            }
+            if !sufficient_prefix {
+                assert_eq!(after.surface_ids, before.surface_ids);
+            }
+            drop(step_gate);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(15), turn)
+                .await.expect("next ordinary request finishes").unwrap().unwrap();
+            actor.handle_completion(prompt_id.into(), Ok(result)).await;
+            let requests = server.request_bodies();
+            assert_eq!(requests.len(), if sufficient_prefix { 3 } else { 2 });
+            let next_request = requests.last().unwrap();
+            assert!(body_occurs(next_request, &expected_body));
+            assert!(body_occurs(next_request, "compact-pending-skill"));
+            assert!(body_occurs(next_request, "raw assistant tail fact without response admission"));
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert_eq!(events.iter().filter(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started { call_id, .. }) if call_id == "compact-pending-skill"
+            )).count(), 1, "the real load executes exactly once");
+            assert_eq!(events.iter().filter(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Messages(messages) if messages.cause == chat_state::MessageCause::SkillLoadModel
+            )).count(), 1);
+            assert!(!events.iter().any(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Messages(messages) if messages.cause == chat_state::MessageCause::SkillLoadSettlement
+            )), "compaction never terminally settles a pending skill");
+            assert!(actor.chat_state_handle.materialize_timeline(actor.session_id_string()).await.unwrap().unconsumed_skill_load_ids.is_empty(),
+                "the real canonical follow-up admits consumption");
+        }));
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -128,6 +128,20 @@ pub struct ChildCompletion<D> {
 /// A local runner may return non-`Send` futures, while a multithreaded runner
 /// may return `Send` futures.
 pub trait ChildRunner: 'static {
+    /// Read from the exact direct parent without blocking the coordinator.
+    /// The host must validate live handles and any bound task/step evidence.
+    fn read_parent_plan(
+        &self,
+        request: super::parent_planning::ParentPlanningRequest,
+        _parent_session_id: String,
+        _task_id: String,
+        _parent_step_id: Option<String>,
+    ) {
+        let _ = request.respond_to.send(Err(
+            super::parent_planning::ParentPlanningReadError::Unavailable,
+        ));
+    }
+
     fn interact(
         &self,
         request: super::interaction::AgentInteractionRequest,
@@ -136,6 +150,19 @@ pub trait ChildRunner: 'static {
     ) {
         let _ = request.respond_to.send(Err(
             "Parent-child communication is unavailable in this host".into(),
+        ));
+    }
+
+    /// Forward to the exact active runtime without blocking the coordinator.
+    /// The host completes the request only after target actor admission.
+    fn set_model(
+        &self,
+        request: super::super::set_subagent_model::SubagentModelControlRequest,
+        _target: <Self::Control as ChildControl>::SecurityContext,
+        _target_cancellation: CancellationToken,
+    ) {
+        let _ = request.respond_to.send(Err(
+            "Subagent model control is unavailable in this host".into()
         ));
     }
 

@@ -2,7 +2,9 @@
 //! selections use the catalog generation protected by the caller's lock;
 //! Workflow children use their immutable Run route instead.
 use crate::agent::mvp_agent::MvpAgent;
-use crate::session::{ControlIntent, SessionCommand, SessionEffortAuthority};
+use crate::session::{
+    ControlIntent, SessionCommand, SessionEffortAuthority, SessionSamplingSelection,
+};
 use acp_transport::protocol as acp;
 use sampling_types::parse_reasoning_effort_meta;
 use tokio::sync::oneshot;
@@ -38,33 +40,91 @@ pub(crate) struct EnqueuedModelSwitch {
     >,
 }
 
-/// Resolve and enqueue a model route while the caller owns the catalog
-/// publication lock. Publication reloads use the same lock while sending their
-/// actor commands, so catalog generations and user selections enter every
-/// session mailbox in one total order. The caller must resolve any in-flight
-/// session load before acquiring the lock and must release it before awaiting
-/// [`finish`].
+/// Enqueue while holding the same lock as catalog publication. Resolve any
+/// in-flight load before acquiring it, and release it before waiting for finish.
 pub(crate) fn enqueue(
     agent: &MvpAgent,
     _catalog_transaction: &tokio::sync::MutexGuard<'_, ()>,
     handle: crate::session::SessionHandle,
     args: ModelSwitchRequest,
 ) -> Result<EnqueuedModelSwitch, acp::Error> {
-    tracing::info!("Received set session model request {args:?}");
-    ::diagnostics::unified_log::info(
-        "model changed",
-        Some(args.session_id.0.as_ref()),
-        Some(serde_json::json!({"model": args.model_id.0.as_ref()})),
-    );
     let intent = ControlIntent::from_meta(args.meta.as_ref())?;
-    let effort_override = parse_reasoning_effort_meta(args.meta.as_ref());
+    let effort = parse_reasoning_effort_meta(args.meta.as_ref());
+    if args
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.contains_key(sampling_types::REASONING_EFFORT_META_KEY))
+        && effort.is_none()
+    {
+        return Err(acp::Error::invalid_params()
+            .data("reasoningEffort must be a canonical string offered by the selected model"));
+    }
     let effort_patch = crate::session::effort_patch_from_meta(args.meta.as_ref())?;
-    let ModelSwitchRequest {
+    if effort_patch && effort.is_none() {
+        return Err(acp::Error::invalid_params().data(format!(
+            "{} requires a reasoning-effort value",
+            crate::session::EFFORT_PATCH_META_KEY
+        )));
+    }
+    let selection = prepare_selection(
+        agent,
+        &handle,
+        (!effort_patch).then_some(&args.model_id),
+        effort,
+    )?;
+    send_selection(
+        handle,
+        args.session_id,
+        args.model_id,
+        selection,
+        intent,
+        None,
+    )
+}
+
+/// Model-facing ingress uses only the host-bound handle and gets a distinct
+/// actor-admission receipt. The returned application receiver remains owned
+/// by the Shell finish task after the tool returns queued.
+pub(crate) fn enqueue_tool(
+    agent: &MvpAgent,
+    _catalog_transaction: &tokio::sync::MutexGuard<'_, ()>,
+    handle: crate::session::SessionHandle,
+    model: Option<String>,
+    effort: Option<sampling_types::ReasoningEffort>,
+    admitted: oneshot::Sender<Result<(), String>>,
+) -> Result<EnqueuedModelSwitch, acp::Error> {
+    if model.is_none() && effort.is_none() {
+        return Err(
+            acp::Error::invalid_params().data("at least one of model or effort is required")
+        );
+    }
+    let model_id = model.map(crate::agent::models::ModelId::new);
+    if let Some(model_id) = &model_id
+        && agent.resolve_model_id(model_id)?.info.hidden
+    {
+        return Err(
+            acp::Error::invalid_params().data("Hidden models cannot be selected by a tool.")
+        );
+    }
+    let selection = prepare_selection(agent, &handle, model_id.as_ref(), effort)?;
+    let session_id = handle.info.id.clone();
+    let model_id = model_id.unwrap_or_else(|| handle.model_route.snapshot().model_id);
+    send_selection(
+        handle,
         session_id,
         model_id,
-        ..
-    } = args;
-    let previous_model_id = handle.model_route.snapshot().model_id;
+        selection,
+        None,
+        Some(admitted),
+    )
+}
+
+fn prepare_selection(
+    agent: &MvpAgent,
+    handle: &crate::session::SessionHandle,
+    model_id: Option<&crate::agent::models::ModelId>,
+    effort: Option<sampling_types::ReasoningEffort>,
+) -> Result<SessionSamplingSelection, acp::Error> {
     let workflow_route = handle
         .workflow_run_id
         .as_deref()
@@ -80,12 +140,9 @@ pub(crate) fn enqueue(
                 })
         })
         .transpose()?;
-    if effort_patch {
-        let effort = effort_override.ok_or_else(|| {
-            acp::Error::invalid_params().data(format!(
-                "{} requires a reasoning-effort value",
-                crate::session::EFFORT_PATCH_META_KEY
-            ))
+    let Some(model_id) = model_id else {
+        let effort = effort.ok_or_else(|| {
+            acp::Error::invalid_params().data("an effort-only selection requires effort")
         })?;
         let authority = if let Some(route) = workflow_route {
             SessionEffortAuthority::Workflow {
@@ -98,23 +155,8 @@ pub(crate) fn enqueue(
                 origin_client: handle.origin_client.clone(),
             }
         };
-        let (responds_to, response) = oneshot::channel();
-        handle
-            .cmd_tx
-            .send(SessionCommand::PatchSessionEffort {
-                effort,
-                authority,
-                intent,
-                responds_to,
-            })
-            .map_err(|_| acp::Error::internal_error().data("session actor closed"))?;
-        return Ok(EnqueuedModelSwitch {
-            session_id,
-            model_id,
-            previous_model_id,
-            response,
-        });
-    }
+        return Ok(SessionSamplingSelection::Effort { effort, authority });
+    };
     let (mut route, catalog) = if let Some(workflow_route) = &workflow_route {
         (
             workflow_route
@@ -123,11 +165,15 @@ pub(crate) fn enqueue(
             None,
         )
     } else {
-        let model = agent.resolve_model_id(&model_id)?;
+        let model = agent.resolve_model_id(model_id)?;
+        if !model.info.user_selectable {
+            return Err(acp::Error::invalid_params()
+                .data("This model isn't allowed by your allowed_models setting."));
+        }
         let catalog = std::sync::Arc::new(agent.models_manager.published_catalog());
         let mut route = catalog
-            .resolve_session_route(&model_id, effort_override)
-            .filter(|route| route.model_id == model_id)
+            .resolve_session_route(model_id, effort)
+            .filter(|route| route.model_id == *model_id)
             .ok_or_else(|| {
                 acp::Error::invalid_params().data(format!("model '{}' is not routable", model_id.0))
             })?;
@@ -135,36 +181,62 @@ pub(crate) fn enqueue(
             agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
         (route, Some(catalog))
     };
-    if let Some(eff) = effort_override {
+    if let Some(effort) = effort {
         let offered = if let Some(route) = &workflow_route {
-            route.supports_reasoning_effort(model_id.0.as_ref(), eff)
+            route.supports_reasoning_effort(model_id.0.as_ref(), effort)
         } else {
             agent
                 .models_manager
-                .model_offers_reasoning_effort(model_id.0.as_ref(), eff)
+                .model_offers_reasoning_effort(model_id.0.as_ref(), effort)
         };
         if !offered {
             return Err(acp::Error::invalid_params().data(format!(
                 "model '{}' does not admit '{}' reasoning effort for this session",
-                model_id.0, eff
+                model_id.0, effort
             )));
         }
-        tracing::info!(
-            session_id = %session_id.0,
-            effort = %eff,
-            "set_session_model: applying reasoning_effort override from meta"
-        );
-        route.sampling_config.reasoning_effort = Some(eff);
+        route.sampling_config.reasoning_effort = Some(effort);
     }
+    Ok(SessionSamplingSelection::Model { route, catalog })
+}
+
+fn send_selection(
+    handle: crate::session::SessionHandle,
+    session_id: acp::SessionId,
+    model_id: crate::agent::models::ModelId,
+    selection: SessionSamplingSelection,
+    intent: Option<ControlIntent>,
+    admitted: Option<oneshot::Sender<Result<(), String>>>,
+) -> Result<EnqueuedModelSwitch, acp::Error> {
+    let previous_model_id = handle.model_route.snapshot().model_id;
     let (responds_to, response) = oneshot::channel();
+    let command = if let Some(admitted) = admitted {
+        SessionCommand::AdmitToolSampling {
+            selection,
+            admitted,
+            responds_to,
+        }
+    } else {
+        match selection {
+            SessionSamplingSelection::Model { route, catalog } => SessionCommand::SetSessionModel {
+                route,
+                catalog,
+                intent,
+                responds_to,
+            },
+            SessionSamplingSelection::Effort { effort, authority } => {
+                SessionCommand::PatchSessionEffort {
+                    effort,
+                    authority,
+                    intent,
+                    responds_to,
+                }
+            }
+        }
+    };
     handle
         .cmd_tx
-        .send(SessionCommand::SetSessionModel {
-            route,
-            catalog,
-            intent,
-            responds_to,
-        })
+        .send(command)
         .map_err(|_| acp::Error::internal_error().data("session actor closed"))?;
     Ok(EnqueuedModelSwitch {
         session_id,

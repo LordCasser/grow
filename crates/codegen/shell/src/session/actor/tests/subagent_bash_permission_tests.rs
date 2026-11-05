@@ -566,7 +566,7 @@ fn task_call(id: &str) -> crate::sampling::types::ToolCallResponse {
         kind: "function".to_owned(),
         function: crate::sampling::types::ToolCallFunction::new(
             "spawn_subagent",
-            r#"{"prompt":"inspect the target","description":"inspect target","subagent_type":"explore","background":false,"capability_mode":"read-only"}"#,
+            r#"{"parent_step_id":"task-step","prompt":"inspect the target","description":"inspect target","subagent_type":"explore","background":false,"capability_mode":"read-only"}"#,
         ),
     }
 }
@@ -982,10 +982,52 @@ async fn subagent_task_preserves_delegation_fast_path_and_depth_hard_stop() {
             );
             actor.subagent_capabilities = Some(capabilities);
 
-            let result = actor
-                .execute_tool_calls(vec![task_call("call_task_in_fence")])
+            super::support::install_test_foreground(&actor, "task-in-fence").await;
+            let mut plan =
+                tool_types::LocalPlan::new(actor.session_id_string(), "work:task-in-fence");
+            plan.steps.push(tool_types::PlanStep {
+                id: "task-step".into(),
+                content: "Inspect the target".into(),
+                priority: tool_types::PlanPriority::Normal,
+                status: tool_types::PlanStepStatus::InProgress,
+                requirements: None,
+                removed: false,
+            });
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
                 .await
-                .expect("authored Task must execute without a permission detour");
+                .unwrap();
+            let (planning_tx, mut planning_rx) = tokio::sync::mpsc::unbounded_channel();
+            bridge
+                .update_resource(
+                    tools::implementations::grow_build::todo::runtime::PlanningRuntimeHandle(
+                        planning_tx,
+                    ),
+                )
+                .await;
+            bridge
+                .update_resource(
+                    tools::implementations::grow_build::task::types::CurrentPromptIdResource(
+                        "task-in-fence".into(),
+                    ),
+                )
+                .await;
+            let mut actor = Arc::new(actor);
+            let (result, ()) = tokio::join!(
+                actor.execute_tool_calls(vec![task_call("call_task_in_fence")]),
+                async {
+                    actor
+                        .handle_planning_command(planning_rx.recv().await.unwrap())
+                        .await;
+                },
+            );
+            let result = result.expect("authored Task must execute without a permission detour");
             assert!(matches!(result, ToolLoop::Continue));
             assert_eq!(backend.spawn_count.load(Ordering::SeqCst), 1);
             assert!(
@@ -1008,7 +1050,17 @@ async fn subagent_task_preserves_delegation_fast_path_and_depth_hard_stop() {
                     .cloned()
                     .collect(),
             };
-            actor.subagent_capabilities = Some(
+            // Link schedules delivery with a cloned Arc; join it before
+            // changing this same fixture's authored capability ceiling.
+            if let Some(delivery) = actor.planning_delivery.take() {
+                tokio::time::timeout(std::time::Duration::from_secs(5), delivery)
+                    .await
+                    .expect("planning delivery must settle before fixture mutation")
+                    .expect("planning delivery must exit normally");
+            }
+            Arc::get_mut(&mut actor)
+                .expect("settled fixture must be uniquely owned")
+                .subagent_capabilities = Some(
                 crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
                     &bridge,
                     &authored_without_task,

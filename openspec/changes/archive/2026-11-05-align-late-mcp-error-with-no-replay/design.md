@@ -1,0 +1,7 @@
+# Design
+
+MCP owner当前try_call_tool只发送一次call_tool_cancel_aware_until；错误仅在is_current_client通过后reset原服务，为后续独立调用准备。父亲自读取完整发送/错误分支，无工具循环；call drop守卫绑定原service+requestId发一次best-effort取消。late_tool_error_does_not_reset_already_recovered_service及HTTP/no-replay测试已存在，后者约束以较新Uncertain MCP条款为准。
+
+保持Requirement名称和现情景锚点，修改旧THEN使新服务保留、错误返回且不重复call；与Late timeouts、Replacement and annotations do not grant replay一致。没有实现行为更改，因此不新建或重复运行Rusttests；该条不代替MCP-F1发送前撤销复核或F2/F3身份修复，后者仍待实施。
+
+验收：检索同规范无再要求迟到错误在当前service自动retry的WHEN/THEN；对照发送链与已归档no-replay语义；strict通过后archive合规范再全量验证。父承担纯文档校对；全局MCP里程碑另验真正调用接口，不以此项关闭运行缺陷。

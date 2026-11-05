@@ -2835,8 +2835,8 @@ pub(crate) async fn spawn_session_actor(
     // Close process-local causal scopes before reconstructing the durable input
     // inbox. In particular, TurnEnded releases FIFO reservations and makes a
     // steer whose target died with the process eligible for deterministic
-    // rerouting. Backend-aware subagent reconciliation runs later and may call
-    // this idempotently again after it closes surviving child scopes.
+    // rerouting. Backend-aware subagent reconciliation runs later and settles
+    // only captured historical Workflow executions after their children close.
     session
         .chat_state_handle
         .recover_interrupted_durably()

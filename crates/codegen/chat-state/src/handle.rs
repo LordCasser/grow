@@ -328,6 +328,21 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    /// Settle captured `(run_id, execution_epoch)` pairs after historical child
+    /// reconciliation, preserving all live scopes and unrelated Workflows.
+    /// Each returned terminal has been durably acknowledged; write failures
+    /// retain the actor's existing pending-commit and writer-failure semantics.
+    pub async fn settle_interrupted_workflows_durably(
+        &self,
+        expected: Vec<(String, u64)>,
+    ) -> Result<Vec<crate::TimelineEvent>, TimelineWriteError> {
+        self.query("SettleInterruptedWorkflowsDurably", |reply| {
+            ChatStateCommand::SettleInterruptedWorkflowsDurably { expected, reply }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     pub async fn settle_open_compaction_durably(
         &self,
         reason: impl Into<String>,
@@ -913,6 +928,7 @@ impl ChatStateHandle {
             timeline_id,
             tool_definitions,
             memory_reminder,
+            None,
             active_goal,
             json_output,
             false,
@@ -920,11 +936,14 @@ impl ChatStateHandle {
         .await
     }
 
+    /// Include host-owned runtime context only in this request, alongside the
+    /// selected image representation. Retrieved memory remains durable.
     pub async fn build_request_for_image_mode(
         &self,
         timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
+        runtime_context: Option<String>,
         active_goal: Option<GoalDirectiveTag>,
         json_output: Option<JsonOutputFormat>,
         use_image_descriptions: bool,
@@ -934,6 +953,7 @@ impl ChatStateHandle {
                 timeline_id: timeline_id.to_owned(),
                 tool_definitions,
                 memory_reminder,
+                runtime_context,
                 active_goal,
                 json_output,
                 use_image_descriptions,

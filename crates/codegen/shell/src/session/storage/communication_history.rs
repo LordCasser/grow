@@ -32,11 +32,18 @@ impl ReceiptSource {
                 source,
                 payload_ref,
                 ..
-            }) if source.agent_message().is_some() => (
-                crate::session::notification_inbox::parent_message_notice(event, None)
-                    .expect("agent message source has a notice"),
-                Some(payload_ref.clone()),
-            ),
+            }) if matches!(
+                source,
+                chat_state::NotificationSource::ParentMessage { .. }
+                    | chat_state::NotificationSource::AgentReply { .. }
+            ) =>
+            {
+                (
+                    crate::session::notification_inbox::parent_message_notice(event, None)
+                        .expect("visible agent message source has a notice"),
+                    Some(payload_ref.clone()),
+                )
+            }
             _ => (
                 crate::coordination::InquiryEvent::from_timeline(event)
                     .map_err(io::Error::other)?
@@ -108,11 +115,18 @@ pub(crate) fn receipt_identity(event: &TimelineEvent) -> io::Result<Option<Recei
             id,
             source,
             ..
-        }) if source.agent_message().is_some() => Ok(Some((
-            id.clone(),
-            Some(AgentMessageNotice::SUBJECT.into()),
-            None,
-        ))),
+        }) if matches!(
+            source,
+            chat_state::NotificationSource::ParentMessage { .. }
+                | chat_state::NotificationSource::AgentReply { .. }
+        ) =>
+        {
+            Ok(Some((
+                id.clone(),
+                Some(AgentMessageNotice::SUBJECT.into()),
+                None,
+            )))
+        }
         TimelineEventKind::Observation(observation)
             if observation.scope == "coordination" && observation.name == "inquiry" =>
         {
@@ -156,7 +170,12 @@ pub(super) fn restore<'a>(
                 owner_session_id,
                 source,
                 ..
-            }) if source.agent_message().is_some() => {
+            }) if matches!(
+                source,
+                chat_state::NotificationSource::ParentMessage { .. }
+                    | chat_state::NotificationSource::AgentReply { .. }
+            ) =>
+            {
                 if owner_session_id != session_id.0.as_ref() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -364,6 +383,9 @@ pub(super) fn restore<'a>(
     history.lines = result;
     Ok(history)
 }
+
+#[cfg(test)]
+mod plan_guidance_tests;
 
 #[cfg(test)]
 mod tests;

@@ -114,7 +114,10 @@ async fn review_binding_from_todo_summary_accepts_and_cold_replays() {
                 let context = actor.local_planning_context().await.unwrap().unwrap();
                 let (_, json) = context.split_once('\n').unwrap();
                 let context: serde_json::Value = serde_json::from_str(json).unwrap();
-                assert_eq!(context["links"][0]["review_binding"], binding);
+                assert_eq!(
+                    context["self"]["links_summary"][0]["review_binding"],
+                    binding
+                );
 
                 write_bound_review(
                     &actor,

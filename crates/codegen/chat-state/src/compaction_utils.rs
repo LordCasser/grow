@@ -507,15 +507,79 @@ pub struct CompactionRangePlan {
 /// starts only at a complete response-group boundary, never at a
 /// `ToolResult` or in the middle of a
 /// `[Reasoning, BackendToolCall, ..., Assistant]` group. `SurfaceId` is the
-/// sole range identity—no parallel message-ID registry is introduced.
+/// sole range identity—no parallel message-ID registry is introduced. The
+/// unconsumed skill identities must come from the same Surface snapshot; a
+/// missing identity or causal load call/result rejects the selection.
 pub fn plan_compaction_range(
     surface: &[ConversationItem],
     surface_ids: &[crate::SurfaceId],
+    unconsumed_skill_load_ids: &[crate::SurfaceId],
     retain_tokens: u64,
     min_source_tokens: u64,
 ) -> Option<CompactionRangePlan> {
     if surface.len() != surface_ids.len() || surface.len() < 2 {
         return None;
+    }
+
+    let mut protected_tail_start = surface.len();
+    for id in unconsumed_skill_load_ids {
+        let mut matches = surface_ids
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| *candidate == id);
+        let (skill_index, _) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let ConversationItem::SkillLoad(skill) = &surface[skill_index] else {
+            return None;
+        };
+        let mut group_start = match skill.source {
+            sampling_types::SkillLoadSource::User => {
+                let prompt_index = skill.prompt_index?;
+                surface[..skill_index].iter().rposition(|item| {
+                    matches!(item, ConversationItem::User(user) if user.prompt_index == Some(prompt_index))
+                })?
+            }
+            sampling_types::SkillLoadSource::Model => {
+                let mut call_index = None;
+                for (index, item) in surface[..skill_index].iter().enumerate() {
+                    if let ConversationItem::Assistant(assistant) = item {
+                        let count = assistant
+                            .tool_calls
+                            .iter()
+                            .filter(|call| call.id.as_ref() == skill.call_id)
+                            .count();
+                        if count > 0 && (count != 1 || call_index.replace(index).is_some()) {
+                            return None;
+                        }
+                    }
+                }
+                let call_index = call_index?;
+                let mut results = surface.iter().enumerate().filter(|(_, item)| {
+                    matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == skill.call_id)
+                });
+                let (result_index, _) = results.next()?;
+                if results.next().is_some()
+                    || result_index <= call_index
+                    || result_index >= skill_index
+                {
+                    return None;
+                }
+                call_index
+            }
+        };
+        // Keep the entire response and tool batch, including every result
+        // after the load metadata, rather than leaving an orphaned tail.
+        while group_start > 0
+            && matches!(
+                surface[group_start - 1],
+                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+            )
+        {
+            group_start -= 1;
+        }
+        protected_tail_start = protected_tail_start.min(group_start);
     }
 
     let mut suffix_tokens = vec![0u64; surface.len() + 1];
@@ -525,6 +589,22 @@ pub fn plan_compaction_range(
     }
     let range_tokens = |start: usize, end: usize| {
         suffix_tokens[start].saturating_sub(suffix_tokens[end.saturating_add(1)])
+    };
+    let protected_range = |start: usize, end: usize| {
+        let end = end.min(protected_tail_start.checked_sub(1)?);
+        if start > end {
+            return None;
+        }
+        let end = if unconsumed_skill_load_ids.is_empty() {
+            end
+        } else {
+            // Capping at a skill's causal group is structural. Only then
+            // check source size, keeping all of the original budgeted tail.
+            *complete_compaction_range_ends(surface, start, end).last()?
+        };
+        let source_tokens = range_tokens(start, end);
+        (source_tokens >= min_source_tokens)
+            .then(|| range_plan(surface_ids, start, end, source_tokens))?
     };
     let mut previous_prompt_index = None;
     let prompt_turns = surface
@@ -563,12 +643,19 @@ pub fn plan_compaction_range(
             break;
         }
     }
-    if tail_start > first_prompt {
-        let end = tail_start - 1;
-        let source_tokens = range_tokens(source_start, end);
-        if source_tokens >= min_source_tokens {
-            return range_plan(surface_ids, source_start, end, source_tokens);
-        }
+    if tail_start > protected_tail_start {
+        // Keep the prompt owning the protected response too. If whole older
+        // turns are too small, the existing split path can summarize response
+        // groups after this prompt without removing the prompt itself.
+        tail_start = *prompt_turns
+            .iter()
+            .rev()
+            .find(|&&index| index <= protected_tail_start)?;
+    }
+    if tail_start > first_prompt
+        && let Some(plan) = protected_range(source_start, tail_start - 1)
+    {
+        return Some(plan);
     }
 
     // Split the oldest prompt segment needed for the tail budget. Newer
@@ -590,9 +677,7 @@ pub fn plan_compaction_range(
         }
     }
     let end = boundary?.checked_sub(1)?;
-    let source_tokens = range_tokens(start, end);
-    (source_tokens >= min_source_tokens)
-        .then(|| range_plan(surface_ids, start, end, source_tokens))?
+    protected_range(start, end)
 }
 
 /// Fit an existing compaction selection by reducing its oldest-history prefix.
@@ -616,6 +701,26 @@ pub fn fit_compaction_range_to_budget(
     {
         return None;
     }
+    // Validate boundaries on the original history, but budget the caller's
+    // transmitted projection. Start at the longest complete range so the
+    // normal fitting case needs only one projection. Do not assume projection
+    // costs are monotonic (e.g. duplicate tool IDs can change portability).
+    complete_compaction_range_ends(surface, start, end)
+        .into_iter()
+        .rev()
+        .find_map(|end| {
+            let tokens = estimate_source(&surface[start..=end]);
+            (min_source_tokens..=max_source_tokens)
+                .contains(&tokens)
+                .then(|| range_plan(surface_ids, start, end, tokens))?
+        })
+}
+
+fn complete_compaction_range_ends(
+    surface: &[ConversationItem],
+    start: usize,
+    end: usize,
+) -> Vec<usize> {
     let mut closed_ends = Vec::new();
     let mut pending_calls = BTreeSet::new();
     for index in start..=end {
@@ -662,16 +767,7 @@ pub fn fit_compaction_range_to_budget(
             closed_ends.push(index);
         }
     }
-    // Validate boundaries on the original history, but budget the caller's
-    // transmitted projection. Start at the longest complete range so the
-    // normal fitting case needs only one projection. Do not assume projection
-    // costs are monotonic (e.g. duplicate tool IDs can change portability).
-    closed_ends.into_iter().rev().find_map(|end| {
-        let tokens = estimate_source(&surface[start..=end]);
-        (min_source_tokens..=max_source_tokens)
-            .contains(&tokens)
-            .then(|| range_plan(surface_ids, start, end, tokens))?
-    })
+    closed_ends
 }
 
 /// A repeated runtime batch with the same prompt coordinate remains part of
@@ -1461,6 +1557,141 @@ mod tests {
         (items, ids)
     }
 
+    fn pending_model_skill_history(
+        old_chars: usize,
+    ) -> (Vec<ConversationItem>, Vec<crate::SurfaceId>) {
+        let skill = sampling_types::SkillLoadItem {
+            input_id: "model:pending-skill".into(),
+            reference_index: 0,
+            call_id: "pending-skill".into(),
+            skill_name: "review".into(),
+            source: sampling_types::SkillLoadSource::Model,
+            args: String::new(),
+            prepared_body: "unconsumed guidance ".repeat(1_500).into(),
+            prompt_index: Some(1),
+        };
+        let mut items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("old task"),
+            ConversationItem::assistant("x".repeat(old_chars)),
+            ConversationItem::user("load guidance"),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "load reasoning",
+            )),
+            ConversationItem::BackendToolCall(
+                sampling_types::BackendToolCallItem::code_interpreter(Some("lookup")),
+            ),
+            ConversationItem::assistant_tool_calls(vec![
+                tool_call(
+                    "pending-skill",
+                    "load_skill",
+                    r#"{"name":"review","args":""}"#,
+                ),
+                tool_call("paired-write", "write_file", "{}"),
+            ]),
+            ConversationItem::tool_result(
+                "pending-skill",
+                sampling_types::skill_load_result_content(&skill),
+            ),
+            ConversationItem::SkillLoad(skill),
+            ConversationItem::tool_result("paired-write", "write succeeded exactly once"),
+            ConversationItem::user("newer task without a canonical response"),
+            ConversationItem::assistant("raw assistant text is not consumption".repeat(40)),
+        ];
+        items[1].set_prompt_index(0);
+        items[3].set_prompt_index(1);
+        items[10].set_prompt_index(2);
+        surface_with_ids(items)
+    }
+
+    #[test]
+    fn partial_compaction_preserves_unconsumed_skill_response_group() {
+        let (surface, ids) = pending_model_skill_history(24_000);
+        let plan = plan_compaction_range(&surface, &ids, &[ids[8]], 100, 5_000)
+            .expect("enough older complete history precedes the protected response group");
+        assert_eq!((plan.start_index, plan.end_index), (1, 2));
+        assert_eq!(plan.target.shadowed, ids[1..=2]);
+        assert!(matches!(
+            surface[plan.end_index + 1],
+            ConversationItem::User(_)
+        ));
+        assert!(matches!(surface[4], ConversationItem::Reasoning(_)));
+        assert!(validate_compacted_history(&surface[plan.end_index + 1..]).is_empty());
+        let fitted = fit_compaction_range_to_budget(
+            &surface,
+            &ids,
+            &plan,
+            plan.source_tokens - 1,
+            1,
+            crate::estimate_conversation_tokens,
+        )
+        .expect("a smaller complete prefix fits");
+        assert!(fitted.end_index < plan.end_index);
+        assert!(
+            fitted
+                .target
+                .shadowed
+                .iter()
+                .all(|id| plan.target.shadowed.contains(id))
+        );
+        assert!(!fitted.target.shadowed.contains(&ids[8]));
+    }
+
+    #[test]
+    fn partial_compaction_splits_before_protected_skill_without_removing_its_prompt() {
+        let (mut surface, _) = pending_model_skill_history(64);
+        surface.insert(
+            4,
+            ConversationItem::assistant("older response ".repeat(2_000)),
+        );
+        let (surface, ids) = surface_with_ids(surface);
+        let plan = plan_compaction_range(&surface, &ids, &[ids[9]], 100, 5_000)
+            .expect("complete older responses within the protected prompt can be summarized");
+        assert_eq!((plan.start_index, plan.end_index), (4, 4));
+        assert_eq!(plan.target.shadowed, ids[4..=4]);
+        assert!(matches!(surface[3], ConversationItem::User(_)));
+        assert!(matches!(surface[5], ConversationItem::Reasoning(_)));
+    }
+
+    #[test]
+    fn partial_compaction_rejects_insufficient_source_before_unconsumed_skill() {
+        let (surface, ids) = pending_model_skill_history(64);
+        let ordinary = plan_compaction_range(&surface, &ids, &[], 100, 5_000).unwrap();
+        assert!(ordinary.target.shadowed.contains(&ids[8]));
+        assert!(plan_compaction_range(&surface, &ids, &[ids[8]], 100, 5_000).is_none());
+    }
+
+    #[test]
+    fn partial_compaction_requires_exact_unconsumed_skill_identity_and_causality() {
+        let (surface, ids) = pending_model_skill_history(24_000);
+        let absent = crate::SurfaceId {
+            event: crate::EventSeq::new(999),
+            item: 0,
+        };
+        for pins in [vec![absent], vec![ids[2]], vec![ids[8], absent]] {
+            assert!(plan_compaction_range(&surface, &ids, &pins, 100, 5_000).is_none());
+        }
+        let mut missing_call = surface.clone();
+        missing_call[6] = ConversationItem::assistant("call is missing");
+        assert!(plan_compaction_range(&missing_call, &ids, &[ids[8]], 100, 5_000).is_none());
+        let mut missing_result = surface.clone();
+        missing_result[7] = ConversationItem::assistant("result is missing");
+        assert!(plan_compaction_range(&missing_result, &ids, &[ids[8]], 100, 5_000).is_none());
+    }
+
+    #[test]
+    fn partial_compaction_preserves_user_skill_input_and_releases_consumed_skill() {
+        let (mut surface, ids) = pending_model_skill_history(24_000);
+        if let ConversationItem::SkillLoad(skill) = &mut surface[8] {
+            skill.source = sampling_types::SkillLoadSource::User;
+        }
+        let pinned = plan_compaction_range(&surface, &ids, &[ids[8]], 100, 5_000).unwrap();
+        assert_eq!((pinned.start_index, pinned.end_index), (1, 2));
+        let consumed = plan_compaction_range(&surface, &ids, &[], 100, 5_000).unwrap();
+        assert!(consumed.target.shadowed.contains(&ids[3]));
+        assert!(consumed.target.shadowed.contains(&ids[8]));
+    }
+
     #[test]
     fn partial_compaction_preserves_prefix_and_recent_user_turn() {
         let mut items = vec![
@@ -1475,7 +1706,7 @@ mod tests {
         items[4].set_prompt_index(1);
         let (surface, ids) = surface_with_ids(items);
 
-        let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
+        let plan = plan_compaction_range(&surface, &ids, &[], 100, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 3));
         assert_eq!(plan.target.shadowed, ids[2..=3]);
         assert_eq!(plan.target.start, ids[2]);
@@ -1497,7 +1728,7 @@ mod tests {
         items[5].set_prompt_index(1);
         let (surface, ids) = surface_with_ids(items);
 
-        let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
+        let plan = plan_compaction_range(&surface, &ids, &[], 100, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 4));
         assert_eq!(plan.target.shadowed, ids[2..=4]);
     }
@@ -1518,7 +1749,7 @@ mod tests {
         items[1].set_prompt_index(0);
         let (surface, ids) = surface_with_ids(items);
 
-        let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
+        let plan = plan_compaction_range(&surface, &ids, &[], 100, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 3));
         assert!(matches!(
             surface[plan.start_index],
@@ -1544,7 +1775,7 @@ mod tests {
         items[1].set_prompt_index(0);
         let (surface, ids) = surface_with_ids(items);
 
-        let plan = plan_compaction_range(&surface, &ids, 1, 1).unwrap();
+        let plan = plan_compaction_range(&surface, &ids, &[], 1, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 2));
         assert!(matches!(
             surface[plan.end_index + 1],
@@ -1575,7 +1806,7 @@ mod tests {
         let retain_tokens = 1_500;
         assert!(crate::estimate_conversation_tokens(&surface[7..]) < retain_tokens);
 
-        let plan = plan_compaction_range(&surface, &ids, retain_tokens, 5_000)
+        let plan = plan_compaction_range(&surface, &ids, &[], retain_tokens, 5_000)
             .expect("the older segment contains a complete response group to summarize");
         assert_eq!((plan.start_index, plan.end_index), (2, 3));
         assert_eq!(plan.target.shadowed, ids[2..=3]);
@@ -1589,8 +1820,8 @@ mod tests {
         );
         assert!(matches!(&surface[7], ConversationItem::User(u) if u.prompt_index == Some(2)));
 
-        assert!(plan_compaction_range(&surface, &ids, retain_tokens, 20_000).is_none());
-        assert!(plan_compaction_range(&surface, &ids, 20_000, 5_000).is_none());
+        assert!(plan_compaction_range(&surface, &ids, &[], retain_tokens, 20_000).is_none());
+        assert!(plan_compaction_range(&surface, &ids, &[], 20_000, 5_000).is_none());
     }
 
     #[test]
@@ -1600,7 +1831,7 @@ mod tests {
             ConversationItem::user("task"),
         ];
         surface[1].set_prompt_index(0);
-        assert!(plan_compaction_range(&surface, &[], 1, 1).is_none());
+        assert!(plan_compaction_range(&surface, &[], &[], 1, 1).is_none());
     }
 
     #[test]
@@ -1851,7 +2082,7 @@ mod tests {
         items[4].set_prompt_index(1);
         let (surface, ids) = surface_with_ids(items);
 
-        let plan = plan_compaction_range(&surface, &ids, 1, 1).unwrap();
+        let plan = plan_compaction_range(&surface, &ids, &[], 1, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 3));
         assert_eq!(plan.target.shadowed, ids[2..=3]);
     }
@@ -1868,7 +2099,7 @@ mod tests {
         items[1].set_prompt_index(0);
         let (surface, ids) = surface_with_ids(items);
 
-        let plan = plan_compaction_range(&surface, &ids, 1, 1).unwrap();
+        let plan = plan_compaction_range(&surface, &ids, &[], 1, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 3));
     }
     #[test]

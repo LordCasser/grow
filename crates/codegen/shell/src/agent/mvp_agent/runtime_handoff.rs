@@ -237,6 +237,7 @@ impl MvpAgent {
         projections: &crate::session::storage::SubagentProjectionState,
         emit_replay: bool,
         cold_recovery: bool,
+        historical_workflows: &[(String, u64)],
     ) {
         let Some(handle) = self.control_session_handle(session_id) else {
             return;
@@ -258,6 +259,7 @@ impl MvpAgent {
             projections,
             emit_replay,
             cold_recovery,
+            historical_workflows,
             &tools::implementations::grow_build::task::backend::ChannelBackend::for_authorized_observer(
                 self.subagent_event_tx.clone(),
             ),

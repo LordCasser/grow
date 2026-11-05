@@ -1136,6 +1136,20 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             crate::session::storage::DescendantOwnership::from_validated(
                 session_id.0.as_ref(), &timeline, &history,
             );
+        // Child reconciliation may finish historical Workflows after bootstrap,
+        // but the new actor already owns every Turn and Workflow it starts.
+        let historical_workflows: Vec<(String, u64)> = if spawn_new_actor {
+            timeline
+                .open_workflow_run_ids()
+                .filter_map(|run_id| {
+                    timeline
+                        .workflow_lifecycle(run_id)
+                        .map(|workflow| (run_id.to_owned(), workflow.execution_epoch))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (delta_completions, subagent_projections) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
@@ -1279,7 +1293,13 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             // those consumed rights as interruptions before adopting the still
             // unused checkpoints; the restoring-root filter preserves the rest.
             if restoring_committed_tree {
-                self.reconcile_loaded_children(&session_id, &subagent_projections, false, spawn_new_actor).await;
+                self.reconcile_loaded_children(
+                    &session_id,
+                    &subagent_projections,
+                    false,
+                    spawn_new_actor,
+                    &historical_workflows,
+                ).await;
             }
             let candidate = spawn_new_actor.then(|| self.control_session_handle(&session_id)).flatten();
             if let Err(error) = self.restore_session_tree(&session_id).await {
@@ -1366,13 +1386,14 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         .data(format!("Plan approval reconciliation failed: {error}"))
                 })?;
         }
-        // The restored Turn already has a live owner. Only ordinary cold
-        // loads may close abandoned local scopes at this post-load boundary.
+        // The actor owns its live scopes. Ordinary cold loads may only settle
+        // the historical Workflow executions captured before actor startup.
         self.reconcile_loaded_children(
             &session_id,
             &subagent_projections,
             !no_replay,
             spawn_new_actor && !runtime_recovery_gated,
+            &historical_workflows,
         ).await;
         self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
         // Cold actors already hold the replayed selection. Resident actors
@@ -2053,36 +2074,6 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         )
         .meta(Some(meta));
         let catalog_transaction = self.model_reload_lock.lock().await;
-        let workflow_pinned = handle.workflow_run_id.is_some();
-        if !workflow_pinned && is_model_selection {
-            let model = self.resolve_model_id(&switch_args.model_id)?;
-            if !model.info.user_selectable {
-                return Err(
-                    acp::Error::invalid_params()
-                        .data("This model isn't allowed by your allowed_models setting."),
-                );
-            }
-        }
-        if switch_args
-            .meta
-            .as_ref()
-            .is_some_and(|meta| meta.contains_key(REASONING_EFFORT_META_KEY))
-        {
-            let Some(effort) = sampling_types::parse_reasoning_effort_meta(switch_args.meta.as_ref()) else {
-                return Err(acp::Error::invalid_params()
-                    .data("reasoningEffort must be a canonical string offered by the selected model"));
-            };
-            if !workflow_pinned
-                && !self
-                .models_manager
-                .model_offers_reasoning_effort(switch_args.model_id.0.as_ref(), effort)
-            {
-                return Err(acp::Error::invalid_params().data(format!(
-                    "reasoning effort `{effort}` is not offered by model `{}`",
-                    switch_args.model_id.0
-                )));
-            }
-        }
         let session_id = switch_args.session_id.clone();
         let enqueued = crate::agent::handlers::model_switch::enqueue(
             self,

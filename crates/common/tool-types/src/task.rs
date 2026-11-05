@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 /// autonomously.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskToolInput {
-    /// Optional weak link to one current local TODO. The child still owns its
-    /// own plan; edits to this step request replanning rather than restart it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_step_id: Option<String>,
+    /// Required ID of one pending or in-progress TODO in the current local scope.
+    /// The runtime durably binds this step before spawning or resuming the child.
+    /// The child still owns its own plan.
+    pub parent_step_id: String,
     /// Mark an explicit deliverable that needs parent review before completion.
     #[serde(default)]
     pub required_deliverable: bool,
@@ -69,18 +69,20 @@ pub struct TaskToolInput {
     /// Resume a previous subagent's conversation instead of starting fresh.
     ///
     /// The new subagent inherits the source's raw transcript, tool state, and
-    /// model. The system prompt and tool configuration are freshly rendered
-    /// from the current agent definition. The new task prompt is appended as
-    /// the next user message.
+    /// actual model/effort unless explicitly overridden. The system prompt and
+    /// tool configuration follow the source's resume contract. The new task
+    /// prompt is appended as the next user message.
     ///
-    /// The source subagent must be completed (not active or unknown) and
-    /// belong to the same parent session.
+    /// The source must have a canonical terminal lifecycle (including
+    /// cancellation), no longer be running or settling, and belong to the same
+    /// parent session.
     #[schemars(
-        description = "Resume from a previously completed subagent's conversation. \
-            Pass the subagent_id returned by a prior task call. The new subagent \
-            continues the previous one's raw transcript with the new task prompt \
-            appended. The source must be completed (not running), belong to the \
-            current session, and use the same subagent_type."
+        description = "Resume from a previous subagent's conversation. Pass the subagent_id \
+            returned by a prior task call. The new subagent continues the source transcript \
+            with the new task prompt appended. The source must have a canonical terminal \
+            lifecycle, no longer be running or settling, belong to the current session, \
+            and use the same subagent_type. Model and effort independently override the \
+            source's actual selections when supplied."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_from: Option<String>,
@@ -103,12 +105,25 @@ pub struct TaskToolInput {
     /// Optional model slug for this subagent.
     #[schemars(
         description = "Optional model slug for this agent. If provided, it must resolve to one \
-            of the available model slugs. If omitted, the subagent uses the same model as the \
-            parent agent. Do not pass if resume_from is set (prior model will be used). Only \
-            choose an explicit model when the user directly requests it."
+            of the available model slugs. If omitted, a fresh subagent inherits the parent \
+            model and a resumed subagent retains its source's actual model and transport. \
+            On resume, an explicit model selects its current route and omitted effort \
+            retains the source's actual effort. Only choose an explicit model when the \
+            user directly requests it."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+
+    /// Optional reasoning effort for the resolved child model.
+    #[schemars(
+        description = "Optional reasoning effort for this agent: none, minimal, low, medium, \
+            high, xhigh, or max. Must be offered by the selected or inherited model. May be \
+            supplied together with model. Omission or JSON null keeps the existing \
+            Agent/model defaults for a fresh task and the source's actual effort on resume, \
+            including unset effort. The string none is an explicit effort value."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 
     /// Server-injected before execution. Becomes the subagent's session ID.
     #[schemars(skip)]
@@ -1182,9 +1197,52 @@ mod tests {
     }
 
     #[test]
+    fn task_tool_input_requires_parent_step_id_in_schema_and_serde() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
+        assert_eq!(schema["properties"]["parent_step_id"]["type"], "string");
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|key| key == "parent_step_id")
+        );
+        assert!(
+            schema["properties"]["parent_step_id"]
+                .get("default")
+                .is_none()
+        );
+
+        let missing = serde_json::json!({"description": "d", "prompt": "p"});
+        let error = serde_json::from_value::<TaskToolInput>(missing.clone()).unwrap_err();
+        assert!(error.to_string().contains("missing field `parent_step_id`"));
+        let mut null = missing;
+        null["parent_step_id"] = serde_json::Value::Null;
+        let error = serde_json::from_value::<TaskToolInput>(null).unwrap_err();
+        assert!(error.to_string().contains("expected a string"));
+    }
+
+    #[test]
+    fn task_tool_input_preserves_parent_step_identity() {
+        for step_id in ["null", "none", "undefined", "  step-1  ", " 父项🦀\u{2003}"] {
+            let input: TaskToolInput = serde_json::from_value(serde_json::json!({
+                "description": "d", "prompt": "p", "parent_step_id": step_id,
+            }))
+            .unwrap();
+            assert_eq!(input.parent_step_id, step_id);
+            assert_eq!(
+                serde_json::to_value(input).unwrap()["parent_step_id"],
+                step_id
+            );
+        }
+    }
+
+    #[test]
     fn task_tool_input_defaults_background_true() {
-        let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "test", "prompt": "do it"}"#).unwrap();
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"parent_step_id": "step-1", "description": "test", "prompt": "do it"}"#,
+        )
+        .unwrap();
         assert_eq!(input.subagent_type, "general-purpose");
         assert!(
             input.run_in_background,
@@ -1192,7 +1250,7 @@ mod tests {
         );
 
         let foreground: TaskToolInput = serde_json::from_str(
-            r#"{"description": "test", "prompt": "do it", "run_in_background": false}"#,
+            r#"{"parent_step_id": "step-1", "description": "test", "prompt": "do it", "run_in_background": false}"#,
         )
         .unwrap();
         assert!(!foreground.run_in_background);
@@ -1200,23 +1258,26 @@ mod tests {
 
     #[test]
     fn task_tool_input_model_omitted_is_none() {
-        let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p"}"#,
+        )
+        .unwrap();
         assert!(input.model.is_none());
     }
 
     #[test]
     fn task_tool_input_model_parses_explicit() {
-        let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p", "model": "grow-3"}"#)
-                .unwrap();
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "model": "grow-3"}"#,
+        )
+        .unwrap();
         assert_eq!(input.model.as_deref(), Some("grow-3"));
     }
 
     #[test]
     fn task_tool_input_model_none_skips_serialize() {
         let input = TaskToolInput {
-            parent_step_id: None,
+            parent_step_id: "step-1".into(),
             required_deliverable: false,
             prompt: "p".into(),
             description: "d".into(),
@@ -1227,6 +1288,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            effort: None,
             task_id: None,
         };
         let value = serde_json::to_value(&input).unwrap();

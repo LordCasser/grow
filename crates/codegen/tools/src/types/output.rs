@@ -482,6 +482,7 @@ pub enum ToolOutput {
     ListDir(ListDirOutput),
     SearchReplace(SearchReplaceOutput),
     Todo(TodoWriteOutput),
+    TodoRead(tool_types::planning::PlanReadOutput),
     WebFetch(WebFetchOutput),
     MCP(MCPOutput),
     TaskOutput(TaskOutputOutput),
@@ -492,6 +493,9 @@ pub enum ToolOutput {
     SearchTool(SearchToolOutput),
     SubagentCompleted(SubagentCompletedOutput),
     PlanControl(PlanControlOutput),
+    SetSubagentModel(
+        crate::implementations::grow_build::set_subagent_model::SetSubagentModelOutput,
+    ),
     AskUserQuestion(AskUserQuestionOutput),
     Monitor(crate::implementations::grow_build::monitor::types::MonitorOutput),
     SchedulerCreate(crate::implementations::grow_build::scheduler::create::SchedulerCreateOutput),
@@ -603,6 +607,9 @@ impl ToolOutput {
             ToolOutput::GrepSearch(grep_search_output) => {
                 String::from_utf8_lossy(&grep_search_output.stdout).into_owned()
             }
+            ToolOutput::TodoRead(output) => {
+                serde_json::to_string(output).expect("plan read is JSON data")
+            }
             ToolOutput::Todo(todo_output) => match todo_output {
                 TodoWriteOutput::TodosUpdated(success) => success.summary_for_prompt.to_owned(),
                 TodoWriteOutput::DuplicateId(msg) => msg.to_owned(),
@@ -708,6 +715,9 @@ impl ToolOutput {
                 text
             }
             ToolOutput::PlanControl(output) => output.message.clone(),
+            ToolOutput::SetSubagentModel(output) => {
+                serde_json::to_string(output).expect("subagent model admission is JSON data")
+            }
             ToolOutput::AskUserQuestion(AskUserQuestionOutput { message }) => message.clone(),
             ToolOutput::Monitor(o) => {
                 if o.persistent {

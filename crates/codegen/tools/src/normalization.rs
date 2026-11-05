@@ -102,6 +102,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
             (field::PATH, opt(g.path.as_ref())),
         ]),
         ToolInput::TodoWrite(_)
+        | ToolInput::TodoRead(_)
         | ToolInput::MCPTool(_)
         | ToolInput::TaskOutput(_)
         | ToolInput::SubagentList(_)
@@ -117,6 +118,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::SearchTool(_)
         | ToolInput::UseTool(_)
         | ToolInput::PlanControl(_)
+        | ToolInput::SetSubagentModel(_)
         | ToolInput::AskUserQuestion(_)
         | ToolInput::Lsp(_)
         | ToolInput::Monitor(_)

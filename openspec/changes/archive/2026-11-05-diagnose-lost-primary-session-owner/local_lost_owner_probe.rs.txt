@@ -1,0 +1,863 @@
+//! Temporary, ignored investigation for diagnose-lost-primary-session-owner.
+//! All executable fixture state is supplied by GROW_LOST_OWNER_PROBE_ROOT in /tmp.
+#![cfg(feature = "test-support")]
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use acp_transport::AcpAgentHandler as _;
+use acp_transport::protocol as acp;
+use shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
+
+const SESSION_ID: &str = "01a1a419-081c-7d92-81e0-bb3f97c017f1";
+const MOCK_RESPONSE: &str = "isolated fixture provider response";
+
+#[test]
+#[ignore = "one-off isolated persisted-session investigation"]
+fn isolated_session_load_first_error() {
+    if std::env::var_os("GROW_LOST_OWNER_MINIMAL").is_some() {
+        minimal_late_recovery_rejects_live_notification();
+        return;
+    }
+    let root = PathBuf::from(
+        std::env::var_os("GROW_LOST_OWNER_PROBE_ROOT").expect("explicit /tmp probe root"),
+    );
+    assert!(root.canonicalize().unwrap().starts_with("/private/tmp"));
+    let verify_fixed = std::env::var_os("GROW_LOST_OWNER_VERIFY_FIXED").is_some();
+    if std::env::var_os("GROW_LOST_OWNER_PROBE_CASE").is_none() {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        let cases = manifest["cases"].as_array().unwrap();
+        if verify_fixed {
+            assert_eq!(
+                cases.len(),
+                1,
+                "final verification permits one original-prefix case"
+            );
+            assert_eq!(cases[0]["domain_cut"], 48629);
+            assert_eq!(cases[0]["physical_cut"], 64448);
+        }
+        for case in cases {
+            let cut = case["domain_cut"].as_u64().unwrap().to_string();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "isolated_session_load_first_error",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env_clear()
+                .env("GROW_HOME", case["home"].as_str().unwrap())
+                .env("GROW_LOST_OWNER_PROBE_ROOT", &root)
+                .env("GROW_LOST_OWNER_PROBE_CASE", &cut)
+                .env("RUST_MIN_STACK", "16777216")
+                .env("RUST_BACKTRACE", "1")
+                .current_dir(case["cwd"].as_str().unwrap());
+            // Keep standard user/tool lookup unchanged; inherit no provider,
+            // MCP, hook, runtime-routing, auth or project configuration env.
+            for name in ["PATH", "HOME", "TMPDIR", "GROW_LOST_OWNER_SKIP_PRECHECK"] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+            if verify_fixed {
+                command.env("GROW_LOST_OWNER_VERIFY_FIXED", "1");
+                command.env("GROW_LOST_OWNER_SKIP_PRECHECK", &cut);
+            }
+            let output = command.output().expect("run isolated probe process");
+            save_probe_log(
+                &root.join(format!("prefix-{cut}.stdout.log")),
+                &output.stdout,
+                verify_fixed,
+            );
+            save_probe_log(
+                &root.join(format!("prefix-{cut}.stderr.log")),
+                &output.stderr,
+                verify_fixed,
+            );
+            eprintln!("PROBE_CASE_EXIT cut={cut} status={}", output.status);
+            for line in String::from_utf8_lossy(&output.stderr).lines() {
+                if line.starts_with("PROBE_") {
+                    eprintln!("{line}");
+                }
+            }
+            assert!(output.status.success(), "probe harness failed for {cut}");
+        }
+        return;
+    }
+
+    let cut = std::env::var("GROW_LOST_OWNER_PROBE_CASE").unwrap();
+    let case_dir = root.join(format!("prefix-{cut}"));
+    let home = case_dir.join("grow-home").canonicalize().unwrap();
+    let cwd = case_dir.join("workspace").canonicalize().unwrap();
+    assert_eq!(PathBuf::from(std::env::var_os("GROW_HOME").unwrap()), home);
+    let final_case = verify_fixed.then(|| {
+        assert_eq!(cut, "48629");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        let case = manifest["cases"][0].clone();
+        verify_original_prefix(&case);
+        case
+    });
+    let log_path = root.join(format!("prefix-{cut}.tracing.log"));
+    let log = if verify_fixed {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(log_path)
+            .unwrap()
+    } else {
+        std::fs::File::create(log_path).unwrap()
+    };
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_env_filter("warn,chat_state=info,shell::session=info,shell::agent::mvp_agent=info")
+        .with_writer(std::sync::Mutex::new(log))
+        .init();
+    diagnostics::tls::install_ring_provider_once();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, async {
+        let info = shell::session::info::Info {
+            id: acp::SessionId::new(SESSION_ID),
+            cwd: cwd.to_string_lossy().into_owned(),
+        };
+        if std::env::var("GROW_LOST_OWNER_SKIP_PRECHECK").ok().as_deref() != Some(cut.as_str()) {
+        let adapter = JsonlStorageAdapter::with_root(home.clone());
+        let started = Instant::now();
+        match adapter.load_session_without_updates(&info).await {
+            Err(error) => eprintln!(
+                "PROBE_STORAGE cut={cut} elapsed_ms={} error_kind={:?} error={error}",
+                started.elapsed().as_millis(), error.kind(),
+            ),
+            Ok(light) => {
+                eprintln!(
+                    "PROBE_STORAGE cut={cut} elapsed_ms={} ok events={} surface={} active_turn={:?}",
+                    started.elapsed().as_millis(), light.timeline.events().len(),
+                    light.timeline.surface().len(), light.timeline.active_turn(),
+                );
+                if cut == "48629" {
+                    let mut timeline = light.timeline;
+                    let kind = chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+                        occurrence_id: uuid::Uuid::now_v7().to_string(),
+                        event: chat_state::HookEventType::PostToolUse,
+                        gate: chat_state::HookGateKind::Observe,
+                        cause: chat_state::HookCause::Tool {
+                            call_id: "call_acd768b9df2a4e0a8822d6424877a0b8".into(),
+                        },
+                        config_generation: 2,
+                        handlers: vec![],
+                    });
+                    match timeline.record(kind) {
+                        Err(error) => eprintln!("PROBE_POST_TOOL_PURE cut={cut} error={error:?}"),
+                        Ok(event) => {
+                            eprintln!("PROBE_POST_TOOL_PURE cut={cut} ok seq={}", event.seq.get());
+                            let source_directory = locate_session(&home);
+                            let control_directory = case_dir.join("hook-append-control");
+                            std::fs::create_dir(&control_directory).unwrap();
+                            for name in ["summary.json", "timeline.jsonl"] {
+                                std::fs::copy(source_directory.join(name), control_directory.join(name))
+                                    .unwrap();
+                            }
+                            let writer = JsonlStorageAdapter::with_explicit_session_dir(control_directory);
+                            let started = Instant::now();
+                            match writer.append_timeline_event_durable(&info, &event).await {
+                                Ok(()) => eprintln!("PROBE_POST_TOOL_APPEND cut={cut} ok elapsed_ms={}", started.elapsed().as_millis()),
+                                Err(error) => eprintln!("PROBE_POST_TOOL_APPEND cut={cut} error_kind={:?} error={error}", error.kind()),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        drop(adapter);
+        } else {
+            eprintln!("PROBE_STORAGE_PRECHECK_SKIPPED cut={cut} prior_evidence=attempt-1");
+        }
+
+        let server = test_support::MockInferenceServer::start().await.unwrap();
+        server.set_response(MOCK_RESPONSE);
+        // The catalog key and effort retain the original selection. Its
+        // destination is deliberately rebound to a loopback mock in /tmp.
+        let mut raw: toml::Value = toml::from_str(&format!(r#"
+[models]
+default = "magpie/gpt-6.1-sol"
+[provider.magpie]
+api_backend = "responses"
+[provider.magpie.options]
+base_url = "{}"
+[provider.magpie.models."gpt-6.1-sol"]
+model = "gpt-6.1-sol"
+context_window = 1048576
+reasoning_efforts = [{{ id = "xhigh", value = "xhigh", label = "xhigh", default = true }}]
+[session]
+load_envrc = false
+"#, server.url())).unwrap();
+        if verify_fixed {
+            raw["provider"]["magpie"]["options"].as_table_mut().unwrap().insert(
+                "api_key".into(), toml::Value::String("isolated-loopback-fixture-key".into()),
+            );
+        }
+        let mut config = shell::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+        config.default_model_override = None;
+        config.remote_settings = Some(shell::util::config::RemoteSettings::default());
+        config.session.load_envrc = Some(false);
+        config.mcp_servers.clear();
+        config.cli_no_memory = true;
+        config.memory_config = None;
+        if let Some(case) = &final_case {
+            let profile = PathBuf::from(case["fixture_agent_profile"].as_str().unwrap());
+            let definition = shell::agent::mvp_agent::MvpAgent::resolve_agent_definition(
+                &cwd, None, None, &config.agent, None,
+                Some("software-engineering/software-architect"),
+            );
+            assert_eq!(definition.source_path.as_ref(), Some(&profile));
+            assert!(definition.is_primary_agent_eligible());
+            assert!(!definition.discover_skills && !definition.inherit_skills);
+            assert!(!definition.agents_md && !definition.inject_default_tools);
+            assert!(definition.skills.is_empty() && definition.mcp_servers.is_empty());
+            assert!(definition.tool_config.tools.iter().any(|tool| tool.kind == Some(tools::types::tool::ToolKind::SearchTool)));
+            assert!(definition.tool_config.tools.iter().any(|tool| tool.kind == Some(tools::types::tool::ToolKind::UseTool)));
+            // The declared profile retains the primary capability floor. The
+            // existing operator clamp is applied after that eligibility check.
+            config.cli_agent_overrides.disallowed_tools = Some(
+                definition.tool_config.tools.iter().map(|tool| tool.id.clone()).collect(),
+            );
+            config.subagents_enabled = false;
+            config.features.lsp_tools = Some(false);
+            config.features.tool_search = Some(false);
+            config.features.ask_user_question = Some(false);
+            config.features.session_recap = Some(false);
+            config.cli.auto_update = Some(false);
+            eprintln!("PROBE_FIXTURE_PROFILE cut={cut} source=temporary_project discover_skills=false ordinary_tools=operator_clamped");
+        } else {
+            let profile = case_dir.join("fixture-agent.md");
+            std::fs::write(&profile, "---\nname: software-engineering/software-architect\ndescription: Isolated load fixture\ndiscover_skills: false\nagents_md: false\ninject_default_tools: false\n---\nIsolated load fixture.\n").unwrap();
+            config.agent_profile_path = Some(profile);
+        }
+
+        let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(message) = gateway_rx.recv().await {
+                match message {
+                    acp_transport::AcpClientMessage::SessionNotification(args) => {
+                        let _ = args.response_tx.send(Ok(()));
+                    }
+                    acp_transport::AcpClientMessage::ExtNotification(args) => {
+                        let _ = args.response_tx.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let agent = shell::agent::mvp_agent::MvpAgent::new(
+            acp_transport::AcpAgentGatewaySender::new(gateway_tx), &config,
+        ).unwrap();
+        let initialize = agent.initialize(
+            acp::InitializeRequest::new(acp::ProtocolVersion::V1)
+                .client_capabilities(acp::ClientCapabilities::new().terminal(false))
+                .meta(serde_json::json!({
+                    "startupHints": {"nonInteractive": true, "skipGitStatus": true, "skipProjectLayout": true},
+                    "clientType": "lost-owner-probe", "clientVersion": "0.0-test"
+                }).as_object().cloned()),
+        );
+        let initialized = tokio::time::timeout(Duration::from_secs(30), initialize).await;
+        match initialized {
+            Ok(Ok(_)) => eprintln!("PROBE_INITIALIZE cut={cut} ok"),
+            other => {
+                eprintln!("PROBE_INITIALIZE cut={cut} error={other:?}");
+                assert!(!verify_fixed, "final verification did not initialize the isolated runtime");
+                return;
+            }
+        }
+        let started = Instant::now();
+        let loaded = tokio::time::timeout(
+            Duration::from_secs(300),
+            agent.load_session(acp::LoadSessionRequest::new(info.id, cwd.clone())
+                .meta(serde_json::json!({"grow/skip_envrc": true, "grow/restore_code": false, "codeNavEnabled": false}).as_object().cloned())),
+        ).await;
+        let load_succeeded = matches!(&loaded, Ok(Ok(_)));
+        match loaded {
+            Ok(Ok(_)) => eprintln!("PROBE_LOAD cut={cut} ok elapsed_ms={}", started.elapsed().as_millis()),
+            Ok(Err(error)) => eprintln!("PROBE_LOAD cut={cut} error elapsed_ms={} error={error:?}", started.elapsed().as_millis()),
+            Err(error) => eprintln!("PROBE_LOAD cut={cut} timeout elapsed_ms={} error={error}", started.elapsed().as_millis()),
+        }
+        assert!(!verify_fixed || load_succeeded, "final verification did not receive load ACK; preserve the first load error above");
+        if load_succeeded {
+            tokio::time::sleep(Duration::from_secs(35)).await;
+            let status = agent.ext_method(acp::ExtRequest::new(
+                "grow/queue/prompt_status",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&serde_json::json!({"sessionId": SESSION_ID})).unwrap()),
+            )).await;
+            match status {
+                Ok(response) => {
+                    let value: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
+                    eprintln!("PROBE_POST_LOAD cut={cut} after_secs=35 status={}", value);
+                    if let Some(case) = &final_case {
+                        verify_loaded_session(&agent, &server, case, &value).await;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("PROBE_POST_LOAD cut={cut} after_secs=35 error={error:?}");
+                    assert!(!verify_fixed, "runtime status query failed after load ACK");
+                }
+            }
+        }
+        eprintln!("PROBE_MOCK_REQUESTS cut={cut} count={}", server.request_count());
+        drop(agent);
+    });
+}
+
+fn save_probe_log(path: &Path, bytes: &[u8], fresh: bool) {
+    use std::io::Write as _;
+    if fresh {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    } else {
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
+fn verify_original_prefix(case: &serde_json::Value) {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+    let path = Path::new(case["directory"].as_str().unwrap()).join("timeline.jsonl");
+    let mut file = std::fs::File::open(path).unwrap();
+    let bytes = file.metadata().unwrap().len();
+    assert_eq!(
+        bytes,
+        case["timeline_bytes"].as_u64().unwrap(),
+        "final verification requires a fresh, unmodified original prefix"
+    );
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    let hash = format!("{:x}", digest.finalize());
+    assert_eq!(hash, case["timeline_sha256"].as_str().unwrap());
+    eprintln!("PROBE_ORIGINAL_PREFIX domain=48629 physical=64448 bytes={bytes} sha256={hash}");
+}
+
+async fn verify_loaded_session(
+    agent: &shell::agent::mvp_agent::MvpAgent,
+    server: &test_support::MockInferenceServer,
+    case: &serde_json::Value,
+    prompt_status: &serde_json::Value,
+) {
+    use chat_state::{NotificationEvent, RequestEvent, TimelineEventKind, TurnEvent};
+
+    let mock_requests = server.requests();
+    let response_posts = mock_requests
+        .iter()
+        .filter(|request| request.method == "POST" && request.path.ends_with("/responses"))
+        .count();
+    eprintln!(
+        "PROBE_MOCK_REQUESTS_FINAL count={} responses_posts={response_posts}",
+        server.request_count()
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(7),
+        agent.ext_method(acp::ExtRequest::new(
+            "grow/session/info",
+            std::sync::Arc::from(
+                serde_json::value::to_raw_value(&serde_json::json!({"sessionId": SESSION_ID}))
+                    .unwrap(),
+            ),
+        )),
+    )
+    .await
+    .expect("session info deadline")
+    .expect("session info RPC");
+    let envelope: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
+    assert!(
+        envelope.get("error").is_none_or(serde_json::Value::is_null),
+        "session info extension failed: {envelope}"
+    );
+    let info = &envelope["result"];
+    eprintln!(
+        "PROBE_RUNTIME_INFO after_secs=35 status={} source={} sessionId={}",
+        info["status"], info["source"], info["sessionId"]
+    );
+    assert_eq!(
+        info["status"], "found",
+        "load ACK must retain a live owner: {info}"
+    );
+    assert_eq!(
+        info["source"], "runtime",
+        "durable fallback does not prove a live owner"
+    );
+    assert_eq!(info["sessionId"], SESSION_ID);
+    assert_eq!(
+        prompt_status["source"], "runtime",
+        "prompt status must still observe the resident actor"
+    );
+    assert_eq!(prompt_status["sessionId"], SESSION_ID);
+
+    let handle = agent
+        .get_session_handle(&acp::SessionId::new(SESSION_ID))
+        .expect("resident registration after session info");
+    assert!(!handle.cmd_tx.is_closed() && !handle.chat_state_handle.is_closed());
+    let received_seq = case["expected_receipt_seq"].as_u64().unwrap();
+    let events = tokio::time::timeout(
+        Duration::from_secs(7),
+        handle.chat_state_handle.timeline_events_from(received_seq),
+    )
+    .await
+    .expect("Timeline suffix query deadline")
+    .expect("live Timeline suffix");
+    let cut = case["domain_cut"].as_u64().unwrap();
+    let new_events = &events[events.partition_point(|event| event.seq.get() <= cut)..];
+    let receipt_id = case["expected_receipt"].as_str().unwrap();
+    let received = events
+        .iter()
+        .find(|event| event.seq.get() == received_seq)
+        .expect("original receipt identity");
+    let TimelineEventKind::Notification(NotificationEvent::Received {
+        id,
+        owner_session_id,
+        source,
+        payload_ref,
+        ..
+    }) = &received.kind
+    else {
+        panic!("original receipt sequence is not Received");
+    };
+    assert_eq!(id, receipt_id);
+    assert_eq!(owner_session_id, SESSION_ID);
+    assert!(matches!(
+        source,
+        chat_state::NotificationSource::AgentReply { .. }
+    ));
+    let (source_id, message_id, reply_to, _) = source.agent_message().unwrap();
+    assert_eq!(
+        source_id,
+        case["expected_receipt_source_session_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        message_id,
+        case["expected_receipt_message_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        reply_to.unwrap().message_id,
+        case["expected_reply_to_message_id"].as_str().unwrap()
+    );
+    assert_eq!(reply_to.unwrap().source_session_id, SESSION_ID);
+    let pending = tokio::time::timeout(
+        Duration::from_secs(7),
+        handle.chat_state_handle.pending_notifications(),
+    )
+    .await
+    .expect("pending notification query deadline")
+    .expect("live notification inbox");
+    assert!(
+        !pending
+            .iter()
+            .any(|notification| notification.id == receipt_id),
+        "the original receipt must no longer be pending"
+    );
+    assert_eq!(
+        payload_ref.bytes,
+        case["expected_receipt_bytes"].as_u64().unwrap()
+    );
+    let consumed = new_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                notification_ids,
+                turn,
+                input,
+            }) if notification_ids.iter().any(|id| id == receipt_id) => {
+                Some((event, notification_ids, turn, input))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        consumed.len(),
+        1,
+        "the original pending reply must be consumed exactly once"
+    );
+    let (consumption, ids, turn, input) = consumed[0];
+    let Some(sampling_types::ConversationItem::AgentMessage(batch)) = input else {
+        panic!("receipt consumption lost its exact AgentMessage");
+    };
+    assert_eq!(batch.messages.len(), ids.len());
+    let message = batch
+        .messages
+        .iter()
+        .find(|message| message.receipt_id == receipt_id)
+        .expect("consumed receipt payload");
+    assert_eq!(message.source_session_id, source_id);
+    assert_eq!(message.target_session_id, SESSION_ID);
+    assert_eq!(message.message_id, message_id);
+    assert_eq!(message.reply_to.as_ref(), reply_to);
+    assert_eq!(message.message.len() as u64, payload_ref.bytes);
+    assert_eq!(
+        blake3::hash(message.message.as_bytes()).to_hex().as_str(),
+        payload_ref.blake3
+    );
+    let (started, identity) = new_events
+        .iter()
+        .find_map(|event| match &event.kind {
+            TimelineEventKind::Turn(TurnEvent::Started { id, identity, .. }) if id == turn => {
+                Some((event, identity))
+            }
+            _ => None,
+        })
+        .expect("new notification turn owns consumption");
+    assert_eq!(identity.origin, "notification_drain");
+    assert_eq!(identity.turn_kind, "internal");
+    assert!(started.seq < consumption.seq);
+    assert!(
+        !new_events.iter().any(|event| event.seq >= started.seq
+            && matches!(&event.kind, TimelineEventKind::Recovery(_))),
+        "post-load recovery must not interfere with the new turn"
+    );
+    let terminals = new_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Turn(TurnEvent::Ended {
+                id,
+                outcome,
+                terminal,
+                ..
+            }) if id == turn => Some((event, outcome, terminal)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminals.len(),
+        1,
+        "the notification turn must finish its response"
+    );
+    let (ended, outcome, terminal) = terminals[0];
+    assert!(
+        consumption.seq < ended.seq,
+        "the new turn cannot end before receipt consumption"
+    );
+    assert_eq!(outcome, "completed");
+    let chat_state::TurnTerminalSource::Provider { request_id } = &terminal.source else {
+        panic!(
+            "notification turn ended without its provider response: {:?}",
+            terminal.source
+        );
+    };
+    let requests = new_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Request(RequestEvent::Started {
+                id,
+                turn: owner,
+                tool_count,
+                ..
+            }) if owner == turn => Some((event, id, tool_count)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the fixed text mock should settle one logical request"
+    );
+    let (request_started, id, advertised_tools) = requests[0];
+    assert_eq!(id, request_id);
+    assert_eq!(
+        *advertised_tools, 0,
+        "operator clamp must leave no dispatchable tools"
+    );
+    assert!(consumption.seq < request_started.seq);
+    let completions = new_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Request(RequestEvent::Completed { id, attempt, .. })
+                if id == request_id =>
+            {
+                Some((event, *attempt))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 1);
+    let (request_completed, attempt) = completions[0];
+    let admissions = new_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Messages(messages)
+                if messages
+                    .response_admission
+                    .as_ref()
+                    .is_some_and(|admission| {
+                        admission.identity.request_id == *request_id
+                            && admission.identity.attempt == attempt
+                    }) =>
+            {
+                Some((event, messages))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(admissions.len(), 1, "one canonical admitted mock response");
+    let (admitted, messages) = admissions[0];
+    assert!(messages.items.iter().any(|item| matches!(
+        item,
+        sampling_types::ConversationItem::Assistant(_)
+    ) && item.text_content() == MOCK_RESPONSE));
+    assert!(messages.items.iter().all(|item| match item {
+        sampling_types::ConversationItem::Assistant(assistant) => assistant.tool_calls.is_empty(),
+        sampling_types::ConversationItem::BackendToolCall(_) => false,
+        _ => true,
+    }));
+    let attempt_key = format!("{request_id}:{attempt}");
+    let settlements = new_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Observation(observation)
+                if observation.scope == "sampling_usage"
+                    && observation.name == "attempt_settled"
+                    && observation.data.as_ref().is_some_and(|data| {
+                        data["attempt_key"].as_str() == Some(attempt_key.as_str())
+                    }) =>
+            {
+                Some((event, observation.data.as_ref().unwrap()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        settlements.len(),
+        1,
+        "the response attempt must be durably charged once"
+    );
+    let (settled, usage) = settlements[0];
+    assert!(
+        usage["usage"].is_object(),
+        "the deterministic mock response must have known usage"
+    );
+    assert!(admitted.seq < ended.seq && settled.seq < ended.seq);
+    assert!(
+        !new_events.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Tool(chat_state::ToolEvent::Started { .. })
+        )),
+        "isolated verification cannot execute tools"
+    );
+    for event in new_events {
+        if let TimelineEventKind::Hook(chat_state::HookEvent::Triggered { handlers, .. }) =
+            &event.kind
+        {
+            assert!(
+                handlers.is_empty(),
+                "isolated verification cannot execute real hooks"
+            );
+        }
+    }
+    assert!(
+        response_posts >= 1,
+        "the model must actually reach the loopback mock"
+    );
+    for request in &mock_requests {
+        if request.method == "POST" {
+            assert!(
+                request.path.ends_with("/responses"),
+                "unexpected mock endpoint: {}",
+                request.path
+            );
+            assert!(
+                request
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.get("tools"))
+                    .is_none_or(
+                        |tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)
+                    ),
+                "the sampler advertised dispatchable tools despite the operator clamp"
+            );
+        }
+    }
+    assert_committed_events(
+        case,
+        &[
+            started,
+            consumption,
+            request_started,
+            request_completed,
+            admitted,
+            settled,
+            ended,
+        ],
+    );
+    let evidence = serde_json::json!({
+        "sessionId": SESSION_ID, "status": "found", "source": "runtime", "afterLoadSeconds": 35,
+        "originalReceipt": receipt_id, "turn": turn, "startedSeq": started.seq.get(),
+        "consumedSeq": consumption.seq.get(), "requestId": request_id, "attempt": attempt,
+        "requestCompletedSeq": request_completed.seq.get(), "admittedSeq": admitted.seq.get(),
+        "usageSettledSeq": settled.seq.get(), "turnEndedSeq": ended.seq.get(), "terminalSource": terminal.source,
+        "mockRequestCount": server.request_count(), "mockResponsesPosts": response_posts,
+        "newToolStartedCount": 0, "newRecoveryAfterTurnStartCount": 0,
+        "childEntityLimit": "historical child entities remain absent; complete reconciler regression belongs to B",
+    });
+    let evidence_path = Path::new(case["home"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .join("verification.json");
+    save_probe_log(
+        &evidence_path,
+        &serde_json::to_vec_pretty(&evidence).unwrap(),
+        true,
+    );
+    eprintln!("PROBE_FIXED_ACCEPTANCE {evidence}");
+}
+
+fn assert_committed_events(case: &serde_json::Value, required: &[&chat_state::TimelineEvent]) {
+    use std::io::{BufRead as _, Seek as _};
+    let path = Path::new(case["directory"].as_str().unwrap()).join("timeline.jsonl");
+    let mut file = std::fs::File::open(path).unwrap();
+    file.seek(std::io::SeekFrom::Start(
+        case["timeline_bytes"].as_u64().unwrap(),
+    ))
+    .unwrap();
+    let mut reader = std::io::BufReader::new(file);
+    let mut committed = std::collections::BTreeMap::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).unwrap() == 0 || !line.ends_with(b"\n") {
+            break;
+        }
+        let record: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        if record["fact"]["kind"] == "domain" {
+            let event: chat_state::TimelineEvent =
+                serde_json::from_value(record["fact"]["event"].clone()).unwrap();
+            committed.insert(event.seq.get(), serde_json::to_value(event).unwrap());
+        }
+    }
+    for event in required {
+        assert_eq!(
+            committed.get(&event.seq.get()),
+            Some(&serde_json::to_value(event).unwrap()),
+            "acknowledged event {} must exist with its exact payload on disk",
+            event.seq.get()
+        );
+    }
+}
+
+fn minimal_late_recovery_rejects_live_notification() {
+    use chat_state::{NotificationEvent, TimelineEventKind, TurnEvent};
+
+    let owner = "fixture-session";
+    let body = "fixture reply";
+    let source = chat_state::NotificationSource::AgentReply {
+        source_session_id: "fixture-source".into(),
+        message_id: "fixture-reply".into(),
+        reply_to: sampling_types::AgentMessageRef {
+            source_session_id: owner.into(),
+            message_id: "fixture-original".into(),
+        },
+    };
+    let version = chat_state::NotificationSourceVersion::Ordinal {
+        value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let receipt = chat_state::notification_id(owner, &source, &version).unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    timeline
+        .record(TimelineEventKind::Notification(
+            NotificationEvent::Received {
+                id: receipt.clone(),
+                owner_session_id: owner.into(),
+                source: source.clone(),
+                source_version: version,
+                payload_ref: chat_state::NotificationPayloadRef {
+                    blake3: blake3::hash(body.as_bytes()).to_hex().to_string(),
+                    bytes: body.len() as u64,
+                },
+            },
+        ))
+        .unwrap();
+    let turn = chat_state::TurnId(1);
+    timeline
+        .record(TimelineEventKind::Turn(TurnEvent::Started {
+            id: turn,
+            prompt_id: "fixture-notification-turn".into(),
+            input_ids: vec![],
+            identity: chat_state::TurnIdentity {
+                origin: "notification_drain".into(),
+                turn_kind: "internal".into(),
+                goal_id: None,
+                goal_definition_revision: None,
+                stage_id: None,
+            },
+            model_id: "fixture/model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "Agent message received.".into(),
+            input_kind: chat_state::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .unwrap();
+    let mut input =
+        sampling_types::ConversationItem::received_agent_message(sampling_types::AgentMessage {
+            receipt_id: receipt.clone(),
+            source_session_id: "fixture-source".into(),
+            target_session_id: owner.into(),
+            message_id: "fixture-reply".into(),
+            reply_to: source.agent_message().unwrap().2.cloned(),
+            message: body.into(),
+        });
+    input.set_prompt_index(0);
+    let consume = TimelineEventKind::Notification(NotificationEvent::Consumed {
+        notification_ids: vec![receipt],
+        turn,
+        input: Some(input),
+    });
+    let mut live = timeline.clone();
+    live.record(consume.clone())
+        .expect("same receipt/input commits while its turn is live");
+    assert!(live.pending_notifications().is_empty());
+    assert!(timeline.events().iter().all(|event| !matches!(
+        event.kind,
+        TimelineEventKind::Subagent(_)
+            | TimelineEventKind::SubagentSeed(_)
+            | TimelineEventKind::SubagentResult(_)
+    )));
+    let repairs = timeline.recover_interrupted().unwrap();
+    assert!(repairs.iter().any(|event| matches!(&event.kind,
+        TimelineEventKind::Turn(TurnEvent::Ended { id, terminal, .. })
+            if *id == turn && terminal.source == chat_state::TurnTerminalSource::Recovery)));
+    assert_eq!(timeline.active_turn(), None);
+    let error = timeline.record(consume).unwrap_err();
+    assert!(matches!(
+        error,
+        chat_state::TimelineError::InvalidNotification
+    ));
+    assert_eq!(timeline.pending_notifications().len(), 1);
+    eprintln!(
+        "PROBE_MINIMAL_LATE_RECOVERY children=0 disk_io=0 provider_requests=0 live_consume=ok late_recovery_consume={error:?} pending=1 events={}",
+        timeline.events().len()
+    );
+}
+
+fn locate_session(home: &Path) -> PathBuf {
+    std::fs::read_dir(home.join("sessions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join(SESSION_ID))
+        .find(|candidate| candidate.is_dir())
+        .unwrap()
+}

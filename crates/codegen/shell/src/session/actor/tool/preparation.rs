@@ -373,6 +373,24 @@ impl SessionActor {
                     Vec::new(),
                 )
             }
+            ToolInput::SetSubagentModel(input) => (
+                match input.model {
+                    Some(model) => format!("Queue subagent {} model: {model}", input.subagent_id),
+                    None => format!("Queue subagent {} reasoning effort", input.subagent_id),
+                },
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::TodoRead(input) => (
+                match input.target {
+                    tool_types::planning::PlanReadTarget::SelfPlan => "Read local plan".to_owned(),
+                    tool_types::planning::PlanReadTarget::Parent => "Read parent plan".to_owned(),
+                },
+                acp::ToolKind::Read,
+                Vec::new(),
+                Vec::new(),
+            ),
             ToolInput::TodoWrite(_) => (
                 "Updating plan".to_string(),
                 acp::ToolKind::Think,

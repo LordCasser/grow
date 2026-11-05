@@ -336,6 +336,7 @@ impl SessionActor {
                     | chat_state::NotificationSource::TaskStillRunning { .. }
                     | chat_state::NotificationSource::PlanHandoff { .. }
                     | chat_state::NotificationSource::ParentMessage { .. }
+                    | chat_state::NotificationSource::PlanGuidance { .. }
                     | chat_state::NotificationSource::AgentReply { .. }
                     | chat_state::NotificationSource::InquiryAnswered { .. }
                     | chat_state::NotificationSource::WorkflowHandoff { .. } => None,

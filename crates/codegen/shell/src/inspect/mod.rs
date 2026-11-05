@@ -224,9 +224,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
         .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
     let parsed_config = crate::agent::config::Config::new_from_toml_cfg(&effective_config).ok();
 
-    let git_root = git2::Repository::discover(cwd)
-        .ok()
-        .and_then(|r| r.workdir().map(|p| p.to_path_buf()));
+    let git_root = ::agent::repo::discover_worktree_root(cwd).ok();
 
     // Route through the live folder-trust gate rather than a raw store read; no
     // session resolve has run for a one-shot `inspect`. The single verdict drives
@@ -365,9 +363,8 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
         agent::prompt::agents_md::read_agents_config_with_paths(&cwd.display().to_string()).await;
 
     let grow_home = crate::util::grow_home::grow_home();
-    let workspace_root = git2::Repository::discover(cwd)
+    let workspace_root = ::agent::repo::discover_worktree_root(cwd)
         .ok()
-        .and_then(|repo| repo.workdir().map(Path::to_path_buf))
         .unwrap_or_else(|| cwd.to_path_buf());
 
     let extra_rule_dirs = extra_rule_dirs_from_config();

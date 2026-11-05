@@ -1001,11 +1001,31 @@ impl SessionActor {
         responds_to: tokio::sync::oneshot::Sender<
             Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
+        admitted: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) {
+        // A native request can wait in the mailbox after Shell verifies its
+        // target. Recheck live Turn ownership under the same locks that admit
+        // the slot, so natural completion cannot win between check and ACK.
+        if admitted.is_some()
+            && !admission
+                .foreground
+                .regular()
+                .is_some_and(|task| admission.can_continue_regular_turn(&task.prompt_id))
+        {
+            let message = "the target subagent execution is no longer open";
+            let _ = admitted
+                .expect("native admission receipt is present")
+                .send(Err(message.into()));
+            let _ = responds_to.send(Err(acp::Error::invalid_request().data(message)));
+            return;
+        }
         let (revision, superseded) =
             admission
                 .pending_step_controls
                 .admit_sampling(route, catalog, intent, responds_to);
+        if let Some(admitted) = admitted {
+            let _ = admitted.send(Ok(()));
+        }
         let projection = admission
             .pending_step_controls
             .domain_projection(crate::extensions::notification::ControlDomain::Sampling)
@@ -1073,6 +1093,20 @@ impl SessionActor {
             Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
     ) {
+        self.admit_effort_patch(effort, authority, intent, responds_to, None)
+            .await;
+    }
+
+    async fn admit_effort_patch(
+        self: &std::sync::Arc<Self>,
+        effort: sampling_types::ReasoningEffort,
+        authority: crate::session::SessionEffortAuthority,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
+        >,
+        admitted: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) {
         let mut gate = Some(self.step_control_gate.lock().await);
         let mut responds_to = Some(responds_to);
         let Some(mut admission) = self
@@ -1084,6 +1118,9 @@ impl SessionActor {
             )
             .await
         else {
+            if let Some(admitted) = admitted {
+                let _ = admitted.send(Err("session is shutting down".to_string()));
+            }
             return;
         };
         let model_id = admission
@@ -1147,11 +1184,15 @@ impl SessionActor {
                     catalog,
                     intent,
                     responds_to.take().expect("Sampling responder is available"),
+                    admitted,
                 )
                 .await;
             }
             Err(error) => {
                 let message = error.to_string();
+                if let Some(admitted) = admitted {
+                    let _ = admitted.send(Err(message.clone()));
+                }
                 admission.mark_control_intent_terminal(
                     crate::extensions::notification::ControlDomain::Sampling,
                     intent.as_ref(),
@@ -1185,6 +1226,20 @@ impl SessionActor {
             Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
     ) {
+        self.admit_model_selection(route, catalog, intent, responds_to, None)
+            .await;
+    }
+
+    async fn admit_model_selection(
+        self: &std::sync::Arc<Self>,
+        route: crate::agent::models::PublishedSessionRoute,
+        catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
+        >,
+        admitted: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) {
         let mut gate = Some(self.step_control_gate.lock().await);
         let mut responds_to = Some(responds_to);
         let Some(admission) = self
@@ -1196,6 +1251,9 @@ impl SessionActor {
             )
             .await
         else {
+            if let Some(admitted) = admitted {
+                let _ = admitted.send(Err("session is shutting down".to_string()));
+            }
             return;
         };
         self.finish_sampling_admission_locked(
@@ -1205,8 +1263,30 @@ impl SessionActor {
             catalog,
             intent,
             responds_to.take().expect("Sampling responder is available"),
+            admitted,
         )
         .await;
+    }
+
+    pub(super) async fn admit_tool_sampling(
+        self: &std::sync::Arc<Self>,
+        selection: crate::session::SessionSamplingSelection,
+        admitted: tokio::sync::oneshot::Sender<Result<(), String>>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
+        >,
+    ) {
+        use crate::session::SessionSamplingSelection;
+        match selection {
+            SessionSamplingSelection::Model { route, catalog } => {
+                self.admit_model_selection(route, catalog, None, responds_to, Some(admitted))
+                    .await;
+            }
+            SessionSamplingSelection::Effort { effort, authority } => {
+                self.admit_effort_patch(effort, authority, None, responds_to, Some(admitted))
+                    .await;
+            }
+        }
     }
 
     /// Admit an Agent profile selection under the same step boundary as

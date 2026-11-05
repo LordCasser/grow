@@ -1,0 +1,23 @@
+## Evidence
+
+Timeline::unconsumed_skill_load_indices基于selected branch provenance和canonical admitted_response_events，原SkillLoad leaf的event用于判定后续是否有消费响应；Sideband summary不构成消费。Timeline在Compaction replacement前检查未消费SkillLoad、原call/result，拒绝单summary替换。Shell prepare_compaction与async预检查仅把surface/ids交给plan_compaction_range；其budget fit不接消费状态，replacement固定一个user_meta。因此错误属于选区准入遗漏，不是最终guard过严。用户现场触发具体是manual/auto/background还未知；不以静态链冒充已复现场景。
+
+## Ownership and precise interface
+
+ChatState拥有分支消费权威；纯planner拥有range选择；Shell仅传快照与发/提交summary。沿TimelineMaterialization现有一次actor读取增加ephemeral字段 `pub unconsumed_skill_load_ids: Vec<SurfaceId>`。Timeline新增公开只读投影方法从现有unconsumed_skill_load_indices映射Surface IDs，供ChatState actor和Shell cold materialization复用原消费判定；不复制另一套fold，不新增持久事件或请求。Shell storage/jsonl中两个TimelineMaterialization构造也必须从该次已验证的同一Timeline取得真实pins，不能填空；仅字段适配，不改解码/校验/锁/写入流程。
+
+扩展公开 `plan_compaction_range(surface, surface_ids, unconsumed_skill_load_ids: &[SurfaceId], retain_tokens, min_source_tokens)`；所有Shell prepare/async预检及相关测试调用同步。TimelineMaterialization的单个Shell summary fixture补空字段。预算fit继续只缩小已受保护plan，不放大原范围。
+
+每个pin以snapshot exact ID定位（不存在/不匹配不能忽略）。对Model source还找到call_id对应assistant调用及其前置连续Reasoning/BackendToolCall响应组；整个call batch与全部配对result保留。生成合法前缀时不让其跨过最早受保护因果组，仅保留之前满足source minimum/完整交换的原选区；既定tail预算保持或增加，不重排消息、拷贝skill到摘要或更换identity。允许coder选局部算法，但不能以任意token估算伪装保护条件，也不能把所有已消费SkillLoad永久pin。
+
+如果安全旧prefix不足，则按既有no-safe-range路径在summary provider之前退出；auto precheck必须应用同一边界，不能启动已知会被拒绝的后台generation。摘要结果冻结其输入/target，预算缩小仍按原完整边界，发布保留Timeline guard。新load只能在snapshot tail，后续消费最多解除保护，不要求扩大已经冻结的target。
+
+## Coder Task Spec
+
+一项共享compaction选区修复，写面限chat-state/src/{timeline.rs,sideband.rs,actor/mod.rs,compaction_utils.rs}及相关tests；Shell仅session/actor/compaction.rs传参、summary.rs物化fixture，以及storage/jsonl/mod.rs两个已有物化构造的真实pins字段与冷物化回归适配，另外skill_loading_tests.rs/compaction_pre_prune_tests.rs中本行为回归。不得改model控制/Task/planning/其他业务。用户原dirty文件保护。
+
+复现旧逻辑：足量早期可摘要history，未消费Model SkillLoad的真实call/result/body落在旧planner选区内，后接较新prompt而没有消费主响应；summary Sideband不能解除pin。新逻辑应摘要合法更旧prefix并原样保留整组/IDs；没有足量prefix时零summary provider。真正canonical响应消费后该组可再被摘要；rewind/冷读按原branch判定不永久pin。旧guard仍拒直接删改未消费load，terminal settle仍只在明确结束。实现前运行/构造失败回归，后验通过；主请求应收到完整skill而不重跑load工具。
+
+## Review Plan
+
+Tier3数据完整性：父核对同快照权威/安全边界/预算retry只缩小，luna独立review最终diff。chat-state定向planner/materialization/guard回归；Shell真实run_compact_only或auto入口+mock summary/下一主请求证明身份/正文/call/result/不重执行，至少覆盖source充足与不足及canonical消费前后。main与subagent共享路径静态核对，必要child startup标志用例；所有运行独立GROW_HOME。父统一新CLI构建及结合model-control的相关集成，完成后归档。不能把原有直接replace守卫测试当planner已修的运行证明。

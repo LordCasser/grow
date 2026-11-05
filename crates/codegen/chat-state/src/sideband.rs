@@ -68,6 +68,9 @@ pub struct TimelineMaterialization {
     pub surface_revision: u64,
     pub surface: Vec<ConversationItem>,
     pub surface_ids: Vec<crate::SurfaceId>,
+    /// Exact identities whose full skill content still awaits a canonical
+    /// consuming response, derived with the Surface in this actor snapshot.
+    pub unconsumed_skill_load_ids: Vec<crate::SurfaceId>,
     /// Branch-selected sanitized first-party authority. Derived Surface text
     /// (including image transcriptions) can never enter it.
     pub direct_user_inputs: Vec<ConversationItem>,

@@ -63,47 +63,7 @@ pub(super) async fn run(
             }
         }
         AgentInteraction::Replan { change } => {
-            if request.receipt_only || request.cancellation.is_cancelled() {
-                Ok(AgentInteractionOutput::message_rejected(
-                    &request.id,
-                    "target_inactive",
-                    "Replanning cannot revive a terminal child",
-                ))
-            } else if let Some(target) = target.as_ref() {
-                let (respond_to, mut response) = tokio::sync::oneshot::channel();
-                if target
-                    .cmd_tx
-                    .send(SessionCommand::ReceivePlanGuidance {
-                        parent_session_id: request.source_session_id.clone(),
-                        change: change.clone(),
-                        respond_to,
-                    })
-                    .is_err()
-                {
-                    Ok(AgentInteractionOutput::message_unconfirmed(
-                        &request.id,
-                        "target_unavailable",
-                        "Replanning target is unavailable",
-                    ))
-                } else {
-                    Ok(
-                        match wait_for_message_ack(&mut response, &request.cancellation).await {
-                            Some(result) => delivery_output(&request.id, result),
-                            None => AgentInteractionOutput::message_unconfirmed(
-                                &request.id,
-                                "receipt_unconfirmed",
-                                "Replanning receipt is unconfirmed",
-                            ),
-                        },
-                    )
-                }
-            } else {
-                Ok(AgentInteractionOutput::message_unconfirmed(
-                    &request.id,
-                    "target_unavailable",
-                    "Replanning target is unavailable",
-                ))
-            }
+            Ok(replan(&request, &source, target.as_ref(), &target_id, change).await)
         }
         AgentInteraction::Ask { question } => match &target {
             Some(target) => ask(&request, &source, target, question, &subagent_task_name).await,
@@ -130,6 +90,142 @@ pub(super) async fn run(
         output
     });
     let _ = request.respond_to.send(result);
+}
+
+async fn replan(
+    request: &AgentInteractionRequest,
+    source: &SessionHandle,
+    target: Option<&SessionHandle>,
+    target_id: &str,
+    change: &tool_types::ReplanChange,
+) -> AgentInteractionOutput {
+    if request.receipt_only {
+        return AgentInteractionOutput::message_rejected(
+            &request.id,
+            "target_inactive",
+            "Replanning cannot revive a terminal child",
+        );
+    }
+    let cancelled = || {
+        AgentInteractionOutput::message_rejected(
+            &request.id,
+            "cancelled_before_dispatch",
+            "Replanning was cancelled before dispatch",
+        )
+    };
+    if request.cancellation.is_cancelled() {
+        return cancelled();
+    }
+    let unavailable_source = || {
+        AgentInteractionOutput::message_unconfirmed(
+            &request.id,
+            "planning_source_unavailable",
+            "The committed replanning source could not be verified",
+        )
+    };
+    let unavailable_target = || {
+        AgentInteractionOutput::message_unconfirmed(
+            &request.id,
+            "target_unavailable",
+            "Replanning target is unavailable",
+        )
+    };
+    let invalid_source = || {
+        AgentInteractionOutput::message_rejected(
+            &request.id,
+            "invalid_planning_source",
+            "Replanning requires the exact committed and claimed source change for this child",
+        )
+    };
+    let Some(target) = target else {
+        return unavailable_target();
+    };
+    if source.info.id.to_string() != request.source_session_id
+        || target.info.id.to_string() != target_id
+        || request.target_child_id.as_deref() != Some(change.link_id.as_str())
+        || change.child_session_id != target_id
+    {
+        return invalid_source();
+    }
+    if source.cmd_tx.is_closed() || source.chat_state_handle.is_closed() {
+        return unavailable_source();
+    }
+    if target.cmd_tx.is_closed() || target.chat_state_handle.is_closed() {
+        return unavailable_target();
+    }
+
+    // The coordinator owns direct-edge eligibility. This read-only observation
+    // binds that resolved route to one committed plan's claimed link and payload;
+    // it neither takes the source mutation gate nor substitutes current step text.
+    let snapshot = tokio::select! {
+        biased;
+        _ = request.cancellation.cancelled() => return cancelled(),
+        _ = source.cmd_tx.closed() => return unavailable_source(),
+        _ = target.cmd_tx.closed() => return unavailable_target(),
+        snapshot = source.chat_state_handle.planning_state() => snapshot,
+    };
+    // Observation can yield while cancellation or endpoint closure wins admission.
+    if request.cancellation.is_cancelled() {
+        return cancelled();
+    }
+    if source.cmd_tx.is_closed() || source.chat_state_handle.is_closed() {
+        return unavailable_source();
+    }
+    if target.cmd_tx.is_closed() || target.chat_state_handle.is_closed() {
+        return unavailable_target();
+    }
+    let plan = match snapshot {
+        Ok(Some(snapshot)) => snapshot.plan,
+        Ok(None) => return invalid_source(),
+        Err(_) => return unavailable_source(),
+    };
+    if plan.session_id != request.source_session_id
+        || !plan.links.iter().any(|link| {
+            link.id == change.link_id
+                && link.parent_step_id == change.step_id
+                && link.child_session_id == target_id
+        })
+    {
+        return invalid_source();
+    }
+    let Some(committed) = plan.replans.iter().find(|stored| stored.id == change.id) else {
+        return invalid_source();
+    };
+    if !matches!(
+        committed.progress,
+        tool_types::ReplanProgress::Dispatching
+            | tool_types::ReplanProgress::Received
+            | tool_types::ReplanProgress::Consumed
+            | tool_types::ReplanProgress::Handled { .. }
+    ) {
+        return invalid_source();
+    }
+    let mut immutable_payload = committed.clone();
+    immutable_payload.progress = change.progress.clone();
+    if immutable_payload != *change {
+        return invalid_source();
+    }
+
+    let (respond_to, mut response) = tokio::sync::oneshot::channel();
+    if target
+        .cmd_tx
+        .send(SessionCommand::ReceivePlanGuidance {
+            parent_session_id: request.source_session_id.clone(),
+            change: change.clone(),
+            respond_to,
+        })
+        .is_err()
+    {
+        return unavailable_target();
+    }
+    match wait_for_message_ack(&mut response, &request.cancellation).await {
+        Some(result) => delivery_output(&request.id, result),
+        None => AgentInteractionOutput::message_unconfirmed(
+            &request.id,
+            "receipt_unconfirmed",
+            "Replanning receipt is unconfirmed",
+        ),
+    }
 }
 
 fn delivery_output(
@@ -440,6 +536,10 @@ async fn ask(
         }),
     })
 }
+
+#[cfg(test)]
+#[path = "interaction_plan_guidance_tests.rs"]
+mod plan_guidance_tests;
 
 #[cfg(test)]
 mod tests {

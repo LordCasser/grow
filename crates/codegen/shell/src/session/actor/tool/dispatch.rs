@@ -527,6 +527,96 @@ pub(in crate::session::actor) fn build_tool_parse_error_message(
 }
 
 #[cfg(test)]
+mod session_model_permit_tests {
+    use super::*;
+    use crate::session::actor::tests::support::{
+        begin_test_causal_turn, build_actor, test_agent_with_tools,
+    };
+    use tools::implementations::grow_build::set_subagent_model::SetSubagentModelTool;
+    use tools::implementations::grow_build::task::backend::{
+        ChannelBackend, SubagentBackendResource,
+    };
+    use tools::implementations::grow_build::task::types::SubagentEvent;
+    use tools::registry::types::{ToolConfig, ToolServerConfig};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_model_uses_authored_child_eligibility_and_an_exact_one_shot_permit() {
+        tokio::task::LocalSet::new().run_until(async {
+            for authored in [false, true] {
+                let (mut actor, mut gateway) = build_actor().await;
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = gateway.recv().await {
+                        match message {
+                            acp_transport::AcpClientMessage::SessionNotification(args) => { let _ = args.response_tx.send(Ok(())); }
+                            acp_transport::AcpClientMessage::ExtNotification(args) => { let _ = args.response_tx.send(Ok(())); }
+                            _ => {}
+                        }
+                    }
+                });
+                let config = ToolConfig::for_tool::<SetSubagentModelTool>();
+                *actor.agent.borrow_mut() = test_agent_with_tools(vec![config.clone()]).await;
+                let bridge = actor.agent.borrow().tool_bridge().clone();
+                let capabilities = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+                    &bridge,
+                    &ToolServerConfig { tools: if authored { vec![config] } else { vec![] } },
+                    tool_types::SubagentCapabilityMode::ReadOnly,
+                    None,
+                    Default::default(),
+                ).await;
+                let mutable = Arc::get_mut(&mut actor).unwrap();
+                mutable.startup_hints.is_subagent = true;
+                mutable.subagent_capabilities = Some(capabilities);
+                begin_test_causal_turn(&actor).await;
+                let (runtime, mut requests) = tokio::sync::mpsc::unbounded_channel();
+                bridge.update_resource(SubagentBackendResource(Arc::new(
+                    ChannelBackend::for_session(runtime, "model-permit-child"),
+                ))).await;
+                let call = crate::sampling::types::ToolCallResponse {
+                    id: "model-permit-call".into(),
+                    kind: "function".into(),
+                    function: crate::sampling::types::ToolCallFunction::new("set_subagent_model", r#"{"subagent_id":"controlled-child","effort":"none"}"#),
+                };
+                actor.events.tool_started(
+                    call.function.name.clone(),
+                    call.id.clone(),
+                    Some(serde_json::json!({"subagent_id":"controlled-child","effort":"none"})),
+                ).await.unwrap();
+                let preflight = actor.prepare_tool_call(call, &mut Vec::new()).await.unwrap();
+                let ToolPreflight::Dispatch(prepared) = preflight else {
+                    assert!(!authored, "authored zero-RWX control should be admissible");
+                    assert!(requests.try_recv().is_err(), "rejected child tool never reaches the host binding");
+                    continue;
+                };
+                assert!(authored, "ToolKind or zero RWX cannot grant an unauthored identity");
+                assert_eq!(prepared.required_access, tool_protocol::ToolAccess::None);
+                let authority = ToolDispatchAuthority {
+                    bridge,
+                    subagent: actor.subagent_capabilities.clone(),
+                    mcp_state: actor.mcp_state.clone(),
+                    runtime_suspend: actor.state.lock().await.runtime_suspend.clone(),
+                    cwd: actor.tool_context.cwd.as_path().to_path_buf(),
+                    actor_source: format!("child:{}", actor.session_info.id.0),
+                };
+                let dispatch = dispatch_tool(&authority, &prepared, "model-permit-child");
+                tokio::pin!(dispatch);
+                let request = tokio::select! {
+                    request = requests.recv() => request.unwrap(),
+                    result = &mut dispatch => panic!("tool returned without actor receipt: {result:?}"),
+                };
+                let SubagentEvent::SetModel(request) = request else { panic!("expected model control"); };
+                assert_eq!(request.source_session_id, "model-permit-child");
+                assert_eq!(request.subagent_id, "controlled-child");
+                request.respond_to.send(Ok(())).unwrap();
+                assert!(dispatch.await.unwrap().prompt_text.contains("queued"));
+                let replay = dispatch_tool(&authority, &prepared, "model-permit-child").await.unwrap_err();
+                assert!(replay.detail.contains("already consumed"));
+                assert!(requests.try_recv().is_err(), "permit replay must not enqueue a second control");
+            }
+        }).await;
+    }
+}
+
+#[cfg(test)]
 mod permit_tests {
     use super::*;
 

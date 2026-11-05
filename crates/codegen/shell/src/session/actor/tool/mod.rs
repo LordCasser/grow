@@ -1634,8 +1634,9 @@ mod rwx_projection_tests {
             resume_from: None,
             cwd: None,
             model: None,
+            effort: None,
             task_id: None,
-            parent_step_id: None,
+            parent_step_id: "step-1".into(),
             required_deliverable: false,
         });
         let read_only = ToolInput::Task(TaskToolInput {

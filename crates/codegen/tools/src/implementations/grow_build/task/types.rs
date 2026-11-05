@@ -804,6 +804,8 @@ pub enum SubagentEvent {
         respond_to: oneshot::Sender<Result<bool, String>>,
     },
     Interact(super::interaction::AgentInteractionRequest),
+    ReadParentPlanning(super::parent_planning::ParentPlanningRequest),
+    SetModel(super::super::set_subagent_model::SubagentModelControlRequest),
     Spawn(SubagentSpawnRequest),
     Query(SubagentQueryRequest),
     Cancel(SubagentCancelRequest),

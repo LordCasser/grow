@@ -24,6 +24,8 @@ mod mcp_result_tests;
 mod parallel_dispatch_tests;
 mod permission_auto_mode_tests;
 mod planning_dispatch_tests;
+mod planning_link_admission_tests;
+mod planning_read_tests;
 mod project_discovery_startup_tests;
 mod project_instructions_idempotence_tests;
 mod prompt_context_persistence_tests;

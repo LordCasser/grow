@@ -930,6 +930,22 @@ mod tests {
     }
 
     #[test]
+    fn discover_project_agents_without_readable_git_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let agents_dir = tmp.path().join(".grow/agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        write_agent_file(&agents_dir, "reviewer.md", "reviewer", "Review changes");
+        let nested = tmp.path().join("src/nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(tmp.path().join(".git/config"), "[invalid config").unwrap();
+
+        let definitions = discover_with_home(&nested, None, None);
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name, "reviewer");
+    }
+
+    #[test]
     fn test_discover_ignores_non_md_files() {
         let tmp = tempfile::tempdir().unwrap();
         let agents_dir = tmp.path().join(".grow").join("agents");

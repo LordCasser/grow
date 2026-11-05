@@ -1,0 +1,19 @@
+## Evidence and owner
+
+Pager app/subagent.rs::replay_inherited_updates调用Shell公开stream_session_history_at。storage/mod.rs::with_prepared_history目前以新独立JsonlStorageAdapter打开id，调用open_session_by_id而非shared_read；下游validated_timeline→history.into_prepare均只读。open_regular_child_directory由cap open_dir_nofollow构造普通namespace pin，错误包装原样对应用户提示。已存在open_session_by_id_shared_read逐层contained观察句柄，保持同一summary/身份/duplicate/full Timeline验证且不填writer cache；load_timeline_by_id_at已使用它。
+
+Windows发布句柄可能仍有DELETE。Microsoft CreateFileW dwShareMode明确：新句柄若不share delete，而旧句柄已持delete，打开返回ERROR_SHARING_VIOLATION(32)，不要求是其他进程。官方文档通过context7查阅：https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew。现有主规范Independent Windows session loads coexist with live writers及2026-09-11归档已采用同一模型；当前是遗漏的调用入口，不需要新共享框架或错误重试。
+
+## Decision and invariants
+
+仅把with_prepared_history的id解析改为既有open_session_by_id_shared_read。其消费者load_prepared_updates_for_replay、for_each_session_history_at、stream_session_history_at都是历史观察；不得赋writer权限或触发restore/recovery。普通mutating id caller和ContainedDirectory pin策略保持，不能全局加FILE_SHARE_DELETE、删no-reparse/contained校验、吞PermissionDenied/Error32或用ambient路径重试。
+
+## Coder Task Spec
+
+单一owner修复：Shell storage/mod.rs只读history准备入口+该模块/jsonl/tests对应回归。如新增Windows-only exact test，现有.github/workflows/windows-session-storage.yml添加一条exact选择，保留其immutablecommit/现有suite，不执行外部dispatch/commit/push。其他文件不改；storage/jsonl/mod.rs正有compaction owner的两行pins，不触碰其写面。不得更改Pager错误文案假装修复。
+
+测试必须走公开stream_session_history_at/for_each_session_history_at/load_updates_for_replay_at至少实际child使用的stream，不只helper。Windows确定性保留真实DELETE-capable publishing handle且share READ|WRITE，旧普通pin应构成Error32负对照，修复后同一公开history入口返回正确有序canonical内容；损坏/非实体/reparse/重复ID保持failclosed，字节不改，无observer writer cache/恢复事实。可用现有session创建/journal夹具，禁止造新通用平台框架。portable公共入口+contained原边界复用existingtests。native Windows不可用时保留cfg(windows)测试与既有CI选择，并精确报告未运行；不能以mac或crosscheck当Windows运行通过。
+
+## Review Plan
+
+父亲自核对真实Pager→公开helper→contained observer链，独立luna审窄diff和测试。当前Cargo窗口由compaction01a1a962独占，候选先落盘报接口不启动Cargo；父随后统一相关Shell tests/CLI。主机macOS可用Rust1.93.1 Windows标准库targets但无Wine，跨编译是否可行以实际工具/依赖为准，不安装工具/触发共享CI来掩盖验证限制。source/range/显示归属不改变，文档链接主规范，同change记录证据并strict归档。

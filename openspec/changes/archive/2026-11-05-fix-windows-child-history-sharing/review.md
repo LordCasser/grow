@@ -1,0 +1,9 @@
+# Independent review
+
+magpie/gpt-6-luna只读审查冻结的3文件diff，静态通过，无生产阻塞。父亲自核对相同实际caller与diff，不把静态review当Windows运行。
+
+Pager replay_inherited_updates的真实stream_session_history_at调用进入Shell with_prepared_history。该owner只把resolver改为既有open_session_by_id_shared_read，其后summary实体id、validated_timeline、history.into_prepare与错误传播不变。Windows observer逐级使用contained handle-relative、OPEN_REPARSE_POINT/FollowSymlinks::No、reparse/dir验证；只有nonshared进入adapter writer cache。普通writer resolver和独占lease路径未变，无恢复/执行入口，也未全局放宽pin或吞sharing错误。
+
+Windows cfg回归保留READ|DELETE和shareREAD|WRITE的publishing目录句柄，普通OS pin raw32和普通id resolver失败作负对照，再经公开child stream/replay/materialized取得准确有序canonical文本；核对历史和summary字节、无旧updates、observer cache/lease为空。portable现有生产只读core加入真实stream及writer lease排他；invalid-source覆盖损坏、非regular、身份、重复id，Unix symlink在其平台拒绝。工作流仅新增一条exact Windows选择。
+
+该review不运行Cargo；Windows测试本机未执行/编译，不将mac或source检查报为native通过。Unix symlink回归不代表Windows reparse测试已执行，Windows保护的本轮依据是既有实现复用和静态检查。父另验收7项mac exact与当前合并CLI集成，平台限制单列verification。

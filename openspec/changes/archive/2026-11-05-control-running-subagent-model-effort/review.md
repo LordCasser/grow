@@ -1,0 +1,21 @@
+# Independent review
+
+## Candidate review: confirmed admission race
+
+magpie/gpt-6-luna审查tools/coordinator/Shell候选，确认严格target/source边界、动态直属资格、exact runtime传递、共享catalog顺序及ACK/application分离。早期Shell两处旧ToolInput variant与一个ToolOutput arm已由原owner适配，不能把中间缺编译状态算最终通过。
+
+一项独立可证伪缺口：Shell完成取消/生命周期检查后，AdmitToolSampling可在目标mailbox或step gate排队，child先自然结束进入Settling/Terminal；普通begin_sampling_intent只execution_open，不能排除已完成但writer仍open的child，原候选可能ACK queued。只读review未运行，其调用链由父亲自核对并确认；原Shell owner正在该feature的接纳owner修复。
+
+必须在两selection共用的最终sampling admission处，持step_control_gate与AdmissionState生命周期锁，在入slot/ACK之前对native ACK Some复用can_continue_regular_turn和真实RegularTurn所有权；用户ACP ACK None仍可idle选模型。锁外guard不替代这个边界。通过标准是Model/Effort在请求外部检查后排队、真实target先结束再处理时拒绝且零pending selection/model事实/queued，live目标对照通过。该修复和确定性测试尚无最终通过证据，feature未验收。
+
+## Actor-boundary re-review
+
+luna对冻结生产guard再次审查，确认native入slot前在同一step_control_gate与AdmissionState锁内复用regular Turn/can_continue_regular_turn；检查→admit_sampling→success ACK没有await或释放state。失败同时回admission/application Err；Model/Effort共用，ACP admitted=None不受此运行中限定，原idle选择保留。父亲自核对相同代码与predicate。
+
+两个mailbox-after-finish测试使用真实child/provider及生产enqueue_tool命令，无手置生命周期，能覆盖原actor TOCTOU。独立review仍指出目录锁等待回归的验证缺口：coordinator list_running FIFO+单yield只证明已转发，不能证明Shell owned_local完成第一次check并在catalog锁等待。父已要求原Shell owner增仅测试到达握手，收到前置check通过/将等已持锁后才释放child，真实settling后释放目录锁，最后post-lock拒绝。此为测试确定性补强，不推翻生产guard；实际运行与补强最终diff仍待父验证。
+
+## Final acceptance
+
+父亲自检查最终cfg(test)一次oneshot握手：首次check成功后、等待已持catalog锁前signal，测试收到signal且control仍pending才让真实child完成，最后释放catalog锁验证拒绝。两mailbox selection和目录锁场景均随正确Rust1.93.1的完整21provider/race矩阵通过；owner10子case、authored eligibility/exact permit及原ACP路径通过，详见verification。该补强只改测试观测，不改变production boundary。
+
+父接受tools和Shell实际交付及两个独立luna review，默认CLI check/build、新CLI三项runtime-control/resume和Goal隔离回归全部通过。特性与跨特性里程碑验收通过；正常旧会话的finalization_pending状态不因此改变。独立SessionEnd Hook发现登记backlog，未混入本change。

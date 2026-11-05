@@ -5,6 +5,7 @@ use super::*;
 #[cfg(test)]
 mod consultation_joint_tests;
 mod interaction;
+mod parent_planning;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
 }
@@ -19,6 +20,28 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
     type ValidateFuture = tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
         tools::implementations::grow_build::task::types::SubagentValidateTypeOutcome,
     >;
+    fn read_parent_plan(
+        &self,
+        request: tools::implementations::grow_build::task::parent_planning::ParentPlanningRequest,
+        parent_session_id: String,
+        task_id: String,
+        parent_step_id: Option<String>,
+    ) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let agent = self.agent_ref.get();
+        let source =
+            agent.control_session_handle(&acp::SessionId::new(request.source_session_id.as_str()));
+        let parent = agent.control_session_handle(&acp::SessionId::new(parent_session_id.as_str()));
+        tokio::task::spawn_local(parent_planning::run(
+            request,
+            source,
+            parent,
+            parent_session_id,
+            task_id,
+            parent_step_id,
+            deadline,
+        ));
+    }
     fn interact(
         &self,
         request: tools::implementations::grow_build::task::interaction::AgentInteractionRequest,
@@ -46,6 +69,16 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             };
             interaction::run(request, source, target, target_id, subagent_task_name).await;
         });
+    }
+    fn set_model(
+        &self,
+        request: tools::implementations::grow_build::set_subagent_model::SubagentModelControlRequest,
+        target: crate::session::SessionHandle,
+        target_cancellation: tokio_util::sync::CancellationToken,
+    ) {
+        self.agent_ref
+            .get()
+            .set_subagent_model(request, target, target_cancellation);
     }
     fn run(
         &self,

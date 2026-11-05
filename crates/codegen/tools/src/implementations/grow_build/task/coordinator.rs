@@ -25,6 +25,7 @@ use super::coordinator_state::{
     TaggedFuture, active_summary, background_at_deadline, background_if_caller_gone,
     completed_snapshot, sleep_until, workflow_outstanding,
 };
+use super::parent_planning::{ParentPlanningReadError, ParentPlanningRequest};
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentEvent,
     SubagentOutstandingReply, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
@@ -99,6 +100,7 @@ struct SuspendedChild<D> {
 
 struct RetiringChild<D> {
     request: SubagentRequest,
+    child_session_id: String,
     completion_data: D,
 }
 
@@ -440,6 +442,34 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         "No active direct parent-child route; task completion or cleanup was not confirmed",
                     ),
                 }
+            }
+            SubagentEvent::ReadParentPlanning(request) => self.read_parent_plan(request),
+            SubagentEvent::SetModel(request) => {
+                if request.respond_to.is_closed() {
+                    return;
+                }
+                if request.cancellation.is_cancelled() {
+                    let _ = request
+                        .respond_to
+                        .send(Err("Subagent model control cancelled".into()));
+                    return;
+                }
+                let Some(child) = self.active.get(&request.subagent_id).filter(|child| {
+                    child.immediate_parent_session_id == request.source_session_id
+                        && !child.request.owner.is_workflow()
+                        && child.execution_outcome.is_none()
+                        && !child.cancellation.is_cancelled()
+                }) else {
+                    let _ = request.respond_to.send(Err(
+                        "Model control requires an active directly owned non-Workflow subagent with open execution".into(),
+                    ));
+                    return;
+                };
+                self.runner.set_model(
+                    request,
+                    child.control.security_context(),
+                    child.cancellation.clone(),
+                );
             }
             SubagentEvent::Spawn(command) => {
                 let mut request = *command.request;
@@ -1344,6 +1374,66 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
     }
 
+    fn read_parent_plan(&self, request: ParentPlanningRequest) {
+        if request.respond_to.is_closed() {
+            return;
+        }
+        if request.cancellation.is_cancelled() {
+            let _ = request
+                .respond_to
+                .send(Err(ParentPlanningReadError::Unavailable));
+            return;
+        }
+        if let Some(child) = self
+            .active
+            .values()
+            .find(|child| child.child_session_id == request.source_session_id)
+        {
+            if child.execution_outcome.is_some() || child.cancellation.is_cancelled() {
+                let _ = request
+                    .respond_to
+                    .send(Err(ParentPlanningReadError::Unavailable));
+                return;
+            }
+            // Lifecycle ownership may name the root; only this immutable direct
+            // edge establishes which parent the caller can read.
+            self.runner.read_parent_plan(
+                request,
+                child.immediate_parent_session_id.clone(),
+                child.request.id.clone(),
+                child.request.parent_step_id.clone(),
+            );
+            return;
+        }
+        let source = &request.source_session_id;
+        let known_child = self
+            .pending
+            .values()
+            .any(|child| child.request.id == *source)
+            || self
+                .suspended
+                .values()
+                .any(|child| child.checkpoint.session_id == *source)
+            || self
+                .completed
+                .values()
+                .any(|child| child.child_session_id == *source)
+            || self
+                .retiring
+                .values()
+                .any(|child| child.child_session_id == *source)
+            || self
+                .finalizations
+                .values()
+                .any(|child| child.output.result.child_session_id == *source);
+        let error = if known_child {
+            ParentPlanningReadError::Unavailable
+        } else {
+            ParentPlanningReadError::NoParent
+        };
+        let _ = request.respond_to.send(Err(error));
+    }
+
     fn interaction_route(
         &self,
         request: &super::interaction::AgentInteractionRequest,
@@ -1685,6 +1775,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 id.to_owned(),
                 RetiringChild {
                     request: request.clone(),
+                    child_session_id: child_session_id.clone(),
                     completion_data: output.completion_data.clone(),
                 },
             );

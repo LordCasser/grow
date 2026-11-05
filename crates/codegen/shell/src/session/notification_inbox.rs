@@ -57,6 +57,13 @@ pub(crate) fn agent_message_receipt(
         else {
             continue;
         };
+        if matches!(
+            existing,
+            chat_state::NotificationSource::PlanGuidance { .. }
+        ) != matches!(source, chat_state::NotificationSource::PlanGuidance { .. })
+        {
+            continue;
+        }
         if existing
             .agent_message()
             .is_some_and(|(sender, id, _, _)| sender == source_id && id == operation)
@@ -97,6 +104,9 @@ pub(crate) fn parent_message_notice(
     else {
         return None;
     };
+    if matches!(source, chat_state::NotificationSource::PlanGuidance { .. }) {
+        return None;
+    }
     let (source_id, message_id, reply_to, interrupt) = source.agent_message()?;
     let details = AgentMessageNotice {
         source_session_id: source_id.to_owned(),
@@ -138,6 +148,9 @@ pub(crate) fn read_parent_message_notice(
     else {
         return None;
     };
+    if matches!(source, chat_state::NotificationSource::PlanGuidance { .. }) {
+        return None;
+    }
     source.agent_message()?;
     let body = match read_payload(session, payload_ref) {
         Ok(body) => Some(body),
@@ -318,6 +331,97 @@ pub(crate) fn remove_payload_hashes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message_receipt(
+        source: chat_state::NotificationSource,
+        body: &str,
+    ) -> chat_state::TimelineEvent {
+        let version = chat_state::NotificationSourceVersion::Ordinal {
+            value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        let id = chat_state::timeline::notification_id("child", &source, &version).unwrap();
+        chat_state::Timeline::default()
+            .record(chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Received {
+                    id,
+                    owner_session_id: "child".into(),
+                    source,
+                    source_version: version,
+                    payload_ref: chat_state::NotificationPayloadRef {
+                        blake3: blake3::hash(body.as_bytes()).to_hex().to_string(),
+                        bytes: body.len() as u64,
+                    },
+                },
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn planning_and_ordinary_receipts_have_separate_identity_domains() {
+        let ordinary = chat_state::NotificationSource::ParentMessage {
+            parent_session_id: "parent".into(),
+            message_id: "message".into(),
+            interrupt: true,
+        };
+        let typed = chat_state::NotificationSource::PlanGuidance {
+            parent_session_id: "parent".into(),
+            message_id: "message".into(),
+        };
+        for (first, second) in [(ordinary.clone(), typed.clone()), (typed, ordinary)] {
+            let first_receipt = message_receipt(first.clone(), "first body");
+            assert_eq!(
+                agent_message_receipt(&[first_receipt.clone()], "child", &second, "second body")
+                    .unwrap(),
+                None
+            );
+            let second_receipt = message_receipt(second.clone(), "second body");
+            let first_id =
+                agent_message_receipt(&[first_receipt.clone()], "child", &first, "first body")
+                    .unwrap()
+                    .unwrap();
+            let second_id =
+                agent_message_receipt(&[second_receipt.clone()], "child", &second, "second body")
+                    .unwrap()
+                    .unwrap();
+            assert_ne!(first_id, second_id);
+            let receipts = [first_receipt, second_receipt];
+            assert_eq!(
+                agent_message_receipt(&receipts, "child", &first, "first body").unwrap(),
+                Some(first_id)
+            );
+            assert_eq!(
+                agent_message_receipt(&receipts, "child", &second, "second body").unwrap(),
+                Some(second_id)
+            );
+            assert!(matches!(
+                agent_message_receipt(&receipts, "child", &second, "changed body"),
+                Err(AgentMessageDeliveryError::Rejected { code, .. }) if code == "message_conflict"
+            ));
+        }
+    }
+
+    #[test]
+    fn parent_and_reply_messages_keep_the_existing_conflict_rules() {
+        let parent = chat_state::NotificationSource::ParentMessage {
+            parent_session_id: "parent".into(),
+            message_id: "message".into(),
+            interrupt: false,
+        };
+        let reply = chat_state::NotificationSource::AgentReply {
+            source_session_id: "parent".into(),
+            message_id: "message".into(),
+            reply_to: sampling_types::AgentMessageRef {
+                source_session_id: "child".into(),
+                message_id: "question".into(),
+            },
+        };
+        for (first, second) in [(parent.clone(), reply.clone()), (reply, parent)] {
+            assert!(matches!(
+                agent_message_receipt(&[message_receipt(first, "body")], "child", &second, "body"),
+                Err(AgentMessageDeliveryError::Rejected { code, .. }) if code == "message_conflict"
+            ));
+        }
+    }
 
     #[test]
     fn payload_round_trip_is_content_addressed() {

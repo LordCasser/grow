@@ -4,6 +4,7 @@ mod auxiliary_load_tests;
 mod dependency_admission_tests;
 mod mcp_child_policy_reload_tests;
 mod plan_decision_status_tests;
+mod session_model_tests;
 mod project_rules_recovery_tests;
 mod restore_retry_tests;
 mod subagent_restore_authority_tests;

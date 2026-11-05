@@ -1,0 +1,17 @@
+# Design
+
+父亲读actor::run/handle_command、state、commands、handle两个collect方法。register覆盖map并取消旧token；JoinSet任务仅返回RequestId，正常按IDremove，JoinError仅日志；CancelOnDrop发按ID的Cancel。当前锁定Tokio1.53.1，官方JoinSet文档确认tracked期间task::Id唯一，join_next_with_id和JoinError::id可取得同实例身份，AbortHandle::id能在spawn登记。
+
+## Decision
+
+公开RequestId仍是调用方的逻辑查询/显式取消键，重用时新提交替换旧登记，旧任务协作取消并完成现usage/evidence settlement。内部ActiveRequest记录对应task::Id，JoinSet正常/异常完成只移除匹配task的active登记；迟到的旧task不删除或取消新task。TaskId的局部索引或按taskid匹配选择由coder选，避免同时维护无必要的第二map；panic不保证尚未形成的结算成功，必须保持已有明确Lifecycle/error/incomplete语义。
+
+每次提交的CancellationToken在Handle构造并随内部Submit传入actor，由actor/任务共享；collect guard Drop直接cancel本次token，不发送可误指替代项的公共Cancel(id)。普通submit/with_config同样创建token，public cancel(id)由actor取消当前登记。提交被处理前drop也已取消该token，不能开始provider工作；两collect入口/accounted均遵守。也可采用同等简单的内部exact-cancel方案，但不能新增public nonce/compat或仅在正常completion时disarm guard而漏掉future被drop。
+
+shutdown仍先关闭接纳、cancel全部current任务，再等JoinSet内所有任务settlement后结束；旧被替代task仍在JoinSet中不能abort/detach来省事。publicevent中的RequestId、attempt identity、deadline/retry、scope/evidence/usage owner保持，绝不因修map在panic路径捏造成功用量。
+
+## Coder Task Spec / Review Plan
+
+一个sampler模块功能：请求工作实例寿命归属。write scope sampler内部actor/state/commands/handle及同crate/tests，父OpenSpec/docs/backlog；无其他模块适配需求，若证据相反先回父。Tier3测试走真实SamplerHandle：A/B复用ID，确定性屏障让A在B登记之后结束，B仍active且cancel(id)确实终止B；old collect future Drop/正常return都不能取消B，unaccounted/accounted两入口覆盖，未替代drop仍取消自己的工作；panic只清自己的登记、actor继续服务，normal/cancel/shutdown结算各一次。所有tests有界握手，不靠sleep推断顺序；可利用既有MockInferenceServer和scope/settlement callback，不手改actor内部map伪造公共链。
+
+父分配串行Cargo，先冻结源码并报scope/hash/静态check，再正确Rust/Cargo/rustdoc1.93.1、MINSTACK16MiB、独立/tmpGROW_HOME运行定向。独立luna审TaskId和Drop token边界、父读实际日志，在后续CLI里程碑验证无session cancel/retry回归。无需为本局部模块每轮重跑全部CLI/历史tag。

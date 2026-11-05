@@ -293,7 +293,8 @@ Timeline restoration SHALL validate all events and expose only a fully validated
 - **THEN** 来源保持 Unknown，不把 end_turn 推断为 provider 返回。
 
 ### Requirement: Independent Windows session loads coexist with live writers
-Independent Windows session loads SHALL use contained observation handles that coexist with the live writer's publication capability. Observation handles SHALL preserve identity and no-reparse validation and SHALL NOT enter the adapter's writer capability cache. Sideband crash reconciliation SHALL remain exclusive to an admitted replacement writer.
+
+Independent Windows session loads, including child history streams and replay preparation, SHALL use contained observation handles that coexist with the live writer's publication capability. Observation handles SHALL preserve identity and no-reparse validation and SHALL NOT enter the adapter's writer capability cache. Sideband crash reconciliation SHALL remain exclusive to an admitted replacement writer. Reading history SHALL NOT restore execution, acquire writer ownership or mutate canonical history.
 
 #### Scenario: Observe active sideband then replace its writer
 - **WHEN** an independent adapter loads a session with a running Sideband and current projections while its writer is alive
@@ -302,6 +303,14 @@ Independent Windows session loads SHALL use contained observation handles that c
 #### Scenario: Loaded entity retains its authority
 - **WHEN** a session load includes Workflow state or an adapter already has a pinned writer capability
 - **THEN** dependent reads reuse the validated entity and do not reopen it through an incompatible or redirected ambient path.
+
+#### Scenario: Child history is opened while publication capability remains live
+- **WHEN** a Windows child view prepares or streams its persisted history while the exact session entity has a retained DELETE-capable publication handle
+- **THEN** public history/replay reads use existing contained shared observation, validate and emit the same ordered canonical history without a sharing violation or history mutation, and do not gain writer or execution authority.
+
+#### Scenario: History source is invalid
+- **WHEN** a history read resolves a reparse point, inconsistent identity, duplicate canonical id or corrupt committed history
+- **THEN** it retains existing failure semantics rather than bypassing containment or returning partial success to avoid a sharing error.
 
 ### Requirement: Windows session storage preserves long-path publication and scan exclusions
 Windows contained storage SHALL publish immutable artifacts and session entities under valid paths exceeding MAX_PATH while retaining source identity and no-replace semantics. A regular file encountered where a session or cwd directory is expected SHALL be excluded as an invalid entity; operational I/O failures SHALL still fail the scan.
@@ -497,12 +506,12 @@ Sideband parent validation SHALL accept a historical Surface coordinate exactly 
 
 ### Requirement: Canonical cancelled subagent lifecycles are resumable
 
-A cancelled subagent SHALL be a valid durable resume source when its parent Timeline contains matching Spawned and Ended facts, its child identity and seed match that spawn, and the terminal result reference resolves to an exactly matching validated child SubagentResult. Resume eligibility SHALL be based on this canonical linkage and the existing security/workspace checks, not on requiring a successful or completed outcome. Resuming SHALL preserve the source agent, model route, reasoning effort, context and worktree semantics and SHALL NOT relabel the cancelled source as successful.
+A cancelled subagent SHALL be a valid durable resume source when its parent Timeline contains matching Spawned and Ended facts, its child identity and seed match that spawn, and the terminal result reference resolves to an exactly matching validated child SubagentResult. Resume eligibility SHALL be based on this canonical linkage and the existing security/workspace checks, not on requiring a successful or completed outcome. Resuming SHALL preserve the source agent, context and worktree semantics and SHALL NOT relabel the cancelled source as successful. Model route and reasoning effort SHALL retain the source's actual selection unless independently overridden by explicit ordinary resume parameters under the current model-selection constraints. The derived Spawn and child route baseline SHALL record the final effective selection while the source lifecycle remains immutable. Original-identity checkpoint restoration SHALL retain its existing route constraints.
 
 #### Scenario: Goal stop cancels a child using another model
 
 - **WHEN** a root Goal stop cancels a child whose model route differs from the root, and Spawned, Ended(cancelled), SubagentSeed and SubagentResult(cancelled) form a valid canonical link
-- **THEN** a later explicit resume accepts that child as its source and pins the original child route instead of rejecting it because its outcome is cancelled or silently replacing it with a fresh spawn.
+- **THEN** a later explicit resume accepts that child as its source and, without a model override, pins the original child route instead of rejecting it because its outcome is cancelled or silently replacing it with a fresh spawn.
 
 #### Scenario: Cancelled result has an exact canonical link
 
@@ -513,6 +522,11 @@ A cancelled subagent SHALL be a valid durable resume source when its parent Time
 
 - **WHEN** the source lacks a spawn or terminal, the child identity/seed does not match, the result reference is missing or invalid, or either Timeline fails validation
 - **THEN** resume fails closed without starting a child, provider request or worktree mutation and without treating the source as a valid canonical lifecycle.
+
+#### Scenario: Override records only the derived selection
+
+- **WHEN** a valid ordinary resume supplies an admitted model or effort override
+- **THEN** the derived Spawn and child baseline record the final choice, its context retains source facts, and the cancelled source Spawn/result/outcome remain unchanged.
 
 ### Requirement: Subagent resume rejection preserves its cause
 
@@ -535,7 +549,7 @@ Durable subagent resume resolution SHALL preserve a typed cause for parent or ch
 
 ### Requirement: Subagent resume admission is fail-closed and retry-safe
 
-Subagent resume SHALL reject a source while its original runtime remains live, even if terminal facts are already visible. After durable source validation, agent/model/transport/effort, workspace, context and derived-child admission failures SHALL stop only the requested resume epoch, preserve the immutable source lifecycle and return the failing stage. No valid resume request SHALL silently become a fresh child. A later retry SHALL revalidate the source and current environment.
+Subagent resume SHALL reject a source while its original runtime remains live, even if terminal facts are already visible. After durable source validation, agent/model/transport/effort, workspace, context and derived-child admission failures SHALL stop only the requested resume epoch, preserve the immutable source lifecycle and return the failing stage. Explicit ordinary resume overrides SHALL be validated against their final selected model and current authority; omitted selections SHALL retain the source constraints. No valid resume request SHALL silently become a fresh child. A later retry SHALL revalidate the source and current environment.
 
 #### Scenario: Durable terminal is visible while the source remains live
 
@@ -545,11 +559,11 @@ Subagent resume SHALL reject a source while its original runtime remains live, e
 #### Scenario: Historical non-worktree cwd is missing
 
 - **WHEN** a validated non-worktree source names a cwd that no longer exists and the current parent workspace is valid
-- **THEN** resume uses the current parent workspace and preserves the source transcript and route; an existing non-directory, unverifiable path or canonical path outside the parent workspace remains rejected.
+- **THEN** resume uses the current parent workspace and preserves the source transcript and selected route; an existing non-directory, unverifiable path or canonical path outside the parent workspace remains rejected.
 
 #### Scenario: Source route or context is incompatible
 
-- **WHEN** the source agent type, model, reasoning effort or transport is unavailable, its transcript cannot be validated or fit safely, or required prompt artifacts cannot be loaded
+- **WHEN** the source agent type, retained model/effort/transport or explicit replacement is unavailable or invalid, its transcript cannot be validated or fit safely, or required prompt artifacts cannot be loaded
 - **THEN** resume identifies the incompatible stage, starts no fresh replacement and does not change the source lifecycle or guess a substitute route, effort, context or artifact.
 
 #### Scenario: Current child System head cannot be rendered
@@ -581,6 +595,8 @@ Subagent resume SHALL reject a source while its original runtime remains live, e
 
 - **WHEN** child control publication, Goal snapshot mailbox delivery, QueuePrompt delivery or the durable prompt persistence acknowledgment fails
 - **THEN** the derived epoch reports the exact launch stage, admits no further provider work, settles any prompt that may already have started before committing its child result, and leaves the original resume source unchanged.
+
+证据与验证入口：`crates/codegen/shell/src/agent/subagent/{mod.rs,handle_request.rs,resolution.rs}`、既有 canonical resume 与 checkpoint restore 测试。
 
 ### Requirement: Agent opinion consumption preserves source and exact context
 
@@ -1967,3 +1983,86 @@ When the build enables panic unwinding, the subagent coordinator SHALL isolate a
 #### Scenario: Build uses panic abort
 - **WHEN** the selected build profile uses panic=abort
 - **THEN** the existing process-abort policy remains authoritative; this observation boundary does not promise recovery from an abort.
+
+### Requirement: Post-load child recovery only settles historical Workflow executions
+
+A child reconciliation pass that runs after a Session actor starts SHALL NOT perform whole-session interrupted-work recovery on that actor. Its Workflow settlement authority SHALL be limited to the exact `(run_id, execution_epoch)` pairs captured from the validated cold-load Timeline before actor startup. The Timeline owner SHALL settle a requested execution only while that same epoch is still open, has no open subagent, and is not preserved by a runtime checkpoint. It SHALL leave the current Turn, Step, requests, tools, hooks, input reservations, skill loads and unrelated Workflow epochs unchanged. A resident reconnect SHALL grant no cold Workflow settlement authority. Settlement SHALL retain the existing durable acknowledgement boundary, interruption status and Workflow completion handoff semantics.
+
+#### Scenario: A pending notification starts a turn during cold load
+
+- **WHEN** the new actor starts a notification-drain Turn before post-load child reconciliation finishes
+- **THEN** reconciliation leaves that Turn open, and the exact pending receipt can be durably consumed by its original Turn without an intervening recovery terminal
+
+#### Scenario: A historical Workflow waits for its child
+
+- **WHEN** a captured historical Workflow epoch still has an open subagent
+- **THEN** Workflow settlement leaves it open until the child terminal has been confirmed through the existing canonical reconciliation path
+
+#### Scenario: Historical child settlement completes while new work runs
+
+- **WHEN** the last child of a captured historical Workflow epoch reaches a confirmed terminal while a new actor Turn or unrelated Workflow is active
+- **THEN** settlement ends only that captured Workflow epoch as Interrupted with its completion handoff, preserving the new actor work
+
+#### Scenario: A Workflow identity has advanced or already ended
+
+- **WHEN** a requested Workflow is absent, already ended or closed, or its execution epoch differs from the captured epoch
+- **THEN** settlement creates no terminal for that target and does not replace it with the current execution
+
+#### Scenario: Repeated or checkpoint-owned recovery
+
+- **WHEN** settlement is repeated, or the runtime checkpoint preserves the requested execution
+- **THEN** it creates no duplicate terminal and does not consume checkpoint-owned execution rights
+
+#### Scenario: A batch fails after one terminal was acknowledged
+
+- **WHEN** an earlier target has been durably settled and a later target fails to persist
+- **THEN** the acknowledged terminal remains canonical, the batch reports the failure without accepting an unconfirmed later terminal, and replaying the same targets from the durable prefix does not duplicate the settled execution
+
+#### Scenario: A resident viewer reconnects
+
+- **WHEN** an already resident Session is loaded for another view
+- **THEN** child projection reconciliation does not acquire cold Workflow settlement authority or end resident work
+
+### Requirement: Worktree deletion confines linked registration cleanup to its owner
+
+Deleting a checkout SHALL NOT authorize recursive deletion of an arbitrary gitfile target. Fast worktree cleanup SHALL remove an external Git registration only after verifying its linked-registration location under the matching common Git directory and its backlink to that exact checkout. Unverified separate metadata and unrelated targets SHALL remain unchanged. Symbolic checkout pointers SHALL NOT grant deletion authority over their targets. Failure to complete a verified registration cleanup SHALL remain observable and SHALL NOT be reported as complete successful removal.
+
+#### Scenario: Remove a linked worktree
+- **WHEN** the public removal API receives a checkout with a valid linked registration and matching common-dir/backlink
+- **THEN** it removes the checkout and its registration while retaining the common repository and sibling registrations.
+
+#### Scenario: Gitfile names separate or unrelated metadata
+- **WHEN** a checkout's editable gitfile points at separate Git metadata or an unrelated directory lacking matching linked-registration ownership
+- **THEN** removal does not recursively delete that target; only the explicitly requested checkout can be removed.
+
+#### Scenario: Relative registration references
+- **WHEN** gitdir, commondir or the registration backlink uses a legal relative path
+- **THEN** identity validation resolves each reference relative to its owning directory and applies the same deletion boundary.
+
+#### Scenario: Registration cleanup cannot complete
+- **WHEN** a verified registration cannot be removed after the checkout has been removed
+- **THEN** the API reports incomplete removal and retains recoverable metadata rather than recording full success.
+
+#### Scenario: Follow-up stale cleanup preserves rejected registration
+- **WHEN** public checkout removal or linked rehydration is followed by path- or prefix-scoped stale cleanup and the candidate registration has a foreign commondir or otherwise unverified linked ownership
+- **THEN** every cleanup entry applies the same registration ownership proof and preserves that candidate; a best-effort result cannot grant deletion authority withheld by the removal verifier.
+
+#### Scenario: Retry a tracked linked cleanup after checkout removal
+- **WHEN** a prior partial removal has left a tracked linked-worktree record while the checkout is missing
+- **THEN** retry revalidates only that checkout's registration from the record's source repository and completes or confirms its absence before unregistering; unreadable or unverifiable recovery evidence remains an observable incomplete result.
+
+### Requirement: Runtime planning context remains a request-only projection
+
+The ChatState request builder SHALL accept host-owned runtime context separately from persistent retrieved memory. It SHALL include runtime context in the effective provider request, source projection and request-pressure accounting without appending a Messages event, Surface item or synthetic user-history row. Each request SHALL use only its current supplied planning context. Existing memory-reminder persistence, causal tool pairing and native continuation boundaries SHALL remain valid.
+
+#### Scenario: Build with runtime planning context
+- **WHEN** a request is assembled with runtime planning context
+- **THEN** the provider request contains it and its input budget accounts for it, while Timeline messages, Surface identities and user-facing history remain unchanged by that context.
+
+#### Scenario: Refresh or omit runtime context
+- **WHEN** the next request supplies different runtime context or omits it
+- **THEN** only that request's context is projected and no previous runtime-context item leaks from persistent memory.
+
+#### Scenario: Actual retrieved memory accompanies runtime planning
+- **WHEN** a request includes both a new retrieved-memory reminder and runtime planning context
+- **THEN** memory follows its existing durable exactly-once behavior and planning stays request-only, with both included in complete input accounting.

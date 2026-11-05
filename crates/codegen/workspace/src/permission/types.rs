@@ -419,10 +419,12 @@ impl AccessKind {
                 input: input.clone(),
             },
             ToolInput::TodoWrite(_)
+            | ToolInput::TodoRead(_)
             | ToolInput::KillTask(_)
             | ToolInput::Task(_)
             | ToolInput::SearchTool(_)
             | ToolInput::PlanControl(_)
+            | ToolInput::SetSubagentModel(_)
             | ToolInput::AskUserQuestion(_)
             | ToolInput::SchedulerCreate(_)
             | ToolInput::SchedulerDelete(_)
@@ -642,6 +644,22 @@ mod tests {
         assert!(!json.contains("wait_ms"));
         assert!(!json.contains("queue_depth"));
     }
+    #[test]
+    fn todo_read_maps_to_named_internal_control_without_file_authority() {
+        use tool_types::planning::{PlanReadInput, PlanReadTarget};
+        for target in [PlanReadTarget::SelfPlan, PlanReadTarget::Parent] {
+            let input = tools::types::ToolInput::TodoRead(PlanReadInput {
+                target,
+                ..Default::default()
+            });
+            let access = AccessKind::from_tool_call("renamed_plan_reader", &input);
+            assert!(matches!(
+                access,
+                AccessKind::InternalControl { ref name } if name == "renamed_plan_reader"
+            ));
+        }
+    }
+
     #[test]
     fn hashline_edit_maps_to_edit_access() {
         use tools::implementations::grow_build_hashline::edit::types::HashlineEditInput;

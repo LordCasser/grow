@@ -23,6 +23,7 @@ pub mod plan_control;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
+pub mod set_subagent_model;
 pub(crate) mod storage;
 pub mod subagent;
 pub mod task;
@@ -56,7 +57,7 @@ pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
 pub use task::TaskTool;
 pub use task_output::GetCommandOutputTool;
-pub use todo::TodoWriteTool;
+pub use todo::{TODO_READ_TOOL_NAME, TodoReadTool, TodoWriteTool};
 pub use update_goal::{
     CREATE_GOAL_TOOL_NAME, CreateGoalInput, CreateGoalTool, GET_GOAL_TOOL_NAME, GetGoalInput,
     GetGoalTool, UPDATE_GOAL_TOOL_NAME, UpdateGoalTool,

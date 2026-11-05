@@ -85,6 +85,11 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         entry::<grow_build::MonitorTool>(ToolKind::Monitor, ToolAccess::All),
         // ── Grow planning / meta ───────────────────────────────────────────
         entry::<grow_build::TodoWriteTool>(ToolKind::Plan, ToolAccess::None),
+        entry::<grow_build::TodoReadTool>(ToolKind::PlanRead, ToolAccess::None),
+        entry::<grow_build::set_subagent_model::SetSubagentModelTool>(
+            ToolKind::Other,
+            ToolAccess::None,
+        ),
         entry::<grow_build::LoadSkillTool>(ToolKind::Skill, ToolAccess::Read),
         entry::<grow_build::PlanControlTool>(ToolKind::PlanControl, ToolAccess::None),
         entry::<grow_build::AskUserQuestionTool>(ToolKind::AskUser, ToolAccess::None),

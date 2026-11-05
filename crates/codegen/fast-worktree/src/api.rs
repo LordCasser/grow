@@ -554,6 +554,11 @@ pub struct RemoveReport {
 /// Using `rm -rf` + deregistration is ~10x faster because the kernel handles
 /// bulk deletion more efficiently, and we avoid git's per-file validation.
 ///
+/// An ordinary checkout symlink is unlinked without following its Git metadata.
+/// External Git metadata is removed only for a verified linked registration.
+/// Registration cleanup errors are returned even if the checkout was already
+/// removed; metadata-tracked linked removals can retry through their saved source.
+///
 /// This is a **blocking** operation. Callers should use `spawn_blocking`
 /// when calling from async contexts.
 pub fn remove_worktree(worktree_path: &std::path::Path) -> Result<RemoveReport> {
@@ -630,13 +635,8 @@ fn remove_worktree_from_disk(
         "removing worktree via rm -rf + deregister"
     );
 
-    // Read the worktree's .git file to find the registration dir BEFORE deleting.
-    // Linked worktrees have `.git` as a file containing `gitdir: /path/to/.git/worktrees/<name>`.
-    let registration_dir = read_worktree_gitdir(worktree_path);
-
-    // symlink_metadata, not `exists()` (which follows the link): a worktree
-    // exposed as a symlink — including a now-dangling one — must be unlinked, not
-    // skipped. (On Linux, symlinks are normally handled earlier in try_btrfs_remove.)
+    // Inspect the checkout itself before reading any pointer through it. A
+    // normal symlink authorizes unlinking only the link, never its target's .git.
     match std::fs::symlink_metadata(worktree_path) {
         Ok(md) if md.file_type().is_symlink() => {
             std::fs::remove_file(worktree_path).context(format!(
@@ -645,24 +645,30 @@ fn remove_worktree_from_disk(
             ))?;
         }
         Ok(_) => {
+            let registration_dir =
+                crate::git::worktree::verified_worktree_registration(worktree_path)?;
             std::fs::remove_dir_all(worktree_path).context(format!(
                 "failed to remove worktree directory: {}",
                 worktree_path.display()
             ))?;
+            if let Some(registration) = registration_dir {
+                std::fs::remove_dir_all(&registration).with_context(|| {
+                    format!(
+                        "worktree checkout was removed but registration removal is incomplete: {}",
+                        registration.display()
+                    )
+                })?;
+            }
         }
-        Err(_) => {} // nothing at the path
-    }
-
-    // Deregister: remove the `.git/worktrees/<name>/` directory.
-    // This is what `git worktree remove` does after deleting the working tree.
-    if let Some(reg_dir) = registration_dir
-        && reg_dir.exists()
-    {
-        tracing::debug!(
-            registration_dir = %reg_dir.display(),
-            "removing worktree registration from .git/worktrees/"
-        );
-        let _ = std::fs::remove_dir_all(&reg_dir);
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(feature = "metadata")]
+            retry_missing_worktree_registration(worktree_path)?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect worktree: {}", worktree_path.display())
+            });
+        }
     }
 
     Ok(RemoveReport {
@@ -826,28 +832,31 @@ fn try_overlay_remove(
     Ok(None)
 }
 
-/// Read the `gitdir:` pointer from a linked worktree's `.git` file.
-///
-/// Linked worktrees have `.git` as a plain file containing:
-/// ```text
-/// gitdir: /path/to/main-repo/.git/worktrees/<name>
-/// ```
-///
-/// Returns the resolved path to the registration directory, or `None`
-/// if the worktree doesn't have a `.git` file (standalone repo or missing).
-fn read_worktree_gitdir(worktree_path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let git_file = worktree_path.join(".git");
-    let content = std::fs::read_to_string(&git_file).ok()?;
-    let gitdir = content.trim().strip_prefix("gitdir: ")?;
-    let path = std::path::Path::new(gitdir);
-    // Resolve relative paths against the worktree directory
-    let resolved = if path.is_relative() {
-        worktree_path.join(path)
-    } else {
-        path.to_path_buf()
+/// A failed registration removal can leave a tracked path without a checkout.
+/// Recover only through the saved source, and keep the record on any uncertainty.
+#[cfg(feature = "metadata")]
+fn retry_missing_worktree_registration(worktree_path: &Path) -> Result<()> {
+    use anyhow::Context;
+
+    let path = crate::git::worktree::normalized_worktree_path(worktree_path)?;
+    let db = crate::db::WorktreeDb::open_default()
+        .context("read metadata for incomplete worktree removal")?;
+    let records = db
+        .list(&crate::db::ListFilter {
+            include_dead: true,
+            ..Default::default()
+        })
+        .context("find retained worktree removal record")?;
+    let Some(record) = records.into_iter().find(|record| record.path == path) else {
+        return Ok(());
     };
-    // Canonicalize to clean up any `..` components
-    dunce::canonicalize(&resolved).ok().or(Some(resolved))
+    match record.creation_mode.as_str() {
+        "linked" | "git" => {
+            crate::git::worktree::remove_missing_worktree_registration(&record.source_repo, &path)
+        }
+        "standalone" => Ok(()),
+        _ => anyhow::bail!("cannot establish registration ownership for retained worktree record"),
+    }
 }
 
 /// Delete `snapshot_path`, falling back to the delegate's `delete_snapshot`
@@ -906,12 +915,8 @@ fn try_btrfs_remove(
     if worktree_path.is_symlink() {
         let link_target = match std::fs::read_link(worktree_path) {
             Ok(t) => t,
-            // Broken/unreadable symlink: unlink it so it isn't left dangling
-            // (the `rm -rf` fallback follows the dead link and would miss it).
-            Err(_) => {
-                let _ = std::fs::remove_file(worktree_path);
-                return Ok(None);
-            }
+            // Let the ordinary unlink path report any removal error.
+            Err(_) => return Ok(None),
         };
 
         let resolved = if link_target.is_relative() {
@@ -973,8 +978,9 @@ fn try_btrfs_remove(
             }));
         }
 
-        // Symlink to non-btrfs target — remove symlink, fall through.
-        let _ = std::fs::remove_file(worktree_path);
+        // A non-btrfs symlink belongs to the ordinary unlink path, which
+        // propagates errors and never inspects the target's Git metadata.
+        return Ok(None);
     }
 
     // Case 2 & 3: Check if the worktree path is a btrfs subvolume.
@@ -1424,8 +1430,8 @@ pub(crate) fn register_worktree(
 #[cfg(feature = "metadata")]
 fn unregister_worktree(worktree_path: &std::path::Path) {
     if let Ok(db) = crate::db::WorktreeDb::open_default() {
-        let path =
-            dunce::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
+        let path = crate::git::worktree::normalized_worktree_path(worktree_path)
+            .unwrap_or_else(|_| worktree_path.to_path_buf());
         let _ = db.unregister_by_path(&path);
     }
 }
@@ -2212,6 +2218,964 @@ pub mod gc {
 }
 
 #[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    struct Fixture {
+        temp: tempfile::TempDir,
+        repo: PathBuf,
+        #[cfg(feature = "metadata")]
+        grow_home: crate::db::GrowHomeFixture,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            #[cfg(unix)]
+            let temp = tempfile::Builder::new()
+                .prefix("fast-worktree-remove-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            #[cfg(not(unix))]
+            let temp = tempfile::TempDir::new().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            std::fs::write(temp.path().join("empty-config"), "").unwrap();
+            std::fs::create_dir(temp.path().join("empty-hooks")).unwrap();
+            let fixture = Self {
+                temp,
+                repo,
+                #[cfg(feature = "metadata")]
+                grow_home: crate::db::GrowHomeFixture::new(),
+            };
+            fixture.git(&fixture.repo, &["init", "--template="]);
+            std::fs::write(fixture.repo.join("tracked.txt"), "main must survive\n").unwrap();
+            fixture.git(&fixture.repo, &["add", "tracked.txt"]);
+            fixture.git(&fixture.repo, &["commit", "-m", "initial"]);
+            fixture
+        }
+
+        fn git(&self, cwd: &Path, args: &[&str]) -> std::process::Output {
+            let mut command = std::process::Command::new("git");
+            command.env_clear();
+            for key in ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            let output = command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", self.temp.path().join("empty-config"))
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args([
+                    "-c",
+                    "user.name=Worktree Test",
+                    "-c",
+                    "user.email=worktree@example.test",
+                ])
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .arg("-c")
+                .arg(format!(
+                    "core.hooksPath={}",
+                    self.temp.path().join("empty-hooks").display()
+                ))
+                .args(args)
+                .current_dir(cwd)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("run isolated Git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        }
+
+        fn checkout(&self, name: &str) -> PathBuf {
+            self.temp.path().join(name)
+        }
+
+        fn registration(&self, name: &str) -> PathBuf {
+            self.repo.join(".git/worktrees").join(name)
+        }
+
+        fn linked(&self, name: &str) -> PathBuf {
+            let checkout = self.checkout(name);
+            self.git(
+                &self.repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    checkout.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            #[cfg(feature = "metadata")]
+            {
+                let head = self.git(&self.repo, &["rev-parse", "HEAD"]);
+                register_worktree(
+                    &checkout,
+                    &self.repo,
+                    crate::db::WorktreeKind::Manual,
+                    "linked",
+                    "HEAD",
+                    String::from_utf8_lossy(&head.stdout).trim(),
+                    None,
+                    Some(name.to_owned()),
+                    None,
+                );
+                self.assert_tracked(name, true);
+            }
+            checkout
+        }
+
+        #[cfg(feature = "metadata")]
+        fn assert_tracked(&self, name: &str, expected: bool) {
+            let db = crate::db::WorktreeDb::open(&self.grow_home.home).unwrap();
+            assert_eq!(
+                db.get_by_id(name).unwrap().is_some(),
+                expected,
+                "tracking record for {name}"
+            );
+        }
+
+        fn assert_main_and_sibling(&self, name: &str) {
+            assert_eq!(
+                std::fs::read(self.repo.join("tracked.txt")).unwrap(),
+                b"main must survive\n"
+            );
+            assert_eq!(
+                std::fs::read(self.checkout(name).join("tracked.txt")).unwrap(),
+                b"main must survive\n"
+            );
+            assert!(self.registration(name).join("gitdir").is_file());
+            self.git(&self.repo, &["rev-parse", "--verify", "HEAD"]);
+        }
+    }
+
+    #[test]
+    fn remove_linked_preserves_common_repository_and_sibling() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        fixture.linked("sibling");
+        // Git normally writes a relative commondir; absolute refs obey the same ownership rule.
+        std::fs::write(
+            fixture.registration("target").join("commondir"),
+            fixture.repo.join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert!(!fixture.registration("target").exists());
+        fixture.assert_main_and_sibling("sibling");
+        #[cfg(feature = "metadata")]
+        fixture.assert_tracked("target", false);
+    }
+
+    #[test]
+    fn remove_separate_git_directory_preserves_metadata() {
+        let fixture = Fixture::new();
+        let checkout = fixture.checkout("separate");
+        let metadata = fixture.checkout("separate-metadata");
+        fixture.git(
+            fixture.temp.path(),
+            &[
+                "init",
+                "--template=",
+                "--separate-git-dir",
+                metadata.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(metadata.join("must-survive"), "separate Git data").unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert_eq!(
+            std::fs::read(metadata.join("must-survive")).unwrap(),
+            b"separate Git data"
+        );
+        assert!(metadata.join("HEAD").is_file());
+    }
+
+    #[test]
+    fn remove_forged_gitfile_preserves_unrelated_directory() {
+        let fixture = Fixture::new();
+        let checkout = fixture.checkout("forged");
+        let unrelated = fixture.checkout("unrelated");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("must-survive"), "unrelated data").unwrap();
+        std::fs::write(
+            checkout.join(".git"),
+            format!("gitdir: {}\n", unrelated.display()),
+        )
+        .unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert_eq!(
+            std::fs::read(unrelated.join("must-survive")).unwrap(),
+            b"unrelated data"
+        );
+    }
+
+    #[test]
+    fn remove_rejects_registration_shape_without_valid_common_git_directory() {
+        let fixture = Fixture::new();
+        let checkout = fixture.checkout("forged");
+        let common = fixture.checkout("not-a-repository");
+        let registration = common.join("worktrees/forged");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::create_dir_all(&registration).unwrap();
+        std::fs::write(
+            checkout.join(".git"),
+            format!("gitdir: {}\n", registration.display()),
+        )
+        .unwrap();
+        std::fs::write(registration.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            registration.join("gitdir"),
+            format!("{}\n", checkout.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(registration.join("must-survive"), "forged registration").unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert_eq!(
+            std::fs::read(registration.join("must-survive")).unwrap(),
+            b"forged registration"
+        );
+    }
+
+    #[test]
+    fn remove_resolves_relative_gitdir_commondir_and_backlink() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("relative");
+        fixture.linked("sibling");
+        let registration = fixture.registration("relative");
+        std::fs::write(
+            checkout.join(".git"),
+            "gitdir: ../repo/.git/worktrees/relative\n",
+        )
+        .unwrap();
+        std::fs::write(registration.join("commondir"), "../..\n").unwrap();
+        std::fs::write(registration.join("gitdir"), "../../../../relative/.git\n").unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert!(!registration.exists());
+        fixture.assert_main_and_sibling("sibling");
+    }
+
+    #[test]
+    fn remove_mismatched_backlink_preserves_registration() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        let sibling = fixture.linked("sibling");
+        let registration = fixture.registration("target");
+        std::fs::write(
+            registration.join("gitdir"),
+            format!("{}\n", sibling.join(".git").display()),
+        )
+        .unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert!(registration.join("gitdir").is_file());
+        fixture.assert_main_and_sibling("sibling");
+    }
+
+    #[test]
+    fn remove_mismatched_commondir_preserves_registration() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        let registration = fixture.registration("target");
+        let other = fixture.checkout("other");
+        std::fs::create_dir(&other).unwrap();
+        fixture.git(&other, &["init", "--template="]);
+        std::fs::write(
+            registration.join("commondir"),
+            other.join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert!(registration.join("gitdir").is_file());
+        assert!(other.join(".git/HEAD").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_checkout_symlink_preserves_target_and_its_registration() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        let alias = fixture.checkout("alias");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+
+        remove_worktree(&alias).unwrap();
+
+        assert!(alias.symlink_metadata().is_err());
+        assert!(checkout.join(".git").is_file());
+        assert!(fixture.registration("target").join("gitdir").is_file());
+        #[cfg(feature = "metadata")]
+        fixture.assert_tracked("target", true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_registration_symlink_preserves_external_target() {
+        let fixture = Fixture::new();
+        let checkout = fixture.checkout("forged");
+        let external = fixture.checkout("external");
+        let alias = fixture.repo.join(".git/worktrees/alias");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        std::fs::write(
+            checkout.join(".git"),
+            format!("gitdir: {}\n", alias.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            external.join("commondir"),
+            fixture.repo.join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            external.join("gitdir"),
+            checkout.join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(external.join("must-survive"), "external data").unwrap();
+        std::os::unix::fs::symlink(&external, &alias).unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!checkout.exists());
+        assert!(alias.is_symlink());
+        assert_eq!(
+            std::fs::read(external.join("must-survive")).unwrap(),
+            b"external data"
+        );
+    }
+
+    #[test]
+    fn remove_unreadable_registration_identity_preserves_checkout() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        let backlink = fixture.registration("target").join("gitdir");
+        std::fs::remove_file(&backlink).unwrap();
+        std::fs::create_dir(&backlink).unwrap();
+
+        let error = remove_worktree(&checkout).unwrap_err();
+
+        assert!(format!("{error:#}").contains("read registration gitdir backlink"));
+        assert!(checkout.join(".git").is_file());
+        assert!(backlink.is_dir());
+        #[cfg(feature = "metadata")]
+        fixture.assert_tracked("target", true);
+    }
+
+    #[test]
+    fn remove_inspection_failure_is_not_success() {
+        let fixture = Fixture::new();
+        let file = fixture.checkout("not-a-directory");
+        std::fs::write(&file, "must survive").unwrap();
+
+        assert!(remove_worktree(&file.join("child")).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"must survive");
+    }
+
+    #[cfg(unix)]
+    struct ReadonlyDirectory {
+        path: PathBuf,
+        permissions: std::fs::Permissions,
+    }
+
+    #[cfg(unix)]
+    impl ReadonlyDirectory {
+        fn new(path: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(path).unwrap().permissions();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+            Self {
+                path: path.to_path_buf(),
+                permissions,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReadonlyDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.path, self.permissions.clone());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_checkout_failure_preserves_registration() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("permission-denial fixture requires a non-root user");
+            return;
+        }
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        let readonly = ReadonlyDirectory::new(&checkout);
+
+        let result = remove_worktree(&checkout);
+
+        drop(readonly);
+        assert!(result.is_err());
+        assert!(checkout.join(".git").is_file());
+        assert!(fixture.registration("target").join("gitdir").is_file());
+        #[cfg(feature = "metadata")]
+        fixture.assert_tracked("target", true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_symlink_unlink_failure_is_not_success() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("permission-denial fixture requires a non-root user");
+            return;
+        }
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        let parent = fixture.checkout("links");
+        std::fs::create_dir(&parent).unwrap();
+        let alias = parent.join("alias");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+        let readonly = ReadonlyDirectory::new(&parent);
+
+        let result = remove_worktree(&alias);
+
+        drop(readonly);
+        assert!(result.is_err());
+        assert!(alias.is_symlink());
+        assert!(checkout.join(".git").is_file());
+        assert!(fixture.registration("target").join("gitdir").is_file());
+    }
+
+    #[cfg(all(unix, feature = "metadata"))]
+    #[test]
+    fn remove_registration_failure_and_missing_checkout_retry_keep_tracking_until_complete() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("permission-denial fixture requires a non-root user");
+            return;
+        }
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        fixture.linked("sibling");
+        let registration = fixture.registration("target");
+        let readonly = ReadonlyDirectory::new(&registration);
+
+        let error = remove_worktree(&checkout).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("registration removal is incomplete")
+        );
+        assert!(!checkout.exists());
+        assert!(registration.join("gitdir").is_file());
+        fixture.assert_tracked("target", true);
+        assert!(
+            remove_worktree(&checkout).is_err(),
+            "retry must not accept a still-failing cleanup"
+        );
+        fixture.assert_tracked("target", true);
+        fixture.assert_main_and_sibling("sibling");
+        drop(readonly);
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!registration.exists());
+        fixture.assert_tracked("target", false);
+        fixture.assert_main_and_sibling("sibling");
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn remove_missing_checkout_with_unavailable_source_keeps_tracking() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        std::fs::remove_dir_all(&checkout).unwrap();
+        let moved = fixture.checkout("moved-repo");
+        std::fs::rename(&fixture.repo, &moved).unwrap();
+
+        let result = remove_worktree(&checkout);
+
+        assert!(result.is_err());
+        fixture.assert_tracked("target", true);
+        assert!(moved.join(".git/worktrees/target/gitdir").is_file());
+        std::fs::rename(&moved, &fixture.repo).unwrap();
+        remove_worktree(&checkout).unwrap();
+        assert!(!fixture.registration("target").exists());
+        fixture.assert_tracked("target", false);
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn remove_missing_checkout_with_mismatched_identity_keeps_tracking() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        fixture.linked("sibling");
+        let commondir = fixture.registration("target").join("commondir");
+        std::fs::remove_dir_all(&checkout).unwrap();
+        std::fs::write(&commondir, "../../..\n").unwrap();
+
+        assert!(remove_worktree(&checkout).is_err());
+        fixture.assert_tracked("target", true);
+        assert!(fixture.registration("target").join("gitdir").is_file());
+        fixture.assert_main_and_sibling("sibling");
+        std::fs::write(&commondir, "../..\n").unwrap();
+        remove_worktree(&checkout).unwrap();
+        fixture.assert_tracked("target", false);
+        fixture.assert_main_and_sibling("sibling");
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn remove_missing_checkout_uses_linked_source_common_directory() {
+        let fixture = Fixture::new();
+        let source = fixture.linked("source");
+        let checkout = fixture.linked("target");
+        std::fs::write(
+            source.join(".git"),
+            "gitdir: ../repo/.git/worktrees/source\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.registration("target").join("gitdir"),
+            "../../../../target/.git\n",
+        )
+        .unwrap();
+        let db = crate::db::WorktreeDb::open(&fixture.grow_home.home).unwrap();
+        let mut record = db.get_by_id("target").unwrap().unwrap();
+        record.source_repo = source.clone();
+        db.register(&record).unwrap();
+        std::fs::remove_dir_all(&checkout).unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        assert!(!fixture.registration("target").exists());
+        fixture.assert_tracked("target", false);
+        fixture.assert_main_and_sibling("source");
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn remove_missing_checkout_confirms_absent_registration_before_untracking() {
+        let fixture = Fixture::new();
+        let checkout = fixture.linked("target");
+        fixture.linked("sibling");
+        std::fs::remove_dir_all(&checkout).unwrap();
+        std::fs::remove_dir_all(fixture.registration("target")).unwrap();
+
+        remove_worktree(&checkout).unwrap();
+
+        fixture.assert_tracked("target", false);
+        fixture.assert_main_and_sibling("sibling");
+        // Once there is no retained record, missing-path retries need no source scan.
+        let moved = fixture.checkout("moved-repo");
+        std::fs::rename(&fixture.repo, &moved).unwrap();
+        remove_worktree(&checkout).unwrap();
+    }
+
+    mod stale_cleanup_tests {
+        use super::*;
+
+        fn foreign_commondir(fixture: &Fixture, registration: &Path) -> PathBuf {
+            let other = fixture.checkout("other-repository");
+            std::fs::create_dir(&other).unwrap();
+            fixture.git(&other, &["init", "--template="]);
+            std::fs::write(
+                registration.join("commondir"),
+                other.join(".git").to_str().unwrap(),
+            )
+            .unwrap();
+            other
+        }
+
+        fn assert_stale_keeps(fixture: &Fixture, checkout: &Path) {
+            assert_eq!(
+                crate::remove_stale_worktree_registration(&fixture.repo, checkout),
+                0
+            );
+            assert_eq!(
+                crate::remove_stale_worktree_registrations_under(
+                    &fixture.repo,
+                    fixture.temp.path()
+                ),
+                0
+            );
+        }
+
+        fn remove_then_stale_keeps_foreign_commondir(under_prefix: bool) {
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("target");
+            fixture.linked("sibling");
+            let registration = fixture.registration("target");
+            let other = foreign_commondir(&fixture, &registration);
+            std::fs::write(registration.join("must-survive"), "rejected registration").unwrap();
+
+            crate::remove_worktree(&checkout).unwrap();
+            assert!(!checkout.exists());
+            assert!(registration.join("must-survive").is_file());
+            let removed = if under_prefix {
+                crate::remove_stale_worktree_registrations_under(&fixture.repo, fixture.temp.path())
+            } else {
+                crate::remove_stale_worktree_registration(&fixture.repo, &checkout)
+            };
+
+            assert_eq!(removed, 0);
+            assert_eq!(
+                std::fs::read(registration.join("must-survive")).unwrap(),
+                b"rejected registration"
+            );
+            assert!(other.join(".git/HEAD").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[test]
+        fn remove_then_stale_path_keeps_foreign_commondir() {
+            remove_then_stale_keeps_foreign_commondir(false);
+        }
+
+        #[test]
+        fn remove_then_stale_prefix_keeps_foreign_commondir() {
+            remove_then_stale_keeps_foreign_commondir(true);
+        }
+
+        #[test]
+        fn remove_then_stale_keeps_valid_cleanup_scoped() {
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("target");
+            fixture.linked("sibling");
+            let outside = fixture.linked("outside");
+            std::fs::remove_dir_all(&outside).unwrap();
+
+            crate::remove_worktree(&checkout).unwrap();
+            assert_eq!(
+                crate::remove_stale_worktree_registration(&fixture.repo, &checkout),
+                0
+            );
+            assert_eq!(
+                crate::remove_stale_worktree_registrations_under(&fixture.repo, &checkout),
+                0
+            );
+
+            assert!(!checkout.exists());
+            assert!(!fixture.registration("target").exists());
+            assert!(fixture.registration("outside").join("gitdir").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[test]
+        fn remove_then_stale_resolves_relative_source_and_registration_references() {
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("relative");
+            let source = fixture.linked("sibling");
+            let registration = fixture.registration("relative");
+            std::fs::write(
+                source.join(".git"),
+                "gitdir: ../repo/.git/worktrees/sibling\n",
+            )
+            .unwrap();
+            // Removing the requested checkout cannot remove the sibling's
+            // registration. Its own abandoned registration remains for stale cleanup.
+            std::fs::write(
+                checkout.join(".git"),
+                "gitdir: ../repo/.git/worktrees/sibling\n",
+            )
+            .unwrap();
+            std::fs::write(registration.join("commondir"), "../..\n").unwrap();
+            std::fs::write(registration.join("gitdir"), "../../../../relative/.git\n").unwrap();
+
+            crate::remove_worktree(&checkout).unwrap();
+            assert!(registration.is_dir());
+            assert_eq!(
+                crate::remove_stale_worktree_registration(&source, &checkout),
+                1
+            );
+            assert_eq!(
+                crate::remove_stale_worktree_registrations_under(&source, fixture.temp.path()),
+                0
+            );
+
+            assert!(!registration.exists());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn remove_then_stale_keeps_registration_symlink_and_target() {
+            let fixture = Fixture::new();
+            fixture.linked("sibling");
+            let checkout = fixture.checkout("target");
+            let external = fixture.checkout("external");
+            let alias = fixture.registration("target");
+            std::fs::create_dir(&checkout).unwrap();
+            std::fs::create_dir(&external).unwrap();
+            std::fs::write(
+                checkout.join(".git"),
+                format!("gitdir: {}\n", alias.display()),
+            )
+            .unwrap();
+            std::fs::write(
+                external.join("commondir"),
+                fixture.repo.join(".git").to_str().unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                external.join("gitdir"),
+                checkout.join(".git").to_str().unwrap(),
+            )
+            .unwrap();
+            std::fs::write(external.join("must-survive"), "external registration").unwrap();
+            std::os::unix::fs::symlink(&external, &alias).unwrap();
+
+            crate::remove_worktree(&checkout).unwrap();
+            assert_stale_keeps(&fixture, &checkout);
+
+            assert!(alias.is_symlink());
+            assert_eq!(
+                std::fs::read(external.join("must-survive")).unwrap(),
+                b"external registration"
+            );
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn remove_then_stale_keeps_aliased_worktrees_directory() {
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("target");
+            fixture.linked("sibling");
+            let worktrees = fixture.repo.join(".git/worktrees");
+            let external = fixture.checkout("external-registrations");
+            std::fs::rename(&worktrees, &external).unwrap();
+            std::os::unix::fs::symlink(&external, &worktrees).unwrap();
+            // The alias alone does not make the moved registrations direct
+            // children of this common directory, even with matching references.
+            std::fs::write(
+                external.join("target/commondir"),
+                fixture.repo.join(".git").to_str().unwrap(),
+            )
+            .unwrap();
+
+            crate::remove_worktree(&checkout).unwrap();
+            assert_stale_keeps(&fixture, &checkout);
+
+            assert!(worktrees.is_symlink());
+            assert!(external.join("target/gitdir").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[test]
+        fn stale_keeps_incomplete_or_unreadable_commondir() {
+            for invalid in ["missing", "empty", "directory"] {
+                let fixture = Fixture::new();
+                let checkout = fixture.linked("target");
+                fixture.linked("sibling");
+                let registration = fixture.registration("target");
+                let commondir = registration.join("commondir");
+                std::fs::remove_file(&commondir).unwrap();
+                match invalid {
+                    "empty" => std::fs::write(&commondir, "\n").unwrap(),
+                    "directory" => std::fs::create_dir(&commondir).unwrap(),
+                    _ => {}
+                }
+
+                let removal = crate::remove_worktree(&checkout);
+                if invalid == "empty" {
+                    removal.unwrap();
+                } else {
+                    assert!(removal.is_err());
+                    assert!(checkout.exists());
+                    // Stale callers can also encounter checkouts disposed of
+                    // outside the removal API; an I/O error is never ownership.
+                    std::fs::remove_dir_all(&checkout).unwrap();
+                }
+                assert_stale_keeps(&fixture, &checkout);
+
+                assert!(registration.join("gitdir").is_file(), "{invalid} commondir");
+                fixture.assert_main_and_sibling("sibling");
+            }
+        }
+
+        #[test]
+        fn remove_then_stale_keeps_backlink_that_does_not_name_gitfile() {
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("target");
+            fixture.linked("sibling");
+            let registration = fixture.registration("target");
+            std::fs::write(
+                registration.join("gitdir"),
+                checkout.join("other-file").to_str().unwrap(),
+            )
+            .unwrap();
+
+            crate::remove_worktree(&checkout).unwrap();
+            assert_stale_keeps(&fixture, &checkout);
+
+            assert!(registration.join("gitdir").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn stale_keeps_registration_when_commondir_read_is_denied() {
+            use std::os::unix::fs::PermissionsExt;
+
+            if unsafe { libc::geteuid() } == 0 {
+                eprintln!("permission-denial fixture requires a non-root user");
+                return;
+            }
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("target");
+            fixture.linked("sibling");
+            let registration = fixture.registration("target");
+            let commondir = registration.join("commondir");
+            let permissions = std::fs::metadata(&commondir).unwrap().permissions();
+            std::fs::set_permissions(&commondir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+            let removal = crate::remove_worktree(&checkout);
+            std::fs::remove_dir_all(&checkout).unwrap();
+            let path_removed = crate::remove_stale_worktree_registration(&fixture.repo, &checkout);
+            let prefix_removed = crate::remove_stale_worktree_registrations_under(
+                &fixture.repo,
+                fixture.temp.path(),
+            );
+            std::fs::set_permissions(&commondir, permissions).unwrap();
+
+            assert!(removal.is_err());
+            assert_eq!(path_removed, 0);
+            assert_eq!(prefix_removed, 0);
+            assert!(registration.join("gitdir").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn stale_keeps_registration_when_checkout_normalization_is_denied() {
+            use std::os::unix::fs::PermissionsExt;
+
+            if unsafe { libc::geteuid() } == 0 {
+                eprintln!("permission-denial fixture requires a non-root user");
+                return;
+            }
+            let fixture = Fixture::new();
+            let sibling = fixture.linked("sibling");
+            let parent = fixture.checkout("inaccessible");
+            std::fs::create_dir(&parent).unwrap();
+            let checkout = parent.join("target");
+            fixture.git(
+                &fixture.repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    checkout.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            std::fs::copy(sibling.join(".git"), checkout.join(".git")).unwrap();
+            crate::remove_worktree(&checkout).unwrap();
+            let permissions = std::fs::metadata(&parent).unwrap().permissions();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+            let path_removed = crate::remove_stale_worktree_registration(&fixture.repo, &checkout);
+            let prefix_removed = crate::remove_stale_worktree_registrations_under(
+                &fixture.repo,
+                fixture.temp.path(),
+            );
+            std::fs::set_permissions(&parent, permissions).unwrap();
+
+            assert_eq!(path_removed, 0);
+            assert_eq!(prefix_removed, 0);
+            assert!(fixture.registration("target").join("gitdir").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[test]
+        fn rehydrate_keeps_registration_rejected_by_removal() {
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("target");
+            fixture.linked("sibling");
+            let registration = fixture.registration("target");
+            let other = foreign_commondir(&fixture, &registration);
+            std::fs::write(registration.join("must-survive"), "rejected registration").unwrap();
+            let snapshot = crate::snapshot_worktree_to_ref(
+                &fixture.repo,
+                "refs/grow/snapshots/stale-registration",
+                "registration cleanup regression",
+            )
+            .unwrap();
+
+            let result =
+                crate::rehydrate_worktree_from_ref(&checkout, &fixture.repo, &snapshot, None);
+
+            assert!(
+                result.is_err(),
+                "rehydration must retain an unverified registration that still claims the destination"
+            );
+            assert!(!checkout.exists());
+            assert_eq!(
+                std::fs::read(registration.join("must-survive")).unwrap(),
+                b"rejected registration"
+            );
+            assert!(other.join(".git/HEAD").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+
+        #[test]
+        fn rehydrate_replaces_verified_stale_registration() {
+            let fixture = Fixture::new();
+            let checkout = fixture.linked("target");
+            fixture.linked("sibling");
+            let registration = fixture.registration("target");
+            let snapshot = crate::snapshot_worktree_to_ref(
+                &fixture.repo,
+                "refs/grow/snapshots/valid-stale-registration",
+                "valid registration cleanup",
+            )
+            .unwrap();
+            std::fs::write(registration.join("old-registration"), "must be removed").unwrap();
+            std::fs::remove_dir_all(&checkout).unwrap();
+
+            crate::rehydrate_worktree_from_ref(&checkout, &fixture.repo, &snapshot, None).unwrap();
+
+            assert_eq!(
+                std::fs::read(checkout.join("tracked.txt")).unwrap(),
+                b"main must survive\n"
+            );
+            assert!(!registration.join("old-registration").exists());
+            assert!(registration.join("gitdir").is_file());
+            fixture.assert_main_and_sibling("sibling");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2553,8 +3517,9 @@ mod tests {
         WorktreeBuilder::new(&repo, &wt).create().unwrap();
 
         // `.git` is a file pointing at `<repo>/.git/worktrees/<name>`.
-        let registration_dir =
-            read_worktree_gitdir(&wt).expect("linked worktree must have a gitdir pointer");
+        let registration_dir = crate::git::worktree::verified_worktree_registration(&wt)
+            .unwrap()
+            .expect("linked worktree must have a verified registration");
         assert!(
             registration_dir.exists(),
             "precondition: registration exists"

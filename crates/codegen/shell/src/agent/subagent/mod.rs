@@ -1639,6 +1639,17 @@ fn durable_resume_source_for(
         .validate_subagent_result_link(parent_session_id, spawn_seq, spawn, terminal)
         .map_err(|error| DurableResumeSourceError::ResultLink(error.to_string()))?;
     let mut data = resume_source_from_facts(spawn, terminal);
+    if let Some((model_id, effort, _, transport)) =
+        session::persistence::latest_model_selection(child.timeline.events())
+            .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?
+    {
+        // Spawn is the immutable birth selection. A completed source may have
+        // accepted model controls since then; resume retains its last durable
+        // route without changing any source facts.
+        data.model_id = model_id.0.to_string();
+        data.reasoning_effort = effort;
+        data.model_transport_key = transport;
+    }
     data.child_cwd = summary.info.cwd.clone();
     Ok(DurableResumeSource {
         data,
@@ -3818,11 +3829,6 @@ fn completion_command_route<'a>(
         })
 }
 
-/// Reconcile parent spawn facts that have no terminal. The backend is merely
-/// an observation source: recovery first commits a child result (when the child
-/// entity exists), then closes the parent spawn, and only then emits UI state.
-/// `cold_recovery` is true only for a newly claimed writer. A resident viewer
-/// reconnect must not close that writer's still-active turn.
 fn released_child_matches_restore(
     root: &chat_state::session_runtime::RuntimeLifecycle,
     child_session_id: &str,
@@ -3843,10 +3849,17 @@ fn released_child_matches_restore(
         })
 }
 
+/// Reconcile parent spawn facts that have no terminal. The backend is merely
+/// an observation source: recovery first commits a child result (when the child
+/// entity exists), then closes the parent spawn, and only then emits UI state.
+/// `cold_recovery` is true only for a newly claimed writer. Workflow settlement
+/// is limited to `historical_workflows` captured before actor startup; the live
+/// actor retains all local scope ownership. Resident reconnects pass no targets.
 pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     projections: &crate::session::storage::SubagentProjectionState,
     emit_replay_projections: bool,
     cold_recovery: bool,
+    historical_workflows: &[(String, u64)],
     backend: &tools::implementations::grow_build::task::backend::ChannelBackend,
     parent_session_id: &str,
     parent_chat_state: &chat_state::ChatStateHandle,
@@ -4038,10 +4051,14 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             ),
         }
     }
-    if cold_recovery && let Err(error) = parent_chat_state.recover_interrupted_durably().await {
+    if cold_recovery
+        && let Err(error) = parent_chat_state
+            .settle_interrupted_workflows_durably(historical_workflows.to_vec())
+            .await
+    {
         tracing::error!(
             %error,
-            "failed to close local recovery scopes after subagent reconciliation"
+            "failed to settle historical Workflows after subagent reconciliation"
         );
         return;
     }

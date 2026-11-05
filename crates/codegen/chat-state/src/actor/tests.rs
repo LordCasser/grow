@@ -3182,7 +3182,7 @@ async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
 
     let projected = h
         .handle
-        .build_request_for_image_mode("test-timeline", vec![], None, None, None, true)
+        .build_request_for_image_mode("test-timeline", vec![], None, None, None, None, true)
         .await
         .unwrap();
     assert!(conversation_image_groups(&projected.items).is_empty());
@@ -5228,6 +5228,252 @@ async fn with_initial_conversation_preserves_items() {
 // ============================================================================
 // BuildConversationRequest tests
 // ============================================================================
+
+#[tokio::test]
+async fn build_request_runtime_context_is_fresh_and_request_only() {
+    let mut h = TestHarness::new();
+    seed_test_system(&h.handle, "system").await;
+    h.handle
+        .push_user_message_durably(ConversationItem::user("inspect the work"))
+        .await
+        .unwrap();
+    let baseline = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    let events = h.handle.timeline_events().await.unwrap();
+    h.drain_persistence();
+    let plain = h
+        .handle
+        .build_request("test-timeline", vec![], None, None, None)
+        .await
+        .unwrap();
+    let context = "Current local work: inspect the first objective";
+    let request = h
+        .handle
+        .build_request_for_image_mode(
+            "test-timeline",
+            vec![],
+            None,
+            Some(context.into()),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(request.items.len(), baseline.surface.len() + 1);
+    assert!(matches!(
+        request.items.last(),
+        Some(ConversationItem::User(user))
+            if user.synthetic_reason == Some(sampling_types::SyntheticReason::SystemReminder)
+                && user.permission_evidence.is_none()
+                && user.prompt_index.is_none()
+    ));
+    assert_eq!(request.items.last().unwrap().text_content(), context);
+    let projection = request.source_projection.as_ref().unwrap();
+    assert_eq!(
+        projection["runtime_context"]["item_index"],
+        baseline.surface.len()
+    );
+    assert_eq!(
+        projection["surface_ids"],
+        serde_json::json!(baseline.surface_ids)
+    );
+    assert!(
+        projection["image_budget"]["before_bytes"].as_u64().unwrap()
+            > plain.source_projection.as_ref().unwrap()["image_budget"]["before_bytes"]
+                .as_u64()
+                .unwrap()
+    );
+    assert!(
+        crate::estimate_request_input_tokens(&request)
+            > crate::estimate_request_input_tokens(&plain)
+    );
+    assert_eq!(
+        h.handle.get_projected_tokens().await,
+        crate::estimate_request_input_tokens(&request)
+    );
+
+    for next_context in [
+        Some("Current local work: use the revised objective"),
+        Some(" \n "),
+        None,
+    ] {
+        let next = h
+            .handle
+            .build_request_for_image_mode(
+                "test-timeline",
+                vec![],
+                None,
+                next_context.map(str::to_owned),
+                None,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(!next.items.iter().any(|item| item.text_content() == context));
+        if let Some(context) = next_context.map(str::trim).filter(|text| !text.is_empty()) {
+            assert_eq!(next.items.len(), baseline.surface.len() + 1);
+            assert_eq!(next.items.last().unwrap().text_content(), context);
+        } else {
+            assert_eq!(
+                serde_json::to_value(&next.items).unwrap(),
+                serde_json::to_value(&baseline.surface).unwrap()
+            );
+            assert!(next.source_projection.as_ref().unwrap()["runtime_context"].is_null());
+            assert_eq!(
+                crate::estimate_request_input_tokens(&next),
+                crate::estimate_request_input_tokens(&plain)
+            );
+        }
+        assert_eq!(
+            h.handle.get_projected_tokens().await,
+            crate::estimate_request_input_tokens(&next)
+        );
+    }
+    let after = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    assert_eq!(after.surface_ids, baseline.surface_ids);
+    assert_eq!(after.surface_revision, baseline.surface_revision);
+    assert_eq!(
+        serde_json::to_value(&after.surface).unwrap(),
+        serde_json::to_value(&baseline.surface).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(h.handle.timeline_events().await.unwrap()).unwrap(),
+        serde_json::to_value(events).unwrap()
+    );
+    assert!(
+        h.drain_persistence().is_empty(),
+        "runtime context must not call persistence"
+    );
+}
+
+#[tokio::test]
+async fn build_request_runtime_context_keeps_actual_memory_durable_once() {
+    let mut h = TestHarness::new();
+    seed_test_system(&h.handle, "system").await;
+    h.handle
+        .push_user_message_durably(ConversationItem::user("inspect the work"))
+        .await
+        .unwrap();
+    let baseline = h.handle.timeline_events().await.unwrap();
+    h.drain_persistence();
+    let memory = "Retrieved memory: this project uses Rust";
+    for context in ["local plan revision one", "local plan revision two"] {
+        let request = h
+            .handle
+            .build_request_for_image_mode(
+                "test-timeline",
+                vec![],
+                Some(memory.into()),
+                Some(context.into()),
+                None,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(request.items.last().unwrap().text_content(), context);
+        assert_eq!(
+            request
+                .items
+                .iter()
+                .filter(|item| item.text_content() == memory)
+                .count(),
+            1
+        );
+        assert_eq!(
+            h.handle.get_projected_tokens().await,
+            crate::estimate_request_input_tokens(&request)
+        );
+    }
+    let events = h.handle.timeline_events().await.unwrap();
+    assert_eq!(events.len(), baseline.len() + 1);
+    let cold = crate::Timeline::from_events(events).unwrap();
+    assert_eq!(cold.surface().len(), 3);
+    assert_eq!(cold.surface().last().unwrap().text_content(), memory);
+    let persisted = h.drain_persistence();
+    let messages: Vec<_> = persisted.iter().filter_map(persisted_messages).collect();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].cause, crate::MessageCause::MemoryContext);
+    assert_eq!(messages[0].items.len(), 1);
+    assert_eq!(messages[0].items[0].text_content(), memory);
+    assert!(matches!(
+        &messages[0].items[0],
+        ConversationItem::User(user)
+            if user.synthetic_reason == Some(sampling_types::SyntheticReason::MemoryContext)
+    ));
+    let without_context = h
+        .handle
+        .build_request("test-timeline", vec![], Some(memory.into()), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&without_context.items).unwrap(),
+        serde_json::to_value(cold.surface()).unwrap()
+    );
+    assert!(h.drain_persistence().is_empty());
+}
+
+#[tokio::test]
+async fn build_request_runtime_context_pressure_survives_surface_refresh() {
+    let h = TestHarness::new();
+    h.handle
+        .push_user_message_durably(ConversationItem::user("inspect the work"))
+        .await
+        .unwrap();
+    let context = "Current local work requirements. ".repeat(128);
+    let request = h
+        .handle
+        .build_request_for_image_mode(
+            "test-timeline",
+            vec![],
+            None,
+            Some(context.clone()),
+            None,
+            Some(sampling_types::JsonOutputFormat::JsonObject),
+            false,
+        )
+        .await
+        .unwrap();
+    let before = crate::estimate_request_input_tokens(&request);
+    let appended = ConversationItem::user("new user guidance");
+    h.handle
+        .push_user_message_durably(appended.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        h.handle.get_projected_tokens().await,
+        before + crate::estimate_item_tokens(&appended)
+    );
+    let without_context = h
+        .handle
+        .build_request(
+            "test-timeline",
+            vec![],
+            None,
+            None,
+            Some(sampling_types::JsonOutputFormat::JsonObject),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        before + crate::estimate_item_tokens(&appended)
+            - crate::estimate_request_input_tokens(&without_context),
+        crate::estimate_item_tokens(&ConversationItem::system_reminder(context.trim()))
+    );
+    assert_eq!(
+        h.handle.get_projected_tokens().await,
+        crate::estimate_request_input_tokens(&without_context)
+    );
+}
 
 #[tokio::test]
 async fn build_request_includes_all_messages() {
@@ -8121,6 +8367,148 @@ fn wire_request_json(
 }
 
 #[tokio::test]
+async fn runtime_context_preserves_native_spans_goal_projection_and_tool_pairs() {
+    use sampling_types::{ApiBackend, GoalDirectiveTag, SyntheticReason, ToolCall};
+
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
+        let active = GoalDirectiveTag {
+            goal_id: "runtime-goal".into(),
+            definition_revision: 2,
+        };
+        let result = ConversationItem::tool_result_with_images(
+            "runtime-call",
+            "inspected image",
+            vec![sampling_types::ContentPart::Image {
+                url: "data:image/png;base64,aW1hZ2U=".into(),
+                description: None,
+            }],
+        );
+        let h = TestHarness::with_config(
+            vec![
+                ConversationItem::system("system"),
+                ConversationItem::goal_directive(
+                    "old objective",
+                    SyntheticReason::AutoContinue,
+                    GoalDirectiveTag {
+                        definition_revision: 1,
+                        ..active.clone()
+                    },
+                ),
+                ConversationItem::goal_directive(
+                    "current objective",
+                    SyntheticReason::AutoContinue,
+                    active.clone(),
+                ),
+                ConversationItem::user("inspect the image"),
+                ConversationItem::assistant_tool_calls(vec![ToolCall {
+                    id: "runtime-call".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.png"}"#.into(),
+                }]),
+                result,
+            ],
+            SamplingConfig {
+                api_backend: backend.clone(),
+                ..test_config()
+            },
+        );
+        h.handle
+            .build_request("runtime-native", vec![], None, Some(active.clone()), None)
+            .await
+            .unwrap();
+        h.handle
+            .push_response_durably(
+                vec![ConversationItem::assistant("answer")],
+                Some(native_fragment_for(&backend)),
+            )
+            .await
+            .unwrap();
+        h.handle
+            .push_user_message_durably(ConversationItem::user("continue the work"))
+            .await
+            .unwrap();
+        let stable = h
+            .handle
+            .build_request("runtime-native", vec![], None, Some(active.clone()), None)
+            .await
+            .unwrap();
+        assert!(stable.has_native_continuation());
+        let events = h.handle.timeline_events().await.unwrap();
+        for context in [
+            Some("runtime plan revision one"),
+            Some("runtime plan revision two"),
+            None,
+        ] {
+            let request = h
+                .handle
+                .build_request_for_image_mode(
+                    "runtime-native",
+                    vec![],
+                    None,
+                    context.map(str::to_owned),
+                    Some(active.clone()),
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+            assert!(
+                request.has_native_continuation(),
+                "{backend:?} must retain the live native lane"
+            );
+            for key in [
+                "native_spans",
+                "portable_prefix_len",
+                "continuation_epoch",
+                "surface_ids",
+            ] {
+                assert_eq!(
+                    request.source_projection.as_ref().unwrap()[key],
+                    stable.source_projection.as_ref().unwrap()[key],
+                    "{backend:?}: {key}"
+                );
+            }
+            assert_eq!(
+                request.items[1].text_content(),
+                sampling_types::SUPERSEDED_GOAL_DIRECTIVE
+            );
+            assert_eq!(request.items[2].text_content(), "current objective");
+            let wire = wire_request_json(&request, &backend).to_string();
+            assert_eq!(
+                wire.matches("native_secret").count(),
+                1,
+                "{backend:?}: {wire}"
+            );
+            assert_eq!(
+                wire.matches("runtime-call").count(),
+                2,
+                "{backend:?} must keep one call and one result: {wire}"
+            );
+            assert!(wire.contains("aW1hZ2U="));
+            if let Some(context) = context {
+                assert_eq!(wire.matches(context).count(), 1);
+            }
+            assert_eq!(
+                h.handle.get_projected_tokens().await,
+                crate::estimate_request_input_tokens(&request)
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(h.handle.timeline_events().await.unwrap()).unwrap(),
+            serde_json::to_value(events).unwrap()
+        );
+        assert_eq!(
+            h.handle.get_conversation().await[1].text_content(),
+            "old objective"
+        );
+    }
+}
+
+#[tokio::test]
 async fn response_without_native_keeps_tool_results_in_the_portable_prefix() {
     use sampling_types::{ApiBackend, ContentPart, ToolCall};
     for backend in [
@@ -9093,6 +9481,35 @@ async fn image_budget_selection_survives_append_until_next_high_water_mark() {
         repeated.source_projection.as_ref().unwrap()["image_budget"]["newly_evicted_parts"],
         serde_json::Value::Null
     );
+    let with_runtime = h
+        .handle
+        .build_request_for_image_mode(
+            "image-selection",
+            vec![],
+            None,
+            Some("Current local work: inspect the selected images".into()),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        with_runtime.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"],
+        repeated.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"]
+    );
+    assert_eq!(
+        with_runtime.source_projection.as_ref().unwrap()["surface_ids"],
+        repeated.source_projection.as_ref().unwrap()["surface_ids"]
+    );
+    assert_eq!(
+        with_runtime.source_projection.as_ref().unwrap()["continuation_epoch"],
+        repeated.source_projection.as_ref().unwrap()["continuation_epoch"]
+    );
+    assert_eq!(
+        h.handle.get_projected_tokens().await,
+        crate::estimate_request_input_tokens(&with_runtime)
+    );
 
     h.handle.push_user_message(image(4));
     let appended = h
@@ -9750,6 +10167,447 @@ async fn prune_tool_results_error_paths() {
         .await
         .expect_err("dead actor must be an error");
     assert!(matches!(err, crate::commands::PruneError::ActorUnavailable));
+}
+
+fn plan_guidance_test_source(message_id: &str) -> crate::NotificationSource {
+    crate::NotificationSource::PlanGuidance {
+        parent_session_id: "parent".into(),
+        message_id: message_id.into(),
+    }
+}
+
+fn plan_guidance_test_payload(body: &str) -> crate::NotificationPayloadRef {
+    crate::NotificationPayloadRef {
+        blake3: blake3::hash(body.as_bytes()).to_hex().to_string(),
+        bytes: body.len() as u64,
+    }
+}
+
+fn plan_guidance_test_input(receipt: &crate::TimelineEvent, body: &str) -> ConversationItem {
+    let crate::TimelineEventKind::Notification(crate::NotificationEvent::Received {
+        id,
+        owner_session_id,
+        source,
+        ..
+    }) = &receipt.kind
+    else {
+        panic!("expected a notification receipt")
+    };
+    let (sender, message_id, reply_to, _) = source.agent_message().unwrap();
+    ConversationItem::received_agent_message(sampling_types::AgentMessage {
+        receipt_id: id.clone(),
+        source_session_id: sender.into(),
+        target_session_id: owner_session_id.clone(),
+        message_id: message_id.into(),
+        reply_to: reply_to.cloned(),
+        message: body.into(),
+    })
+}
+
+async fn plan_guidance_test_start_turn(handle: &crate::ChatStateHandle, turn: crate::TurnId) {
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            id: turn,
+            prompt_id: format!("guidance-prompt-{}", turn.0),
+            input_ids: Vec::new(),
+            identity: crate::TurnIdentity {
+                origin: "notification_drain".into(),
+                ..test_turn_identity()
+            },
+            model_id: "test-model".into(),
+            input_message_count: handle.get_conversation_len().await,
+            prompt_index: handle.get_prompt_index().await,
+            prompt_text: "notification available".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+}
+
+async fn plan_guidance_test_end_turn(handle: &crate::ChatStateHandle, turn: crate::TurnId) {
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Ended {
+            id: turn,
+            outcome: "completed".into(),
+            duration_ms: 1,
+            tool_count: 0,
+            terminal: crate::TurnTerminal {
+                source: crate::TurnTerminalSource::Host,
+                stop_reason: "end_turn".into(),
+                completion_kind: "completed".into(),
+            },
+            cancellation_category: None,
+            details: None,
+        }))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn durable_agent_message_plan_guidance_exact_retry_preserves_distinct_ordinary_receipt() {
+    let mut h = TestHarness::new();
+    let source = plan_guidance_test_source("change-1");
+    let ordinary = crate::NotificationSource::ParentMessage {
+        parent_session_id: "parent".into(),
+        message_id: "change-1".into(),
+        interrupt: false,
+    };
+    let version = crate::NotificationSourceVersion::Ordinal {
+        value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let ordinary_receipt = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            ordinary.clone(),
+            version.clone(),
+            plan_guidance_test_payload("ordinary"),
+        )
+        .await
+        .unwrap();
+    let typed_receipt = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            source.clone(),
+            version.clone(),
+            plan_guidance_test_payload("wrap up."),
+        )
+        .await
+        .unwrap();
+    assert_ne!(typed_receipt.seq, ordinary_receipt.seq);
+    let ordinary_id = crate::notification_id("session-1", &ordinary, &version).unwrap();
+    let typed_id = crate::notification_id("session-1", &source, &version).unwrap();
+    assert_ne!(typed_id, ordinary_id);
+    h.drain_persistence();
+    for (retry_source, body, expected) in [
+        (ordinary.clone(), "ordinary", &ordinary_receipt),
+        (source.clone(), "wrap up.", &typed_receipt),
+    ] {
+        let retried = h
+            .handle
+            .receive_notification_durably(
+                "session-1".into(),
+                retry_source,
+                version.clone(),
+                plan_guidance_test_payload(body),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(retried).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+    for (owner, payload) in [
+        ("session-1", plan_guidance_test_payload("keep up.")),
+        (
+            "session-1",
+            crate::NotificationPayloadRef {
+                bytes: 9,
+                ..plan_guidance_test_payload("wrap up.")
+            },
+        ),
+        ("other-session", plan_guidance_test_payload("wrap up.")),
+    ] {
+        assert!(matches!(
+            h.handle
+                .receive_notification_durably(
+                    owner.into(),
+                    source.clone(),
+                    version.clone(),
+                    payload,
+                )
+                .await,
+            Err(crate::TimelineWriteError::Invalid(
+                crate::TimelineError::InvalidNotification
+            ))
+        ));
+    }
+    assert!(
+        h.drain_persistence().is_empty(),
+        "retries and conflicts cannot append receipts"
+    );
+    assert_eq!(h.handle.pending_notifications().await.unwrap().len(), 2);
+    assert_eq!(h.handle.parent_message_receipts().await.unwrap().len(), 2);
+    assert_eq!(
+        h.handle
+            .received_notification_id(ordinary, version.clone())
+            .await,
+        Some(Some(ordinary_id))
+    );
+    assert_eq!(
+        h.handle.received_notification_id(source, version).await,
+        Some(Some(typed_id))
+    );
+    assert!(h.handle.get_conversation().await.is_empty());
+}
+
+#[tokio::test]
+async fn durable_agent_message_plan_guidance_lost_or_failed_ack_retries_exactly_before_publication()
+{
+    for lost in [true, false] {
+        let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+        let source = plan_guidance_test_source("change-1");
+        let version = crate::NotificationSourceVersion::Ordinal {
+            value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        let receive = {
+            let handle = h.handle.clone();
+            let source = source.clone();
+            let version = version.clone();
+            tokio::spawn(async move {
+                handle
+                    .receive_notification_durably(
+                        "session-1".into(),
+                        source,
+                        version,
+                        plan_guidance_test_payload("wrap up."),
+                    )
+                    .await
+            })
+        };
+        let first_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
+        assert!(!receive.is_finished());
+        assert!(h.drain_events().is_empty());
+        let first_event = h
+            .drain_persistence()
+            .into_iter()
+            .find_map(|record| match record {
+                PersistenceRecord::Timeline(event) => Some(event),
+                PersistenceRecord::Flush => None,
+            })
+            .unwrap();
+        if lost {
+            drop(first_ack);
+        } else {
+            first_ack
+                .send(Err(std::io::Error::other("simulated disk failure")))
+                .unwrap();
+        }
+        let retry_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
+        let retry_event = h
+            .drain_persistence()
+            .into_iter()
+            .find_map(|record| match record {
+                PersistenceRecord::Timeline(event) => Some(event),
+                PersistenceRecord::Flush => None,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&retry_event).unwrap(),
+            serde_json::to_vec(&first_event).unwrap()
+        );
+        assert!(
+            !receive.is_finished(),
+            "an unconfirmed receipt must not return success"
+        );
+        assert!(h.drain_events().is_empty());
+        retry_ack.send(Ok(())).unwrap();
+        let received = receive.await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&received).unwrap(),
+            serde_json::to_value(&first_event).unwrap()
+        );
+        let duplicate = h
+            .handle
+            .receive_notification_durably(
+                "session-1".into(),
+                source,
+                version,
+                plan_guidance_test_payload("wrap up."),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(duplicate).unwrap(),
+            serde_json::to_value(received).unwrap()
+        );
+        assert!(h.drain_persistence().is_empty());
+        assert_eq!(h.handle.parent_message_receipts().await.unwrap().len(), 1);
+        assert_eq!(h.handle.pending_notifications().await.unwrap().len(), 1);
+        assert!(h.handle.get_conversation().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn durable_agent_message_plan_guidance_cold_retry_preserves_its_exact_consumer() {
+    let h = TestHarness::new();
+    let ordinary = crate::NotificationSource::ParentMessage {
+        parent_session_id: "parent".into(),
+        message_id: "change-1".into(),
+        interrupt: false,
+    };
+    let source = plan_guidance_test_source("change-1");
+    let version = crate::NotificationSourceVersion::Ordinal {
+        value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let ordinary_receipt = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            ordinary.clone(),
+            version.clone(),
+            plan_guidance_test_payload("ordinary"),
+        )
+        .await
+        .unwrap();
+    let ordinary_id = crate::notification_id("session-1", &ordinary, &version).unwrap();
+    let ordinary_turn = crate::TurnId(1901);
+    plan_guidance_test_start_turn(&h.handle, ordinary_turn).await;
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Notification(
+            crate::NotificationEvent::Consumed {
+                notification_ids: vec![ordinary_id],
+                turn: ordinary_turn,
+                input: Some(plan_guidance_test_input(&ordinary_receipt, "ordinary")),
+            },
+        ))
+        .await
+        .unwrap();
+    plan_guidance_test_end_turn(&h.handle, ordinary_turn).await;
+    let body = "收尾\tretain exact evidence.\r\n";
+    let typed_receipt = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            source.clone(),
+            version.clone(),
+            plan_guidance_test_payload(body),
+        )
+        .await
+        .unwrap();
+    let typed_id = crate::notification_id("session-1", &source, &version).unwrap();
+    let prefix = h.handle.timeline_events().await.unwrap();
+    drop(h);
+    let (cold, mut persistence_rx) = cold_actor_from_events(prefix.clone()).await;
+    assert_eq!(
+        cold.consumed_notification_turn(ordinary.clone(), version.clone())
+            .await,
+        Some(Some(ordinary_turn))
+    );
+    assert_eq!(
+        cold.consumed_notification_turn(source.clone(), version.clone())
+            .await,
+        Some(None)
+    );
+    assert_eq!(cold.pending_notifications().await.unwrap()[0].id, typed_id);
+    assert_eq!(
+        serde_json::to_value(cold.timeline_events().await.unwrap()).unwrap(),
+        serde_json::to_value(&prefix).unwrap()
+    );
+    let retried = cold
+        .receive_notification_durably(
+            "session-1".into(),
+            source.clone(),
+            version.clone(),
+            plan_guidance_test_payload(body),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&retried).unwrap(),
+        serde_json::to_value(&typed_receipt).unwrap()
+    );
+    assert!(
+        persistence_rx.drain().is_empty(),
+        "cold retry reuses the existing durable receipt"
+    );
+    let typed_turn = crate::TurnId(1902);
+    plan_guidance_test_start_turn(&cold, typed_turn).await;
+    let before_invalid = cold.timeline_events().await.unwrap();
+    let mut tampered = plan_guidance_test_input(&typed_receipt, body);
+    let ConversationItem::AgentMessage(batch) = &mut tampered else {
+        unreachable!()
+    };
+    batch.messages[0].target_session_id = "other-session".into();
+    for input in [
+        None,
+        Some(ConversationItem::notification_drain(body)),
+        Some(tampered),
+    ] {
+        assert!(matches!(
+            cold.record_timeline_event_durably(crate::TimelineEventKind::Notification(
+                crate::NotificationEvent::Consumed {
+                    notification_ids: vec![typed_id.clone()],
+                    turn: typed_turn,
+                    input,
+                }
+            ))
+            .await,
+            Err(crate::TimelineWriteError::Invalid(
+                crate::TimelineError::InvalidNotification
+            ))
+        ));
+        assert_eq!(
+            serde_json::to_value(cold.timeline_events().await.unwrap()).unwrap(),
+            serde_json::to_value(&before_invalid).unwrap()
+        );
+        assert_eq!(
+            cold.consumed_notification_turn(source.clone(), version.clone())
+                .await,
+            Some(None)
+        );
+    }
+    cold.record_timeline_event_durably(crate::TimelineEventKind::Notification(
+        crate::NotificationEvent::Consumed {
+            notification_ids: vec![typed_id],
+            turn: typed_turn,
+            input: Some(plan_guidance_test_input(&typed_receipt, body)),
+        },
+    ))
+    .await
+    .unwrap();
+    plan_guidance_test_end_turn(&cold, typed_turn).await;
+    let consumed = cold.timeline_events().await.unwrap();
+    drop(cold);
+    let (restored, mut restored_persistence) = cold_actor_from_events(consumed.clone()).await;
+    assert_eq!(
+        restored
+            .consumed_notification_turn(source.clone(), version.clone())
+            .await,
+        Some(Some(typed_turn))
+    );
+    assert_eq!(
+        restored
+            .consumed_notification_turn(ordinary, version.clone())
+            .await,
+        Some(Some(ordinary_turn))
+    );
+    assert!(restored.pending_notifications().await.unwrap().is_empty());
+    assert_eq!(restored.parent_message_receipts().await.unwrap().len(), 2);
+    assert_eq!(
+        restored
+            .retained_notification_payload_hashes()
+            .await
+            .unwrap(),
+        std::collections::BTreeSet::from([
+            plan_guidance_test_payload("ordinary").blake3,
+            plan_guidance_test_payload(body).blake3,
+        ])
+    );
+    let conversation = restored.get_conversation().await;
+    assert_eq!(conversation.len(), 2);
+    assert_eq!(conversation[1].text_content(), body);
+    let duplicate = restored
+        .receive_notification_durably(
+            "session-1".into(),
+            source,
+            version,
+            plan_guidance_test_payload(body),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(duplicate).unwrap(),
+        serde_json::to_value(typed_receipt).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(restored.timeline_events().await.unwrap()).unwrap(),
+        serde_json::to_value(consumed).unwrap()
+    );
+    assert!(restored_persistence.drain().is_empty());
 }
 
 #[tokio::test]
@@ -12282,6 +13140,158 @@ async fn unconsumed_model_skill_is_pinned_then_settled_once_without_branch_reviv
 }
 
 #[tokio::test]
+async fn materialization_pins_skill_until_canonical_response_not_raw_or_summary() {
+    let h = TestHarness::with_conversation(vec![ConversationItem::system("system")]);
+    let turn = crate::TurnId(958);
+    let call_id = "materialized-skill";
+    seed_admitted_load_skill_call(&h.handle, turn, call_id, r#"{"name":"review","args":""}"#).await;
+    let mut skill = user_skill_load(
+        "model:materialized-skill",
+        0,
+        call_id,
+        "review",
+        "complete guidance",
+    );
+    skill.source = sampling_types::SkillLoadSource::Model;
+    let revision = h.handle.get_surface_revision().await.unwrap();
+    assert_eq!(
+        h.handle
+            .publish_model_skill_conditionally(
+                ConversationItem::tool_result(
+                    call_id,
+                    sampling_types::skill_load_result_content(&skill)
+                ),
+                skill,
+                ConversationItem::tool_result(call_id, "not loaded"),
+                revision,
+                128_000,
+                2_048,
+            )
+            .await
+            .unwrap(),
+        crate::ConditionalToolResultOutcome::Accepted
+    );
+    let before = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    let skill_id = before.surface_ids[before
+        .surface
+        .iter()
+        .position(|item| matches!(item, ConversationItem::SkillLoad(_)))
+        .unwrap()];
+    assert_eq!(before.unconsumed_skill_load_ids, vec![skill_id]);
+
+    h.handle
+        .push_user_message_durably(marked_user("newer prompt", 1))
+        .await
+        .unwrap();
+    h.handle
+        .push_response_durably(
+            vec![ConversationItem::assistant("raw assistant text")],
+            None,
+        )
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Started {
+                id: "materialized-pin".into(),
+                mode: crate::CompactionMode::Foreground,
+                source_items: h.handle.get_conversation_len().await,
+                prompt_index: 1,
+            },
+        ))
+        .await
+        .unwrap();
+    record_compaction_summary(&h.handle, "materialized-pin").await;
+    let after_summary = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    assert_eq!(after_summary.unconsumed_skill_load_ids, vec![skill_id]);
+    assert_eq!(
+        &after_summary.surface_ids[..before.surface_ids.len()],
+        &before.surface_ids
+    );
+    let replayed = crate::Timeline::from_events(h.handle.timeline_events().await.unwrap()).unwrap();
+    assert_eq!(replayed.unconsumed_skill_load_ids(), vec![skill_id]);
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Failed {
+                id: "materialized-pin".into(),
+                duration_ms: 1,
+                error: "no replacement in this test".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let previous_step = crate::StepId { turn, index: 0 };
+    let consuming_step = crate::StepId { turn, index: 1 };
+    let request_id = "consume-materialized-skill";
+    let input_message_count = after_summary.surface.len();
+    for kind in [
+        crate::TimelineEventKind::Step(crate::StepEvent::Ended {
+            id: previous_step,
+            outcome: "completed".into(),
+            duration_ms: 1,
+        }),
+        crate::TimelineEventKind::Step(crate::StepEvent::Started { id: consuming_step }),
+        crate::TimelineEventKind::Request(crate::RequestEvent::Started {
+            id: request_id.into(),
+            turn,
+            step: consuming_step,
+            model_id: "test-model".into(),
+            input_message_count,
+            tool_count: 0,
+        }),
+        crate::TimelineEventKind::Request(crate::RequestEvent::Completed {
+            id: request_id.into(),
+            duration_ms: 1,
+            time_to_first_token_ms: None,
+            usage: crate::RequestUsage::default(),
+            response_message_count: 1,
+            attempt: 1,
+            provider_terminal: None,
+        }),
+    ] {
+        h.handle.record_timeline_event_durably(kind).await.unwrap();
+    }
+    h.handle
+        .push_response_durably_with_identity(
+            vec![ConversationItem::assistant("canonical skill consumer")],
+            crate::ResponseAdmissionIdentity {
+                request_id: request_id.into(),
+                attempt: 1,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let consumed = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    assert!(consumed.unconsumed_skill_load_ids.is_empty());
+    assert!(consumed.surface_ids.contains(&skill_id));
+    let eligible = crate::compaction_utils::plan_compaction_range(
+        &consumed.surface,
+        &consumed.surface_ids,
+        &consumed.unconsumed_skill_load_ids,
+        1,
+        1,
+    )
+    .expect("the consumed load returns to ordinary eligibility");
+    assert!(eligible.target.shadowed.contains(&skill_id));
+    let replayed = crate::Timeline::from_events(h.handle.timeline_events().await.unwrap()).unwrap();
+    assert!(replayed.unconsumed_skill_load_ids().is_empty());
+}
+
+#[tokio::test]
 async fn model_skill_batch_preserves_success_through_request_and_timeline_replay() {
     use sampling_types::{ApiBackend, SkillLoadSource, ToolCall};
     let h = TestHarness::new();
@@ -12506,6 +13516,9 @@ async fn chat_runtime_only_reasoning_recovery_is_acknowledged_once() {
         );
     }
 }
+
+#[path = "workflow_settlement_tests.rs"]
+mod workflow_settlement_tests;
 
 #[path = "context_pressure_tests.rs"]
 mod context_pressure;

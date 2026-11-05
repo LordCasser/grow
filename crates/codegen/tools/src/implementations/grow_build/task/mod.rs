@@ -18,6 +18,7 @@ pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
 pub mod interaction;
+pub mod parent_planning;
 pub use coordinator_state::{cap_completion_output, completion_summary};
 pub mod types;
 
@@ -146,6 +147,11 @@ impl tool_runtime::Tool for TaskTool {
         input: TaskToolInput,
     ) -> Result<ToolOutput, tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
+        if input.parent_step_id.trim().is_empty() {
+            return Err(tool_runtime::ToolError::invalid_arguments(
+                "parent_step_id must name a pending or in-progress TODO in the current local scope.",
+            ));
+        }
         let resources = shared_resources(&ctx)?;
         let tool_cancellation = ctx
             .get::<tool_runtime::Cancellation>()
@@ -300,19 +306,10 @@ impl tool_runtime::Tool for TaskTool {
             is_valid_resume_id(trimmed).then(|| trimmed.to_string())
         });
 
-        // Model overrides are soft-ignored on resume (source model is always pinned).
         let model = tool_types::sanitize_optional_arg(input.model);
-        let model = if resume_from.is_some() {
-            if let Some(ref ignored) = model {
-                tracing::debug!(
-                    model = %ignored,
-                    "ignoring model override because resume_from is set"
-                );
-            }
-            None
-        } else {
-            model
-        };
+        // Preserve explicit effort tokens, including "none", for the child
+        // runner's final model/effort validation. JSON null is omission.
+        let reasoning_effort = input.effort.map(Some);
 
         // Treat blank/empty/"null" cwd as absent (models sometimes emit these).
         // Also strip stray surrounding quote characters and expand `~`.
@@ -403,8 +400,7 @@ impl tool_runtime::Tool for TaskTool {
             .task_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-        let mut prompt = input.prompt.clone();
-        let planning_sender = if let Some(step_id) = input.parent_step_id.as_ref() {
+        let planning_sender = {
             use crate::implementations::grow_build::todo::runtime::{
                 PlanningCommand, PlanningRuntimeHandle,
             };
@@ -431,7 +427,7 @@ impl tool_runtime::Tool for TaskTool {
             sender
                 .send(PlanningCommand::Link {
                     prompt_id,
-                    step_id: step_id.clone(),
+                    step_id: input.parent_step_id.clone(),
                     task_id: id.clone(),
                     required: input.required_deliverable,
                     respond_to,
@@ -439,7 +435,7 @@ impl tool_runtime::Tool for TaskTool {
                 .map_err(|_| {
                     tool_runtime::ToolError::custom("planning_unavailable", "Planning owner closed")
                 })?;
-            let snapshot = response
+            response
                 .await
                 .map_err(|_| {
                     tool_runtime::ToolError::custom(
@@ -448,31 +444,7 @@ impl tool_runtime::Tool for TaskTool {
                     )
                 })?
                 .map_err(|error| tool_runtime::ToolError::custom("planning_rejected", error))?;
-            let step = snapshot
-                .steps
-                .iter()
-                .find(|step| step.id == *step_id)
-                .ok_or_else(|| {
-                    tool_runtime::ToolError::custom(
-                        "planning_rejected",
-                        "Committed delegation lost its parent step",
-                    )
-                })?;
-            let guidance = serde_json::json!({
-                "session_id": snapshot.session_id,
-                "scope_id": snapshot.scope_id,
-                "revision": snapshot.revision,
-                "step": step,
-            });
-            prompt.push_str(&format!("\n\nCurrent delegated parent step:\n{guidance}"));
-            Some(sender)
-        } else if input.required_deliverable {
-            return Err(tool_runtime::ToolError::custom(
-                "planning_rejected",
-                "A mandatory deliverable must name its local parent step",
-            ));
-        } else {
-            None
+            sender
         };
         let child_cancellation = tokio_util::sync::CancellationToken::new();
         let cancellation_forwarder = (!input.run_in_background)
@@ -491,11 +463,11 @@ impl tool_runtime::Tool for TaskTool {
             id: id.clone(),
 
             origin_tool_call_id: Some(ctx.call_id.to_string()),
-            prompt,
+            prompt: input.prompt,
             description: input.description.clone(),
             subagent_type: input.subagent_type.clone(),
             parent_session_id,
-            parent_step_id: input.parent_step_id.clone(),
+            parent_step_id: Some(input.parent_step_id.clone()),
             parent_prompt_id,
             resume_from,
             cwd,
@@ -503,7 +475,7 @@ impl tool_runtime::Tool for TaskTool {
                 model,
                 model_transport_key: None,
                 model_override_provenance: ModelOverrideProvenance::Tool,
-                reasoning_effort: None,
+                reasoning_effort,
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
                 completion_output_cap: None,
@@ -559,26 +531,18 @@ impl tool_runtime::Tool for TaskTool {
                         let reason = r
                             .error
                             .unwrap_or_else(|| "coordinator rejected task admission".into());
-                        match bg_planning_sender {
-                            Some(sender) => {
-                                if let Err(error) = record_undispatched_planning_link(
-                                    &sender,
-                                    bg_id.clone(),
-                                    reason,
-                                )
-                                .await
-                                {
-                                    tracing::error!(
-                                        subagent_id = %bg_id,
-                                        error,
-                                        "dispatch failure remains pending because Planning did not acknowledge it",
-                                    );
-                                }
-                            }
-                            None => tracing::warn!(
+                        if let Err(error) = record_undispatched_planning_link(
+                            &bg_planning_sender,
+                            bg_id.clone(),
+                            reason,
+                        )
+                        .await
+                        {
+                            tracing::error!(
                                 subagent_id = %bg_id,
-                                "coordinator rejected background task before dispatch",
-                            ),
+                                error,
+                                "dispatch failure remains pending because Planning did not acknowledge it",
+                            );
                         }
                     }
                     Ok(r) if !r.success => {
@@ -613,14 +577,13 @@ impl tool_runtime::Tool for TaskTool {
             forwarder.abort();
         }
         let result = result?;
-        if result.not_dispatched
-            && let Some(sender) = planning_sender
-        {
+        if result.not_dispatched {
             let reason = result
                 .error
                 .clone()
                 .unwrap_or_else(|| "coordinator rejected task admission".into());
-            if let Err(error) = record_undispatched_planning_link(&sender, id.clone(), reason).await
+            if let Err(error) =
+                record_undispatched_planning_link(&planning_sender, id.clone(), reason).await
             {
                 return Err(tool_runtime::ToolError::custom(
                     "planning_unconfirmed",
@@ -820,6 +783,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(MAX_SUBAGENT_DEPTH)); // at limit
         resources.insert(SessionIdResource("test-session".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
 
         let tool = TaskTool;
@@ -827,7 +791,7 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
@@ -838,6 +802,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -856,13 +821,14 @@ mod tests {
         resources.insert(SubagentDepthCounter(1));
         resources.insert(MaxSubagentDepth(2));
         resources.insert(SessionIdResource("child-session".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-nested".to_string()));
 
         let result = tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "nested ok".into(),
                 prompt: "should be allowed at max_depth=2".into(),
@@ -873,6 +839,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -893,13 +860,14 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(1)); // first-level subagent
         resources.insert(SessionIdResource("child-session".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
 
         let result = tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "nested spawn".into(),
                 prompt: "should be rejected".into(),
@@ -910,6 +878,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -932,7 +901,7 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
@@ -943,6 +912,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -963,6 +933,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
         resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
             "goal-123",
@@ -1013,7 +984,7 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "Find auth middleware".into(),
                 prompt: "Search for authentication middleware files".into(),
@@ -1024,6 +995,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -1068,7 +1040,7 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
@@ -1079,6 +1051,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -1096,6 +1069,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0)); // top-level session
         resources.insert(SessionIdResource("parent-session".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
 
         let tool = TaskTool;
@@ -1116,7 +1090,7 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
@@ -1127,6 +1101,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: Some("failed-task".into()),
             },
         )
@@ -1155,6 +1130,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
 
         let tool = TaskTool;
@@ -1170,7 +1146,7 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
@@ -1181,6 +1157,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -1260,8 +1237,10 @@ mod tests {
 
     #[tokio::test]
     async fn default_subagent_type_and_background() {
-        let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "test", "prompt": "do it"}"#).unwrap();
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"parent_step_id": "step-1", "description": "test", "prompt": "do it"}"#,
+        )
+        .unwrap();
         assert_eq!(input.subagent_type, "general-purpose");
         assert!(
             input.run_in_background,
@@ -1271,7 +1250,7 @@ mod tests {
 
     fn task_input(subagent_type: &str, background: bool) -> TaskToolInput {
         TaskToolInput {
-            parent_step_id: None,
+            parent_step_id: "step-1".into(),
             required_deliverable: false,
             description: "test".into(),
             prompt: "do it".into(),
@@ -1282,8 +1261,75 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            effort: None,
             task_id: None,
         }
+    }
+
+    fn linked_plan(
+        session_id: &str,
+        step_id: &str,
+        task_id: &str,
+        required: bool,
+    ) -> tool_types::LocalPlan {
+        let mut plan = tool_types::LocalPlan::new(session_id, "work:test");
+        plan.revision = 1;
+        plan.steps.push(tool_types::PlanStep {
+            id: step_id.into(),
+            content: "Delegate the test task".into(),
+            priority: tool_types::PlanPriority::Normal,
+            status: tool_types::PlanStepStatus::InProgress,
+            requirements: None,
+            removed: false,
+        });
+        plan.links.push(tool_types::PlanLink {
+            id: task_id.into(),
+            parent_step_id: step_id.into(),
+            child_session_id: task_id.into(),
+            terminal: false,
+            required,
+            pending_source_revision: None,
+            review_required_revision: 1,
+            result_id: None,
+            dispatch_failure: None,
+        });
+        plan
+    }
+
+    /// Provide the existing tools/owner ACK contract for unrelated Task tests.
+    /// Shell owner eligibility and durable admission are verified by its own tests.
+    fn install_planning_runtime(resources: &mut Resources) {
+        use crate::implementations::grow_build::todo::runtime::{
+            PlanningCommand, PlanningRuntimeHandle,
+        };
+        let session_id = resources.get::<SessionIdResource>().unwrap().0.clone();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        resources.insert(PlanningRuntimeHandle(sender));
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                match command {
+                    PlanningCommand::Link {
+                        step_id,
+                        task_id,
+                        required,
+                        respond_to,
+                        ..
+                    } => {
+                        assert_eq!(step_id, "step-1");
+                        let _ = respond_to.send(Ok(linked_plan(
+                            &session_id,
+                            &step_id,
+                            &task_id,
+                            required,
+                        )));
+                    }
+                    PlanningCommand::Undispatched { respond_to, .. } => {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                    other => panic!("unexpected planning command: {other:?}"),
+                }
+            }
+        });
     }
 
     fn resources_for_task(backend: SubagentBackendResource) -> Resources {
@@ -1291,9 +1337,277 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
         resources.insert(TaskModelValidator::new(|_| None));
         resources
+    }
+
+    #[tokio::test]
+    async fn spawn_and_resume_in_both_modes_require_link_ack_for_any_deliverable() {
+        use crate::implementations::grow_build::todo::runtime::{
+            PlanningCommand, PlanningRuntimeHandle,
+        };
+
+        const PROMPT: &str = " \tAuthored \"父项🦀\" task.\r\nPreserve these bytes.\n  ";
+        for resume in [false, true] {
+            for background in [false, true] {
+                for required in [false, true] {
+                    let (backend_tx, mut backend_rx) = mpsc::unbounded_channel();
+                    let backend = ChannelBackend::new(backend_tx).into_resource();
+                    let mut resources = resources_for_task(backend);
+                    let (planning_tx, mut planning_rx) = mpsc::unbounded_channel();
+                    resources.insert(PlanningRuntimeHandle(planning_tx));
+                    let mut input = task_input("explore", background);
+                    input.prompt = PROMPT.into();
+                    input.task_id = Some("exact-task".into());
+                    input.parent_step_id = "exact-step".into();
+                    input.required_deliverable = required;
+                    input.resume_from = resume.then(|| "source-task".into());
+                    input.isolation = Some(SubagentIsolationMode::Worktree);
+                    let run = tokio::spawn(async move {
+                        tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                            .await
+                    });
+
+                    let SubagentEvent::ValidateType(validation) = backend_rx.recv().await.unwrap()
+                    else {
+                        panic!("type validation must precede Link");
+                    };
+                    validation
+                        .respond_to
+                        .send(SubagentValidateTypeOutcome::Ok)
+                        .unwrap();
+                    let PlanningCommand::Link {
+                        prompt_id,
+                        step_id,
+                        task_id,
+                        required: linked_required,
+                        respond_to,
+                    } = planning_rx.recv().await.unwrap()
+                    else {
+                        panic!("Task must request Link");
+                    };
+                    assert_eq!(prompt_id, "prompt-123");
+                    assert_eq!(step_id, "exact-step");
+                    assert_eq!(task_id, "exact-task");
+                    assert_eq!(linked_required, required);
+                    assert!(
+                        !run.is_finished(),
+                        "Tool must remain pending until durable ACK"
+                    );
+                    assert!(
+                        matches!(backend_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                        "no backend Spawn before ACK"
+                    );
+
+                    respond_to
+                        .send(Ok(linked_plan(
+                            "parent-session",
+                            &step_id,
+                            &task_id,
+                            required,
+                        )))
+                        .unwrap();
+                    let spawn = unwrap_spawn(backend_rx.recv().await.unwrap());
+                    assert_eq!(spawn.prompt, PROMPT);
+                    assert_eq!(spawn.id, "exact-task");
+                    assert_eq!(spawn.parent_session_id, "parent-session");
+                    assert_eq!(spawn.parent_prompt_id.as_deref(), Some("prompt-123"));
+                    assert_eq!(spawn.parent_step_id.as_deref(), Some("exact-step"));
+                    assert_eq!(
+                        spawn.resume_from.as_deref(),
+                        resume.then_some("source-task")
+                    );
+                    assert_eq!(spawn.run_in_background, background);
+                    assert_eq!(
+                        spawn.runtime_overrides.isolation,
+                        Some(SubagentIsolationMode::Worktree)
+                    );
+                    spawn
+                        .respond_with(|request| SubagentResult {
+                            success: true,
+                            output: "acknowledged child".into(),
+                            subagent_id: request.id.clone(),
+                            child_session_id: request.id.clone(),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let output = run.await.unwrap().expect("ACK admits Task");
+                    if background {
+                        assert!(matches!(output, ToolOutput::Text(_)));
+                    } else {
+                        assert!(matches!(output, ToolOutput::SubagentCompleted(_)));
+                    }
+                    assert!(backend_rx.try_recv().is_err(), "exactly one backend Spawn");
+                    assert!(planning_rx.try_recv().is_err(), "exactly one Link");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_parent_step_id_is_rejected_without_link_or_spawn() {
+        use crate::implementations::grow_build::todo::runtime::PlanningRuntimeHandle;
+
+        for step_id in ["", " \t\n\r", "\u{2003}\u{3000}"] {
+            for resume in [false, true] {
+                for background in [false, true] {
+                    let (backend, mut backend_rx) = make_backend();
+                    let mut resources = resources_for_task(backend);
+                    let (planning_tx, mut planning_rx) = mpsc::unbounded_channel();
+                    resources.insert(PlanningRuntimeHandle(planning_tx));
+                    let mut input = task_input("explore", background);
+                    input.parent_step_id = step_id.into();
+                    input.resume_from = resume.then(|| "source-task".into());
+                    let error = tool_runtime::Tool::run(
+                        &TaskTool,
+                        test_ctx(resources.into_shared()),
+                        input,
+                    )
+                    .await
+                    .expect_err("empty TODO identity must be rejected");
+                    assert_eq!(error.kind, tool_runtime::ToolErrorKind::InvalidArguments);
+                    assert!(error.to_string().contains("parent_step_id"));
+                    assert!(backend_rx.try_recv().is_err());
+                    assert!(planning_rx.try_recv().is_err());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_step_identity_reaches_link_and_spawn_without_normalization() {
+        use crate::implementations::grow_build::todo::runtime::{
+            PlanningCommand, PlanningRuntimeHandle,
+        };
+
+        for step_id in ["null", "none", "undefined", "  step-1  ", " 父项🦀\u{2003}"] {
+            let (backend, mut backend_rx) = make_backend();
+            let mut resources = resources_for_task(backend);
+            let (planning_tx, mut planning_rx) = mpsc::unbounded_channel();
+            resources.insert(PlanningRuntimeHandle(planning_tx));
+            let mut input = task_input("explore", false);
+            input.parent_step_id = step_id.into();
+            let run = tokio::spawn(async move {
+                tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await
+            });
+            let PlanningCommand::Link {
+                step_id: linked_id,
+                task_id,
+                required,
+                respond_to,
+                ..
+            } = planning_rx.recv().await.unwrap()
+            else {
+                panic!("Task must request Link");
+            };
+            assert_eq!(linked_id, step_id);
+            respond_to
+                .send(Ok(linked_plan(
+                    "parent-session",
+                    &linked_id,
+                    &task_id,
+                    required,
+                )))
+                .unwrap();
+            let spawn = unwrap_spawn(backend_rx.recv().await.unwrap());
+            assert_eq!(spawn.parent_step_id.as_deref(), Some(step_id));
+            spawn
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+            run.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn planning_admission_failures_never_spawn() {
+        use crate::implementations::grow_build::todo::runtime::{
+            PlanningCommand, PlanningRuntimeHandle,
+        };
+
+        for failure in [
+            "missing-owner",
+            "missing-prompt",
+            "closed-channel",
+            "rejected",
+            "dropped-ack",
+        ] {
+            for resume in [false, true] {
+                for background in [false, true] {
+                    let (backend, mut backend_rx) = make_backend();
+                    let mut resources = resources_for_task(backend);
+                    let (planning_tx, mut planning_rx) = mpsc::unbounded_channel();
+                    resources.insert(PlanningRuntimeHandle(planning_tx));
+                    match failure {
+                        "missing-owner" => {
+                            resources.remove::<PlanningRuntimeHandle>();
+                        }
+                        "missing-prompt" => {
+                            resources.remove::<CurrentPromptIdResource>();
+                        }
+                        "closed-channel" => {
+                            planning_rx.close();
+                        }
+                        _ => {}
+                    }
+                    let mut input = task_input("explore", background);
+                    input.resume_from = resume.then(|| "source-task".into());
+                    input.isolation = Some(SubagentIsolationMode::Worktree);
+                    let run = tokio::spawn(async move {
+                        tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                            .await
+                    });
+                    if matches!(failure, "rejected" | "dropped-ack") {
+                        let PlanningCommand::Link { respond_to, .. } =
+                            planning_rx.recv().await.unwrap()
+                        else {
+                            panic!("Task must request Link");
+                        };
+                        if failure == "rejected" {
+                            respond_to
+                                .send(Err("selected TODO is not eligible".into()))
+                                .unwrap();
+                        } else {
+                            drop(respond_to);
+                        }
+                    }
+                    let error = run
+                        .await
+                        .unwrap()
+                        .expect_err("unacknowledged Link cannot spawn");
+                    let expected = match failure {
+                        "rejected" => "planning_rejected",
+                        "dropped-ack" => "planning_unconfirmed",
+                        _ => "planning_unavailable",
+                    };
+                    assert_eq!(
+                        error
+                            .details
+                            .as_ref()
+                            .and_then(|details| details["code"].as_str()),
+                        Some(expected),
+                        "{failure}: {error}"
+                    );
+                    if failure == "rejected" {
+                        assert!(error.to_string().contains("selected TODO is not eligible"));
+                    }
+                    assert!(
+                        backend_rx.try_recv().is_err(),
+                        "{failure}: no backend Spawn"
+                    );
+                    assert!(
+                        planning_rx.try_recv().is_err(),
+                        "{failure}: no extra planning command"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -1600,6 +1914,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("special-session-id".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-x".to_string()));
 
         let _ = tool_runtime::Tool::run(
@@ -1620,6 +1935,7 @@ mod tests {
     fn runtime_overrides_parse() {
         let input: TaskToolInput = serde_json::from_str(
             r#"{
+                "parent_step_id": "step-1",
                 "description": "d",
                 "prompt": "p",
                 "capability_mode": "read-only"
@@ -1635,11 +1951,12 @@ mod tests {
     #[test]
     fn partial_overrides_leave_rest_none() {
         let input: TaskToolInput = serde_json::from_str(
-            r#"{"description": "d", "prompt": "p", "capability_mode": "execute"}"#,
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "capability_mode": "execute"}"#,
         )
         .unwrap();
         assert_eq!(input.capability_mode, Some(SubagentCapabilityMode::Execute));
         assert!(input.model.is_none());
+        assert!(input.effort.is_none());
     }
 
     #[test]
@@ -1648,9 +1965,24 @@ mod tests {
         assert_eq!(
             schema["properties"]["model"]["description"],
             "Optional model slug for this agent. If provided, it must resolve to one of the \
-             available model slugs. If omitted, the subagent uses the same model as the parent \
-             agent. Do not pass if resume_from is set (prior model will be used). Only choose \
-             an explicit model when the user directly requests it."
+             available model slugs. If omitted, a fresh subagent inherits the parent model \
+             and a resumed subagent retains its source's actual model and transport. On \
+             resume, an explicit model selects its current route and omitted effort retains \
+             the source's actual effort. Only choose an explicit model when the user directly \
+             requests it."
+        );
+        assert!(
+            schema["properties"]["effort"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("selected or inherited model")
+        );
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "effort")
         );
     }
 
@@ -1666,7 +1998,7 @@ mod tests {
     #[test]
     fn task_input_roundtrips_through_json() {
         let input = TaskToolInput {
-            parent_step_id: None,
+            parent_step_id: "step-1".into(),
             required_deliverable: false,
             description: "find bugs".into(),
             prompt: "search for bugs".into(),
@@ -1677,6 +2009,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: Some("test-model".into()),
+            effort: Some("high".into()),
             task_id: Some("task-123".into()),
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1687,6 +2020,7 @@ mod tests {
             Some(SubagentCapabilityMode::ReadOnly)
         );
         assert_eq!(parsed.model.as_deref(), Some("test-model"));
+        assert_eq!(parsed.effort.as_deref(), Some("high"));
     }
 
     #[test]
@@ -1697,8 +2031,9 @@ mod tests {
             ("execute", SubagentCapabilityMode::Execute),
             ("all", SubagentCapabilityMode::All),
         ] {
-            let json =
-                format!(r#"{{"description":"d","prompt":"p","capability_mode":"{json_val}"}}"#);
+            let json = format!(
+                r#"{{"parent_step_id":"step-1","description":"d","prompt":"p","capability_mode":"{json_val}"}}"#
+            );
             let input: TaskToolInput = serde_json::from_str(&json).unwrap();
             assert_eq!(input.capability_mode, Some(expected), "for {json_val}");
         }
@@ -1706,7 +2041,7 @@ mod tests {
 
     #[test]
     fn capability_mode_rejects_invalid_value() {
-        let json = r#"{"description":"d","prompt":"p","capability_mode":"invalid_mode"}"#;
+        let json = r#"{"parent_step_id": "step-1", "description":"d","prompt":"p","capability_mode":"invalid_mode"}"#;
         let result = serde_json::from_str::<TaskToolInput>(json);
         assert!(result.is_err(), "unknown value should be rejected");
     }
@@ -1727,7 +2062,9 @@ mod tests {
             "All",
             "ALL",
         ] {
-            let json = format!(r#"{{"description":"d","prompt":"p","capability_mode":"{alias}"}}"#);
+            let json = format!(
+                r#"{{"parent_step_id":"step-1","description":"d","prompt":"p","capability_mode":"{alias}"}}"#
+            );
             assert!(
                 serde_json::from_str::<TaskToolInput>(&json).is_err(),
                 "noncanonical alias {alias:?} must be rejected"
@@ -1751,15 +2088,17 @@ mod tests {
 
     #[test]
     fn isolation_defaults_to_none() {
-        let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p"}"#,
+        )
+        .unwrap();
         assert_eq!(input.isolation, None);
     }
 
     #[test]
     fn isolation_worktree_parses() {
         let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p", "isolation": "worktree"}"#)
+            serde_json::from_str(r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "isolation": "worktree"}"#)
                 .unwrap();
         assert_eq!(input.isolation, Some(SubagentIsolationMode::Worktree));
     }
@@ -1767,7 +2106,7 @@ mod tests {
     #[test]
     fn isolation_none_parses() {
         let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p", "isolation": "none"}"#)
+            serde_json::from_str(r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "isolation": "none"}"#)
                 .unwrap();
         assert_eq!(input.isolation, Some(SubagentIsolationMode::None));
     }
@@ -1775,7 +2114,7 @@ mod tests {
     #[test]
     fn isolation_invalid_rejected() {
         let result = serde_json::from_str::<TaskToolInput>(
-            r#"{"description": "d", "prompt": "p", "isolation": "sandbox"}"#,
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "isolation": "sandbox"}"#,
         );
         assert!(result.is_err());
     }
@@ -1783,7 +2122,9 @@ mod tests {
     #[test]
     fn isolation_mode_rejects_noncanonical_aliases() {
         for alias in ["None", "Worktree", "work_tree", "work-tree"] {
-            let json = format!(r#"{{"description":"d","prompt":"p","isolation":"{alias}"}}"#);
+            let json = format!(
+                r#"{{"parent_step_id":"step-1","description":"d","prompt":"p","isolation":"{alias}"}}"#
+            );
             assert!(
                 serde_json::from_str::<TaskToolInput>(&json).is_err(),
                 "noncanonical alias {alias:?} must be rejected"
@@ -1806,7 +2147,7 @@ mod tests {
     #[test]
     fn task_tool_input_has_no_fork_context_field() {
         let _: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p", "fork_context": true}"#)
+            serde_json::from_str(r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "fork_context": true}"#)
                 .unwrap();
         let schema_json = serde_json::to_string(&schemars::schema_for!(TaskToolInput)).unwrap();
         assert!(
@@ -1814,7 +2155,7 @@ mod tests {
             "TaskToolInput JSON schema must not expose fork_context"
         );
         let serialized = serde_json::to_string(&TaskToolInput {
-            parent_step_id: None,
+            parent_step_id: "step-1".into(),
             required_deliverable: false,
             description: "d".into(),
             prompt: "p".into(),
@@ -1825,6 +2166,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            effort: None,
             task_id: None,
         })
         .unwrap();
@@ -1841,6 +2183,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -1865,7 +2208,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "d".into(),
                 prompt: "p".into(),
@@ -1876,6 +2219,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -1886,15 +2230,17 @@ mod tests {
 
     #[test]
     fn resume_from_defaults_to_none() {
-        let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p"}"#,
+        )
+        .unwrap();
         assert!(input.resume_from.is_none());
     }
 
     #[test]
     fn resume_from_parses() {
         let input: TaskToolInput = serde_json::from_str(
-            r#"{"description": "d", "prompt": "p", "resume_from": "prev-agent-id"}"#,
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "resume_from": "prev-agent-id"}"#,
         )
         .unwrap();
         assert_eq!(input.resume_from.as_deref(), Some("prev-agent-id"));
@@ -1903,7 +2249,7 @@ mod tests {
     #[test]
     fn resume_from_not_serialized_when_none() {
         let input = TaskToolInput {
-            parent_step_id: None,
+            parent_step_id: "step-1".into(),
             required_deliverable: false,
             description: "d".into(),
             prompt: "p".into(),
@@ -1914,6 +2260,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            effort: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1930,6 +2277,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -1951,7 +2299,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "resume".into(),
                 prompt: "continue".into(),
@@ -1962,6 +2310,7 @@ mod tests {
                 resume_from: Some("prev-id".into()),
                 cwd: None,
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -1994,6 +2343,7 @@ mod tests {
             resources.insert(backend);
             resources.insert(SubagentDepthCounter(0));
             resources.insert(SessionIdResource("parent".to_string()));
+            install_planning_runtime(&mut resources);
             resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
             let shared = resources.into_shared();
@@ -2019,7 +2369,7 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared),
                 TaskToolInput {
-                    parent_step_id: None,
+                    parent_step_id: "step-1".into(),
                     required_deliverable: false,
                     description: "test sentinel".into(),
                     prompt: "work".into(),
@@ -2030,6 +2380,7 @@ mod tests {
                     resume_from: Some(sentinel.into()),
                     cwd: None,
                     model: None,
+                    effort: None,
                     task_id: None,
                 },
             )
@@ -2050,15 +2401,17 @@ mod tests {
 
     #[test]
     fn cwd_defaults_to_none() {
-        let input: TaskToolInput =
-            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p"}"#,
+        )
+        .unwrap();
         assert!(input.cwd.is_none());
     }
 
     #[test]
     fn cwd_parses_from_json() {
         let input: TaskToolInput = serde_json::from_str(
-            r#"{"description": "d", "prompt": "p", "cwd": "/tmp/my-worktree"}"#,
+            r#"{"parent_step_id": "step-1", "description": "d", "prompt": "p", "cwd": "/tmp/my-worktree"}"#,
         )
         .unwrap();
         assert_eq!(input.cwd.as_deref(), Some("/tmp/my-worktree"));
@@ -2067,7 +2420,7 @@ mod tests {
     #[test]
     fn cwd_not_serialized_when_none() {
         let input = TaskToolInput {
-            parent_step_id: None,
+            parent_step_id: "step-1".into(),
             required_deliverable: false,
             description: "d".into(),
             prompt: "p".into(),
@@ -2078,6 +2431,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            effort: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -2091,13 +2445,14 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let result = tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test cwd conflict".into(),
                 prompt: "work".into(),
@@ -2108,6 +2463,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2128,6 +2484,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2153,7 +2510,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test empty cwd".into(),
                 prompt: "work".into(),
@@ -2164,6 +2521,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2180,6 +2538,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2205,7 +2564,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test null cwd".into(),
                 prompt: "work".into(),
@@ -2216,6 +2575,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("null".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2232,6 +2592,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2257,7 +2618,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test whitespace cwd".into(),
                 prompt: "work".into(),
@@ -2268,6 +2629,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("  ".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2287,6 +2649,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2312,7 +2675,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test nonexistent cwd".into(),
                 prompt: "work".into(),
@@ -2323,6 +2686,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2342,13 +2706,14 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let result = tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "test nonexistent cwd no worktree".into(),
                 prompt: "work".into(),
@@ -2359,6 +2724,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2380,6 +2746,7 @@ mod tests {
             resources.insert(backend);
             resources.insert(SubagentDepthCounter(0));
             resources.insert(SessionIdResource("parent".to_string()));
+            install_planning_runtime(&mut resources);
             resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
             let shared = resources.into_shared();
@@ -2405,7 +2772,7 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared.clone()),
                 TaskToolInput {
-                    parent_step_id: None,
+                    parent_step_id: "step-1".into(),
                     required_deliverable: false,
                     description: "test sentinel cwd".into(),
                     prompt: "work".into(),
@@ -2416,6 +2783,7 @@ mod tests {
                     resume_from: None,
                     cwd: Some(sentinel.into()),
                     model: None,
+                    effort: None,
                     task_id: None,
                 },
             )
@@ -2439,6 +2807,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2460,7 +2829,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "cwd test".into(),
                 prompt: "work".into(),
@@ -2471,6 +2840,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2494,6 +2864,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2519,7 +2890,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "stray quote cwd".into(),
                 prompt: "work".into(),
@@ -2530,6 +2901,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("\"/tmp".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2552,6 +2924,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2573,7 +2946,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "cwd with none".into(),
                 prompt: "work".into(),
@@ -2584,6 +2957,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2600,6 +2974,7 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent".to_string()));
+        install_planning_runtime(&mut resources);
         resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
 
         let shared = resources.into_shared();
@@ -2623,7 +2998,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
-                parent_step_id: None,
+                parent_step_id: "step-1".into(),
                 required_deliverable: false,
                 description: "cwd + resume".into(),
                 prompt: "work".into(),
@@ -2634,6 +3009,7 @@ mod tests {
                 resume_from: Some("prev-id".into()),
                 cwd: Some("/tmp/some-dir".into()),
                 model: None,
+                effort: None,
                 task_id: None,
             },
         )
@@ -2650,6 +3026,53 @@ mod tests {
     }
 
     // ── model override tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn json_selection_reaches_fresh_and_resume_runtime() {
+        for resume_from in [None, Some("prev-id")] {
+            for selection in [
+                serde_json::json!({}),
+                serde_json::json!({"model": null, "effort": null}),
+                serde_json::json!({"model": "test-model"}),
+                serde_json::json!({"effort": "high"}),
+                serde_json::json!({"model": "test-model", "effort": "high"}),
+                serde_json::json!({"effort": "none"}),
+            ] {
+                let (backend, mut rx) = make_backend();
+                let shared = resources_for_task(backend).into_shared();
+                let model = selection["model"].as_str().map(str::to_owned);
+                let effort = selection["effort"].as_str().map(str::to_owned);
+                let handle = tokio::spawn(async move {
+                    let request = unwrap_spawn(rx.recv().await.unwrap());
+                    assert_eq!(request.resume_from.as_deref(), resume_from);
+                    assert_eq!(request.runtime_overrides.model, model);
+                    assert_eq!(request.runtime_overrides.reasoning_effort, effort.map(Some));
+                    let id = request.id.clone();
+                    request
+                        .result_tx
+                        .send(SubagentResult {
+                            success: true,
+                            output: "ok".into(),
+                            subagent_id: id.clone(),
+                            child_session_id: id,
+                            ..Default::default()
+                        })
+                        .unwrap();
+                });
+                let mut json = serde_json::to_value(task_input("general-purpose", false)).unwrap();
+                json["resume_from"] = serde_json::json!(resume_from);
+                json.as_object_mut().unwrap().remove("model");
+                json.as_object_mut().unwrap().remove("effort");
+                json.as_object_mut()
+                    .unwrap()
+                    .extend(selection.as_object().unwrap().clone());
+                let input: TaskToolInput = serde_json::from_value(json).unwrap();
+                let result = tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input).await;
+                handle.await.unwrap();
+                assert!(matches!(result.unwrap(), ToolOutput::SubagentCompleted(_)));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn model_threads_to_runtime_overrides() {
@@ -2820,7 +3243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_from_with_model_soft_ignores_model() {
+    async fn resume_from_forwards_model_and_unparsed_effort() {
         let (backend, mut rx) = make_backend();
         let resources = resources_for_task(backend);
         let shared = resources.into_shared();
@@ -2828,16 +3251,19 @@ mod tests {
         let handle = tokio::spawn(async move {
             let request = unwrap_spawn(rx.recv().await.unwrap());
             assert_eq!(request.resume_from.as_deref(), Some("prev-id"));
-            assert!(
-                request.runtime_overrides.model.is_none(),
-                "model must be soft-ignored when resume_from is set, got {:?}",
-                request.runtime_overrides.model
+            assert_eq!(
+                request.runtime_overrides.model.as_deref(),
+                Some("test-model")
             );
             assert_eq!(
                 request.runtime_overrides.model_override_provenance,
                 ModelOverrideProvenance::Tool,
             );
-            assert!(request.runtime_overrides.reasoning_effort.is_none());
+            assert_eq!(
+                request.runtime_overrides.reasoning_effort,
+                Some(Some("not-an-effort".into())),
+                "the child runner validates effort against the final resume model"
+            );
             let id = request.id.clone();
             request
                 .result_tx
@@ -2854,6 +3280,7 @@ mod tests {
         let mut input = task_input("general-purpose", false);
         input.resume_from = Some("prev-id".into());
         input.model = Some("test-model".into());
+        input.effort = Some("not-an-effort".into());
         let result = tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
             .await
             .unwrap();

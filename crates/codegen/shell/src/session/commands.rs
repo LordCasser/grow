@@ -73,6 +73,19 @@ pub enum SessionEffortAuthority {
     },
 }
 
+/// A Shell-prepared selection. Effort patches retain no model snapshot, so
+/// the actor composes them with its latest desired Sampling model.
+pub enum SessionSamplingSelection {
+    Model {
+        route: crate::agent::models::PublishedSessionRoute,
+        catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
+    },
+    Effort {
+        effort: sampling_types::ReasoningEffort,
+        authority: SessionEffortAuthority,
+    },
+}
+
 impl ControlIntent {
     pub fn from_meta(meta: Option<&acp::Meta>) -> Result<Option<Self>, acp::Error> {
         let intent: Option<Self> = meta
@@ -485,6 +498,14 @@ pub enum SessionCommand {
     SettleGoalUsageAttempt {
         attempt_id: String,
         respond_to: oneshot::Sender<Result<bool, String>>,
+    },
+    /// Same Sampling admission as user controls, with a separate receipt so
+    /// a running tool can finish before its Step applies the selection.
+    AdmitToolSampling {
+        selection: SessionSamplingSelection,
+        admitted: oneshot::Sender<Result<(), String>>,
+        responds_to:
+            oneshot::Sender<Result<DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>>,
     },
     SetSessionModel {
         /// Complete route resolved under one catalog/Workflow authority

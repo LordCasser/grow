@@ -529,6 +529,7 @@ impl SessionActor {
             chat_state::NotificationSource::SubagentCompleted { .. }
             | chat_state::NotificationSource::PlanHandoff { .. }
             | chat_state::NotificationSource::ParentMessage { .. }
+            | chat_state::NotificationSource::PlanGuidance { .. }
             | chat_state::NotificationSource::AgentReply { .. }
             | chat_state::NotificationSource::InquiryAnswered { .. }
             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
@@ -549,6 +550,7 @@ impl SessionActor {
                     chat_state::NotificationSource::SubagentCompleted { .. }
                     | chat_state::NotificationSource::PlanHandoff { .. }
                     | chat_state::NotificationSource::ParentMessage { .. }
+                    | chat_state::NotificationSource::PlanGuidance { .. }
                     | chat_state::NotificationSource::AgentReply { .. }
                     | chat_state::NotificationSource::InquiryAnswered { .. }
                     | chat_state::NotificationSource::WorkflowHandoff { .. } => return None,
@@ -1176,6 +1178,7 @@ impl SessionActor {
                 | chat_state::NotificationSource::SubagentCompleted { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
                 | chat_state::NotificationSource::ParentMessage { .. }
+                | chat_state::NotificationSource::PlanGuidance { .. }
                 | chat_state::NotificationSource::AgentReply { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => 0u8,
             };
@@ -1458,6 +1461,7 @@ impl SessionActor {
                     ))]);
                 }
                 chat_state::NotificationSource::ParentMessage { .. }
+                | chat_state::NotificationSource::PlanGuidance { .. }
                 | chat_state::NotificationSource::AgentReply { .. } => {}
             }
         }
@@ -1533,6 +1537,7 @@ impl SessionActor {
                 chat_state::NotificationSource::MonitorProgress { .. } => {}
                 chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::ParentMessage { .. }
+                | chat_state::NotificationSource::PlanGuidance { .. }
                 | chat_state::NotificationSource::AgentReply { .. }
                 | chat_state::NotificationSource::InquiryAnswered { .. } => {}
             }
@@ -1543,6 +1548,9 @@ impl SessionActor {
         )
     }
 }
+
+#[cfg(test)]
+mod plan_guidance_tests;
 
 #[cfg(test)]
 mod tests {

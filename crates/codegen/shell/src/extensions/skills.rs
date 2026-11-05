@@ -299,9 +299,7 @@ async fn validate_skill_request_cwd(cwd: &str) -> Result<(), acp::Error> {
 fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)> {
     let cwd_path = std::path::PathBuf::from(cwd);
     let grow_home = tools::util::grow_home::grow_home();
-    let git_root = git2::Repository::discover(&cwd_path)
-        .ok()
-        .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()));
+    let git_root = ::agent::repo::discover_worktree_root(&cwd_path).ok();
 
     let mut sources: Vec<(String, usize)> = Vec::new();
     let subdirs = ["skills", "commands"];
