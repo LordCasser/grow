@@ -26,4 +26,10 @@
 
 必要验证是Linux受控writer持有造成真实ETXTBSY、release后成功、持续busy不启动脚本和返回错误，以及非busy错误不被重试；在支持平台跑本OCR组（包括取消/超时/后代清理/原四输出场景）、格式warning门禁。macOS通过不能证明Linux控制，Linux证据应来自既有CI或可达隔离环境，未实际运行则明确待验。父检查生产段字节相等及实际日志；最终精确提交Core仍需全门禁，不以偶发成功替代机制验证。已失败的第二轮按用户停止指示取消，并确认completed/cancelled、零unfinished。
 
+## Minimal Ctrl+D PTY failure boundary
+
+第三轮official42048771667在c81c8d87的Core/PTy唯一失败为`minimal_ctrl_d_confirms_and_quits`：确认提示已出现并用Ctrl+C清除，随后单write送`\x04\x04`，5s后process仍Running；失败screen仍idle，不能据此区分按键/确认未交付、退出挂起或等待方法未pump。主规范`Confirmed quit requests bounded session tree suspension`要求一秒内同键二次确认、原五秒绝对suspension期限、不自动force，不能为CI改窗口或接受Running。`wait_exit_code`仅poll/sleep，不处理PTY输出或终端query；已有`wait_for_exit_and_drain`会pump并保留实际exit/status。现证据不证明生产错误，也不证明仅延长等待可解。
+
+先由Pager PTY fixture owner复现并收集实际输入/屏幕/进程事实。优先仅同test文件同步现有harness输入和输出、用已有可pump且实际exit0的等待；必须保留Ctrl+Cidle不退出、首D可见确认、另键清arm、第二D确认、无force/kill、原一秒及五秒生产边界。夹具的观察期限应覆盖退出/终端收尾，不能仅与产品suspension5s相同，也不能只改数字无证据。若证据指向production/公共harness缺陷，先报告其所有者与路径，父修订任务后再实施；禁止静默扩业务或新抽象。定向原exact与必要控制足够本地验收，Linux最终CI仍需真实执行；不跳PTY门禁、不整轮盲重跑。
+
 正式命令依据`scripts/validate-release.sh`和`.github/workflows/release.yml`：验证annotated tag对应HEAD且版本匹配；从main dispatch全部Linux/macOS/Windows/OHOS组，发布十个平台资产及SHA256SUMS并核attestation。用户随后明确授权“按2.6.1准备候选和发布”，因此本change包含必要的候选commit、annotated tag、push和该版本的官方workflow/Release发布；先完成本地具体候选及验证，再逐步执行，不修改门禁、不force push或重写已发布tag。

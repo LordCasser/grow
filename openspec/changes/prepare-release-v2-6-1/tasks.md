@@ -10,7 +10,8 @@
 - [x] 2.3 strict/archive检查并形成具体发布候选，创建匹配提交/tag并核对既有发布门禁。
 
 - [x] 2.4 对齐Core中Stop/迟到依赖旧cursor断言，保留原场景，完成red/green、取消/挂起边界及完整Shell库回归，准备修正候选。
-- [ ] 2.5 核实第二轮Core的临时OCR脚本ETXTBSY，限定测试夹具修正并验证有限busy恢复、持续busy及真实错误，保留全部原OCR和进程清理断言。
+- [x] 2.5 核实第二轮Core的临时OCR脚本ETXTBSY，限定测试夹具修正并验证有限busy恢复、持续busy及真实错误，保留全部原OCR和进程清理断言。
+- [ ] 2.6 核实第三轮Core的minimal Ctrl+D PTY退出失败，按实际机制修正必要夹具同步/退出观察，保留一秒确认和durable suspension契约，定向及最终Linux门禁通过。
 
 ## 3. Publish the authorized version
 

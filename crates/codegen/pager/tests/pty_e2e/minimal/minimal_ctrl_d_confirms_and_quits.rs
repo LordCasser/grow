@@ -18,6 +18,13 @@ async fn minimal_ctrl_d_confirms_and_quits() {
         .expect("Ctrl+C must stay local");
     harness.update(Duration::from_millis(100));
     assert!(!harness.screen_contents().contains("again to quit"));
+    assert_eq!(
+        harness
+            .wait_exit_code(Duration::ZERO)
+            .expect("poll after idle Ctrl+C"),
+        PtyExitPoll::Running,
+        "Ctrl+C must not exit minimal at idle"
+    );
 
     harness.inject_keys(b"\x04").expect("arm Ctrl+D quit");
     harness
@@ -28,6 +35,13 @@ async fn minimal_ctrl_d_confirms_and_quits() {
                 harness.screen_contents()
             )
         });
+    assert_eq!(
+        harness
+            .wait_exit_code(Duration::ZERO)
+            .expect("poll after first Ctrl+D"),
+        PtyExitPoll::Running,
+        "first Ctrl+D must only arm confirmation"
+    );
 
     // The screen wait pumps PTY output and may itself outlive Ctrl+D's
     // one-second confirmation window on a loaded CI runner. Ctrl+C clears
@@ -39,15 +53,26 @@ async fn minimal_ctrl_d_confirms_and_quits() {
     harness
         .wait_for_text_absent("again to quit", Duration::from_secs(2))
         .expect("Ctrl+C clears the old quit confirmation");
+    assert_eq!(
+        harness
+            .wait_exit_code(Duration::ZERO)
+            .expect("poll after clearing Ctrl+D confirmation"),
+        PtyExitPoll::Running,
+        "Ctrl+C must clear confirmation without exiting minimal"
+    );
+    // The observation budget covers request processing and normal process/terminal
+    // cleanup without extending the five-second suspension deadline. Keep
+    // servicing terminal queries, then drain the final output separately.
     harness
         .inject_keys(b"\x04\x04")
         .expect("send Ctrl+D confirmation pair together");
     let exit = harness
-        .wait_exit_code(Duration::from_secs(5))
-        .expect("wait for minimal pager exit");
-    assert!(
-        matches!(exit, PtyExitPoll::Exited(_) | PtyExitPoll::PendingStatus),
-        "second Ctrl+D should quit minimal, got {exit:?}\nscreen:\n{}",
+        .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
+        .expect("wait for minimal pager exit and final output");
+    assert_eq!(
+        exit,
+        0,
+        "second Ctrl+D should quit minimal normally, got {exit}; screen:\n{}",
         harness.screen_contents()
     );
 }
