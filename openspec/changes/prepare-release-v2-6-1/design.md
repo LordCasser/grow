@@ -18,4 +18,12 @@
 
 验收先用原场景确认有意义red，然后同exact green；运行取消owner组和挂起cursor既有exact，以区分终态退役与同Turn挂起保留；最后完整Shell库4线程通过并核warning/fmt。父读实际diff/日志，不新增独立review。完整Core后续包、Settings、原生恢复和PTY在最终精确提交的官方门禁重新执行，当前失败运行不算通过。现远端v2.6.1已绑定首候选；测试修正候选与验证完成前不移动该共享tag，发布身份变更单独处理。
 
+## Linux OCR fixture startup
+
+第二轮official run42033135390的Core job127264627813在同一e6dafd23上失败，而push Core曾完整成功。唯一失败为`local_process_retains_text_and_rejects_empty_or_failed_output`：line1375临时脚本启动收到ETXTBSY（26），不是ENOENT（2）或缺少tesseract。测试`executable`自行写入`ocr-test`并chmod；并行fork可能暂持该写描述符，已有hooks测试也明确记录此机制。生产`run_local_ocr`直接spawn程序并分类错误，必须保留；不安装真实OCR、不在workflow跳过、不放宽原断言。
+
+本次只在`#[cfg(all(test, unix))] local_ocr_tests`内增加必要的临时脚本启动适配：固定有界次数/总时间，只重试`local OCR unavailable`的ETXTBSY，失败发生于exec之前、尚无OCR子进程；任何ENOENT/EACCES、退出失败、空/超限输出或进程组错误立即返回。局部script fixture各启动入口复用该规则，外层现5s超时、取消/进程树guard和PID握手不改。禁止无界重试、通用spawn重试库或生产降级。最终持续busy仍失败，不把environmenterror变成功。
+
+必要验证是Linux受控writer持有造成真实ETXTBSY、release后成功、持续busy不启动脚本和返回错误，以及非busy错误不被重试；在支持平台跑本OCR组（包括取消/超时/后代清理/原四输出场景）、格式warning门禁。macOS通过不能证明Linux控制，Linux证据应来自既有CI或可达隔离环境，未实际运行则明确待验。父检查生产段字节相等及实际日志；最终精确提交Core仍需全门禁，不以偶发成功替代机制验证。已失败的第二轮按用户停止指示取消，并确认completed/cancelled、零unfinished。
+
 正式命令依据`scripts/validate-release.sh`和`.github/workflows/release.yml`：验证annotated tag对应HEAD且版本匹配；从main dispatch全部Linux/macOS/Windows/OHOS组，发布十个平台资产及SHA256SUMS并核attestation。用户随后明确授权“按2.6.1准备候选和发布”，因此本change包含必要的候选commit、annotated tag、push和该版本的官方workflow/Release发布；先完成本地具体候选及验证，再逐步执行，不修改门禁、不force push或重写已发布tag。

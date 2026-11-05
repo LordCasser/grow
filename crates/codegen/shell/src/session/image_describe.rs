@@ -1190,13 +1190,87 @@ mod local_ocr_tests {
             b"abc"
         );
     }
+    async fn fixture_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String> {
+        let mut result = run_local_ocr(program, bytes.clone()).await;
+        // A parallel fork can briefly inherit the freshly written script's
+        // write descriptor. Only ETXTBSY from spawn is safe to retry: no OCR
+        // child has started, and all output/process-group errors stay final.
+        for _ in 0..8 {
+            if !matches!(&result, Err(error) if error.starts_with("local OCR unavailable: ") && error.ends_with("(os error 26)"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            result = run_local_ocr(program, bytes.clone()).await;
+        }
+        result
+    }
+
     async fn bounded_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String> {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            run_local_ocr(program, bytes),
+            fixture_ocr(program, bytes),
         )
         .await
         .expect("OCR pipe protocol must not hang")
+    }
+
+    #[tokio::test]
+    async fn fixture_spawn_does_not_retry_nonbusy_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let denied = executable(dir.path(), "printf 'recognized text\\n'");
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for (path, code) in [(&missing, 2), (&denied, 13)] {
+            let run = bounded_ocr(path, vec![]);
+            tokio::pin!(run);
+            let std::task::Poll::Ready(Err(error)) = futures::poll!(&mut run) else {
+                panic!("nonbusy spawn errors must return without waiting for a retry");
+            };
+            assert!(error.starts_with("local OCR unavailable: "));
+            assert!(error.ends_with(&format!("(os error {code})")));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fixture_spawn_recovers_after_executable_writer_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = executable(
+            dir.path(),
+            "echo ran > \"$0.executed\"; printf 'recognized text\\n'",
+        );
+        let executed = path.with_extension("executed");
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let error = run_local_ocr(&path, vec![]).await.unwrap_err();
+        assert!(error.starts_with("local OCR unavailable: "));
+        assert!(error.ends_with("(os error 26)"));
+        assert!(!executed.exists());
+
+        let run = bounded_ocr(&path, vec![]);
+        tokio::pin!(run);
+        assert!(futures::poll!(&mut run).is_pending());
+        assert!(!executed.exists());
+        drop(writer);
+        assert_eq!(run.await.unwrap(), "recognized text");
+        assert_eq!(std::fs::read_to_string(executed).unwrap(), "ran\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fixture_spawn_fails_bounded_while_executable_stays_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = executable(
+            dir.path(),
+            "echo ran > \"$0.executed\"; printf 'recognized text\\n'",
+        );
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let error = bounded_ocr(&path, vec![]).await.unwrap_err();
+        assert!(error.starts_with("local OCR unavailable: "));
+        assert!(error.ends_with("(os error 26)"));
+        assert!(!path.with_extension("executed").exists());
+        drop(writer);
     }
 
     struct FixtureProcessGroup {
@@ -1287,7 +1361,7 @@ mod local_ocr_tests {
         let task = tokio::spawn(TEST_LOCAL_OCR_PROGRAM.scope(
             path,
             TEST_LOCAL_OCR_SPAWNED.scope(spawned_tx, async move {
-                let run = run_local_ocr(&program, vec![1]);
+                let run = fixture_ocr(&program, vec![1]);
                 tokio::pin!(run);
                 let deadline = tokio::select! {
                     result = &mut run => return result,
@@ -1353,7 +1427,7 @@ mod local_ocr_tests {
         let program = path.clone();
         let (spawned_tx, mut spawned_rx) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(TEST_LOCAL_OCR_SPAWNED.scope(spawned_tx, async move {
-            run_local_ocr(&program, b"image".to_vec()).await
+            fixture_ocr(&program, b"image".to_vec()).await
         }));
         let group_pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned_rx.recv())
             .await
