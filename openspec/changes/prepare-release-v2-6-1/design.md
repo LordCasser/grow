@@ -12,4 +12,10 @@
 
 实际workspace/all-targets检查exit0，但`test_subagent_effort.rs::script_parent_todo`丢弃must_use `InferenceExpectation`产生两条warning（另有Cargo汇总）。该helper属于测试fixture，现三个调用点都应返回并保留expectation，在对应parent prompt完成后调用`assert_satisfied`；不改响应匹配、工具参数、持久契约或生产代码。此项由单独coder只改该fixture，随后重跑本target编译及最终workspace/all-targets警告门禁。清理warning是用户明确要求的发布维护，不是新增架构审查。
 
+## Core CI fixture alignment
+
+官方run42020391094的Core job127221555801在Shell库唯一失败：`stop_wins_when_the_last_planning_dependency_resolves`仍要求已durable Stop后actor保留旧cursor（Some），实际None。父已读完整测试、取消owner和已归档model-sampling终态退役条款；None符合新契约，原用例的Stop胜过迟到依赖、单Turn/不重采样/晚交互持久事实仍须全部保留。此修复仅由Shell测试owner更新该测试：停止前确证原cursor存在且Turn身份一致，ACK成功后turn/sampling continuation均None；Question/Permission迟到结算后仍None，且所有原无重采样及持久观察断言保留。生产代码、权限/Timeline校验、provider行为及其他用例不改，也不以ignore或删除场景解门禁。
+
+验收先用原场景确认有意义red，然后同exact green；运行取消owner组和挂起cursor既有exact，以区分终态退役与同Turn挂起保留；最后完整Shell库4线程通过并核warning/fmt。父读实际diff/日志，不新增独立review。完整Core后续包、Settings、原生恢复和PTY在最终精确提交的官方门禁重新执行，当前失败运行不算通过。现远端v2.6.1已绑定首候选；测试修正候选与验证完成前不移动该共享tag，发布身份变更单独处理。
+
 正式命令依据`scripts/validate-release.sh`和`.github/workflows/release.yml`：验证annotated tag对应HEAD且版本匹配；从main dispatch全部Linux/macOS/Windows/OHOS组，发布十个平台资产及SHA256SUMS并核attestation。用户随后明确授权“按2.6.1准备候选和发布”，因此本change包含必要的候选commit、annotated tag、push和该版本的官方workflow/Release发布；先完成本地具体候选及验证，再逐步执行，不修改门禁、不force push或重写已发布tag。

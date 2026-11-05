@@ -1463,6 +1463,8 @@ fn stop_wins_when_the_last_planning_dependency_resolves() {
                 .cancel_running_task(false, false, false, Some("stop-wait-race".into()))
                 .await
                 .expect("Stop must durably close the waiting turn");
+            assert!(actor.turn_continuation.borrow().is_none());
+            assert!(actor.sampling_continuation.borrow().is_none());
             let stopped = actor.chat_state_handle.timeline_events().await.unwrap();
             let ended = stopped.iter().find_map(|event| match &event.kind {
                 chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended {
@@ -1474,8 +1476,9 @@ fn stop_wins_when_the_last_planning_dependency_resolves() {
                 _ => None,
             });
             assert!(
-                ended.is_some_and(|(_, stop_reason)| stop_reason == "cancelled"),
-                "accepted Stop must persist a cancelled TurnEnded"
+                ended.is_some_and(|(id, stop_reason)| id == cursor_before_stop.turn_id
+                    && stop_reason == "cancelled"),
+                "accepted Stop must persist a cancelled TurnEnded for the parked turn"
             );
 
             // The final dependency becomes ready only after the Stop terminal
@@ -1533,11 +1536,8 @@ fn stop_wins_when_the_last_planning_dependency_resolves() {
                 1,
                 "Stop must prevent resampling"
             );
-            assert_eq!(
-                actor.turn_continuation.borrow().as_ref(),
-                Some(&cursor_before_stop),
-                "the resolved dependency must not replenish or mutate the stopped cursor"
-            );
+            assert!(actor.turn_continuation.borrow().is_none());
+            assert!(actor.sampling_continuation.borrow().is_none());
             assert!(final_events.iter().any(|event| matches!(
                 &event.kind,
                 chat_state::TimelineEventKind::Interaction(chat_state::InteractionEvent::Resolved {

@@ -7,7 +7,9 @@
 
 - [x] 2.1 准备2.6.1发行说明，更新workspace继承版本和lock本地包版本，保护独立/third-party版本及用户dirty。
 - [x] 2.2 通过版本边界、cargo fmt及既有release脚本测试，清理生产/workspace-all-targets实际编译warning，完成最终默认CLI check/build并记录真实产物、源hash和未执行平台门禁。
-- [ ] 2.3 strict/archive检查并形成具体发布候选，创建匹配提交/tag并核对既有发布门禁。
+- [x] 2.3 strict/archive检查并形成具体发布候选，创建匹配提交/tag并核对既有发布门禁。
+
+- [x] 2.4 对齐Core中Stop/迟到依赖旧cursor断言，保留原场景，完成red/green、取消/挂起边界及完整Shell库回归，准备修正候选。
 
 ## 3. Publish the authorized version
 
