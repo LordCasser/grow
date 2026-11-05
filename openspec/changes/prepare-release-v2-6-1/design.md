@@ -33,3 +33,9 @@
 先由Pager PTY fixture owner复现并收集实际输入/屏幕/进程事实。优先仅同test文件同步现有harness输入和输出、用已有可pump且实际exit0的等待；必须保留Ctrl+Cidle不退出、首D可见确认、另键清arm、第二D确认、无force/kill、原一秒及五秒生产边界。夹具的观察期限应覆盖退出/终端收尾，不能仅与产品suspension5s相同，也不能只改数字无证据。若证据指向production/公共harness缺陷，先报告其所有者与路径，父修订任务后再实施；禁止静默扩业务或新抽象。定向原exact与必要控制足够本地验收，Linux最终CI仍需真实执行；不跳PTY门禁、不整轮盲重跑。
 
 正式命令依据`scripts/validate-release.sh`和`.github/workflows/release.yml`：验证annotated tag对应HEAD且版本匹配；从main dispatch全部Linux/macOS/Windows/OHOS组，发布十个平台资产及SHA256SUMS并核attestation。用户随后明确授权“按2.6.1准备候选和发布”，因此本change包含必要的候选commit、annotated tag、push和该版本的官方workflow/Release发布；先完成本地具体候选及验证，再逐步执行，不修改门禁、不force push或重写已发布tag。
+
+## Sampler actor terminal fixture
+
+Responses 修复之外的实际 sampler integration 执行在 test_actor 出现六项终态超时。源码显示 request_task 成功只发送 RequestCompleted 元数据，完整 ConversationResponse 经 completion oneshot 返回；原测试 drain、并发完成观察和正文断言仍等 L2 Completed。先以 exact 与原 decoder 对照确认此差异，不能只因超时宣称负载问题。若证明为基线旧夹具，独立 test_actor owner 修正这一个共同根因，不混入 client decoder 任务。
+
+测试应通过 actor 的 RequestCompleted/Failed 观察终态，并按对应 request identity 验证 metadata；需要正文/usage/stop reason 的原断言通过现 submit_and_collect 返回值核对，正文仍须完整验证，不能仅用 item_count 取代。保留 AttemptStarted/StreamStarted/FirstToken/ChannelToken 顺序和内容、重试次数、并发 request 身份、Messages refusal、custom-frame/idle/error 的原有边界。不得让生产重新复制完整响应到事件通道，不同时接受两种成功终态作兼容，不延长 timeout、不删失败/正文断言。先回归失败 exact，再完整25项该二进制与相关sampler integration，固定1.93.1 fmt/warning检查。此项仅修测试对既有执行接口的旧假设，不改运行契约，纳入本发布维护 change。

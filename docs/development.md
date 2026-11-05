@@ -165,6 +165,10 @@ Hunk action 的统计、turn 索引和 affected ids 在 single 或每文件动�
 
 Reject 在 restore/delete/patch 前由 hunk owner 比较真实磁盘内容与展示快照，外部编辑或存在性变化返回明确 stale conflict，保留外部内容和当前文件的 pending 投影。Shell 四种 action 入口沿 WorkspaceOps 传播该失败，响应不报告成功数量；刷新后可按新展示重试。该比较检测读取前的变化，不提供任意外部 writer 在读写之间的原子隔离。见 [hunk 磁盘冲突契约](../openspec/specs/client-surfaces/spec.md#requirement-hunk-rejection-detects-an-already-changed-disk-target)。
 
+LSP 文档更新由 `Documents::send_update` 在一次同步写锁内完成通知入队与成功版本/end 发布，诊断读者据此归属；准入失败保留上一文本的 UTF-16 端点。closure 只能同步入队，不能重入 Documents、等待响应或跨 await，didSave/pull 在释放锁后执行。见 [LSP 文档接纳契约](../openspec/specs/client-surfaces/spec.md#requirement-lsp-diagnostic-attribution-observes-admitted-document-revisions)。
+
+Responses 路由若在显式 `in_progress` 的 function_call added 项省略初始 arguments，Sampler 只在 typed decode 副本补空前缀。已知字段重复、null/非字符串、done/terminal 缺参数仍失败，后续参数与身份/终态校验照常执行；原始 evidence 不改。见 [初始函数参数契约](../openspec/specs/model-sampling/spec.md#requirement-responses-function-call-starts-may-omit-the-empty-argument-prefix)。
+
 ## 环境
 
 Rust toolchain 由 `rust-toolchain.toml` 声明，构建仍使用 Cargo。OpenSpec 是开发工具，不进入 Cargo 运行时依赖。

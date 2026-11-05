@@ -221,19 +221,34 @@ async fn submit_emits_started_first_token_channel_completed() {
     assert_eq!(texts.join(""), "hello world");
 
     match events.last().unwrap() {
-        SamplingEvent::Completed {
+        SamplingEvent::RequestCompleted {
             request_id,
-            response,
+            usage,
+            item_count,
+            provider_terminal,
+            doom_loop_signals,
             ..
         } => {
             assert_eq!(request_id, &rid);
-            if let Some(a) = response.assistant() {
-                assert_eq!(a.content.as_ref(), "hello world");
-            } else {
-                panic!("expected Assistant message");
-            }
+            assert_eq!(*item_count, 1);
+            let usage = usage.as_ref().expect("completed text has usage");
+            assert_eq!(
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens
+                ),
+                (10, 2, 12)
+            );
+            assert_eq!(
+                provider_terminal.as_ref(),
+                Some(&sampling_types::ProviderTerminal::ChatCompletions {
+                    finish_reason: "stop".into(),
+                })
+            );
+            assert!(doom_loop_signals.is_empty());
         }
-        other => panic!("expected Completed, got {other:?}"),
+        other => panic!("expected RequestCompleted, got {other:?}"),
     }
 }
 
@@ -503,7 +518,7 @@ async fn two_concurrent_requests_complete_with_correct_request_ids() {
     handle.submit(rid_a.clone(), user_request("a"));
     handle.submit(rid_b.clone(), user_request("b"));
 
-    // Drain until we see Completed for both.
+    // Drain until the actor reports RequestCompleted for both requests.
     let mut completed_a = false;
     let mut completed_b = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -516,17 +531,40 @@ async fn two_concurrent_requests_complete_with_correct_request_ids() {
         }
         let remaining = deadline - now;
         match tokio::time::timeout(remaining, event_rx.recv()).await {
-            Ok(Some(SamplingEvent::Completed { request_id, .. })) if request_id == rid_a => {
-                completed_a = true;
+            Ok(Some(SamplingEvent::RequestCompleted {
+                request_id,
+                usage,
+                item_count,
+                ..
+            })) => {
+                assert_eq!(item_count, 1);
+                let usage = usage.expect("each completed request has usage");
+                assert_eq!(
+                    (
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        usage.total_tokens
+                    ),
+                    (10, 1, 11)
+                );
+                if request_id == rid_a {
+                    assert!(!completed_a, "req-a must complete once");
+                    completed_a = true;
+                } else {
+                    assert_eq!(request_id, rid_b, "unexpected completed request");
+                    assert!(!completed_b, "req-b must complete once");
+                    completed_b = true;
+                }
             }
-            Ok(Some(SamplingEvent::Completed { request_id, .. })) if request_id == rid_b => {
-                completed_b = true;
+            Ok(Some(SamplingEvent::Failed { request_id, error })) => {
+                panic!("{request_id} failed: {error:?}");
             }
             Ok(Some(_)) => {}
             Ok(None) => panic!("event channel closed"),
             Err(_) => panic!("timeout"),
         }
     }
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
     server.shutdown();
 }
 
@@ -575,24 +613,27 @@ async fn retries_on_500_then_succeeds() {
     );
 
     let rid = RequestId::from("req-retry");
-    handle.submit(rid.clone(), user_request("hi"));
-
-    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    let (result, events) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            handle.submit_and_collect(rid.clone(), user_request("hi")),
+            drain_until_terminal(&mut event_rx, Duration::from_secs(15)),
+        )
+    })
+    .await
+    .expect("retry and completion must finish within the original deadline");
+    let (response, _metrics) = result.expect("retry completes successfully");
     server.shutdown();
 
     let saw_retrying = events
         .iter()
-        .any(|e| matches!(e, SamplingEvent::Retrying { .. }));
+        .any(|e| matches!(e, SamplingEvent::Retrying { request_id, .. } if request_id == &rid));
     assert!(saw_retrying, "expected at least one Retrying event");
 
-    match events.last().unwrap() {
-        SamplingEvent::Completed { response, .. } => {
-            if let Some(a) = response.assistant() {
-                assert_eq!(a.content.as_ref(), "ok");
-            }
-        }
-        other => panic!("expected Completed after retry, got {other:?}"),
-    }
+    assert_request_completed(events.last().unwrap(), &rid, &response);
+    let assistant = response
+        .assistant()
+        .expect("expected Assistant after retry");
+    assert_eq!(assistant.content.as_ref(), "ok");
 
     assert!(
         counter.load(Ordering::SeqCst) >= 2,
@@ -632,23 +673,23 @@ async fn empty_response_before_output_retries_then_succeeds() {
         event_tx,
     );
 
-    handle.submit(
-        RequestId::from("req-empty-before-output"),
-        user_request("hi"),
-    );
-    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    let rid = RequestId::from("req-empty-before-output");
+    let (result, events) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            handle.submit_and_collect(rid.clone(), user_request("hi")),
+            drain_until_terminal(&mut event_rx, Duration::from_secs(15)),
+        )
+    })
+    .await
+    .expect("empty response recovery must finish within the original deadline");
+    let (response, _metrics) = result.expect("retry after empty response succeeds");
     server.shutdown();
 
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, SamplingEvent::Retrying { .. }))
-    );
-    assert!(matches!(
-        events.last(),
-        Some(SamplingEvent::Completed { response, .. })
-            if response.assistant_text() == "ok"
+    assert!(events.iter().any(
+        |event| matches!(event, SamplingEvent::Retrying { request_id, .. } if request_id == &rid)
     ));
+    assert_request_completed(events.last().unwrap(), &rid, &response);
+    assert_eq!(response.assistant_text(), "ok");
     assert_eq!(
         counter.load(Ordering::SeqCst),
         2,
@@ -967,8 +1008,16 @@ async fn messages_empty_refusal_completes_without_retry() {
         event_tx,
     );
 
-    handle.submit(RequestId::from("req-empty-refusal"), user_request("hi"));
-    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
+    let rid = RequestId::from("req-empty-refusal");
+    let (result, events) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            handle.submit_and_collect(rid.clone(), user_request("hi")),
+            drain_until_terminal(&mut event_rx, Duration::from_secs(10)),
+        )
+    })
+    .await
+    .expect("empty refusal must finish within the original deadline");
+    let (response, _metrics) = result.expect("empty refusal completes successfully");
     server.shutdown();
 
     assert!(
@@ -977,15 +1026,19 @@ async fn messages_empty_refusal_completes_without_retry() {
             .any(|e| matches!(e, SamplingEvent::Retrying { .. })),
         "content-less refusal must not be retried"
     );
-    match events.last().unwrap() {
-        SamplingEvent::Completed { response, .. } => {
-            assert_eq!(
-                response.stop_reason,
-                Some(sampling_types::StopReason::ContentFilter)
-            );
-        }
-        other => panic!("expected Completed, got {other:?}"),
-    }
+    assert_request_completed(events.last().unwrap(), &rid, &response);
+    assert_eq!(
+        response.stop_reason,
+        Some(sampling_types::StopReason::ContentFilter)
+    );
+    assert_eq!(
+        response.provider_terminal,
+        Some(sampling_types::ProviderTerminal::Messages {
+            stop_reason: "refusal".into(),
+            stop_sequence: None,
+        })
+    );
+    assert!(response.assistant_text().is_empty());
     assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one request");
 }
 
@@ -1225,14 +1278,18 @@ async fn all_endpoints_ignore_custom_frames_without_hiding_failure_or_extending_
             cfg.idle_timeout_secs = Some(1);
             let (event_tx, mut event_rx) = mpsc::unbounded_channel();
             let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+            let rid = RequestId::from("extensions-test");
             let result = tokio::time::timeout(
                 Duration::from_secs(4),
-                handle.submit_and_collect(RequestId::from("extensions-test"), user_request("hi")),
+                handle.submit_and_collect(rid.clone(), user_request("hi")),
             )
             .await
             .unwrap();
+            let events = drain_until_terminal(&mut event_rx, Duration::from_secs(1)).await;
             if mode == 2 {
-                assert_eq!(result.unwrap().0.assistant_text(), "safe text");
+                let (response, _metrics) = result.unwrap();
+                assert_eq!(response.assistant_text(), "safe text");
+                assert_request_completed(events.last().unwrap(), &rid, &response);
             } else {
                 let error = result.unwrap_err();
                 assert!(
@@ -1248,12 +1305,15 @@ async fn all_endpoints_ignore_custom_frames_without_hiding_failure_or_extending_
                     "{backend:?} mode={mode}: {error:?}"
                 );
             }
-            let events = drain_until_terminal(&mut event_rx, Duration::from_secs(1)).await;
             if mode != 2 {
+                assert!(matches!(
+                    events.last(),
+                    Some(SamplingEvent::Failed { request_id, .. }) if request_id == &rid
+                ));
                 assert!(
                     !events
                         .iter()
-                        .any(|event| matches!(event, SamplingEvent::Completed { .. })),
+                        .any(|event| matches!(event, SamplingEvent::RequestCompleted { .. })),
                     "rejected custom-frame scenario must not fabricate completion: {events:?}"
                 );
             }
@@ -1322,7 +1382,7 @@ async fn named_flat_sse_errors_reach_all_backends_without_retry_or_admission() {
         ));
         assert!(!events.iter().any(|event| matches!(
             event,
-            SamplingEvent::Retrying { .. } | SamplingEvent::Completed { .. }
+            SamplingEvent::Retrying { .. } | SamplingEvent::RequestCompleted { .. }
         )));
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "{backend:?}");
         server.shutdown();
@@ -1377,7 +1437,7 @@ async fn messages_named_error_discards_a_partial_tool_candidate() {
     ));
     assert!(!events.iter().any(|event| matches!(
         event,
-        SamplingEvent::Retrying { .. } | SamplingEvent::Completed { .. }
+        SamplingEvent::Retrying { .. } | SamplingEvent::RequestCompleted { .. }
     )));
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     server.shutdown();
@@ -1495,8 +1555,34 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
 // Helpers for draining the event channel
 // ---------------------------------------------------------------------------
 
-/// Drain the event channel until a terminal event (`Completed` or
-/// `Failed`) is received, or until `deadline` elapses.
+fn assert_request_completed(
+    event: &SamplingEvent,
+    expected_id: &RequestId,
+    response: &sampling_types::ConversationResponse,
+) {
+    let SamplingEvent::RequestCompleted {
+        request_id,
+        usage,
+        item_count,
+        provider_terminal,
+        doom_loop_signals,
+        ..
+    } = event
+    else {
+        panic!("expected RequestCompleted, got {event:?}");
+    };
+    assert_eq!(request_id, expected_id);
+    assert_eq!(*item_count, response.items.len());
+    assert_eq!(
+        serde_json::to_value(usage).unwrap(),
+        serde_json::to_value(&response.usage).unwrap()
+    );
+    assert_eq!(provider_terminal, &response.provider_terminal);
+    assert_eq!(doom_loop_signals, &response.doom_loop_signals);
+}
+
+/// Drain the actor event channel until `RequestCompleted` or `Failed` is
+/// received, or until `timeout` elapses.
 async fn drain_until_terminal(
     rx: &mut mpsc::UnboundedReceiver<SamplingEvent>,
     timeout: Duration,
@@ -1517,7 +1603,7 @@ async fn drain_until_terminal(
             Ok(Some(ev)) => {
                 let terminal = matches!(
                     ev,
-                    SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+                    SamplingEvent::RequestCompleted { .. } | SamplingEvent::Failed { .. }
                 );
                 out.push(ev);
                 if terminal {

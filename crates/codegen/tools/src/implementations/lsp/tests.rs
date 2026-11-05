@@ -172,6 +172,80 @@ async fn did_change_carries_range_for_incremental_servers() {
     client.shutdown().await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn failed_did_open_leaves_the_document_unknown_until_admission_succeeds() {
+    let (_dir, script_path) = write_incremental_sync_server();
+    let (workspace, mut client) = start_client_with(&script_path).await;
+    let file = workspace.path().join("retry-open.ts");
+    let uri = file_uri(&file).unwrap().to_string();
+    let live_socket = std::mem::replace(&mut client.socket, async_lsp::ServerSocket::new_closed());
+
+    assert_eq!(
+        client.notify_file_change(&file, "rejected\n🚀", "wrong"),
+        None
+    );
+    assert_eq!(client.documents.version(&uri), None);
+    assert!(!client.documents.contains(&uri));
+    assert!(client.tracked_documents().is_empty());
+
+    client.socket = live_socket;
+    assert_eq!(
+        client.notify_file_change(&file, "accepted", "typescript"),
+        Some(super::documents::FIRST_VERSION)
+    );
+    assert_eq!(
+        wait_for_message(&client, &file, |m| m == "opened")
+            .await
+            .as_deref(),
+        Some("opened")
+    );
+    assert_eq!(client.tracked_documents(), vec![(uri, "typescript".into())]);
+    client.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_did_change_preserves_the_next_incremental_range() {
+    let (_dir, script_path) = write_incremental_sync_server();
+    let (workspace, mut client) = start_client_with(&script_path).await;
+    let file = workspace.path().join("retry-change.ts");
+    let uri = file_uri(&file).unwrap().to_string();
+    let first = client
+        .notify_file_change(&file, "old\n🚀b", "typescript")
+        .unwrap();
+    assert_eq!(
+        wait_for_message(&client, &file, |m| m == "opened")
+            .await
+            .as_deref(),
+        Some("opened")
+    );
+    let live_socket = std::mem::replace(&mut client.socket, async_lsp::ServerSocket::new_closed());
+
+    assert_eq!(
+        client.notify_file_change(&file, "rejected\ntext\n", "wrong"),
+        None
+    );
+    assert_eq!(client.documents.version(&uri), Some(first));
+    assert_eq!(
+        client.tracked_documents(),
+        vec![(uri.clone(), "typescript".into())]
+    );
+
+    client.socket = live_socket;
+    assert_eq!(
+        client.notify_file_change(&file, "accepted", "different"),
+        Some(first + 1)
+    );
+    assert_eq!(
+        wait_for_message(&client, &file, |m| m.starts_with("changed"))
+            .await
+            .as_deref(),
+        Some("changed with range 0:0-1:3"),
+        "the range must still describe the last admitted UTF-16 text"
+    );
+    assert_eq!(client.tracked_documents(), vec![(uri, "typescript".into())]);
+    client.shutdown().await;
+}
+
 /// Wait for a diagnostic on `path` whose message satisfies `pred`.
 async fn wait_for_message(
     client: &LspClient,
@@ -989,12 +1063,9 @@ async fn e2e_restart_monitor_preserves_replacement_client() {
                 let mut stale = mgr.clients.remove("mock-ts").unwrap();
                 stale.lifecycle_id = original_lifecycle_id;
                 for (uri, lang) in tracked_docs {
-                    stale.documents.commit(
-                        &uri,
-                        0,
-                        &lang,
-                        async_lsp::lsp_types::Position::default(),
-                    );
+                    stale
+                        .documents
+                        .seed(&uri, 0, &lang, async_lsp::lsp_types::Position::default());
                 }
                 mgr.clients.insert("mock-ts".to_string(), stale);
                 let healthy_lifecycle_id = mgr.alloc_lifecycle_id();

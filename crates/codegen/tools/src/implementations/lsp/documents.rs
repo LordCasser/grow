@@ -24,7 +24,7 @@ const _: () = assert!(FIRST_VERSION > super::diagnostics::NO_VERSION);
 /// The revision of one document that the server has.
 #[derive(Debug, Clone)]
 pub struct Tracked {
-    /// Version of the last notification we successfully sent for it.
+    /// Version of the last notification successfully admitted to the queue.
     pub version: i32,
     pub language_id: String,
     /// Where that revision ends. Two integers, not a copy of the text.
@@ -66,15 +66,21 @@ impl Documents {
         Self::default()
     }
 
-    /// What to send for `uri`, without recording it as sent.
+    /// Admit a notification and publish its revision as one step for readers.
     ///
-    /// Deliberately separate from [`Self::commit`]: what is recorded here
-    /// describes the text the *server* has, so a notification that failed to go
-    /// out must not advance it. Advancing it anyway would aim every later
-    /// incremental range at a revision the server never received — the same
-    /// protocol violation the range exists to avoid.
-    pub fn plan(&self, uri: &str) -> Update {
-        match self.read().get(uri) {
+    /// `send` must only enqueue the notification synchronously. It must not
+    /// reenter `Documents` or wait for a response: the write lock spans planning,
+    /// admission and publication so a fast diagnostic cannot see older text.
+    /// A rejected admission leaves version, language and incremental end intact.
+    pub fn send_update<E>(
+        &self,
+        uri: &str,
+        language_id: &str,
+        end: Position,
+        send: impl FnOnce(Update) -> Result<(), E>,
+    ) -> Result<i32, E> {
+        let mut documents = self.write();
+        let update = match documents.get(uri) {
             Some(tracked) => Update::Change {
                 version: tracked.version.saturating_add(1),
                 previous_end: tracked.end,
@@ -82,12 +88,10 @@ impl Documents {
             None => Update::Open {
                 version: FIRST_VERSION,
             },
-        }
-    }
-
-    /// Record a notification that is on the wire.
-    pub fn commit(&self, uri: &str, version: i32, language_id: &str, end: Position) {
-        self.write()
+        };
+        send(update)?;
+        let version = update.version();
+        documents
             .entry(uri.to_string())
             .and_modify(|tracked| {
                 tracked.version = version;
@@ -98,6 +102,19 @@ impl Documents {
                 language_id: language_id.to_string(),
                 end,
             });
+        Ok(version)
+    }
+
+    #[cfg(test)]
+    pub(super) fn seed(&self, uri: &str, version: i32, language_id: &str, end: Position) {
+        self.write().insert(
+            uri.to_string(),
+            Tracked {
+                version,
+                language_id: language_id.to_string(),
+                end,
+            },
+        );
     }
 
     /// The version the server has, or `None` if it has never been told about
@@ -137,6 +154,14 @@ impl Documents {
         std::mem::take(&mut *self.write()).into_keys().collect()
     }
 
+    #[cfg(test)]
+    pub(super) fn read_is_blocked(&self) -> bool {
+        matches!(
+            self.inner.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     fn read(&self) -> RwLockReadGuard<'_, HashMap<String, Tracked>> {
         self.inner.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -172,48 +197,78 @@ mod tests {
     #[test]
     fn an_unknown_document_is_opened_above_the_no_version_marker() {
         let documents = Documents::new();
-        assert_eq!(
-            documents.plan(A),
-            Update::Open {
-                version: FIRST_VERSION
-            }
-        );
-        assert_eq!(documents.version(A), None);
+        let version = documents.send_update(A, "csharp", end_position("one"), |update| {
+            assert_eq!(
+                update,
+                Update::Open {
+                    version: FIRST_VERSION
+                }
+            );
+            Ok::<(), ()>(())
+        });
+        assert_eq!(version, Ok(FIRST_VERSION));
+        assert_eq!(documents.version(A), Some(FIRST_VERSION));
     }
 
     #[test]
-    fn a_committed_document_is_changed_from_where_it_ended() {
+    fn an_admitted_change_uses_the_previous_end_and_keeps_the_opened_language() {
         let documents = Documents::new();
-        documents.commit(A, 1, "csharp", end_position("one\ntwo"));
+        documents.seed(A, FIRST_VERSION, "csharp", end_position("one\ntwo"));
 
         assert_eq!(
-            documents.plan(A),
-            Update::Change {
-                version: 2,
-                previous_end: Position {
-                    line: 1,
-                    character: 3
-                },
-            }
+            documents.send_update(A, "different", end_position("new"), |update| {
+                assert_eq!(
+                    update,
+                    Update::Change {
+                        version: FIRST_VERSION + 1,
+                        previous_end: position(1, 3),
+                    }
+                );
+                Ok::<(), ()>(())
+            }),
+            Ok(FIRST_VERSION + 1)
         );
-        assert_eq!(documents.version(A), Some(1));
+        let tracked = documents.read()[A].clone();
+        assert_eq!(tracked.version, FIRST_VERSION + 1);
+        assert_eq!(tracked.end, end_position("new"));
+        assert_eq!(tracked.language_id, "csharp");
     }
 
-    /// The plan is what to send; only a send that went out is committed. A
-    /// failed one must leave the server's revision where it was, or the next
-    /// incremental range will describe text the server never received.
     #[test]
-    fn planning_alone_does_not_move_the_document() {
+    fn rejected_admission_keeps_version_language_and_end_for_the_next_attempt() {
         let documents = Documents::new();
-        documents.commit(A, 0, "csharp", end_position("one"));
-
-        let planned = documents.plan(A);
         assert_eq!(
-            documents.plan(A),
-            planned,
-            "planning twice is the same plan"
+            documents.send_update(A, "wrong", position(8, 8), |_| Err("open failed")),
+            Err("open failed")
         );
-        assert_eq!(documents.version(A), Some(0));
+        assert!(!documents.contains(A));
+        documents.seed(A, FIRST_VERSION, "csharp", end_position("one\n🚀b"));
+
+        let expected = Update::Change {
+            version: FIRST_VERSION + 1,
+            previous_end: position(1, 3),
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                documents.send_update(A, "wrong", position(9, 9), |update| {
+                    assert_eq!(update, expected);
+                    Err("change failed")
+                }),
+                Err("change failed")
+            );
+            let tracked = documents.read()[A].clone();
+            assert_eq!(tracked.version, FIRST_VERSION);
+            assert_eq!(tracked.end, position(1, 3));
+            assert_eq!(tracked.language_id, "csharp");
+        }
+        assert_eq!(
+            documents.send_update(A, "different", position(2, 0), |update| {
+                assert_eq!(update, expected);
+                Ok::<(), ()>(())
+            }),
+            Ok(FIRST_VERSION + 1)
+        );
+        assert_eq!(documents.read()[A].end, position(2, 0));
     }
 
     fn position(line: u32, character: u32) -> Position {
@@ -240,7 +295,7 @@ mod tests {
     #[test]
     fn take_all_empties_the_map() {
         let documents = Documents::new();
-        documents.commit(A, FIRST_VERSION, "csharp", Position::default());
+        documents.seed(A, FIRST_VERSION, "csharp", Position::default());
         assert_eq!(documents.take_all(), vec![A.to_string()]);
         assert!(documents.uris().is_empty());
         assert!(!documents.contains(A));

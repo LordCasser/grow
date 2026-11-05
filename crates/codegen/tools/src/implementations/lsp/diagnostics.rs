@@ -391,6 +391,23 @@ mod tests {
     }
 
     #[test]
+    fn a_future_push_is_clamped_and_cannot_freeze_later_verdicts() {
+        let store = DiagnosticsStore::new();
+        store.record_push(
+            A,
+            vec![diagnostic("future version")],
+            Some(i32::MAX),
+            Some(2),
+        );
+        assert_eq!(store.covers(A), Some(2));
+        assert!(!store.answered_for(A, 3));
+
+        assert!(store.record_push(A, vec![diagnostic("next verdict")], Some(3), Some(3)));
+        assert_eq!(store.covers(A), Some(3));
+        assert_eq!(store.items(A)[0].message, "next verdict");
+    }
+
+    #[test]
     fn a_push_for_a_document_we_never_opened_is_still_kept() {
         let store = DiagnosticsStore::new();
         store.record_push(A, vec![diagnostic("boom")], None, None);

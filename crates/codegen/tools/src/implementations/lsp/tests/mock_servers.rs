@@ -377,18 +377,19 @@ state = {"saves": 0, "pulls": 0}
 def read_message():
     headers = {}
     while True:
-        line = sys.stdin.readline()
+        line = sys.stdin.buffer.readline()
         if not line:
             return None
-        if line.strip() == '':
+        if line.strip() == b'':
             break
-        if ':' in line:
-            key, value = line.split(':', 1)
+        if b':' in line:
+            key, value = line.split(b':', 1)
             headers[key.strip()] = value.strip()
-    length = int(headers.get('Content-Length', 0))
+    length = int(headers.get(b'Content-Length', 0))
     if length == 0:
         return None
-    return json.loads(sys.stdin.read(length))
+    # LSP lengths count UTF-8 bytes, not Python text-stream characters.
+    return json.loads(sys.stdin.buffer.read(length))
 
 def send_message(msg):
     body = json.dumps(msg)

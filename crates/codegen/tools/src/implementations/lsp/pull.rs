@@ -549,7 +549,7 @@ mod tests {
     async fn an_answer_from_before_a_refresh_is_not_written_down() {
         let pull = detached_pull();
         pull.documents
-            .commit("file:///a.cs", 0, "csharp", Default::default());
+            .seed("file:///a.cs", 0, "csharp", Default::default());
 
         let sent_before = pull.generation.load(Ordering::Acquire);
         pull.refresh_all();

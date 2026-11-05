@@ -25,6 +25,10 @@ use super::{DiagnosticsNotify, LspError, LspMainLoop, file_uri, workspace_open};
 use tty_utils::{ProcessGroup, ProcessScope};
 
 #[cfg(test)]
+#[path = "tests/document_admission.rs"]
+mod document_admission;
+
+#[cfg(test)]
 use super::config::REQUEST_TIMEOUT;
 #[cfg(test)]
 use super::format::{flatten_document_symbols, markup_string_to_text};
@@ -61,6 +65,8 @@ pub struct LspClient {
     /// (no child) or if group creation failed.
     process_group: Option<Arc<ProcessGroup>>,
     pub shutdown_timeout: std::time::Duration,
+    #[cfg(test)]
+    document_update_queued: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl std::fmt::Debug for LspClient {
@@ -322,6 +328,8 @@ impl LspClient {
             child_process,
             process_group: None,
             shutdown_timeout: std::time::Duration::from_millis(config.shutdown_timeout_ms()),
+            #[cfg(test)]
+            document_update_queued: None,
         })
     }
 
@@ -623,63 +631,62 @@ impl LspClient {
         };
         let uri_str = uri.to_string();
         let new_end = end_position(content);
-        let update = self.documents.plan(&uri_str);
-        let version = update.version();
-
-        let sent = match update {
-            Update::Open { version } => {
-                tracing::debug!(server = %self.server_name, uri = %uri, language_id, "didOpen");
-                self.socket.did_open(DidOpenTextDocumentParams {
-                    text_document: TextDocumentItem {
-                        uri: uri.clone(),
-                        language_id: language_id.to_string(),
-                        version,
-                        text: content.to_string(),
-                    },
-                })
+        let sent = self.documents.send_update(&uri_str, language_id, new_end, |update| {
+            // async-lsp 0.2.4 only enqueues these notifications synchronously;
+            // it does not wait for transport I/O or invoke diagnostic handlers.
+            let sent = match update {
+                Update::Open { version } => {
+                    tracing::debug!(server = %self.server_name, uri = %uri, language_id, "didOpen");
+                    self.socket.did_open(DidOpenTextDocumentParams {
+                        text_document: TextDocumentItem {
+                            uri: uri.clone(),
+                            language_id: language_id.to_string(),
+                            version,
+                            text: content.to_string(),
+                        },
+                    })
+                }
+                Update::Change {
+                    version,
+                    previous_end,
+                } => {
+                    // Incremental servers require a full replacement range
+                    // spanning the last successfully admitted revision.
+                    let range = self.policy.full_replacement_range(previous_end);
+                    tracing::debug!(
+                        server = %self.server_name, uri = %uri, version, ranged = range.is_some(),
+                        "didChange"
+                    );
+                    self.socket.did_change(DidChangeTextDocumentParams {
+                        text_document: VersionedTextDocumentIdentifier {
+                            uri: uri.clone(),
+                            version,
+                        },
+                        content_changes: vec![TextDocumentContentChangeEvent {
+                            range,
+                            range_length: None,
+                            text: content.to_string(),
+                        }],
+                    })
+                }
+            };
+            sent?;
+            #[cfg(test)]
+            if let Some(queued) = self.document_update_queued.take() {
+                queued();
             }
-            Update::Change {
-                version,
-                previous_end,
-            } => {
-                // We always resend the whole file. A server that asked for
-                // incremental sync still requires a range on every change
-                // event — Roslyn dereferences it unconditionally and tears its
-                // request queue down without one — so the full replacement is
-                // expressed as a range covering the previous revision.
-                let range = self.policy.full_replacement_range(previous_end);
-                tracing::debug!(
-                    server = %self.server_name, uri = %uri, version, ranged = range.is_some(),
-                    "didChange"
-                );
-                self.socket.did_change(DidChangeTextDocumentParams {
-                    text_document: VersionedTextDocumentIdentifier {
-                        uri: uri.clone(),
-                        version,
-                    },
-                    content_changes: vec![TextDocumentContentChangeEvent {
-                        range,
-                        range_length: None,
-                        text: content.to_string(),
-                    }],
-                })
+            Ok::<(), async_lsp::Error>(())
+        });
+        let version = match sent {
+            Ok(version) => version,
+            Err(e) => {
+                tracing::debug!(server = %self.server_name, error = %e, "failed to send document update");
+                return None;
             }
         };
 
-        if let Err(e) = sent {
-            tracing::debug!(server = %self.server_name, error = %e, "failed to send document update");
-            return None;
-        }
-
-        // Only now, with the notification actually on the wire, does our record
-        // of the server's copy advance. It describes the text the *server* has;
-        // advancing it after a send that failed would compute every later
-        // incremental range against a revision the server never received — the
-        // same protocol violation the range exists to avoid. It is also what
-        // the pull about to be spawned reads to know which revision it is
-        // asking about, so it has to be committed first.
-        self.documents
-            .commit(&uri_str, version, language_id, new_end);
+        // Admission has published version/end and released the document lock.
+        // Save and pull work must stay outside that synchronous boundary.
 
         // Some servers only emit diagnostics on save, not change — but only
         // notify the ones that asked, and only include the text when they said

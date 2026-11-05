@@ -51,7 +51,7 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     let mut event = serde_json::from_str::<rs::ResponseStreamEvent>(data)
         .or_else(|error| {
-            normalize_response_usage_details(data)
+            normalize_response_event(data)
                 .map_or(Err(error), |normalized| serde_json::from_str(&normalized))
         })
         .map_err(SamplingError::from)?;
@@ -65,7 +65,7 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
 fn decode_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
     let mut event = match decode_tagged_event::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
-        Err(error) => match normalize_response_usage_details(data) {
+        Err(error) => match normalize_response_event(data) {
             Some(normalized) => decode_tagged_event(&normalized)?,
             None => return Err(error),
         },
@@ -74,6 +74,75 @@ fn decode_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> 
         apply_terminal_event_overrides(event, data);
     }
     Ok(event)
+}
+
+/// Normalizations that let the locked SDK accept otherwise-known Responses
+/// events, applied in priority order to a decode copy only. Callers keep the
+/// raw evidence, so diagnostics and a surviving candidate use original facts.
+fn normalize_response_event(data: &str) -> Option<String> {
+    normalize_response_usage_details(data).or_else(|| normalize_added_function_call_arguments(data))
+}
+
+/// The locked SDK requires `arguments` on every function-call item, but a
+/// route may open one with `response.output_item.added`, explicit
+/// `status: "in_progress"` and the field omitted before any argument delta.
+/// Only that exact shape gains an empty prefix, and only in the copy used
+/// for typed decoding. All other shapes retain their original fields and
+/// decode errors, so completion, identity and JSON validation downstream
+/// stay authoritative.
+fn normalize_added_function_call_arguments(data: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("response.output_item.added") {
+        return None;
+    }
+    let serde_json::Value::Object(item) = value.get_mut("item")? else {
+        return None;
+    };
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("function_call")
+        || item.get("status").and_then(serde_json::Value::as_str) != Some("in_progress")
+        || item.contains_key("arguments")
+    {
+        return None;
+    }
+    // Value re-encoding drops duplicate keys, including keys the SDK has not
+    // reached when it first reports missing arguments. Preserve its rejection
+    // of repeated known fields without duplicating their type/required checks.
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct FunctionCallFields {
+        #[serde(rename = "type")]
+        _kind: serde::de::IgnoredAny,
+        #[serde(rename = "id")]
+        _id: serde::de::IgnoredAny,
+        #[serde(rename = "call_id")]
+        _call_id: serde::de::IgnoredAny,
+        #[serde(rename = "namespace")]
+        _namespace: serde::de::IgnoredAny,
+        #[serde(rename = "name")]
+        _name: serde::de::IgnoredAny,
+        #[serde(rename = "status")]
+        _status: serde::de::IgnoredAny,
+        #[serde(rename = "arguments")]
+        _arguments: serde::de::IgnoredAny,
+    }
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct AddedEventFields {
+        #[serde(rename = "type")]
+        _kind: serde::de::IgnoredAny,
+        #[serde(rename = "sequence_number")]
+        _sequence_number: serde::de::IgnoredAny,
+        #[serde(rename = "output_index")]
+        _output_index: serde::de::IgnoredAny,
+        #[serde(rename = "item")]
+        _item: FunctionCallFields,
+    }
+    serde_json::from_str::<AddedEventFields>(data).ok()?;
+    item.insert(
+        "arguments".to_owned(),
+        serde_json::Value::String(String::new()),
+    );
+    Some(value.to_string())
 }
 
 /// The locked SDK requires cached/reasoning detail fields even when a route
@@ -2781,6 +2850,166 @@ mod tests {
     }
 
     #[test]
+    fn in_progress_function_call_added_with_absent_arguments_decodes() {
+        let added = r#"{"type":"response.output_item.added","sequence_number":0,"output_index":0,
+            "item":{"type":"function_call","id":"item-0","call_id":"call-0","name":"test_tool","status":"in_progress"}}"#;
+        let rs::ResponseStreamEvent::ResponseOutputItemAdded(added) = decode_response_event(added)
+            .expect("initial in-progress function call decodes")
+            .expect("known event")
+        else {
+            panic!("expected ResponseOutputItemAdded");
+        };
+        let rs::OutputItem::FunctionCall(call) = &added.item else {
+            panic!("expected a function_call item: {:?}", added.item);
+        };
+        // The in-progress repair adds only the empty prefix required by the
+        // locked SDK; identity and status come from the event unchanged.
+        assert_eq!(call.arguments, "");
+        assert_eq!(call.call_id, "call-0");
+        assert_eq!(call.name, "test_tool");
+        assert_eq!(call.id.as_deref(), Some("item-0"));
+        assert_eq!(call.status, Some(rs::OutputStatus::InProgress));
+    }
+
+    #[test]
+    fn already_supplied_initial_argument_prefixes_decode_unchanged() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "sequence_number": 0, "output_index": 0,
+            "item": {
+                "type": "function_call", "id": "item-0", "call_id": "call-0",
+                "name": "test_tool", "status": "in_progress",
+                "arguments": r#"{"a""#
+            }
+        })
+        .to_string();
+        let rs::ResponseStreamEvent::ResponseOutputItemAdded(added) = decode_response_event(&added)
+            .expect("initial function call decodes")
+            .expect("known event")
+        else {
+            panic!("expected ResponseOutputItemAdded");
+        };
+        let rs::OutputItem::FunctionCall(call) = &added.item else {
+            panic!("expected a function_call item: {:?}", added.item);
+        };
+        assert_eq!(call.arguments, r#"{"a""#);
+    }
+
+    #[test]
+    fn function_call_arguments_defects_keep_failing_decoding() {
+        // Malformed argument values on an in-progress initial call are not
+        // repaired: only their absence is.
+        for item_arguments in [
+            serde_json::Value::Null,
+            serde_json::json!(7),
+            serde_json::json!({}),
+        ] {
+            let added = serde_json::json!({
+                "type": "response.output_item.added",
+                "sequence_number": 0, "output_index": 0,
+                "item": {
+                    "type": "function_call", "id": "item-0", "call_id": "call-0",
+                    "name": "test_tool", "status": "in_progress",
+                    "arguments": item_arguments
+                }
+            })
+            .to_string();
+            assert!(
+                decode_response_event(&added).is_err(),
+                "arguments {item_arguments} stays a decoding failure"
+            );
+        }
+
+        // Closed or terminal items keep requiring the field.
+        let closed_shapes = [
+            ("response.output_item.done", "completed"),
+            ("response.output_item.added", "completed"),
+            ("response.output_item.added", "incomplete"),
+        ];
+        for (event_type, item_status) in closed_shapes {
+            let data = serde_json::json!({
+                "type": event_type,
+                "sequence_number": 0, "output_index": 0,
+                "item": {
+                    "type": "function_call", "id": "item-0", "call_id": "call-0",
+                    "name": "test_tool", "status": item_status
+                }
+            })
+            .to_string();
+            assert!(
+                decode_response_event(&data).is_err(),
+                "{event_type} with status {item_status} requires arguments"
+            );
+        }
+
+        // The terminal usage normalization exists; it must not repair absent
+        // arguments on the final snapshot.
+        let completed = r#"{"type":"response.completed","sequence_number":0,"response":{
+            "id":"resp-0","object":"response","created_at":0,"model":"test-model","status":"completed",
+            "output":[{"type":"function_call","id":"item-0","call_id":"call-0","name":"test_tool","status":"completed"}],
+            "usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0},
+                "output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":105}}}"#;
+        assert!(
+            decode_response_event(completed).is_err(),
+            "terminal snapshots with absent arguments are not repaired"
+        );
+
+        // Identity fields are never fabricated by the in-progress repair.
+        let identity_shapes = [
+            r#"{"type":"response.output_item.added","sequence_number":0,"output_index":0,
+                "item":{"type":"function_call","id":"item-0","call_id":"call-0","status":"in_progress"}}"#,
+            r#"{"type":"response.output_item.added","sequence_number":0,"output_index":0,
+                "item":{"type":"function_call","id":"item-0","name":"test_tool","status":"in_progress"}}"#,
+        ];
+        for data in identity_shapes {
+            assert!(decode_response_event(data).is_err(), "{data}");
+        }
+    }
+
+    #[test]
+    fn function_call_start_preserves_other_sdk_decode_errors() {
+        let cases = [
+            (
+                "name",
+                r#"{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"function_call","id":"item-0","call_id":"call-0","name":"first","name":"second","status":"in_progress"}}"#,
+            ),
+            (
+                "call_id",
+                r#"{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"function_call","id":"item-0","call_id":"first","call_id":"second","name":"test_tool","status":"in_progress"}}"#,
+            ),
+            (
+                "sequence_number",
+                r#"{"type":"response.output_item.added","sequence_number":0,"sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"item-0","call_id":"call-0","name":"test_tool","status":"in_progress"}}"#,
+            ),
+            (
+                "sequence_number_after_item",
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"item-0","call_id":"call-0","name":"test_tool","status":"in_progress"},"sequence_number":0,"sequence_number":1}"#,
+            ),
+            (
+                "name_null_first",
+                r#"{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"function_call","id":"item-0","call_id":"call-0","name":null,"name":"test_tool","status":"in_progress"}}"#,
+            ),
+            (
+                "namespace_invalid_first",
+                r#"{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"function_call","id":"item-0","call_id":"call-0","namespace":7,"namespace":"tools","name":"test_tool","status":"in_progress"}}"#,
+            ),
+        ];
+        let results = cases.map(|(field, data)| {
+            let sdk_error = serde_json::from_str::<rs::ResponseStreamEvent>(data)
+                .expect_err("the original SDK rejects the malformed event");
+            (
+                field,
+                sdk_error.to_string(),
+                decode_response_event(data).is_err(),
+            )
+        });
+        assert!(
+            results.iter().all(|(_, _, rejected)| *rejected),
+            "initial arguments repair must preserve other SDK errors: {results:?}"
+        );
+    }
+
+    #[test]
     fn messages_extensions_do_not_hide_known_protocol_errors() {
         for kind in ["keepalive", "vendor.metrics", "message.future_event"] {
             let data = serde_json::json!({"type": kind, "payload": {"type": "anything"}});
@@ -2900,6 +3129,162 @@ mod tests {
         assert_eq!(
             serde_json::to_value(settled).unwrap(),
             serde_json::to_value(&usage).unwrap()
+        );
+    }
+
+    /// Builds the `data: {…}\n\n` SSE body for synthetic Responses events.
+    /// Callers pass the full event sequence, so an EOF test simply omits the
+    /// terminal frame. `test_tool` is synthetic and side-effect free; the
+    /// test never executes it.
+    fn responses_sse(events: &[serde_json::Value]) -> String {
+        events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect()
+    }
+
+    fn responses_created_event() -> serde_json::Value {
+        serde_json::json!({
+            "type": "response.created",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp-direct", "object": "response", "created_at": 0,
+                "model": "test-model", "status": "in_progress", "output": []
+            }
+        })
+    }
+
+    /// `function_call` opened in progress WITHOUT the typed arguments field:
+    /// the locked SDK rejects it before the repair.
+    fn responses_added_without_arguments_event() -> serde_json::Value {
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+                "type": "function_call", "id": "item-0", "call_id": "call-direct",
+                "name": "test_tool", "status": "in_progress"
+            }
+        })
+    }
+
+    fn responses_args_delta_event(sequence_number: u64, delta: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": sequence_number,
+            "item_id": "item-0", "output_index": 0, "delta": delta
+        })
+    }
+
+    fn responses_args_done_event() -> serde_json::Value {
+        serde_json::json!({
+            "type": "response.function_call_arguments.done",
+            "sequence_number": 5, "item_id": "item-0", "output_index": 0,
+            "arguments": r#"{"a":1}"#, "name": "test_tool"
+        })
+    }
+
+    fn responses_item_done_event() -> serde_json::Value {
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "sequence_number": 6, "output_index": 0,
+            "item": {
+                "type": "function_call", "id": "item-0", "call_id": "call-direct",
+                "name": "test_tool", "arguments": r#"{"a":1}"#, "status": "completed"
+            }
+        })
+    }
+
+    fn responses_completed_event() -> serde_json::Value {
+        serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": 7,
+            "response": {
+                "id": "resp-direct", "object": "response", "created_at": 0,
+                "model": "test-model", "status": "completed",
+                "output": [{
+                    "type": "function_call", "id": "item-0", "call_id": "call-direct",
+                    "name": "test_tool", "arguments": r#"{"a":1}"#, "status": "completed"
+                }],
+                "usage": {
+                    "input_tokens": 100, "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 105
+                }
+            }
+        })
+    }
+
+    async fn responses_stream_client(
+        body: String,
+    ) -> (SamplingClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = minimal_config();
+        config.base_url = format!("http://{}", listener.local_addr().unwrap());
+        config.api_backend = ApiBackend::Responses;
+        let app = axum::Router::new().route(
+            "/responses",
+            axum::routing::post(move || {
+                let body = body.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (SamplingClient::new(config).expect("client"), server)
+    }
+
+    #[tokio::test]
+    async fn responses_added_function_call_without_arguments_completes_with_later_fragments() {
+        let body = responses_sse(&[
+            responses_created_event(),
+            responses_added_without_arguments_event(),
+            responses_args_delta_event(3, r#"{"a":"#),
+            responses_args_delta_event(4, "1}"),
+            responses_args_done_event(),
+            responses_item_done_event(),
+            responses_completed_event(),
+        ]);
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let response = result
+            .expect("initial in-progress call without arguments completes with later fragments");
+
+        assert_eq!(response.stop_reason, Some(sampling_types::StopReason::Stop));
+        assert_eq!(response.tool_calls().len(), 1);
+        let call = &response.tool_calls()[0];
+        assert_eq!(call.name, "test_tool");
+        assert_eq!(&*call.id, "call-direct");
+        assert_eq!(&*call.arguments, r#"{"a":1}"#);
+    }
+
+    #[tokio::test]
+    async fn responses_stream_ending_before_terminal_rejects_the_call() {
+        // added with arguments absent, then deltas and EOF: without a legal
+        // terminal snapshot the call must stay an incomplete-stream rejection
+        // instead of becoming an accepted completed ToolCall.
+        let body = responses_sse(&[
+            responses_created_event(),
+            responses_added_without_arguments_event(),
+            responses_args_delta_event(3, r#"{"a":"#),
+            responses_args_delta_event(4, "1}"),
+        ]);
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let error = result.expect_err("EOF without a terminal response cannot complete a call");
+        assert!(
+            matches!(error, SamplingError::IncompleteStream { .. }),
+            "EOF before a terminal snapshot is an incomplete stream, got {error:?}"
         );
     }
 
