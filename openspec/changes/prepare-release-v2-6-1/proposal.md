@@ -6,7 +6,7 @@
 
 ## What Changes
 
-按用户随后明确指定“按2.6.1准备候选和发布”，准备2.6.1候选并执行官方发布：记录里程碑和剩余backlog、归档已经通过的行为change、更新workspace version/对应lock本地包版本及发行说明，并核对发布前已有门禁。不新增产品行为或改发布流程，因此skip_specs:true，不虚构delta。
+按用户随后明确指定“按2.6.1准备候选和发布”，准备2.6.1候选并执行官方发布：记录里程碑和剩余backlog、归档已经通过的行为change、更新workspace version/对应lock本地包版本及发行说明，并核对发布前已有门禁。不新增产品行为或改发布流程，因此skip_specs:true，不虚构delta。实际执行暴露的旧测试假设（actor终态、Minimal启动就绪）在本维护change内修正，并可增加一条不含prompt的Pager状态应用诊断以建立可观测前置；行为修复LSP与Responses分别建立并归档独立delta，不能以本维护豁免跳过契约。
 
 ## Impact
 

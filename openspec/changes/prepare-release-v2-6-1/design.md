@@ -32,7 +32,13 @@
 
 先由Pager PTY fixture owner复现并收集实际输入/屏幕/进程事实。优先仅同test文件同步现有harness输入和输出、用已有可pump且实际exit0的等待；必须保留Ctrl+Cidle不退出、首D可见确认、另键清arm、第二D确认、无force/kill、原一秒及五秒生产边界。夹具的观察期限应覆盖退出/终端收尾，不能仅与产品suspension5s相同，也不能只改数字无证据。若证据指向production/公共harness缺陷，先报告其所有者与路径，父修订任务后再实施；禁止静默扩业务或新抽象。定向原exact与必要控制足够本地验收，Linux最终CI仍需真实执行；不跳PTY门禁、不整轮盲重跑。
 
-正式命令依据`scripts/validate-release.sh`和`.github/workflows/release.yml`：验证annotated tag对应HEAD且版本匹配；从main dispatch全部Linux/macOS/Windows/OHOS组，发布十个平台资产及SHA256SUMS并核attestation。用户随后明确授权“按2.6.1准备候选和发布”，因此本change包含必要的候选commit、annotated tag、push和该版本的官方workflow/Release发布；先完成本地具体候选及验证，再逐步执行，不修改门禁、不force push或重写已发布tag。
+最终15秒观察再次失败时，f0f461e54的CI screen/raw明确显示 `Exit not confirmed: Session startup is still pending; retry exit after startup completes`。这次键已到达退出owner，原因不再是未知键交付或观察未pump：`wait_minimal_ready`只等status line，该行可早于session_id及PromptHistoryLoaded。product router在prompt_history_loading/loading_replay时拒绝退出符合既有契约，不能自动重试/force来遮盖。
+
+后续维护只修此退出fixture的启动前置：在原Ctrl+C/D断言之前证明本session启动和prompt history已完成。native Minimal由pager-minimal/src/live.rs直接绘制prompt，没有普通agent_view历史dropdown；`/session-info`和真实turn完成分属独立JoinSet任务，不能保证PromptHistoryLoaded已应用。带session_id的history只读取当前session，跨session canary无效；resume的Up又可从replay scrollback填充，仍不足以证明flag解除。不能继续猜UI动作、固定sleep、等spinner消失、新建session文件或重复exit来代替该前提。
+
+允许在现`TaskResult::PromptHistoryLoaded`分支内、匹配agent后清除prompt_history_loading并完成历史赋值之后增加一条结构化tracing::debug事件，带明确事件名和该session ID，不记录prompt内容。fixture使用隔离进程的现有日志配置与文件能力持续pump PTY，等待当前session的该事件后才开始原断言；不以shell侧RPC完成日志替代。此诊断不新增状态/环境变量/协议或行为契约，属于release维护，write scope只扩到task_result.rs该诊断和该fixture。保留生产startup拒绝、1秒确认/5秒挂起/15秒观察、单write DD、无force和实际exit0。父核事件与guard的因果、实际日志配置/事件和定向exact后再精确提交CI；本地baseline通过不标为竞态red，其余wait_minimal_ready调用方不顺带改。
+
+正式命令依据`scripts/validate-release.sh`和`.github/workflows/release.yml`：验证annotated tag对应HEAD且版本匹配；从main dispatch全部Linux/macOS/Windows/OHOS组，发布十个平台资产及SHA256SUMS并核attestation。用户随后明确授权“按2.6.1准备候选和发布”，因此本change包含必要的候选commit、annotated tag、push和该版本的官方workflow/Release发布；先完成本地具体候选及验证，再逐步执行，不修改门禁，不对main或已发布历史force push。v2.6.1目前仅有未发布的旧annotated tag；发布前重新核对远端tag object、其目标及Release确实尚不存在，才用该object的精确lease替换为最终候选，不重写任何已公开版本。
 
 ## Sampler actor terminal fixture
 

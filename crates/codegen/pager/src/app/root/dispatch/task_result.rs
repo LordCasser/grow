@@ -1657,6 +1657,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         agent.prompt.history_search.update_query(&query);
                     }
                 }
+                if let Some(session_id) = agent
+                    .session
+                    .session_id
+                    .as_ref()
+                    .filter(|id| !id.0.is_empty())
+                {
+                    tracing::debug!(event = "prompt_history_applied", session_id = %session_id.0);
+                }
             }
             vec![]
         }

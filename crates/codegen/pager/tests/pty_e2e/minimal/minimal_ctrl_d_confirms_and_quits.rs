@@ -10,9 +10,65 @@ async fn minimal_ctrl_d_confirms_and_quits() {
     let content = ContentController::start().await.expect("start content");
     git2::Repository::init(content.home()).expect("initialize isolated project");
     content.seed_llm_config().expect("seed mock LLM config");
-    let mut harness = spawn_minimal(&content);
+    let log_path = content.home().join("minimal-ctrl-d.log");
+    let binary = pager_binary().expect("resolve pager binary");
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        MINIMAL_ARGS,
+        &[
+            ("GROW_LOG_FILE", log_path.to_str().expect("UTF-8 log path")),
+            (
+                "RUST_LOG",
+                "info,pager::app::root::dispatch::task_result=debug",
+            ),
+        ],
+    )
+    .expect("spawn minimal pager with isolated log");
+    harness.set_respond_to_queries(true);
+    let pid = harness.child_pid().expect("live minimal pager child PID");
     wait_minimal_ready(&mut harness);
 
+    // The idle status can render before SessionCreated and PromptHistoryLoaded.
+    // Only the matched pager child's applied event for its new session proves
+    // the startup guard has cleared; keep pumping terminal queries while waiting.
+    let pager_prefix = format!(" role=tui pid={pid} sid=");
+    let mut ready_line = None;
+    harness
+        .wait_until("current minimal session prompt history applied", WELCOME_TIMEOUT, |_| {
+            ready_line = std::fs::read_to_string(&log_path).ok().and_then(|log| {
+                log.lines()
+                    .find(|line| {
+                        line.contains(" DEBUG pager::app::root::dispatch::task_result")
+                            && line.contains(&pager_prefix)
+                            && line.contains(" event=\"prompt_history_applied\"")
+                            && line
+                                .split_ascii_whitespace()
+                                .find_map(|field| field.strip_prefix("session_id="))
+                                .is_some_and(|id| {
+                                    let id = id.trim_matches('"');
+                                    !id.is_empty() && id != "-"
+                                })
+                    })
+                    .map(str::to_owned)
+            });
+            ready_line.is_some()
+        })
+        .unwrap_or_else(|error| {
+            let log = std::fs::read_to_string(&log_path)
+                .unwrap_or_else(|read_error| format!("log unavailable: {read_error}"));
+            let pager_log = log
+                .lines()
+                .filter(|line| line.contains(&pager_prefix))
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!(
+                "minimal prompt history did not finish: {error}\nlog {} for PID {pid}:\n{pager_log}",
+                log_path.display()
+            )
+        });
     harness
         .inject_keys(b"\x03\x03")
         .expect("Ctrl+C must stay local");
