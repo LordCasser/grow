@@ -65,15 +65,65 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
 fn decode_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
     let mut event = match decode_tagged_event::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
-        Err(error) => match normalize_response_event(data) {
-            Some(normalized) => decode_tagged_event(&normalized)?,
-            None => return Err(error),
+        Err(error) => match normalize_response_event(data)
+            .map(|normalized| decode_tagged_event(&normalized))
+            .unwrap_or(Err(error))
+        {
+            Ok(event) => event,
+            Err(error) => return Err(sparse_response_failure(data).unwrap_or(error)),
         },
     };
     if let Some(event) = &mut event {
         apply_terminal_event_overrides(event, data);
     }
     Ok(event)
+}
+
+/// A failed stream may carry only the provider's error rather than a full
+/// Response snapshot. Accept precisely that envelope after normal SDK decoding
+/// fails; do not invent the missing identity, sequence, timestamp or usage.
+fn sparse_response_failure(data: &str) -> Option<SamplingError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FailedEnvelope {
+        #[serde(rename = "type")]
+        kind: String,
+        response: FailedResponse,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FailedResponse {
+        object: String,
+        status: String,
+        error: FailedError,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FailedError {
+        code: String,
+        message: String,
+    }
+
+    let failed: FailedEnvelope = serde_json::from_str(data).ok()?;
+    if failed.kind != "response.failed"
+        || failed.response.object != "response"
+        || failed.response.status != "failed"
+        || failed.response.error.code.trim().is_empty()
+        || failed.response.error.message.trim().is_empty()
+    {
+        return None;
+    }
+    crate::audit::AttemptEvidence::observe_terminal(sampling_types::ProviderTerminal::Responses {
+        event: "response.failed".into(),
+        status: "failed".into(),
+        incomplete_reason: None,
+    });
+    Some(SamplingError::from_stream_error(
+        failed.response.error.code,
+        failed.response.error.message,
+    ))
 }
 
 /// Normalizations that let the locked SDK accept otherwise-known Responses
@@ -3527,6 +3577,289 @@ mod tests {
                 }
             }),
         ]
+    }
+
+    #[test]
+    fn sparse_response_failure_requires_exact_fields_and_values() {
+        let original = r#"{"type":"response.failed","response":{"object":"response","status":"failed","error":{"code":"server_error","message":"failure"}}}"#;
+        let mut invalid = vec![
+            original.replace(
+                r#""type":"response.failed""#,
+                r#""type":"response.completed""#,
+            ),
+            original.replace(r#""object":"response""#, r#""object":"other""#),
+            original.replace(r#""status":"failed""#, r#""status":"completed""#),
+            original.replace(r#""type":"response.failed""#, r#""type":7"#),
+            original.replace(r#""object":"response""#, r#""object":null"#),
+            original.replace(r#""status":"failed""#, r#""status":7"#),
+            original.replace(r#""code":"server_error""#, r#""code":7"#),
+            original.replace(r#""message":"failure""#, r#""message":null"#),
+            original.replace(r#""code":"server_error""#, r#""code":"   ""#),
+            original.replace(r#""message":"failure""#, r#""message":" \t ""#),
+            original.replace(r#""code":"server_error""#, r#""code":null"#),
+            original.replace(r#""message":"failure""#, r#""message":7"#),
+            original.replace(
+                r#""response":{"object""#,
+                r#""response":null,"response":{"object""#,
+            ),
+            original.replace(r#""error":{"code""#, r#""error":null,"error":{"code""#),
+            original.replace(
+                r#""code":"server_error""#,
+                r#""code":null,"code":"server_error""#,
+            ),
+            original.replace(
+                r#""type":"response.failed""#,
+                r#""type":null,"type":"response.failed""#,
+            ),
+            original.replace(
+                r#""object":"response""#,
+                r#""object":"response","object":"response""#,
+            ),
+            original.replace(
+                r#""status":"failed""#,
+                r#""status":"failed","status":"failed""#,
+            ),
+            original.replace(
+                r#""message":"failure""#,
+                r#""message":"failure","message":"failure""#,
+            ),
+        ];
+        let base: serde_json::Value = serde_json::from_str(original).unwrap();
+        for path in ["/response", "/response/error"] {
+            let mut wrong_type = base.clone();
+            *wrong_type.pointer_mut(path).unwrap() = serde_json::json!([]);
+            invalid.push(wrong_type.to_string());
+        }
+        for path in [
+            "/sequence_number",
+            "/response/id",
+            "/response/created_at",
+            "/response/usage",
+            "/response/error/param",
+        ] {
+            let mut extra = base.clone();
+            let (parent, field) = path.rsplit_once('/').unwrap();
+            extra
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), serde_json::json!(1));
+            invalid.push(extra.to_string());
+        }
+        for path in [
+            "/type",
+            "/response",
+            "/response/object",
+            "/response/status",
+            "/response/error",
+            "/response/error/code",
+            "/response/error/message",
+        ] {
+            let mut missing = base.clone();
+            let (parent, field) = path.rsplit_once('/').unwrap();
+            missing
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            invalid.push(missing.to_string());
+        }
+        for data in invalid {
+            let original_error = serde_json::from_str::<rs::ResponseStreamEvent>(&data)
+                .expect_err("SDK rejects malformed known events");
+            let SamplingError::Serialization(error) = decode_response_event(&data)
+                .expect_err("malformed event must preserve the original SDK error")
+            else {
+                panic!("sparse exception must not accept {data}");
+            };
+            assert_eq!(error.to_string(), original_error.to_string(), "{data}");
+        }
+    }
+
+    #[test]
+    fn sparse_failure_reuses_shared_code_mapping_without_trimming_provider_message() {
+        for (code, expected_status) in [
+            (
+                "rate_limit_exceeded",
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+            ),
+            ("invalid_request_error", reqwest::StatusCode::BAD_REQUEST),
+        ] {
+            let data = serde_json::json!({
+                "type": "response.failed", "response": {
+                    "object": "response", "status": "failed", "error": {
+                        "code": code, "message": "  provider failed  "
+                    }
+                }
+            });
+            let error = decode_response_event(&data.to_string())
+                .expect_err("valid sparse failure propagates provider error");
+            let SamplingError::Api {
+                status, message, ..
+            } = &error
+            else {
+                panic!("expected shared API classification for {code}");
+            };
+            assert_eq!(*status, expected_status);
+            assert_eq!(message, &format!("{code}:   provider failed  "));
+            if *status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                assert!(error.is_retryable());
+                assert!(matches!(
+                    crate::retry::classify_error(&error, 0, 3, 3),
+                    crate::retry::RetryDecision::RetryWithBackoff {
+                        is_rate_limited: true,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(!error.is_retryable());
+                assert!(matches!(
+                    crate::retry::classify_error(&error, 0, 3, 3),
+                    crate::retry::RetryDecision::Fatal(_)
+                ));
+            }
+        }
+        let data = r#"{"type":"response.failed","response":{"object":"response","status":"failed","error":{"code":"authentication_error","message":"bad token"}}}"#;
+        let error = decode_response_event(data).expect_err("authentication failure");
+        assert!(matches!(&error, SamplingError::Auth { .. }));
+        assert!(!error.is_retryable());
+        assert!(matches!(
+            crate::retry::classify_error(&error, 0, 3, 3),
+            crate::retry::RetryDecision::EmitToSession(_)
+        ));
+    }
+
+    #[test]
+    fn complete_failed_response_uses_the_sdk_and_other_terminal_snapshots_stay_required() {
+        let mut full = responses_completed_event();
+        full["type"] = serde_json::json!("response.failed");
+        full["response"]["status"] = serde_json::json!("failed");
+        full["response"]["error"] =
+            serde_json::json!({"code": "server_error", "message": "full response failed"});
+        let Some(rs::ResponseStreamEvent::ResponseFailed(decoded)) =
+            decode_response_event(&full.to_string()).expect("full failed response decodes")
+        else {
+            panic!("full failed response stays on the typed SDK path");
+        };
+        assert_eq!(decoded.response.usage.unwrap().total_tokens, 105);
+        for kind in ["response.completed", "response.incomplete"] {
+            let mut missing = full.clone();
+            missing["type"] = serde_json::json!(kind);
+            missing["response"]["status"] =
+                serde_json::json!(kind.strip_prefix("response.").unwrap());
+            missing["response"]
+                .as_object_mut()
+                .unwrap()
+                .remove("created_at");
+            assert!(matches!(
+                decode_response_event(&missing.to_string()),
+                Err(SamplingError::Serialization(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_sparse_failed_after_partial_tool_output_preserves_provider_error() {
+        let failed = serde_json::json!({
+            "type": "response.failed",
+            "response": {
+                "object": "response", "status": "failed",
+                "error": {"code": "server_error", "message": "Codex: connection lost mid-reply (unexpected EOF)"}
+            }
+        });
+        let raw_body = responses_sse(&[
+            responses_created_event(),
+            responses_added_without_arguments_event(),
+            responses_args_delta_event(3, r#"{"a":"#),
+            failed,
+        ]);
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entries = captured.clone();
+        let sink: crate::audit::EvidenceSink = std::sync::Arc::new(move |entry| {
+            entries.lock().unwrap().push(entry);
+            Box::pin(async { Ok(()) })
+        });
+        let evidence = crate::audit::AttemptEvidence::new(sink);
+        let (client, server) = responses_stream_client(raw_body.clone()).await;
+        let events = evidence
+            .scope(async {
+                let (raw, metadata, doom_loop) = client
+                    .conversation_stream_responses(ConversationRequest::new())
+                    .await
+                    .expect("HTTP 200 stream");
+                crate::stream::stream_responses(
+                    raw,
+                    metadata,
+                    crate::types::RequestId::from("sparse-failed"),
+                    std::time::Duration::from_secs(5),
+                    doom_loop,
+                )
+                .collect::<Vec<_>>()
+                .await
+            })
+            .await;
+        evidence.finish(serde_json::json!({})).await.unwrap();
+        server.abort();
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, crate::events::SamplingEvent::ToolCallDelta { .. })),
+            "the partial arguments remain only a streamed candidate: {events:?}"
+        );
+        let failures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::events::SamplingEvent::Failed { error, .. } => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failures.len(), 1, "exactly one Failed event: {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, crate::events::SamplingEvent::Completed { .. })),
+            "a partial tool call cannot be admitted: {events:?}"
+        );
+        let error = crate::events::sampling_error_from_info(failures[0]);
+        let SamplingError::Api {
+            status, message, ..
+        } = &error
+        else {
+            panic!("provider server_error must survive SDK decoding: {error:?}");
+        };
+        assert_eq!(*status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(message.contains("server_error"), "{message}");
+        assert!(
+            message.contains("Codex: connection lost mid-reply (unexpected EOF)"),
+            "{message}"
+        );
+        assert!(error.is_retryable());
+        assert!(matches!(
+            crate::retry::classify_error(&error, 0, 3, 3),
+            crate::retry::RetryDecision::RetryWithClientRebuild { .. }
+        ));
+        assert!(matches!(
+            crate::retry::classify_error(&error, 2, 3, 3),
+            crate::retry::RetryDecision::Fatal(_)
+        ));
+
+        let records = captured.lock().unwrap();
+        let response = records
+            .iter()
+            .find(|entry| entry.kind == "response")
+            .expect("response evidence");
+        assert_eq!(response.body.as_slice(), raw_body.as_bytes());
+        assert_eq!(response.metadata["status"], 200);
+        assert_eq!(
+            response.metadata["provider_terminal"],
+            serde_json::json!({
+                "backend": "responses", "event": "response.failed", "status": "failed",
+                "incomplete_reason": null
+            })
+        );
     }
 
     #[tokio::test]

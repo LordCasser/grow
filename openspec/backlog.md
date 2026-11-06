@@ -4,7 +4,7 @@
 
 ## 本轮全仓审计发现，待独立修复
 
-用户于2026-11-05要求停止新增审查并把当前成果作为发布前里程碑。已接受修复逐项归档；下列未闭合项保留为后续工作，本里程碑不再启动新的调查或实施。状态、验证限制和原停止点见[里程碑记录](changes/archive/2026-11-05-coordinate-audit-backlog-repairs/milestone.md)，发布准备见[2.6.1候选](changes/prepare-release-v2-6-1/proposal.md)。
+用户于2026-11-05要求停止新增审查并把当前成果作为发布前里程碑。已接受修复逐项归档；下列未闭合项保留为后续工作，本里程碑不再启动新的调查或实施。状态、验证限制和原停止点见[里程碑记录](changes/archive/2026-11-05-coordinate-audit-backlog-repairs/milestone.md)，发布与验收见[2.6.1发布记录](changes/archive/2026-11-06-prepare-release-v2-6-1/verification.md)。
 
 以下事项来自 [跨版本架构审计](changes/archive/2026-11-05-audit-grow-architecture-across-versions/proposal.md)。用户随后已授权按全局职责与共享契约统筹修复，执行顺序、待核实边界与集成里程碑见[统一修复设计](changes/archive/2026-11-05-coordinate-audit-backlog-repairs/design.md)。各项仍按独立 owner 建 change，验收后移出本表，不并入 model/effort 特性；静态、机制实验和真实入口证据分别保留。WS-01 见[索引最终删除修复与57项回归](changes/archive/2026-11-05-preserve-code-index-removals/verification.md)。已闭合的 WS-06b 见[成功提交修复与验证](changes/archive/2026-11-05-commit-hunk-projections-after-success/verification.md)，WS-03 见[工作树删除归属修复与44项回归](changes/archive/2026-11-05-bind-worktree-registration-cleanup/verification.md)；WS-06a 外部编辑保护见[磁盘冲突与Shell传播验证](changes/archive/2026-11-05-reject-stale-hunk-targets/verification.md)。
 
@@ -49,6 +49,8 @@ Sampler任务归属与取消回合预算见[模块及产品链验收](changes/ar
 | 交付释放/迟到结果 · 源码已修，现场待新构建恢复 | tool-types LocalPlan历史review绑定与Shell canonical结果提交 | [独立修复与实验](changes/archive/2026-11-05-audit-released-delivery-finalization/verification.md)：原公共API反例已在新生产库转为Ok，planning26/26、独立review和默认CLI check/build通过。只放宽历史Released(None)，其他review/canonical/终态门槛保持。当前旧宿主仍Receipt Unknown、link未terminal，需正常退出后用新项目构建恢复，再核对真实结果与replan；不能将源码验证当作现场闭合 |
 
 ## 明确暂缓
+
+- **Sampler 并发日志捕获测试（待独立复现）**：本次稀疏失败回归首轮并发执行时，既有 `client::tests::sampling_auth_logs_omit_credentials` 失败一次；该项单独重跑与完整串行326项均通过。尚未确认根因，不据此认定生产凭据泄漏或修改日志实现；后续应在并发日志订阅/捕获边界建立受控复现后独立修复。原始失败、exact和串行对照见[验证记录](changes/archive/2026-11-06-decode-sparse-responses-failure/verification.md)。
 
 - **child 结束后的 SessionEnd Hook 因果写入（待独立修复）**：运行时模型控制的隔离真实 child 测试在 canonical Result 关闭 Timeline 后，日志出现 `session-end hook lifecycle was not durable: child Timeline is closed by its subagent result fact`。当前 model/provider/权限/竞态回归通过，未据此放宽封闭 Timeline 或顺带改收尾链路；后续应独立核对 SessionEnd Hook owner 与 Result 的持久顺序，覆盖有无Hook、正常完成/取消与冷恢复。触发和验证限制见[本次验证记录](changes/archive/2026-11-05-control-running-subagent-model-effort/verification.md#shell-verified-candidate)。
 

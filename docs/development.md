@@ -171,6 +171,8 @@ Responses 路由若在显式 `in_progress` 的 function_call added 项省略初�
 
 `response.content_part.added` 的 `output_text` part 若显式文本为空且完全缺少 annotations，Sampler 同样只在解码副本补 `[]`。已有 annotations 保留原值；null、错类型、非空初始文本缺字段、重复已知字段，以及 done/terminal 缺字段仍失败。原始 SSE evidence 逐字节保留，EOF 仍不能完成响应。该修复属于2.6.1之后的版本，见 [初始文本 part 契约](../openspec/specs/model-sampling/spec.md#requirement-initial-responses-empty-text-parts-may-omit-empty-annotations)。
 
+若 `response.failed` 只携带 `response.error/object/status` 而缺完整快照，SDK 可先报 missing created_at。Sampler 仅对已验证的精确稀疏字段形状保留原 code/message，沿既有服务错误分类及有限恢复门处理，并记录实际 failed 终态；不补时间戳、response ID、usage 或完成输出。额外字段、重复键或畸形值不采用此例外，完整失败仍走原 typed 路径。2.6.1之后的修复与证据见 [稀疏失败契约](../openspec/specs/model-sampling/spec.md#requirement-sparse-responses-failure-envelopes-preserve-provider-errors)。
+
 ## 环境
 
 Rust toolchain 由 `rust-toolchain.toml` 声明，构建仍使用 Cargo。OpenSpec 是开发工具，不进入 Cargo 运行时依赖。
