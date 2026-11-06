@@ -80,7 +80,62 @@ fn decode_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> 
 /// events, applied in priority order to a decode copy only. Callers keep the
 /// raw evidence, so diagnostics and a surviving candidate use original facts.
 fn normalize_response_event(data: &str) -> Option<String> {
-    normalize_response_usage_details(data).or_else(|| normalize_added_function_call_arguments(data))
+    normalize_response_usage_details(data)
+        .or_else(|| normalize_added_function_call_arguments(data))
+        .or_else(|| normalize_added_text_part_annotations(data))
+}
+
+/// Only an initial empty output_text part may omit annotations. The original
+/// SSE bytes remain untouched; later part.done and terminal snapshots still
+/// require the SDK's complete fields.
+fn normalize_added_text_part_annotations(data: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("response.content_part.added")
+    {
+        return None;
+    }
+    let serde_json::Value::Object(part) = value.get_mut("part")? else {
+        return None;
+    };
+    if part.get("type").and_then(serde_json::Value::as_str) != Some("output_text")
+        || part.get("text").and_then(serde_json::Value::as_str) != Some("")
+        || part.contains_key("annotations")
+    {
+        return None;
+    }
+    // Re-encoding Value would discard repeated keys. Inspect only fields the
+    // SDK knows on this event and part; leave their types and presence to it.
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct TextPartFields {
+        #[serde(rename = "type")]
+        _kind: serde::de::IgnoredAny,
+        #[serde(rename = "annotations")]
+        _annotations: serde::de::IgnoredAny,
+        #[serde(rename = "logprobs")]
+        _logprobs: serde::de::IgnoredAny,
+        #[serde(rename = "text")]
+        _text: serde::de::IgnoredAny,
+    }
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct AddedTextPartFields {
+        #[serde(rename = "type")]
+        _kind: serde::de::IgnoredAny,
+        #[serde(rename = "sequence_number")]
+        _sequence_number: serde::de::IgnoredAny,
+        #[serde(rename = "item_id")]
+        _item_id: serde::de::IgnoredAny,
+        #[serde(rename = "output_index")]
+        _output_index: serde::de::IgnoredAny,
+        #[serde(rename = "content_index")]
+        _content_index: serde::de::IgnoredAny,
+        #[serde(rename = "part")]
+        _part: TextPartFields,
+    }
+    serde_json::from_str::<AddedTextPartFields>(data).ok()?;
+    part.insert("annotations".to_owned(), serde_json::json!([]));
+    Some(value.to_string())
 }
 
 /// The locked SDK requires `arguments` on every function-call item, but a
@@ -3010,6 +3065,212 @@ mod tests {
     }
 
     #[test]
+    fn empty_text_part_annotations_are_inferred_only_when_absent() {
+        let added = responses_text_events(serde_json::json!({"type": "output_text", "text": ""}))
+            [2]
+        .to_string();
+        let sdk_error = serde_json::from_str::<rs::ResponseStreamEvent>(&added)
+            .expect_err("the locked SDK requires annotations on output_text");
+        assert!(
+            sdk_error
+                .to_string()
+                .contains("missing field `annotations`")
+        );
+        let rs::ResponseStreamEvent::ResponseContentPartAdded(event) =
+            decode_response_event(&added).unwrap().unwrap()
+        else {
+            panic!("expected added text part");
+        };
+        let rs::OutputContent::OutputText(part) = event.part else {
+            panic!("expected output_text part");
+        };
+        assert_eq!(part.text, "");
+        assert!(part.annotations.is_empty());
+
+        let citation = serde_json::json!({
+            "type": "url_citation", "start_index": 0, "end_index": 5,
+            "title": "Source", "url": "https://example.test/source"
+        });
+        for annotations in [serde_json::json!([]), serde_json::json!([citation])] {
+            let added = responses_text_events(serde_json::json!({
+                "type": "output_text", "text": "", "annotations": annotations
+            }))[2]
+                .to_string();
+            assert!(normalize_added_text_part_annotations(&added).is_none());
+            let rs::ResponseStreamEvent::ResponseContentPartAdded(event) =
+                decode_response_event(&added).unwrap().unwrap()
+            else {
+                panic!("expected added text part");
+            };
+            let rs::OutputContent::OutputText(part) = event.part else {
+                panic!("expected output_text part");
+            };
+            assert_eq!(serde_json::to_value(part.annotations).unwrap(), annotations);
+        }
+    }
+
+    #[test]
+    fn empty_text_part_does_not_repair_other_malformed_fields_or_snapshots() {
+        let events = responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
+        let added = events[2].clone();
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(7),
+            serde_json::json!({}),
+        ] {
+            let mut invalid = added.clone();
+            invalid["part"]["annotations"] = value;
+            assert!(
+                decode_response_event(&invalid.to_string()).is_err(),
+                "{invalid}"
+            );
+        }
+        for text in [
+            serde_json::json!("Already present"),
+            serde_json::Value::Null,
+        ] {
+            let mut invalid = added.clone();
+            invalid["part"]["text"] = text;
+            assert!(
+                decode_response_event(&invalid.to_string()).is_err(),
+                "{invalid}"
+            );
+        }
+        let mut missing_text = added.clone();
+        missing_text["part"].as_object_mut().unwrap().remove("text");
+        assert!(decode_response_event(&missing_text.to_string()).is_err());
+        let mut null_part = added.clone();
+        null_part["part"] = serde_json::Value::Null;
+        assert!(decode_response_event(&null_part.to_string()).is_err());
+        let mut unknown_part = added.clone();
+        unknown_part["part"]["type"] = serde_json::json!("vendor.nested");
+        assert!(decode_response_event(&unknown_part.to_string()).is_err());
+        for field in [
+            "sequence_number",
+            "item_id",
+            "output_index",
+            "content_index",
+        ] {
+            let mut missing = added.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                decode_response_event(&missing.to_string()).is_err(),
+                "{field}"
+            );
+        }
+        let mut null_id = added.clone();
+        null_id["item_id"] = serde_json::Value::Null;
+        assert!(decode_response_event(&null_id.to_string()).is_err());
+        let mut bad_index = added.clone();
+        bad_index["content_index"] = serde_json::json!("zero");
+        assert!(decode_response_event(&bad_index.to_string()).is_err());
+
+        // A valid initial part cannot grant defaults to a later snapshot.
+        for (index, pointer) in [
+            (4, "/part"),
+            (5, "/item/content/0"),
+            (6, "/response/output/0/content/0"),
+        ] {
+            let mut invalid = events[index].clone();
+            invalid
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("annotations");
+            assert!(
+                decode_response_event(&invalid.to_string()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_text_part_preserves_known_duplicate_field_rejection() {
+        let base = r#"{"type":"response.content_part.added","sequence_number":3,"item_id":"msg-text","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}"#;
+        let cases = [
+            (
+                "event type",
+                base.replace(
+                    r#""sequence_number":3"#,
+                    r#""type":"response.content_part.added","sequence_number":3"#,
+                ),
+            ),
+            (
+                "sequence_number after part",
+                format!(r#"{},"sequence_number":4}}"#, &base[..base.len() - 1]),
+            ),
+            (
+                "item_id null first",
+                base.replace(
+                    r#""item_id":"msg-text""#,
+                    r#""item_id":null,"item_id":"msg-text""#,
+                ),
+            ),
+            (
+                "output_index",
+                base.replace(
+                    r#""output_index":0"#,
+                    r#""output_index":0,"output_index":0"#,
+                ),
+            ),
+            (
+                "content_index",
+                base.replace(
+                    r#""content_index":0"#,
+                    r#""content_index":0,"content_index":0"#,
+                ),
+            ),
+            (
+                "part null first",
+                base.replace(
+                    r#""part":{"type":"output_text""#,
+                    r#""part":null,"part":{"type":"output_text""#,
+                ),
+            ),
+            (
+                "part type",
+                base.replace(
+                    r#""type":"output_text""#,
+                    r#""type":"output_text","type":"output_text""#,
+                ),
+            ),
+            (
+                "part text null first",
+                base.replace(r#""text":"""#, r#""text":null,"text":"""#),
+            ),
+            (
+                "part logprobs null first and repeated at tail",
+                base.replace(r#""text":"""#, r#""logprobs":null,"text":"","logprobs":[]"#),
+            ),
+        ];
+        for (field, data) in cases {
+            assert!(
+                serde_json::from_str::<rs::ResponseStreamEvent>(&data).is_err(),
+                "SDK control for {field}: {data}"
+            );
+            assert!(
+                decode_response_event(&data).is_err(),
+                "decode-copy must not swallow duplicate {field}: {data}"
+            );
+        }
+
+        // The actual SDK rejects a duplicate on an otherwise complete part,
+        // while Value re-encoding silently erases it. This is why the guard
+        // must inspect the original JSON before adding annotations.
+        let annotated = base.replace(r#""text":""}"#, r#""text":"","annotations":[]}"#);
+        let duplicate = format!(
+            r#"{},"sequence_number":4}}"#,
+            &annotated[..annotated.len() - 1]
+        );
+        assert!(serde_json::from_str::<rs::ResponseStreamEvent>(&duplicate).is_err());
+        let collapsed =
+            serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&duplicate).unwrap())
+                .unwrap();
+        assert!(serde_json::from_str::<rs::ResponseStreamEvent>(&collapsed).is_ok());
+    }
+
+    #[test]
     fn messages_extensions_do_not_hide_known_protocol_errors() {
         for kind in ["keepalive", "vendor.metrics", "message.future_event"] {
             let data = serde_json::json!({"type": kind, "payload": {"type": "anything"}});
@@ -3213,6 +3474,164 @@ mod tests {
                 }
             }
         })
+    }
+
+    fn responses_text_events(added_part: serde_json::Value) -> Vec<serde_json::Value> {
+        let completed_part = serde_json::json!({
+            "type": "output_text", "text": "Hello, world!", "annotations": []
+        });
+        let completed_message = serde_json::json!({
+            "type": "message", "id": "msg-text", "role": "assistant",
+            "phase": "final_answer", "status": "completed",
+            "content": [completed_part]
+        });
+        vec![
+            responses_created_event(),
+            serde_json::json!({
+                "type": "response.output_item.added", "sequence_number": 2,
+                "output_index": 0, "item": {
+                    "type": "message", "id": "msg-text", "role": "assistant",
+                    "phase": "final_answer", "status": "in_progress", "content": []
+                }
+            }),
+            serde_json::json!({
+                "type": "response.content_part.added", "sequence_number": 3,
+                "item_id": "msg-text", "output_index": 0, "content_index": 0,
+                "part": added_part
+            }),
+            serde_json::json!({
+                "type": "response.output_text.delta", "sequence_number": 4,
+                "item_id": "msg-text", "output_index": 0, "content_index": 0,
+                "delta": "Hello, world!"
+            }),
+            serde_json::json!({
+                "type": "response.content_part.done", "sequence_number": 5,
+                "item_id": "msg-text", "output_index": 0, "content_index": 0,
+                "part": {"type": "output_text", "text": "Hello, world!", "annotations": []}
+            }),
+            serde_json::json!({
+                "type": "response.output_item.done", "sequence_number": 6,
+                "output_index": 0, "item": completed_message
+            }),
+            serde_json::json!({
+                "type": "response.completed", "sequence_number": 7,
+                "response": {
+                    "id": "resp-direct", "object": "response", "created_at": 0,
+                    "model": "test-model", "status": "completed",
+                    "output": [completed_message],
+                    "usage": {
+                        "input_tokens": 100, "input_tokens_details": {"cached_tokens": 0},
+                        "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 0},
+                        "total_tokens": 105
+                    }
+                }
+            }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn responses_empty_text_part_without_annotations_completes_with_valid_snapshots() {
+        let events = responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
+        assert!(
+            !events[2]["part"]
+                .as_object()
+                .unwrap()
+                .contains_key("annotations")
+        );
+        let raw_body = responses_sse(&events);
+        let added_frame = format!("data: {}\n\n", events[2]);
+        assert!(raw_body.contains(&added_frame));
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entries = captured.clone();
+        let sink: crate::audit::EvidenceSink = std::sync::Arc::new(move |entry| {
+            entries.lock().unwrap().push(entry);
+            Box::pin(async { Ok(()) })
+        });
+        let evidence = crate::audit::AttemptEvidence::new(sink);
+        let (client, server) = responses_stream_client(raw_body.clone()).await;
+        let result = evidence
+            .scope(client.conversation_collect(ConversationRequest::new()))
+            .await;
+        evidence.finish(serde_json::json!({})).await.unwrap();
+        server.abort();
+        let records = captured.lock().unwrap();
+        let raw_evidence = &records
+            .iter()
+            .find(|entry| entry.kind == "response")
+            .expect("raw response evidence")
+            .body;
+        assert_eq!(raw_evidence.as_slice(), raw_body.as_bytes());
+        let response = result.expect("complete annotated snapshots must finish the text response");
+        assert_eq!(response.assistant_text(), "Hello, world!");
+        assert_eq!(response.stop_reason, Some(sampling_types::StopReason::Stop));
+        assert_eq!(
+            response.assistant().unwrap().model_id.as_deref(),
+            Some("test-model")
+        );
+        assert_eq!(response.usage.as_ref().unwrap().total_tokens, 105);
+        assert!(response.provider_terminal.is_some());
+    }
+
+    #[tokio::test]
+    async fn responses_text_part_with_explicit_annotations_completes_unchanged() {
+        let events = responses_text_events(serde_json::json!({
+            "type": "output_text", "text": "", "annotations": []
+        }));
+        let (client, server) = responses_stream_client(responses_sse(&events)).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let response = result.expect("already annotated initial text completes normally");
+        assert_eq!(response.assistant_text(), "Hello, world!");
+        assert_eq!(response.stop_reason, Some(sampling_types::StopReason::Stop));
+        assert_eq!(
+            response.assistant().unwrap().model_id.as_deref(),
+            Some("test-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_empty_text_part_then_eof_does_not_complete() {
+        let mut events =
+            responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
+        events.truncate(4); // created, item added, part added, delta; no terminal
+        let (client, server) = responses_stream_client(responses_sse(&events)).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        assert!(
+            matches!(result, Err(SamplingError::IncompleteStream { .. })),
+            "an accepted initial part and text delta never imply completion: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_empty_text_part_does_not_repair_later_snapshots() {
+        for (index, pointer) in [
+            (4, "/part"),
+            (5, "/item/content/0"),
+            (6, "/response/output/0/content/0"),
+        ] {
+            let mut events =
+                responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
+            events[index]
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("annotations");
+            let (client, server) = responses_stream_client(responses_sse(&events)).await;
+            let result = client
+                .conversation_collect(ConversationRequest::new())
+                .await;
+            server.abort();
+            assert!(
+                matches!(result, Err(SamplingError::Serialization(_))),
+                "missing annotations at later index {index} must fail: {result:?}"
+            );
+        }
     }
 
     async fn responses_stream_client(

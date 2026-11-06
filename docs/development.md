@@ -169,6 +169,8 @@ LSP 文档更新由 `Documents::send_update` 在一次同步写锁内完成通�
 
 Responses 路由若在显式 `in_progress` 的 function_call added 项省略初始 arguments，Sampler 只在 typed decode 副本补空前缀。已知字段重复、null/非字符串、done/terminal 缺参数仍失败，后续参数与身份/终态校验照常执行；原始 evidence 不改。见 [初始函数参数契约](../openspec/specs/model-sampling/spec.md#requirement-responses-function-call-starts-may-omit-the-empty-argument-prefix)。
 
+`response.content_part.added` 的 `output_text` part 若显式文本为空且完全缺少 annotations，Sampler 同样只在解码副本补 `[]`。已有 annotations 保留原值；null、错类型、非空初始文本缺字段、重复已知字段，以及 done/terminal 缺字段仍失败。原始 SSE evidence 逐字节保留，EOF 仍不能完成响应。该修复属于2.6.1之后的版本，见 [初始文本 part 契约](../openspec/specs/model-sampling/spec.md#requirement-initial-responses-empty-text-parts-may-omit-empty-annotations)。
+
 ## 环境
 
 Rust toolchain 由 `rust-toolchain.toml` 声明，构建仍使用 Cargo。OpenSpec 是开发工具，不进入 Cargo 运行时依赖。
