@@ -105,6 +105,8 @@ Project and user definitions can add new types. Project definitions can shadow a
 | `parent_step_id` | Required TODO identity in the direct parent's current scope. The item must be pending or in progress and not removed. |
 | `required_deliverable` | Require explicit parent review of the linked result. Both optional and required deliveries need `parent_step_id`. |
 
+The separate `effort` parameter is available from Grow 2.6.1. If an Agent reports that it is absent, check the actual tool schema in that session's provider request and the version of the process serving the session. Installing a newer binary does not replace the tool runtime of an already running older process; `grow --version` in another shell may resolve to a different installed binary. Use the newer process when creating or restoring the session's tool runtime.
+
 Observe children with three separate tools:
 
 - `list_subagent({"scope":"active"})` discovers visible unfinished or unknown children, including initialization, suspension and finalization. Use `"all"` to include authorized history. The list contains basic identity/state facts, without tool calls or answers.
