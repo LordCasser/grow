@@ -111,7 +111,7 @@ fn every_bool_executes_keyboard_and_mouse_with_its_own_setter() {
         }
         exercised.insert(meta.key);
     }
-    assert_eq!(exercised.len(), 25);
+    assert_eq!(exercised.len(), 26);
 }
 
 #[test]

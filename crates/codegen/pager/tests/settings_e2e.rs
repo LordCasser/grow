@@ -37,6 +37,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "simple_mode",
     "vim_mode",
     "remember_tool_approvals",
+    "toolset.ask_user_question.allow_non_blocking",
     "toolset.ask_user_question.timeout_enabled",
     "keep_text_selection",
     "theme",
@@ -230,6 +231,15 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetRememberToolApprovals value differs from expected"
+            )
+        }
+        (
+            "toolset.ask_user_question.allow_non_blocking",
+            Action::SetAskUserQuestionAllowNonBlocking(b),
+        ) => {
+            assert_eq!(
+                b, expected,
+                "SetAskUserQuestionAllowNonBlocking value differs from expected"
             )
         }
         (
@@ -1819,6 +1829,7 @@ fn registry_kind_membership_through_pr_14() {
             "simple_mode",
             "vim_mode",
             "remember_tool_approvals",
+            "toolset.ask_user_question.allow_non_blocking",
             "toolset.ask_user_question.timeout_enabled",
             "auto_update",
             "show_tips",
@@ -1961,6 +1972,7 @@ fn defaults_round_trip_through_registry() {
             "simple_mode" => SettingValue::Bool(true),
             "vim_mode" => SettingValue::Bool(false),
             "remember_tool_approvals" => SettingValue::Bool(false),
+            "toolset.ask_user_question.allow_non_blocking" => SettingValue::Bool(true),
             "toolset.ask_user_question.timeout_enabled" => SettingValue::Bool(true),
             "keep_text_selection" => SettingValue::Enum("flash"),
             "theme" => SettingValue::Enum("grownight"),
@@ -2059,6 +2071,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
             | SettingsKeyOutcome::Action(Action::SetVimMode(_))
             | SettingsKeyOutcome::Action(Action::SetRememberToolApprovals(_))
+            | SettingsKeyOutcome::Action(Action::SetAskUserQuestionAllowNonBlocking(_))
             | SettingsKeyOutcome::Action(Action::SetAskUserQuestionTimeoutEnabled(_))
             | SettingsKeyOutcome::Action(Action::SetShowTips(_))
             | SettingsKeyOutcome::Action(Action::SetAutoUpdate(_))
