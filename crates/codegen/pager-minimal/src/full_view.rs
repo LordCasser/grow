@@ -447,15 +447,19 @@ mod tests {
             &mut out,
         );
 
-        // OSC 8 hyperlinks keep the absolute owning-session `file://` target
-        // while the visible label elides the session cwd prefix. Assert the
-        // target on the raw output, then strip exactly that opening sequence
-        // and judge the display layer as the terminal shows it.
-        assert!(
-            out.contains("\x1b]8;;file:///alternate/worktree/src/main.rs\x07"),
-            "OSC8 target must stay the absolute owning-session path: {out:?}"
-        );
-        let display_layer = out.replace("\x1b]8;;file:///alternate/worktree/src/main.rs\x07", "");
+        // Hyperlink renderers (macOS) emit an OSC 8 opening whose target must
+        // stay the absolute owning-session `file://` URL, while the visible
+        // label elides the session cwd prefix. Renderers without hyperlinks
+        // (Linux CI) render plain text, so the target check only applies when
+        // a hyperlink sequence exists. Strip every OSC 8 sequence before
+        // judging the display layer exactly as a terminal shows it.
+        if out.contains("\x1b]8;") {
+            assert!(
+                out.contains("file:///alternate/worktree/src/main.rs"),
+                "OSC8 target must stay the absolute owning-session path: {out:?}"
+            );
+        }
+        let display_layer = strip_osc8_sequences_for_test(&out);
         assert!(
             display_layer.contains("src/main.rs"),
             "visible label: {display_layer:?}"
@@ -464,6 +468,33 @@ mod tests {
             !display_layer.contains("/alternate/worktree"),
             "session prefix should be elided from the visible label: {display_layer:?}"
         );
+    }
+
+    /// Test-only: remove OSC 8 hyperlink sequences (`ESC ] 8 ; params ; URL BEL`
+    /// or `ESC \`) so assertions inspect the text a terminal displays, on
+    /// renderers that emit hyperlinks and those that do not.
+    fn strip_osc8_sequences_for_test(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input;
+        while let Some(start) = rest.find("\x1b]8;") {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 4..];
+            let end = after
+                .find('\x07')
+                .map(|index| index + 1)
+                .or_else(|| after.find("\x1b\\").map(|index| index + 2));
+            match end {
+                Some(end) => rest = &after[end..],
+                // Unterminated sequence: keep the remainder so the label
+                // assertions still run instead of silently dropping text.
+                None => {
+                    out.push_str(&rest[start..]);
+                    return out;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     #[test]

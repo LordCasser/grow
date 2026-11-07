@@ -270,6 +270,8 @@ fn publish_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
 
+    // `permissions` is Unix-only, so the builder only needs `mut` there.
+    #[cfg_attr(not(unix), expect(unused_mut))]
     let mut builder = tempfile::Builder::new();
     #[cfg(unix)]
     {

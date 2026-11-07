@@ -96,7 +96,6 @@ impl PtyChild {
     /// code is 259 would otherwise be reported as still running forever.
     #[cfg(windows)]
     fn try_wait_windows(&mut self) -> Result<Option<u32>> {
-        use portable_pty::Child as _;
         use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
