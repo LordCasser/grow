@@ -24,6 +24,7 @@ pub use lifecycle::LifecycleEventBlock;
 pub use list_dir::ListDirToolCallBlock;
 pub use memory_search::MemorySearchToolCallBlock;
 pub use other::OtherToolCallBlock;
+pub use other::{AdvisoryCard, AdvisoryCardStatus, AdvisoryReplyStatus};
 pub use other::{CoordinationPhase, CoordinationRow};
 pub use read::{ReadMediaKind, ReadToolCallBlock};
 pub use search::{

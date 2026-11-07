@@ -1,0 +1,21 @@
+# Design
+
+## 决策依据与所有者
+
+共享错误分类在 `sampling-types/src/error.rs::from_stream_error`，三reader、Messages typed L2、sampler retry及非主turn调用者都消费同一SamplingError。sampler拥有重试预算和attempt接纳，不应为了两个已知code添reader特判或新循环。父已亲读当前known_server_error白名单、Api retry范围、RecoveryBudget::admit/replay_safe，以及固定官方errors.md（原资料SHA256见归档official对照）。Context7本轮补核官方Python `_streaming.py`只抛出HTTP200流错误，不自行重发；`_base_client.py`的HTTP重试不等于SSE自动重试保证。
+
+精确映射：规范化后等于api_error→500并作为已知server error，等于timeout_error→504且无未知code veto。代码/type/message保持现有原文来源，身份保留现有传播能力：typed流的本地SamplingEvent request ID与raw evidence中的供应方request_id分别核验；现有named错误分支已提取的provider request_id继续保留。`parse_structured_error`此前不提取typed顶层request_id，本项不新增提取格式，也不把本地ID冒称供应方ID。type里的timeout身份不从人可读message猜。真实HTTP非2xx继续从actualstatus构造，timeout_error在500响应里不会被本项硬改504。这里的504仅是缺真实失败HTTPstatus的流内分类，与既有overload→529同层。
+
+未知code仍映射通用500+false veto；api_error_suffix、timeout_error_custom等不因部分字符串匹配而取得资格。普通身份+error混合帧、重复已声明字段、错误资格gate原契约保持Serialization，不让标准type绕过gate。auth/request/quota/overload分类保持。
+
+## 重试与不变量
+
+选用已有Api500/504有限重试入口；不设`should_retry=true`强迫重试，不改用户配置、retry-after或sharedbudget。每个真实providerattempt必须先结算已知/未知usage，再准入后续请求；已发布的可撤回候选在失败时整次撤回，不执行候选工具。`replay_safe=false`、maxattempts和绝对期限均可拒绝后续准入。保留用户原route/version未知的证据限制。
+
+备选：只把标准code当已知但仍无条件veto，可保守却不能修api_error明确backoff建议与当前server_error等效语义；给每个reader加specialcase会重复共同分类。新增独立Timeout公共变体不提供当前消费者所需新能力，现有Api504已表达，均不采用。
+
+## Coder Task Spec / Review Plan
+
+一个coder负责一个共享错误分类修复：只写error.rs及本项必要sampler消费测试，保留既有dirty工作。先通过当前公共helper/真实Messages reader建立oldred，随后最小映射修复；不收紧HTTPparser或通用serde默认。用合法typed SSE+requestID、初始工具候选后错误、未知lookalike、malformed普通帧正反控；test retry决定允许有限重试并在额度耗尽/unsafe时拒绝。真实loopbackprovider失败→下一attempt或reject，区分L2未完成候选与工具执行链证据，不用空tool list假称已验证执行副作用。
+
+父核最终diff、原code/message/requestID与unknownveto、实际reader/recovery输入输出及最终源码验证；通过后运行OpenSpec strict、更新开发说明和backlog，逐场景核记录后归档。本项green不代表真实Anthropic部署同版本现场已复现。

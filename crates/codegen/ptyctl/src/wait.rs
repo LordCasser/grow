@@ -58,11 +58,8 @@ pub struct WaitDiagnostics {
 ///
 /// The HTTP server wraps `PtySession` in a mutex; a long-poll must clone
 /// this handle and drop the session guard, or it would block send/screen
-/// for the whole wait.
-///
-/// TODO: the next verb needing lock-free session access must instead make
-/// `stop()` take `&self` and switch the server state to `Arc<PtySession>`,
-/// deleting this handle — do not clone another field trio.
+/// for the whole wait. Lifecycle control uses SessionControl, owned by the same
+/// Session child owner; this handle only observes screen generations.
 pub struct WaitHandle {
     pub(crate) terminal: Arc<Mutex<Terminal>>,
     pub(crate) generation_rx: watch::Receiver<u64>,

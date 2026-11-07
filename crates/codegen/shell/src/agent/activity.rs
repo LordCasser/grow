@@ -13,23 +13,35 @@
 //! path end session actors gracefully instead of aborting them via
 //! `LocalSet` drop.
 //!
-//! ## Lifecycle: entries expire with their actor, not with agent bookkeeping
+//! ## Lifecycle: entries expire with the complete incarnation, not with the command channel
 //!
 //! The agent only ever **registers** sessions (at handle creation). There is
-//! deliberately no unregister: an entry is live exactly while its actor
-//! holds the command receiver (`!cmd_tx.is_closed()`), and closed entries
-//! are purged opportunistically. This sidesteps a whole class of races
-//! between `MvpAgent`'s map bookkeeping and actor lifetime — an actor
-//! removed from the agent's map but still winding down stays visible to
-//! `is_busy`/`flush_all_sessions` until it actually exits, and a session id
-//! rebuilt with a fresh actor is just a second (distinct) entry.
+//! deliberately no unregister: an entry is live exactly while its session's
+//! full incarnation — the dedicated actor thread **and** its persistence
+//! task, observed via [`SessionThread::is_finished`] — has not retired, and
+//! finished entries are purged opportunistically.
+//!
+//! The command channel must NOT be the liveness signal:
+//! `begin_graceful_shutdown` calls `cmd_rx.close()` *before* the
+//! SessionEnd lifecycle and the final persistence flush, so every sender
+//! sees `cmd_tx.is_closed()` while the actor/persistence owners are still
+//! winding down. Treating that as exit made `flush_all_sessions` return
+//! early and let the `LocalSet` drop truncate the persistence worker.
+//!
+//! This sidesteps a whole class of races between `MvpAgent`'s map
+//! bookkeeping and actor lifetime — an actor removed from the agent's map
+//! but still winding down stays visible to `is_busy`/`flush_all_sessions`
+//! until the incarnation actually retires, and a session id rebuilt with a
+//! fresh actor is just a second (distinct) entry (deduped per command
+//! channel during flush). Joining stays with the agent's `session_threads`
+//! map and its reaper; the clone held here is observation-only.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::session::pending_interaction::PendingInteractions;
-use crate::session::{SessionCommand, SessionHandle};
+use crate::session::{SessionCommand, SessionHandle, SessionThread};
 
 /// How often [`AgentActivity::flush_all_sessions`] re-polls actors that have
 /// not yet exited.
@@ -51,6 +63,16 @@ pub const SESSION_FLUSH_GRACE: Duration = Duration::from_secs(10);
 struct SessionActivityEntry {
     id: String,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+    /// Observation-only handle on the session's full incarnation (actor
+    /// thread + persistence task). Joining stays with the agent's
+    /// `session_threads` map and its reaper; the clone here only answers
+    /// "has this incarnation retired?".
+    ///
+    /// `None` exists only for the `cfg(test)` raw-channel seam
+    /// ([`AgentActivity::register_for_test`]); the production registration
+    /// signature takes a real `SessionThread` by value, so production
+    /// liveness never falls back to the closed-channel heuristic.
+    session_thread: Option<SessionThread>,
     /// `Some` while an IPC-driven turn is running.
     current_prompt_id: Arc<Mutex<Option<String>>>,
     /// Non-empty while a blocking reverse-request (permission / question /
@@ -59,9 +81,16 @@ struct SessionActivityEntry {
 }
 
 impl SessionActivityEntry {
-    /// The actor still holds the command receiver.
+    /// The session's incarnation (actor thread and persistence task) has
+    /// not yet retired. The command channel is deliberately not consulted:
+    /// `cmd_rx.close()` happens before the SessionEnd lifecycle, so channel
+    /// closure does not mean the owners are done.
     fn is_live(&self) -> bool {
-        !self.cmd_tx.is_closed()
+        match &self.session_thread {
+            Some(thread) => !thread.is_finished(),
+            // Test-only raw-channel seam: no owner to observe.
+            None => !self.cmd_tx.is_closed(),
+        }
     }
 
     /// A running turn or a parked blocking interaction.
@@ -88,6 +117,19 @@ struct ActivityInner {
     subagents: Arc<AtomicUsize>,
 }
 
+/// Whether a signaled session incarnation has retired: the full
+/// `SessionThread` when present, otherwise (test-only raw-channel seam) the
+/// command receiver.
+fn retired(
+    tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+    thread: &Option<SessionThread>,
+) -> bool {
+    match thread {
+        Some(thread) => thread.is_finished(),
+        None => tx.is_closed(),
+    }
+}
+
 /// Cheap-to-clone, `Send + Sync` handle. See module docs.
 #[derive(Clone, Default)]
 pub struct AgentActivity {
@@ -95,12 +137,20 @@ pub struct AgentActivity {
 }
 
 impl AgentActivity {
-    /// Register a session's shared state at handle-creation time. No
-    /// unregister exists — the entry expires when the actor exits.
-    pub(crate) fn register_session(&self, id: &str, handle: &SessionHandle) {
+    /// Register a session's shared state at handle-creation time, along with
+    /// an observation-only clone of the session's [`SessionThread`]. No
+    /// unregister exists — the entry expires when the full incarnation
+    /// (actor thread + persistence task) retires.
+    pub(crate) fn register_session(
+        &self,
+        id: &str,
+        handle: &SessionHandle,
+        session_thread: SessionThread,
+    ) {
         self.lock_live_sessions().push(SessionActivityEntry {
             id: id.to_string(),
             cmd_tx: handle.cmd_tx.clone(),
+            session_thread: Some(session_thread),
             current_prompt_id: handle.current_prompt_id.clone(),
             pending_interactions: handle.pending_interactions.clone(),
         });
@@ -133,8 +183,13 @@ impl AgentActivity {
 
     /// Send [`SessionCommand::Shutdown`] to every live session actor
     /// (replay-buffer flush → hooks → memory save → actor returns) and wait
-    /// up to `grace` for the actors to exit, observed via
-    /// `cmd_tx.is_closed()`.
+    /// up to `grace` for each session's full incarnation — actor thread and
+    /// persistence task, via [`SessionThread::is_finished`] — to retire.
+    ///
+    /// The command channel alone is not an exit signal: the actor closes
+    /// its receiver before running the SessionEnd lifecycle, so a closed
+    /// `cmd_tx` with the incarnation still running must keep the flush
+    /// pending.
     ///
     /// This is a quiesce loop, not a one-shot broadcast: each poll
     /// re-snapshots the registry and signals actors that appeared after the
@@ -147,34 +202,38 @@ impl AgentActivity {
     /// case, call **before** cancelling the root token; in the in-process case,
     /// **after** the cancel that ends the worker's run loop but before its
     /// `LocalSet` drops — either way, session state must be durable before the
-    /// drop aborts remaining tasks. Actors that miss the grace are logged and
-    /// abandoned.
+    /// drop aborts remaining tasks. Incarnations that miss the grace are
+    /// logged and abandoned.
     pub async fn flush_all_sessions(&self, grace: Duration) {
         let deadline = tokio::time::Instant::now() + grace;
-        // Every distinct channel signaled so far (id kept for logging).
-        let mut signaled: Vec<(String, tokio::sync::mpsc::UnboundedSender<SessionCommand>)> =
-            Vec::new();
+        // Every distinct channel signaled so far (id kept for logging), with
+        // the incarnation to observe for completion.
+        let mut signaled: Vec<(
+            String,
+            tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+            Option<SessionThread>,
+        )> = Vec::new();
 
         loop {
             let snapshot: Vec<_> = self
                 .lock_live_sessions()
                 .iter()
-                .map(|e| (e.id.clone(), e.cmd_tx.clone()))
+                .map(|e| (e.id.clone(), e.cmd_tx.clone(), e.session_thread.clone()))
                 .collect();
-            for (id, tx) in snapshot {
-                if !signaled.iter().any(|(_, s)| s.same_channel(&tx)) {
+            for (id, tx, thread) in snapshot {
+                if !signaled.iter().any(|(_, s, _)| s.same_channel(&tx)) {
                     tracing::info!(session_id = %id, "shutdown: flushing session");
                     let _ = tx.send(SessionCommand::Shutdown);
-                    signaled.push((id, tx));
+                    signaled.push((id, tx, thread));
                 }
             }
 
-            if signaled.iter().all(|(_, tx)| tx.is_closed()) {
-                return; // nothing to flush, or all actors exited
+            if signaled.iter().all(|(_, tx, thread)| retired(tx, thread)) {
+                return; // nothing to flush, or every incarnation retired
             }
             if tokio::time::Instant::now() >= deadline {
-                for (id, tx) in &signaled {
-                    if !tx.is_closed() {
+                for (id, tx, thread) in &signaled {
+                    if !retired(tx, thread) {
                         tracing::warn!(
                             session_id = %id,
                             "shutdown: session actor did not exit within grace; proceeding"
@@ -204,11 +263,41 @@ impl AgentActivity {
 
     /// Register a synthetic session from raw parts (no full `SessionHandle`).
     /// Returns the command receiver (the "actor" side) plus the shared
-    /// running-turn and pending-interaction slots.
+    /// running-turn and pending-interaction slots. Test-only raw-channel
+    /// seam: no `SessionThread`, so liveness follows the channel.
     #[cfg(test)]
     pub(crate) fn register_for_test(
         &self,
         id: &str,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<SessionCommand>,
+        Arc<Mutex<Option<String>>>,
+        PendingInteractions,
+    ) {
+        self.register_raw(id, None)
+    }
+
+    /// Like [`AgentActivity::register_for_test`], but with a real
+    /// `SessionThread` so tests observe the production incarnation口径
+    /// (actor thread + persistence task, not the command channel).
+    #[cfg(test)]
+    pub(crate) fn register_for_test_with_thread(
+        &self,
+        id: &str,
+        session_thread: SessionThread,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<SessionCommand>,
+        Arc<Mutex<Option<String>>>,
+        PendingInteractions,
+    ) {
+        self.register_raw(id, Some(session_thread))
+    }
+
+    #[cfg(test)]
+    fn register_raw(
+        &self,
+        id: &str,
+        session_thread: Option<SessionThread>,
     ) -> (
         tokio::sync::mpsc::UnboundedReceiver<SessionCommand>,
         Arc<Mutex<Option<String>>>,
@@ -220,6 +309,7 @@ impl AgentActivity {
         self.lock_live_sessions().push(SessionActivityEntry {
             id: id.to_string(),
             cmd_tx,
+            session_thread,
             current_prompt_id: current_prompt_id.clone(),
             pending_interactions: pending_interactions.clone(),
         });
@@ -421,5 +511,123 @@ mod tests {
     async fn flush_with_no_sessions_is_noop() {
         let activity = AgentActivity::default();
         activity.flush_all_sessions(Duration::from_secs(1)).await;
+    }
+
+    // ---- Tier 2: production incarnation口径 (real SessionThread) ----
+
+    /// Real test incarnation: a dedicated thread that stays alive until the
+    /// given release channel fires, plus an already-finished command
+    /// receiver holder we drop immediately (the receiver is dropped by the
+    /// caller, mirroring `cmd_rx.close()` preceding the SessionEnd work).
+    fn spawn_blocking_owner() -> (SessionThread, std::sync::mpsc::Sender<()>) {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            // Hold the incarnation open until released.
+            let _ = release_rx.recv();
+        });
+        (
+            SessionThread::with_persistence(handle, None, None),
+            release_tx,
+        )
+    }
+
+    /// `cmd_rx.close()` happens before the SessionEnd lifecycle, so a closed
+    /// command channel must not be read as owner retirement: with a real
+    /// `SessionThread` still running, `flush_all_sessions` stays pending and
+    /// only returns after the incarnation retires.
+    #[tokio::test]
+    async fn flush_pending_while_channel_closed_but_incarnation_running() {
+        let activity = AgentActivity::default();
+        let (thread, release) = spawn_blocking_owner();
+        let (rx, _prompt_id, _pending) = activity.register_for_test_with_thread("s1", thread);
+        // The actor closed its command entry (receiver dropped) — the exact
+        // window `begin_graceful_shutdown` creates before the final flush.
+        drop(rx);
+
+        let flush_activity = activity.clone();
+        let flush = tokio::spawn(async move {
+            flush_activity
+                .flush_all_sessions(Duration::from_secs(10))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !flush.is_finished(),
+            "flush must stay pending while the incarnation is running, even though the command channel is closed"
+        );
+
+        release.send(()).expect("release owner thread");
+        flush.await.expect("flush task must not panic");
+    }
+
+    /// An actor thread that has already terminated is not enough: while the
+    /// persistence task still runs, the incarnation is not retired. Observed
+    /// with a real persistence task (bounded, actually finishing) via
+    /// `SessionThread::with_persistence` — no fake zero-delay stand-in.
+    #[tokio::test]
+    async fn flush_pending_while_persistence_task_still_runs() {
+        let activity = AgentActivity::default();
+        // Actor thread: finished before the entry is observed, so only the
+        // persistence task can hold the incarnation open. `join` would
+        // consume the handle the `SessionThread` needs, so observe
+        // `is_finished` instead.
+        let actor_handle = std::thread::spawn(|| {});
+        while !actor_handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Real persistence task: blocked until released.
+        let (release_persistence, persistence_released) = tokio::sync::oneshot::channel::<()>();
+        let persistence = tokio::spawn(async move {
+            let _ = persistence_released.await;
+        });
+        let thread =
+            SessionThread::with_persistence(actor_handle, Some(persistence.abort_handle()), None);
+        let (rx, _prompt_id, _pending) = activity.register_for_test_with_thread("s1", thread);
+        drop(rx); // command entry closed, as in graceful shutdown
+
+        let flush_activity = activity.clone();
+        let flush = tokio::spawn(async move {
+            flush_activity
+                .flush_all_sessions(Duration::from_secs(10))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !flush.is_finished(),
+            "flush must stay pending while the persistence task still owns the incarnation"
+        );
+
+        release_persistence
+            .send(())
+            .expect("release persistence task");
+        persistence.await.expect("persistence task finishes");
+        flush.await.expect("flush task must not panic");
+    }
+
+    /// With a real `SessionThread`, the entry expires when the full
+    /// incarnation retires — the production analogue of
+    /// `live_actor_counts_busy_until_it_exits`.
+    #[tokio::test]
+    async fn threaded_entry_expires_when_incarnation_retires() {
+        let activity = AgentActivity::default();
+        let (thread, release) = spawn_blocking_owner();
+        let (rx, prompt_id, _pending) = activity.register_for_test_with_thread("s1", thread);
+        drop(rx);
+        *prompt_id.lock().unwrap() = Some("prompt-1".to_string());
+        assert!(activity.is_busy());
+        assert_eq!(activity.session_count(), 1);
+
+        release.send(()).expect("release owner thread");
+        // Poll until the incarnation observation catches up (bounded).
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while activity.session_count() > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            activity.session_count(),
+            0,
+            "entry must expire once the incarnation retires"
+        );
+        assert!(!activity.is_busy());
     }
 }

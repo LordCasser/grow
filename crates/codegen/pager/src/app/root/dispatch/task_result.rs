@@ -1052,6 +1052,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             response_source,
             status,
         } => {
+            let advisory_identity = app.advisory_reply_card_identity(agent_id, &prompt_id);
             let Some(agent) = find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
             else {
                 return vec![];
@@ -1073,8 +1074,20 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .pending_prompts
                 .iter()
                 .any(|prompt| prompt.prompt_id.as_deref() == Some(prompt_id.as_str()));
-            if !matches_inflight && !matches_queued {
+            if !matches_inflight && !matches_queued && advisory_identity.is_none() {
                 return vec![];
+            }
+            // Transport failures have no response evidence. They can only
+            // freeze this already-bound card, never release a send/editor.
+            if status.is_err()
+                && response_session_id.is_none()
+                && response_prompt_id.is_none()
+                && response_source.is_none()
+                && let Some((source, call)) = advisory_identity.as_ref()
+            {
+                return super::prompt::reconcile_advisory_reply(
+                    app, agent_id, &prompt_id, source, call, &status,
+                );
             }
             if response_session_id.as_deref() != Some(session_id.0.as_ref())
                 || response_prompt_id.as_deref() != Some(prompt_id.as_str())
@@ -1082,6 +1095,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             {
                 tracing::warn!(session_id = %session_id.0, %prompt_id, "input admission observation identity mismatch");
                 return vec![];
+            }
+            if let Some((source, call)) = advisory_identity {
+                return super::prompt::reconcile_advisory_reply(
+                    app, agent_id, &prompt_id, &source, &call, &status,
+                );
             }
             let query_error = status.as_ref().err().cloned();
             let disposition = match status {
@@ -1738,9 +1756,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::PluginCtaCatalogLoaded { agent_id, result } => {
             handle_plugin_cta_catalog_loaded(app, agent_id, result)
         }
-        TaskResult::SkillsListLoaded { agent_id, result } => {
+        TaskResult::SkillsListLoaded {
+            agent_id,
+            session_id,
+            binding_epoch,
+            result,
+        } => {
             use crate::views::extensions_modal::TabDataState;
             if let Some(agent) = app.agents.get_mut(&agent_id)
+                && agent.session.session_id.as_ref() == Some(&session_id)
+                && agent.session_binding_epoch == binding_epoch
                 && let Some(ref mut modal) = agent.extensions_modal
             {
                 modal.skills_data = match result {
@@ -1769,9 +1794,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::SkillsToggleDone { agent_id, result } => {
-            handle_skills_toggle_done(app, agent_id, result)
-        }
+        TaskResult::SkillsToggleDone {
+            agent_id,
+            session_id,
+            binding_epoch,
+            result,
+        } => handle_skills_toggle_done(app, agent_id, session_id, binding_epoch, result),
         TaskResult::SessionAgentNameResolved {
             agent_id,
             session_id,
@@ -2432,11 +2460,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SettingPersisted { key, value } => {
             tracing::trace!(target: "settings", ?key, ?value, "setting persisted");
-            app.setting_persistence
-                .complete(key, true)
-                .0
-                .into_iter()
-                .collect()
+            let next = app.setting_persistence.complete(key, true).0;
+            if key == "toolset.ask_user_question.allow_non_blocking" && next.is_none() {
+                app.show_toast("Saved non-blocking question preference (environment may override)");
+            }
+            next.into_iter().collect()
         }
         TaskResult::SettingPersistFailed {
             key,

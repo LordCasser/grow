@@ -1,0 +1,29 @@
+# Design
+
+## 架构依据
+
+`extensions/plugins.rs:121`解析PluginsActionRequest，MvpAgent.execute_plugins_action把Update交给session handle和actor；只有Reload成功才广播registry，Pager也仅按requires_reload触发原Reload。actor目前加载immutable registry，直接git_install::update_repo并只读changed，后面保存原记录。低层Git owner负责pull ff-only并返回new_commit、发现plugin列表，不替调用方采用状态。
+
+`plugin::update_plugins_by_selector`已是CLI应用层入口：解析PluginName/RepoKey、调用普通Git或marketplace transactional updater，changed时私有apply_update_to_registry同步commit/updated_at/repo_plugin_map，最后保存一次。RepoUpdateOutcome已表达Updated/AlreadyUpToDate/Pinned/LiveLocal/Failed，repo_update_requires_reload只匹配Updated；CLI与ACP应共用此owner，不复制apply helper或暴露新公共实体。
+
+## 决策与不变量
+
+只替换actor Update分支的应用链。Some(plugin_id)继续取最后段传PluginUpdateSelector::PluginName，None更新全部；UpdateError::NotFound和空结果保现ActionOutcome NotFound，changed outcome形成updated文案及requires_reload=true，AlreadyUpToDate/Pinned/LiveLocal不触发reload。原wire类型、选择政策、强制SHA策略和按原Reload生效的时机保持。不在Update内重载全局/session registry，不改变同名插件身份政策。
+
+actor应按既有RepoUpdateOutcome形成明确结果文案，不再加载/保存第二份InstallRegistry或自行git pull。marketplace项因此走与CLI相同的provenance/事务路径；不得把marketplace当普通branch丢掉发布来源。局部格式化由coder沿现文案选择，无必要引入通用formatter或新枚举。
+
+该项承诺成功无I/O错误更新的状态采用。共享save_registry_or_warn仍属于AC-08待修边界：本项不能声称save失败被正确上报，亦不为保持当前错误实现新增契约。随后AC-08更新owner要使同一个application入口传播真实保存失败及部分完成事实；这影响今日应复用入口的决策，不要求本轮预建事务/回滚。
+
+## Coder Task Spec
+
+唯一行为：真实ACP Update成功后安装记录采用实际更新结果。write scope为`session/actor/hooks_plugins.rs` Update分支和其行为测试，可用已有Shell integration test邻区；共享plugin.rs按现接口直接消费，若发现该入口无法表达当前选择语义或市场事务事实，回报父修订而非复制第二套Git updater。不可顺便实现AC-08 Install/Uninstall/Update错误、新worker运行时、skills/LSP/MCP或其余dirty。
+
+先用隔离本地Git bare remote＋branch安装一个已记录旧commit的repo，将remote推进到新增plugin的commit，调用实际grow/plugins/action Update，证明旧checkout已推进而记录仍旧或第二次仍changed的有效旧红，再用同场景验新绿。无需多轮回退旧源码。调用须经过ACP extension、handle/actor，不仅单测apply helper或直接共享CLI函数。
+
+成功验收：首次outcome与真实durable InstallRegistry commit、updated_at、plugin map和checkout HEAD相符；新plugin保name/path映射，原条目按实际发现更新；第二次同tip为AlreadyUpToDate等价outcome、requires_reload=false且updated_at/commit不被伪造推进。None全量和Some选定plugin的范围、空安装/不存在、pinned/local与reload判定可复用现较小fixture/既有tests，不为每个case构建完整CLI。
+
+## Review Plan
+
+Tier 2：父亲核实际ACP链和actor只消费共享application结果，避免绕过registry/provenance；真实Git main path和同tip no-op，现marketplace updater与repo_update_requires_reload定向回归，scopedfmt/diffcheck。实际不可执行的marketplace远端现场不冒充通过；local fixture可证明其已有入口仍使用。
+
+单一Rust/Cargo writer按当前队列串行，前序SDK任务释放后才能派发。父核证据、同步docs/development/backlog，strict归档。此文是冻结候选，未实施/验收；AC-08仍待独立操作owner交付。

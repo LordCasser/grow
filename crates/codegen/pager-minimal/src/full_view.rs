@@ -447,10 +447,22 @@ mod tests {
             &mut out,
         );
 
-        assert!(out.contains("src/main.rs"), "transcript: {out:?}");
+        // OSC 8 hyperlinks keep the absolute owning-session `file://` target
+        // while the visible label elides the session cwd prefix. Assert the
+        // target on the raw output, then strip exactly that opening sequence
+        // and judge the display layer as the terminal shows it.
         assert!(
-            !out.contains("/alternate/worktree"),
-            "session prefix should be elided: {out:?}"
+            out.contains("\x1b]8;;file:///alternate/worktree/src/main.rs\x07"),
+            "OSC8 target must stay the absolute owning-session path: {out:?}"
+        );
+        let display_layer = out.replace("\x1b]8;;file:///alternate/worktree/src/main.rs\x07", "");
+        assert!(
+            display_layer.contains("src/main.rs"),
+            "visible label: {display_layer:?}"
+        );
+        assert!(
+            !display_layer.contains("/alternate/worktree"),
+            "session prefix should be elided from the visible label: {display_layer:?}"
         );
     }
 

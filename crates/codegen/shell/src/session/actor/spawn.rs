@@ -654,6 +654,9 @@ pub(super) fn start_user_question_worker(
                 tool_call_id: request.tool_call_id.clone(),
                 questions: request.questions.clone(),
                 mode,
+                // Effective blocking value from the tool's admission
+                // snapshot; the worker branch on it is Shell-owned follow-up.
+                blocking: request.blocking,
             };
             debug_assert!(
                 !ext_req.session_id.is_empty(),
@@ -667,6 +670,69 @@ pub(super) fn start_user_question_worker(
             );
             let questions_for_response = request.questions.clone();
             let tool_call_id = request.tool_call_id.clone();
+            // Effective advisory (`blocking = false`): bounded presentation
+            // admission only. No waiting-for-user hook, no pending-interaction
+            // guard, no durable Opened/Resolved — the user was never waited
+            // on, so nothing durable to reconcile. Timeout/transport failures
+            // are infrastructure errors, never a fake user cancel.
+            if !request.blocking {
+                // The tool may have already finished (its own deadline or
+                // cancellation) while the request sat in the serial queue.
+                if request.result_tx.is_closed() {
+                    continue;
+                }
+                if request
+                    .deadline
+                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
+                    tracing::info!(
+                        %tool_call_id,
+                        "advisory question expired in queue; not sending a card"
+                    );
+                    let _ = request
+                        .result_tx
+                        .send(Err(UserQuestionError::TransportError(
+                        "advisory question presentation budget elapsed before the card was sent"
+                            .to_string(),
+                    )));
+                    continue;
+                }
+                let deadline = request.deadline;
+                let result = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    () = request.result_tx.closed() => continue,
+                    () = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => Err(UserQuestionError::TransportError(
+                        "advisory question presentation timed out".to_string(),
+                    )),
+                    acp_result = gateway.ext_method(ext_request) => {
+                        match acp_result {
+                            Ok(raw) => match serde_json::from_str::<AskUserQuestionExtResponse>(
+                                raw.0.get(),
+                            ) {
+                                Ok(AskUserQuestionExtResponse::Presented) => {
+                                    Ok(UserQuestionResponse::Presented)
+                                }
+                                Ok(other) => Err(UserQuestionError::MalformedResponse(format!(
+                                    "client returned a user response to an advisory question (expected presentation acknowledgement): {other:?}"
+                                ))),
+                                Err(e) => Err(UserQuestionError::MalformedResponse(e.to_string())),
+                            },
+                            Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
+                        }
+                    }
+                };
+                let _ = request.result_tx.send(result);
+                if shutdown.is_cancelled() {
+                    break;
+                }
+                continue;
+            }
             let hook_completed = if let Some(session) = weak_session.upgrade() {
                 tokio::select! {
                     biased;
@@ -734,6 +800,17 @@ pub(super) fn start_user_question_worker(
                     }
                 }
             };
+            // A presentation acknowledgement on a blocking question is a
+            // protocol violation from the client, not a user path: reject it
+            // here so the durable interaction resolves Failed (and the tool
+            // gets an error) instead of being recorded as Answered.
+            let result = match result {
+                Ok(UserQuestionResponse::Presented) => Err(UserQuestionError::MalformedResponse(
+                    "client returned a presentation acknowledgement to a blocking question"
+                        .to_string(),
+                )),
+                other => other,
+            };
             // The turn receiver can close before the background worker's
             // shutdown token: suspension aborts the foreground owner first.
             let resolution = if runtime_suspend.load(std::sync::atomic::Ordering::Acquire) {
@@ -795,6 +872,7 @@ pub(crate) async fn spawn_session_actor(
     mcp_meta_config_map: McpMetaConfigMap,
     parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     acp_mcp_servers: Vec<crate::session::mcp_servers::AcpServerEntry>,
+    acp_mcp_leader_client_id: Option<u64>,
     support_permission: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
@@ -1586,6 +1664,8 @@ pub(crate) async fn spawn_session_actor(
         if !acp_mcp_servers.is_empty() {
             let invoker = std::sync::Arc::new(crate::session::acp_mcp::GatewayAcpInvoker::new(
                 gateway.clone(),
+                session_info.id.clone(),
+                acp_mcp_leader_client_id,
             ));
             let acp_server_count = acp_mcp_servers.len();
             state.set_acp_servers(acp_mcp_servers, invoker);
@@ -3695,6 +3775,7 @@ pub(crate) async fn spawn_session_on_thread(
     mcp_meta_config_map: McpMetaConfigMap,
     parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     acp_mcp_servers: Vec<crate::session::mcp_servers::AcpServerEntry>,
+    acp_mcp_leader_client_id: Option<u64>,
     support_permission: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
@@ -3818,6 +3899,7 @@ pub(crate) async fn spawn_session_on_thread(
                     mcp_meta_config_map,
                     parent_mcp_pool,
                     acp_mcp_servers,
+                    acp_mcp_leader_client_id,
                     support_permission,
                     auto_update,
                     persistence,

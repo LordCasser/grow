@@ -301,22 +301,43 @@ fn mcp_pre_decision(
     None
 }
 
-/// True when `words` is an `rg` invocation that enables a preprocessor.
+/// True when `words` is an `rg` invocation that selects an external program.
 ///
 /// `rg --pre COMMAND` (or `--pre=COMMAND`) runs `COMMAND <file>` for every
-/// searched file, so it can execute arbitrary programs. It must not ride the
-/// built-in safe-command auto-allow (unlike a pipeline, `--pre` stays one
-/// bash segment whose primary is still `rg`).
+/// searched file, and `rg --hostname-bin FILE` (or `--hostname-bin=FILE`)
+/// runs `FILE` to decorate hyperlink output — measured on ripgrep 15.2, the
+/// helper executes even when hyperlink output is disabled. Either flag lets a
+/// single bash segment whose primary is still `rg` execute an arbitrary
+/// caller-chosen program, so neither may ride the built-in safe-command
+/// auto-allow nor a plain `rg` prefix grant. Exact invocation grants keep
+/// their existing user policy (see `evaluate_bash`).
 ///
 /// Deliberately does **not** match `--pre-glob`, which only filters when a
-/// preprocessor runs and does not itself spawn processes.
-fn rg_has_pre_flag(words: &[String]) -> bool {
-    if words.first().map(String::as_str) != Some("rg") {
+/// preprocessor runs and does not itself spawn processes. The scan is
+/// intentionally conservative and continues past a literal `--` separator:
+/// rg accepts option values as separate words (`--glob --` makes the next
+/// `--` a glob operand), so position alone cannot prove a later
+/// `--hostname-bin`/`--pre` word is a pattern rather than a flag (verified
+/// on ripgrep 15.2: `rg --glob -- --hostname-bin HELPER needle FILE` executes
+/// HELPER). Flag-shaped words after `--` therefore still cancel the
+/// observational shortcut; a literal search whose pattern happens to equal
+/// such a word over-prompts, never under-prompts.
+pub(super) fn rg_selects_external_program(words: &[String]) -> bool {
+    let Some(head) = words.first() else {
+        return false;
+    };
+    if !head
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(head.as_str())
+        .eq_ignore_ascii_case("rg")
+    {
         return false;
     }
-    words
-        .iter()
-        .any(|w| w == "--pre" || w.starts_with("--pre="))
+    words.iter().skip(1).any(|word| {
+        let name = word.split_once('=').map_or(word.as_str(), |(n, _)| n);
+        name == "--pre" || name == "--hostname-bin"
+    })
 }
 
 /// True when `words` is a `kubectl` invocation that selects a caller-controlled
@@ -429,7 +450,7 @@ fn is_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_selects_external_program(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -480,8 +501,9 @@ fn is_safe_command_words_str(cmd: &str) -> bool {
     // to arbitrary files, enabling pipelines like `cat data | tee /target` to
     // bypass edit permissions.
     //
-    // `rg --pre` is excluded at the words level via [`rg_has_pre_flag`] — the
-    // string form here cannot see flag structure reliably after join.
+    // `rg --pre`/`--hostname-bin` are excluded at the words level via
+    // [`rg_selects_external_program`] — the string form here cannot see flag
+    // structure reliably after join.
 }
 
 /// Commands which are always safe to execute and should never prompt the user.
@@ -525,7 +547,7 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_selects_external_program(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -755,14 +777,16 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             continue;
         }
 
-        // kubectl config/auth flags, `rg --pre`, and env-dumping `ps` (BSD
-        // `e`/`E`) must prompt even under a whitelist *prefix* grant. Always-allow
-        // persists only the verb prefix (e.g. "kubectl get", or a bare "ps" from
-        // approving `ps aux`), so it cannot be trusted to auto-allow these
-        // secret-exposing variants (H1 #3877754). An exact segment grant still
-        // auto-allows below. Do NOT set any_dangerous — that would also block
-        // exact grants.
-        if (kubectl_has_unsafe_flag(words) || rg_has_pre_flag(words) || ps_dumps_environment(words))
+        // kubectl config/auth flags, `rg --pre`/`--hostname-bin`, and
+        // env-dumping `ps` (BSD `e`/`E`) must prompt even under a whitelist
+        // *prefix* grant. Always-allow persists only the verb prefix (e.g.
+        // "kubectl get", or a bare "ps" from approving `ps aux`), so it cannot
+        // be trusted to auto-allow these secret-exposing or exec variants
+        // (H1 #3877754). An exact segment grant still auto-allows below. Do
+        // NOT set any_dangerous — that would also block exact grants.
+        if (kubectl_has_unsafe_flag(words)
+            || rg_selects_external_program(words)
+            || ps_dumps_environment(words))
             && !state.allowed_bash_commands.contains(&s)
         {
             needs_prompt.push(s);
@@ -6941,6 +6965,184 @@ mod tests {
         assert!(!is_safe_command("python script.py"));
         assert!(!is_safe_command("kubectl delete"));
         assert!(!is_safe_command("git commit"));
+    }
+
+    /// `--hostname-bin FILE` runs `FILE` to decorate hyperlinks (even with
+    /// hyperlinks disabled), so both flag forms must not auto-allow.
+    ///
+    /// The scan is conservative past `--`: an option whose value is a
+    /// separate word (`--glob --` makes the next `--` a glob operand) lets a
+    /// later flag-shaped word still be a real flag — measured on ripgrep
+    /// 15.2, `rg --glob -- --hostname-bin HELPER needle FILE` executes
+    /// HELPER — so a flag-shaped word after `--` prompts too (over-prompt
+    /// only). `--pre-glob` remains a filter that spawns nothing.
+    #[test]
+    fn rg_hostname_bin_helper_is_not_safe_command() {
+        assert!(!is_safe_command(
+            "rg --hostname-bin ./hostname-helper.sh pattern ."
+        ));
+        assert!(!is_safe_command(
+            "rg --hostname-bin=./hostname-helper.sh pattern ."
+        ));
+        // rg runs the helper even when hyperlink/color output is disabled.
+        assert!(!is_safe_command(
+            "rg --hyperlink-format=none --hostname-bin ./h.sh pattern ."
+        ));
+        assert!(!is_safe_command(
+            "rg --color=never --hostname-bin ./h.sh pattern ."
+        ));
+        // Option-value `--`: the following --hostname-bin is still a real
+        // flag (verified executing on ripgrep 15.2).
+        assert!(!is_safe_command(
+            "rg --glob -- --hostname-bin ./h.sh needle file.txt"
+        ));
+        assert!(!is_safe_command(
+            "rg --regexp -- --hostname-bin=./h.sh needle file.txt"
+        ));
+        // Conservative: a flag-shaped word after a plain literal `--`
+        // separator also prompts (cannot be proven a pattern without a full
+        // rg option parser; over-prompt never under-prompts).
+        assert!(!is_safe_command("rg -- --pre pattern ."));
+        assert!(!is_safe_command("rg pattern -- --hostname-bin"));
+        // Ordinary searches without the flags stay auto-allowed.
+        assert!(is_safe_command("rg -- pattern -- file"));
+        assert!(is_safe_command("rg --pre-glob '*.pdf' pattern ."));
+    }
+
+    /// A plain `rg` prefix grant must not cover external-program flags; an
+    /// exact invocation grant keeps its existing policy; a deny prefix wins.
+    #[test]
+    fn rg_external_program_flags_prompt_under_prefix_grant() {
+        let mut state = PermissionState::default();
+        state.allowed_bash_commands.insert("rg".to_string());
+        for cmd in [
+            "rg --hostname-bin ./h.sh pattern .",
+            "rg --hostname-bin=./h.sh pattern .",
+            "rg --pre ./pre.sh pattern .",
+            // Option-value `--`: later --hostname-bin still selects the helper.
+            "rg --glob -- --hostname-bin ./h.sh needle file.txt",
+            "rg --regexp -- --hostname-bin=./h.sh needle file.txt",
+            // Conservative: flag-shaped word after a plain `--` also prompts.
+            "rg -- --pre pattern .",
+        ] {
+            match evaluate_bash_segments(cmd, &state) {
+                SegmentEvaluation::NeedsPrompts { segments, .. } => {
+                    assert_eq!(segments, vec![cmd.to_string()], "case: {cmd}");
+                }
+                other => panic!("prefix `rg` grant must not cover `{cmd}`: {other:?}"),
+            }
+        }
+        // Exact grant for the full invocation still auto-allows.
+        let mut exact = PermissionState::default();
+        exact
+            .allowed_bash_commands
+            .insert("rg --hostname-bin ./h.sh pattern .".to_string());
+        assert!(matches!(
+            evaluate_bash_segments("rg --hostname-bin ./h.sh pattern .", &exact),
+            SegmentEvaluation::AutoAllow { .. }
+        ));
+        // Deny precedence: a session deny on `rg` rejects even before grants.
+        let mut denied = PermissionState::default();
+        denied.allowed_bash_commands.insert("rg".to_string());
+        denied
+            .allowed_bash_commands
+            .insert("rg --hostname-bin ./h.sh pattern .".to_string());
+        denied.disallowed_bash_commands.insert("rg".to_string());
+        assert!(matches!(
+            evaluate_bash_segments("rg --hostname-bin ./h.sh pattern .", &denied),
+            SegmentEvaluation::Reject(_)
+        ));
+    }
+
+    /// The fail-closed RWX projection must not classify an rg invocation that
+    /// selects an external program as observational.
+    #[test]
+    fn rg_external_program_flags_are_not_observational() {
+        assert!(command_is_known_observational("rg pattern ."));
+        assert!(!command_is_known_observational(
+            "rg --hostname-bin ./h.sh pattern ."
+        ));
+        assert!(!command_is_known_observational(
+            "rg --hostname-bin=./h.sh pattern ."
+        ));
+        // Option-value `--`: later --hostname-bin still executes the helper.
+        assert!(!command_is_known_observational(
+            "rg --glob -- --hostname-bin ./h.sh needle file.txt"
+        ));
+        // Conservative: flag-shaped word after a plain `--` is not
+        // provably a pattern, so it also loses the observational projection.
+        assert!(!command_is_known_observational("rg -- --pre pattern ."));
+    }
+
+    /// Through the real permission actor in Ask mode, an `rg --hostname-bin`
+    /// invocation must reach an actual user prompt, not a silent safe-command
+    /// auto-allow.
+    #[tokio::test]
+    async fn rg_hostname_bin_prompts_user_in_ask_mode() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+
+                let d = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    mgr.request(
+                        AccessKind::Bash("rg --hostname-bin ./h.sh pattern .".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+                .await
+                .expect("permission request must resolve, not hang");
+                assert_eq!(
+                    prompts.borrow().len(),
+                    1,
+                    "rg --hostname-bin must prompt the user exactly once"
+                );
+                assert!(
+                    !matches!(d, Decision::Allow),
+                    "must not be silently auto-allowed, got {d:?}"
+                );
+
+                // Option-value `--`: the later --hostname-bin still selects
+                // the helper (verified executing on ripgrep 15.2), so it too
+                // must reach a real prompt.
+                let client2 = RecordingClient::default();
+                let prompts2 = client2.prompts.clone();
+                let (mgr2, _events2) =
+                    manager_with_recording_client(&cwd, None, client2, ClientType::Generic);
+                let d2 = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    mgr2.request(
+                        AccessKind::Bash(
+                            "rg --glob -- --hostname-bin ./h.sh needle file.txt".into(),
+                        ),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+                .await
+                .expect("permission request must resolve, not hang");
+                assert_eq!(
+                    prompts2.borrow().len(),
+                    1,
+                    "option-value `--` variant must prompt the user exactly once"
+                );
+                assert!(
+                    !matches!(d2, Decision::Allow),
+                    "must not be silently auto-allowed, got {d2:?}"
+                );
+            })
+            .await;
     }
 
     #[test]

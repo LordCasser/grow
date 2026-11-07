@@ -1112,6 +1112,23 @@ impl ChatStateActor {
             ChatStateCommand::GetRuntimeState { reply } => {
                 let _ = reply.send(self.state.timeline.runtime_lifecycle().clone());
             }
+            ChatStateCommand::GetRuntimeTreeSnapshot { reply } => {
+                let timeline = &self.state.timeline;
+                let events = timeline
+                    .events()
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            &event.kind,
+                            crate::TimelineEventKind::Subagent(
+                                crate::SubagentEvent::Spawned(_) | crate::SubagentEvent::Ended(_)
+                            )
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let _ = reply.send((timeline.runtime_lifecycle().clone(), events));
+            }
             ChatStateCommand::GetAdmittedResponse { identity, reply } => {
                 let _ = reply.send(self.state.timeline.admitted_response(&identity));
             }
@@ -1134,6 +1151,12 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetRetainedNotificationPayloadHashes { reply } => {
                 let _ = reply.send(self.state.timeline.retained_notification_payload_hashes());
+            }
+            ChatStateCommand::GetCommittedUserImagePaths { reply } => {
+                let _ = reply.send(self.state.timeline.committed_user_image_paths());
+            }
+            ChatStateCommand::GetInputState { input_id, reply } => {
+                let _ = reply.send(self.state.timeline.input_state(&input_id));
             }
             ChatStateCommand::GetPendingAllowedInputs { reply } => {
                 let _ = reply.send(self.state.timeline.pending_allowed_inputs());

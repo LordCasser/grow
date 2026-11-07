@@ -1,0 +1,9 @@
+# U5 · P2：queue-only冻结答复被自动Absent重送
+
+独立reviewer b177在U2新实现之后指出，父再次亲核当前 `reconcile_advisory_reply`：自动回调无open_intent，若had_queued=true、has_inflight=false、既有row.requires_review=true，Absent分支仍会清review，并由 `(absent && had_queued)` drain。这个分支绕过了新U2显式retry意图。
+
+真实前提：首发RPC在TurnSubmitting失败，用户此时已有非空普通composer，`restore_failed_input_draft`无法占用该composer，于是把原答复存成queue-only reviewrow而不保inflight。自动grow/input/admission_status在session存储目录缺失时确可返回durableAbsent；observer只验证identity/epoch/source，未排除该回包。正常现存session缺Submitted返回Unknown，不触发此反例；不能把磁盘缺失的必要条件省略成所有Unknown都自动重送，也不能以正常路径的Unknown排除该合同反例。
+
+受损不变量是自动观察不重送未知结果的原请求。最小修复归Pager输入owner：自动Absent只可保持原ready首发的既有资格，不能把失败/uncertain reviewrow放行；清review/重送必须有本次有效explicitCheck意图，仍使用原正文/稳定id和F3串行接纳。无需新状态、wire或泛化backend。
+
+通过标准：由真实firstSubmit→Send→用户普通composer非空→真实PromptResponse Err产生queue-only frozenrow（不得直接手工构造reviewbool），自动Absent无Send且保requires_review/原body/id/composer；随后实际QueryAdvisoryReplyAdmission→匹配durableUnknown或Absent允许同原文/id重试一次；再次自动Absent/晚回包不重复发。U3的未发ready首发queue仍可在原Turn结束后按正常FIFO发送；U2 Submitted/error/terminal/activeguards、replay占位消费和后继普通输入推进保持。独立oldred/newgreen，回归原24admission/24turncompletion即可，不扩其他queue政策。父核复现条件、最终guard和实际证据后再组织freshCLI产品链。

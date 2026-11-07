@@ -1,0 +1,4 @@
+- [x] 核raw格式/唯一production resolver与地址归属缺口，选择backlog允许的明确限制方案。
+- [x] PB-05释放后实施raw-only未验证地址策略、报告文案和必要依赖收缩。
+- [x] 完成当前函数IP错误归因旧红/新绿、真实PIE跨slide及raw保真/相邻回归。
+- [x] 父验收实际caller/报告与限制，同步docs/backlog，strict/archive及全量复核。

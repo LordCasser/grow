@@ -2,6 +2,7 @@
 mod delegation_identity_tests;
 mod observation_tests;
 mod workflow_recovery_tests;
+mod startup_publication_tests;
 use super::*;
 use super::handle_request::{
     canonical_total_tokens, child_task_prompt_identity, record_subagent_usage,
@@ -522,6 +523,7 @@ async fn usage_ack_precedes_terminal_presentation() {
                 },
                 forward_to_gateway: true,
                 restored: false,
+                respond_to: None,
             })
         ));
 }
@@ -584,6 +586,7 @@ async fn emit_subagent_notification_sends_one_metadata_only_parent_command() {
             notification,
             forward_to_gateway: true,
             restored: false,
+            respond_to: None,
         } => {
             assert!(matches!(
                 notification.update,
@@ -3300,6 +3303,7 @@ async fn committed_cancelled_completion_presents_one_finish() {
                     },
                     forward_to_gateway: true,
                     restored: false,
+                    respond_to: None,
                 } if status == "cancelled"
             ) {
             persisted += 1;
@@ -4129,4 +4133,113 @@ fn subagent_validation_uses_full_nested_path_ids_before_policy() {
     }
     ctx.subagent_toggle.insert("team/worker".into(), false);
     assert!(matches!(validate_subagent_type("team/worker", &ctx), SubagentValidateTypeOutcome::Disabled));
+}
+
+// ── `finalization_ready` synchronous observation ──
+
+async fn healthy_parent_writer() -> chat_state::ChatStateHandle {
+    let (persistence, _receiver) = chat_state::MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = chat_state::ChatStateActor::spawn(
+        Vec::new(),
+        test_sampling_config("model"),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    assert!(!handle.is_closed());
+    handle
+}
+
+fn readiness_fixture(
+    parent_chat_state: Option<chat_state::ChatStateHandle>,
+    child_thread: Option<crate::session::SessionThread>,
+) -> ShellCompletionData {
+    ShellCompletionData {
+        parent_chat_state,
+        child_thread,
+        output_write_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ..ShellCompletionData::not_admitted()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finalization_ready_gates_on_parent_health_without_mutating_state() {
+    // A closed writer: `ChatStateHandle::noop()` drops its receiver, so the
+    // mailbox is permanently closed.
+    let closed = chat_state::ChatStateHandle::noop();
+    assert!(closed.is_closed());
+
+    // Missing parent and no retained stored writer: not ready.
+    let missing = readiness_fixture(None, None);
+    assert!(!missing.finalization_ready_with_current_parent(None));
+
+    // Retained stored writer closed: not ready even with no current parent.
+    let stale = readiness_fixture(Some(closed.clone()), None);
+    assert!(!stale.finalization_ready_with_current_parent(None));
+    assert!(!stale.finalization_ready_with_current_parent(Some(&closed)));
+
+    // A healthy resident replacement covers the stale stored writer...
+    let healthy = healthy_parent_writer().await;
+    assert!(stale.finalization_ready_with_current_parent(Some(&healthy)));
+    // ...and the observation does not adopt it: stored facts are untouched.
+    assert!(stale.parent_chat_state.as_ref().is_some_and(|h| h.is_closed()));
+
+    // A closed resident parent falls back to the retained stored writer.
+    let retained = healthy_parent_writer().await;
+    let mut stored_healthy = readiness_fixture(Some(retained), None);
+    assert!(stored_healthy.finalization_ready_with_current_parent(Some(&closed)));
+    assert!(stored_healthy.finalization_ready_with_current_parent(None));
+
+    // In-flight output publication blocks even with a healthy parent.
+    stored_healthy
+        .output_write_in_flight
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(!stored_healthy.finalization_ready_with_current_parent(Some(&healthy)));
+    assert!(
+        stored_healthy
+            .output_write_in_flight
+            .load(std::sync::atomic::Ordering::Acquire),
+        "ready observation must not clear the I/O flag"
+    );
+    stored_healthy
+        .output_write_in_flight
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(stored_healthy.finalization_ready_with_current_parent(Some(&healthy)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finalization_ready_requires_fully_retired_child_writer() {
+    let healthy = healthy_parent_writer().await;
+    // Actor thread retired, persistence owner still draining.
+    let (release, wait) = oneshot::channel::<()>();
+    let persistence_task = tokio::spawn(async move {
+        let _ = wait.await;
+    });
+    let actor = std::thread::spawn(|| {});
+    while !actor.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    let draining = readiness_fixture(
+        Some(healthy.clone()),
+        Some(crate::session::SessionThread::with_persistence(
+            actor,
+            Some(persistence_task.abort_handle()),
+            None,
+        )),
+    );
+    assert!(!draining.finalization_ready_with_current_parent(Some(&healthy)));
+
+    // Both owners retired: ready.
+    let _ = release.send(());
+    persistence_task.await.unwrap();
+    assert!(
+        draining
+            .child_thread
+            .as_ref()
+            .is_some_and(|thread| thread.is_finished())
+    );
+    assert!(draining.finalization_ready_with_current_parent(Some(&healthy)));
+
+    // The temp thread owner is dropped here, releasing through the reaper.
 }

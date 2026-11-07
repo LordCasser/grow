@@ -595,6 +595,52 @@ impl ShellCompletionData {
     pub(crate) fn has_physical_retirement_owner(&self) -> bool {
         self.child_thread.is_some()
     }
+
+    /// Synchronous readiness observation mirroring the pre-flight checks that
+    /// `finalization::advance` performs before any recovery I/O. `parent` is
+    /// the currently resident lifecycle-root handle resolved by the runner; a
+    /// healthy one is what a later `refresh_finalization_parent` would adopt,
+    /// so it can cover a stale stored writer. Otherwise the retained stored
+    /// parent must still be healthy (refresh never swaps in a closed handle).
+    /// No canonical/lease/epoch/deadline state is changed; the only lifecycle
+    /// side effect is the pre-existing `is_finished` behavior of requesting a
+    /// persistence stop once the actor has already exited.
+    /// Pure observation of retained facts.
+    pub(crate) fn finalization_ready(
+        &self,
+        parent: Option<&crate::session::SessionHandle>,
+    ) -> bool {
+        self.finalization_ready_with_current_parent(parent.map(|handle| &handle.chat_state_handle))
+    }
+
+    /// Same observation as [`Self::finalization_ready`] with the resident
+    /// parent already reduced to its timeline writer.
+    fn finalization_ready_with_current_parent(
+        &self,
+        parent: Option<&chat_state::ChatStateHandle>,
+    ) -> bool {
+        if self
+            .output_write_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        // No new child writer while either the actor or persistence rail remains.
+        if self
+            .child_thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            return false;
+        }
+        match parent {
+            Some(parent) if !parent.is_closed() => true,
+            _ => self
+                .parent_chat_state
+                .as_ref()
+                .is_some_and(|handle| !handle.is_closed()),
+        }
+    }
     pub(crate) fn retain_execution_owner(&mut self, control: Option<&ShellChildRuntime>) {
         if self.child_thread.is_none() {
             self.child_thread = control.map(|runtime| runtime._child_thread.clone());
@@ -2213,12 +2259,32 @@ async fn record_child_result(
     })
 }
 
-async fn record_child_result_before(
+/// Outcome of handing the child's terminal result to its own session actor.
+struct ChildResultHandoff {
+    result_ref: Option<chat_state::TimelineRangeRef>,
+    /// `None` on success; otherwise the typed failure, or the unknown-write
+    /// outcome when the ACK never returned.
+    error: Option<chat_state::TimelineWriteError>,
+    /// True once the terminal commit command reached the child actor: it then
+    /// owns the child's shutdown lifecycle and no plain `Shutdown` is sent.
+    actor_owns_shutdown: bool,
+}
+
+impl ChildResultHandoff {
+    fn not_dispatched() -> Self {
+        Self {
+            result_ref: None,
+            error: None,
+            actor_owns_shutdown: false,
+        }
+    }
+}
+
+async fn prepare_child_result_event(
     child_chat_state: &chat_state::ChatStateHandle,
     result: &mut SubagentResult,
     output_ref: Option<String>,
-    deadline: tokio::time::Instant,
-) -> Result<chat_state::TimelineRangeRef, chat_state::TimelineWriteError> {
+) -> Result<chat_state::SubagentResultEvent, chat_state::TimelineWriteError> {
     let planning = child_chat_state.planning_state().await.map_err(|error| {
         let _ = error;
         chat_state::TimelineWriteError::Invalid(chat_state::TimelineError::InvalidSubagent)
@@ -2235,16 +2301,77 @@ async fn record_child_result_before(
         .map_err(|_| {
             chat_state::TimelineWriteError::Invalid(chat_state::TimelineError::InvalidSubagent)
         })?;
-    let kind =
-        chat_state::TimelineEventKind::SubagentResult(subagent_result_fact(result, output_ref));
-    let event = child_chat_state
-        .record_timeline_event_durably_before(kind, deadline)
-        .await?;
-    Ok(chat_state::TimelineRangeRef {
-        timeline_id: result.child_session_id.clone(),
-        first_seq: event.seq.get(),
-        last_seq: event.seq.get(),
-    })
+    Ok(subagent_result_fact(result, output_ref))
+}
+
+/// Hand the child's fully prepared terminal result to its own session actor.
+/// The actor commits it as the last normal Timeline fact after its SessionEnd
+/// lifecycle has drained and ACKs the precise range; the runner never appends
+/// the child result itself, so the closed-Timeline protection can never reject
+/// the session-end hook facts.
+///
+/// `handed_off` is set the moment the command reaches the actor's mailbox, so
+/// a caller whose finalization deadline fires mid-ACK still knows the actor
+/// owns the child's shutdown and must not send a plain `Shutdown`.
+async fn hand_off_child_result_to_actor(
+    child_handle: &SessionHandle,
+    result: &mut SubagentResult,
+    output_ref: Option<String>,
+    deadline: tokio::time::Instant,
+    handed_off: &mut bool,
+) -> ChildResultHandoff {
+    let event =
+        match prepare_child_result_event(&child_handle.chat_state_handle, result, output_ref).await
+        {
+            Ok(event) => event,
+            Err(error) => {
+                return ChildResultHandoff {
+                    result_ref: None,
+                    error: Some(error),
+                    actor_owns_shutdown: false,
+                };
+            }
+        };
+    let (respond_to, ack) = tokio::sync::oneshot::channel();
+    if child_handle
+        .cmd_tx
+        .send(SessionCommand::CommitSubagentResult {
+            result: event,
+            deadline,
+            respond_to,
+        })
+        .is_err()
+    {
+        // The child actor is already retired. Never write the result from
+        // here and never wait for an exited actor: cold recovery owns the
+        // canonical append under the original identity.
+        return ChildResultHandoff {
+            result_ref: None,
+            error: Some(chat_state::TimelineWriteError::AcknowledgementLost),
+            actor_owns_shutdown: false,
+        };
+    }
+    *handed_off = true;
+    match ack.await {
+        Ok(Ok(result_ref)) => ChildResultHandoff {
+            result_ref: Some(result_ref),
+            error: None,
+            actor_owns_shutdown: true,
+        },
+        Ok(Err(error)) => ChildResultHandoff {
+            result_ref: None,
+            error: Some(error),
+            actor_owns_shutdown: true,
+        },
+        // The actor dropped the responder before committing (a fail-stop
+        // teardown branch or exit): the write outcome stays unknown until
+        // recovery verifies the original identity.
+        Err(_) => ChildResultHandoff {
+            result_ref: None,
+            error: Some(chat_state::TimelineWriteError::AcknowledgementLost),
+            actor_owns_shutdown: true,
+        },
+    }
 }
 
 async fn record_child_result_with_persistence(
@@ -2390,6 +2517,48 @@ async fn cancel_pending_shell_child(
         ..Default::default()
     }
 }
+/// Publish a new child's route through its original lifecycle owner. A bound
+/// parent mailbox must never be bypassed when publication is unconfirmed.
+async fn publish_subagent_spawned(
+    gateway: &GatewaySender,
+    parent_session_id: &str,
+    update: SessionUpdate,
+    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+) -> Result<(), String> {
+    let mut notification = SessionNotification {
+        session_id: acp::SessionId::new(parent_session_id),
+        update,
+        meta: None,
+    };
+    if let Some(cmd_tx) = parent_cmd_tx {
+        let (respond_to, published) = oneshot::channel();
+        cmd_tx
+            .send(SessionCommand::GrowSessionNotification {
+                notification,
+                forward_to_gateway: true,
+                restored: false,
+                respond_to: Some(respond_to),
+            })
+            .map_err(|_| "parent actor mailbox closed before Spawned publication".to_owned())?;
+        return published
+            .await
+            .map_err(|_| "parent Spawned publication receipt dropped".to_owned())?;
+    }
+    let mut meta = None;
+    crate::util::event_id::ensure_event_id_meta(parent_session_id, &mut meta);
+    notification.meta = meta.map(serde_json::Value::Object);
+    let params = serde_json::value::to_raw_value(&notification)
+        .map_err(|error| format!("could not serialize Spawned notification: {error}"))?;
+    gateway
+        .forward_with_completion(acp::ExtNotification::new(
+            "grow/session_notification",
+            params.into(),
+        ))
+        .await
+        .map_err(|_| "Spawned gateway completion dropped".to_owned())?
+        .map_err(|error| format!("Spawned gateway publication failed: {error}"))
+}
+
 fn emit_subagent_notification(
     gateway: &GatewaySender,
     parent_session_id: &str,
@@ -2413,6 +2582,7 @@ fn emit_subagent_notification(
                 notification: notification.clone(),
                 forward_to_gateway: true,
                 restored,
+                respond_to: None,
             })
             .is_ok()
     {

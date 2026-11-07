@@ -1,0 +1,5 @@
+- [x] 核已归档官方固定来源、现共享分类与retry/recovery消费方，区分真实HTTPstatus和流内逻辑status。
+- [x] 冻结精确knowncode映射与既有预算/结算/unknownveto不变量，建立delta和独立修复边界。
+- [x] 用当前公共helper和真实Messages SSE入口建立标准类型oldred及unknown/malformed控制。
+- [x] 最小修复共享分类，并验证真实reader、有限recovery和原分类回归。
+- [x] 父review最终差异/实际证据，更新开发说明，完成归档前strict；归档后全量/归档校验与backlog同步记录在verification.md。

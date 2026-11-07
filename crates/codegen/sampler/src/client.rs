@@ -253,37 +253,202 @@ fn normalize_added_function_call_arguments(data: &str) -> Option<String> {
 /// The locked SDK requires cached/reasoning detail fields even when a route
 /// omits them. Supply typed zeros only for decoding; raw presence is recorded
 /// separately below and remains the accounting authority.
+///
+/// The completion is spliced into the original JSON text instead of
+/// re-encoding a `serde_json::Value` of the whole event: a `Value` map keeps
+/// only the last value of repeated keys, which erased the SDK's rejection of
+/// duplicated known fields (response id, function name, ...) whenever usage
+/// details happened to be missing. Every byte outside the inserted members is
+/// preserved, so duplicate known fields still reach the SDK's typed decode
+/// and unknown extension keys keep their existing treatment.
 fn normalize_response_usage_details(data: &str) -> Option<String> {
-    let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
+    use serde_json::value::RawValue;
+
+    /// A borrowed JSON member value that keeps an explicit `null` distinct
+    /// from an absent key: an absent usage detail may be supplied, a null one
+    /// must keep the SDK's original rejection instead of being "repaired".
+    #[derive(Default)]
+    enum MemberValue<'a> {
+        #[default]
+        Absent,
+        Null,
+        Raw(&'a RawValue),
+    }
+
+    impl<'de: 'a, 'a> serde::Deserialize<'de> for MemberValue<'a> {
+        fn deserialize<D: serde::Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            struct BorrowedMemberVisitor<'a>(std::marker::PhantomData<&'a ()>);
+            impl<'de: 'a, 'a> serde::de::Visitor<'de> for BorrowedMemberVisitor<'a> {
+                type Value = MemberValue<'a>;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("any JSON member value")
+                }
+                fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+                    Ok(MemberValue::Null)
+                }
+                fn visit_some<D: serde::Deserializer<'de>>(
+                    self,
+                    deserializer: D,
+                ) -> std::result::Result<Self::Value, D::Error> {
+                    Ok(MemberValue::Raw(<&'a RawValue as serde::Deserialize<
+                        'de,
+                    >>::deserialize(
+                        deserializer
+                    )?))
+                }
+            }
+            deserializer.deserialize_option(BorrowedMemberVisitor(std::marker::PhantomData))
+        }
+    }
+
+    // Borrowed mirrors of exactly the levels this helper patches. Derived
+    // struct decoding rejects a duplicated `type`, `response`, `usage`,
+    // detail container or mirrored count member on that path, keeping the
+    // SDK's duplicate-field rejection; members outside these levels are never
+    // re-encoded, so their original bytes (including conflicts) survive.
+    #[derive(Deserialize)]
+    struct TerminalUsageEvent<'a> {
+        #[serde(rename = "type")]
+        kind: &'a str,
+        #[serde(borrow)]
+        response: ResponseUsagePath<'a>,
+    }
+    #[derive(Deserialize)]
+    struct ResponseUsagePath<'a> {
+        #[serde(borrow)]
+        usage: &'a RawValue,
+    }
+    #[derive(Deserialize)]
+    struct UsageMembers<'a> {
+        #[serde(rename = "input_tokens_details", borrow, default)]
+        input_tokens_details: MemberValue<'a>,
+        #[serde(rename = "output_tokens_details", borrow, default)]
+        output_tokens_details: MemberValue<'a>,
+    }
+    // Each container mirrors only the count this helper may supply, so a
+    // duplicated member unknown to that container keeps the SDK's tolerance
+    // instead of failing the mirror.
+    #[derive(Deserialize)]
+    struct CachedTokensMembers<'a> {
+        #[serde(rename = "cached_tokens", borrow, default)]
+        cached_tokens: MemberValue<'a>,
+    }
+    #[derive(Deserialize)]
+    struct ReasoningTokensMembers<'a> {
+        #[serde(rename = "reasoning_tokens", borrow, default)]
+        reasoning_tokens: MemberValue<'a>,
+    }
+
+    let event: TerminalUsageEvent = serde_json::from_str(data).ok()?;
     if !matches!(
-        value.get("type")?.as_str()?,
+        event.kind,
         "response.completed" | "response.incomplete" | "response.failed"
     ) {
         return None;
     }
-    let usage = value.pointer_mut("/response/usage")?.as_object_mut()?;
+    let usage_text = event.response.usage.get();
+    // This helper completes object-shaped usage only. serde's derived struct
+    // decoding also accepts the sequence form (`[0]` for a u32 member), which
+    // the locked SDK tolerates on its direct decode path; a sequence beside a
+    // genuinely missing detail must keep that missing-detail rejection
+    // instead of being completed past it, so non-object shapes block the
+    // completion here. `RawValue` carries no surrounding whitespace and is
+    // already well-formed, so the prefix check is exact.
+    if !usage_text.starts_with('{') {
+        return None;
+    }
+    let usage: UsageMembers = serde_json::from_str(usage_text).ok()?;
     let mut changed = false;
-    for (details, field) in [
-        ("input_tokens_details", "cached_tokens"),
-        ("output_tokens_details", "reasoning_tokens"),
-    ] {
-        if !usage.contains_key(details) {
-            let mut object = serde_json::Map::new();
-            object.insert(field.to_owned(), serde_json::json!(0));
-            usage.insert(details.to_owned(), serde_json::Value::Object(object));
-            changed = true;
-        } else if let Some(object) = usage
-            .get_mut(details)
-            .and_then(serde_json::Value::as_object_mut)
-            && !object.contains_key(field)
-        {
-            object.insert(field.to_owned(), serde_json::json!(0));
-            changed = true;
-        } else if !usage.get(details).is_some_and(serde_json::Value::is_object) {
-            return None;
+    // Count insertions inside existing containers, as spans within the
+    // original usage text. Splices are applied below in reverse order so the
+    // earlier offsets stay valid while replacing.
+    let mut count_splices: Vec<(std::ops::Range<usize>, &str)> = Vec::new();
+    match usage.input_tokens_details {
+        MemberValue::Absent => changed = true,
+        MemberValue::Null => return None,
+        MemberValue::Raw(details) => {
+            // Only object containers qualify for the count completion; the
+            // SDK's sequence-form tolerance stays on its direct decode path.
+            if !details.get().starts_with('{') {
+                return None;
+            }
+            let members: CachedTokensMembers = serde_json::from_str(details.get()).ok()?;
+            if matches!(members.cached_tokens, MemberValue::Absent) {
+                let start = borrowed_slice_offset(usage_text, details.get())?;
+                count_splices.push((start..start + details.get().len(), "\"cached_tokens\":0"));
+            }
         }
     }
-    changed.then(|| value.to_string())
+    match usage.output_tokens_details {
+        MemberValue::Absent => changed = true,
+        MemberValue::Null => return None,
+        MemberValue::Raw(details) => {
+            if !details.get().starts_with('{') {
+                return None;
+            }
+            let members: ReasoningTokensMembers = serde_json::from_str(details.get()).ok()?;
+            if matches!(members.reasoning_tokens, MemberValue::Absent) {
+                let start = borrowed_slice_offset(usage_text, details.get())?;
+                count_splices.push((start..start + details.get().len(), "\"reasoning_tokens\":0"));
+            }
+        }
+    }
+    if count_splices.is_empty() && !changed {
+        return None;
+    }
+    let mut patched_usage = usage_text.to_owned();
+    count_splices.sort_by_key(|(span, _)| span.start);
+    for (span, member) in count_splices.iter().rev() {
+        let details = prepend_json_member(&patched_usage[span.clone()], member)?;
+        patched_usage.replace_range(span.clone(), &details);
+    }
+    if matches!(usage.input_tokens_details, MemberValue::Absent) {
+        patched_usage = prepend_json_member(
+            &patched_usage,
+            "\"input_tokens_details\":{\"cached_tokens\":0}",
+        )?;
+    }
+    if matches!(usage.output_tokens_details, MemberValue::Absent) {
+        patched_usage = prepend_json_member(
+            &patched_usage,
+            "\"output_tokens_details\":{\"reasoning_tokens\":0}",
+        )?;
+    }
+    let usage_start = borrowed_slice_offset(data, usage_text)?;
+    Some(format!(
+        "{}{}{}",
+        &data[..usage_start],
+        patched_usage,
+        &data[usage_start + usage_text.len()..]
+    ))
+}
+
+/// Byte offset of `needle` within `haystack` when `needle` is a borrowed
+/// slice of `haystack` (both slice the same original input, as `RawValue`
+/// text does). The trailing comparison re-verifies the bytes, so an
+/// unexpected mismatch degrades to `None` — no normalization — instead of
+/// patching the wrong location.
+fn borrowed_slice_offset(haystack: &str, needle: &str) -> Option<usize> {
+    let start = (needle.as_ptr() as usize).checked_sub(haystack.as_ptr() as usize)?;
+    let end = start.checked_add(needle.len())?;
+    if end > haystack.len() || !haystack.is_char_boundary(start) {
+        return None;
+    }
+    (&haystack[start..end] == needle).then_some(start)
+}
+
+/// Splice `member` in front of a raw JSON object's first member. The object
+/// text comes from `RawValue::get`, so it is exactly the `{…}` value with no
+/// surrounding whitespace.
+fn prepend_json_member(object: &str, member: &str) -> Option<String> {
+    let body = object.strip_prefix('{')?.strip_suffix('}')?;
+    Some(if body.trim().is_empty() {
+        format!("{{{member}}}")
+    } else {
+        format!("{{{member},{body}}}")
+    })
 }
 
 fn decode_tagged_event<T: serde::de::DeserializeOwned>(data: &str) -> Result<Option<T>> {
@@ -1693,16 +1858,37 @@ impl SamplingClient {
                         // the check disabled, the shared name-or-payload-type
                         // predicate guards against a server emitting it
                         // despite no opt-in (rollout skew), named or not.
+                        //
+                        // Ordering: a known check frame whose body is not a
+                        // complete legal JSON OBJECT keeps the unconditional
+                        // swallow-first order. That includes invalid JSON and
+                        // scalar/null/array bodies — a check frame that does
+                        // not form an object is an existing convention to
+                        // absorb and ignore; it can never be an error
+                        // envelope, and forwarding it would fail the typed
+                        // parse. Any other frame — including one named or
+                        // typed as the check event but carrying a top-level
+                        // error envelope — is qualified as a mixed ordinary
+                        // error first, before the collector records any
+                        // signals. Duplicate-key objects still reach the
+                        // shared error gate, which fails closed on declared
+                        // duplicates.
+                        let unstructured_known_check = is_check_event(&event.event, data)
+                            && serde_json::from_str::<
+                                std::collections::HashMap<String, serde::de::IgnoredAny>,
+                            >(data)
+                            .is_err();
+                        if !unstructured_known_check {
+                            if let Some(stream_error) = try_parse_stream_error(&event.event, data) {
+                                return std::future::ready(Some(Some(Err(stream_error))));
+                            }
+                        }
                         let swallow = match &doom_loop_for_stream {
                             Some(collector) => collector.absorb(&event.event, data),
                             None => is_check_event(&event.event, data),
                         };
                         if swallow {
                             Some(None)
-                        } else if let Some(stream_error) =
-                            try_parse_stream_error(&event.event, data)
-                        {
-                            Some(Some(Err(stream_error)))
                         } else {
                             Some(decode_response_event(data).transpose())
                         }
@@ -3114,6 +3300,453 @@ mod tests {
         );
     }
 
+    /// Terminal-only snapshot with complete usage details. Raw strings are
+    /// required: building these through `serde_json::Value` would silently
+    /// drop the duplicated keys the completion must keep rejecting.
+    const USAGE_TERMINAL_COMPLETED: &str = r#"{"type":"response.completed","sequence_number":7,"response":{"id":"resp-direct","object":"response","created_at":0,"model":"test-model","status":"completed","output":[{"type":"function_call","id":"item-0","call_id":"call-direct","name":"test_tool","arguments":"{\"a\":1}","status":"completed"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":105}}}"#;
+
+    fn usage_terminal_without_details(data: &str) -> String {
+        data.replace(r#","input_tokens_details":{"cached_tokens":0}"#, "")
+            .replace(r#","output_tokens_details":{"reasoning_tokens":0}"#, "")
+    }
+
+    #[test]
+    fn usage_detail_completion_preserves_duplicate_field_rejection() {
+        let cases = [
+            (
+                "response.id",
+                USAGE_TERMINAL_COMPLETED.replace(
+                    r#""id":"resp-direct""#,
+                    r#""id":"resp-conflict","id":"resp-direct""#,
+                ),
+                r#""id":"resp-conflict","id":"resp-direct""#,
+            ),
+            (
+                "function.name",
+                USAGE_TERMINAL_COMPLETED.replace(
+                    r#""name":"test_tool""#,
+                    r#""name":"other_tool","name":"test_tool""#,
+                ),
+                r#""name":"other_tool","name":"test_tool""#,
+            ),
+            (
+                "function.call_id",
+                USAGE_TERMINAL_COMPLETED.replace(
+                    r#""call_id":"call-direct""#,
+                    r#""call_id":"call-a","call_id":"call-direct""#,
+                ),
+                r#""call_id":"call-a","call_id":"call-direct""#,
+            ),
+            (
+                "usage.input_tokens",
+                USAGE_TERMINAL_COMPLETED.replace(
+                    r#""input_tokens":100"#,
+                    r#""input_tokens":99,"input_tokens":100"#,
+                ),
+                r#""input_tokens":99,"input_tokens":100"#,
+            ),
+            (
+                "response.status",
+                USAGE_TERMINAL_COMPLETED.replacen(
+                    r#""status":"completed""#,
+                    r#""status":"in_progress","status":"completed""#,
+                    1,
+                ),
+                r#""status":"in_progress","status":"completed""#,
+            ),
+            (
+                "response.output",
+                USAGE_TERMINAL_COMPLETED.replace(r#""output":["#, r#""output":[],"output":["#),
+                r#""output":[],"output":["#,
+            ),
+            (
+                "sequence_number",
+                USAGE_TERMINAL_COMPLETED.replace(
+                    r#""sequence_number":7"#,
+                    r#""sequence_number":6,"sequence_number":7"#,
+                ),
+                r#""sequence_number":6,"sequence_number":7"#,
+            ),
+            (
+                "top.type",
+                USAGE_TERMINAL_COMPLETED.replace(
+                    r#""type":"response.completed""#,
+                    r#""type":"response.incomplete","type":"response.completed""#,
+                ),
+                r#""type":"response.incomplete","type":"response.completed""#,
+            ),
+            (
+                "response.id_null_first",
+                USAGE_TERMINAL_COMPLETED
+                    .replace(r#""id":"resp-direct""#, r#""id":null,"id":"resp-direct""#),
+                r#""id":null,"id":"resp-direct""#,
+            ),
+        ];
+        for (label, full, duplicated) in cases {
+            let missing = usage_terminal_without_details(&full);
+            assert_ne!(missing, full, "{label}: fixture must differ");
+            // The locked SDK rejects both variants on the original bytes.
+            for input in [&full, &missing] {
+                assert!(
+                    serde_json::from_str::<rs::ResponseStreamEvent>(input).is_err(),
+                    "{label}: the locked SDK rejects {input}"
+                );
+            }
+            // Rejection is identical with and without usage details: the
+            // completion copy keeps the conflict instead of erasing it.
+            assert!(
+                decode_response_event(&full).is_err(),
+                "{label}: complete usage keeps the SDK rejection"
+            );
+            match decode_response_event(&missing) {
+                Err(SamplingError::Serialization(_)) => {}
+                other => panic!("{label}: missing details must keep the rejection, got {other:?}"),
+            }
+            if let Some(normalized) = normalize_response_usage_details(&missing) {
+                assert!(
+                    normalized.contains(duplicated),
+                    "{label}: completion copy must keep the original duplicate bytes"
+                );
+                assert!(
+                    serde_json::from_str::<rs::ResponseStreamEvent>(&normalized).is_err(),
+                    "{label}: completion copy must still be rejected by the SDK"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn usage_detail_completion_supplies_only_missing_details() {
+        assert!(normalize_response_usage_details(USAGE_TERMINAL_COMPLETED).is_none());
+
+        // Both detail containers absent: exactly the two members are inserted.
+        let missing = usage_terminal_without_details(USAGE_TERMINAL_COMPLETED);
+        let normalized =
+            normalize_response_usage_details(&missing).expect("missing details are completed");
+        let stripped = normalized
+            .replace(r#""output_tokens_details":{"reasoning_tokens":0},"#, "")
+            .replace(r#""input_tokens_details":{"cached_tokens":0},"#, "");
+        assert_eq!(
+            stripped, missing,
+            "the completion inserts only the two detail members"
+        );
+
+        // Only the input container is absent, or only its count is missing.
+        let input_container_missing =
+            USAGE_TERMINAL_COMPLETED.replace(r#","input_tokens_details":{"cached_tokens":0}"#, "");
+        let normalized = normalize_response_usage_details(&input_container_missing)
+            .expect("input container is supplied");
+        assert!(
+            normalized.contains(r#""input_tokens_details":{"cached_tokens":0},"input_tokens":100"#)
+        );
+        let input_count_missing =
+            USAGE_TERMINAL_COMPLETED.replace(r#"{"cached_tokens":0}"#, r#"{"text_tokens":7}"#);
+        let normalized = normalize_response_usage_details(&input_count_missing)
+            .expect("missing count is supplied");
+        assert!(
+            normalized.contains(r#""input_tokens_details":{"cached_tokens":0,"text_tokens":7}"#)
+        );
+
+        // Whitespace and member order inside usage do not defeat the splice.
+        let spaced = USAGE_TERMINAL_COMPLETED.replace(
+            r#""usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":105}"#,
+            r#""usage": { "total_tokens" : 105 , "input_tokens" : 100 , "output_tokens" : 5 }"#,
+        );
+        assert!(decode_response_event(&spaced).unwrap().is_some());
+
+        // Decoded completion keeps the reported totals, and the raw presence
+        // record keeps cache read unknown rather than a typed zero.
+        let rs::ResponseStreamEvent::ResponseCompleted(event) =
+            decode_response_event(&missing).unwrap().unwrap()
+        else {
+            panic!("expected completed event");
+        };
+        let usage = serde_json::to_value(event.response.usage.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            usage.pointer("/input_tokens"),
+            Some(&serde_json::json!(100))
+        );
+        assert_eq!(usage.pointer("/output_tokens"), Some(&serde_json::json!(5)));
+        assert_eq!(
+            usage.pointer("/total_tokens"),
+            Some(&serde_json::json!(105))
+        );
+        assert_eq!(
+            usage.pointer("/input_tokens_details/cached_tokens"),
+            Some(&serde_json::json!(0))
+        );
+        assert!(
+            event
+                .response
+                .metadata
+                .is_none_or(|map| { !map.contains_key(CACHE_READ_TOKENS_METADATA_KEY) }),
+            "omitted raw details keep cache read unknown"
+        );
+        // The explicit zero in the full-usage control is still recorded.
+        let rs::ResponseStreamEvent::ResponseCompleted(full) =
+            decode_response_event(USAGE_TERMINAL_COMPLETED)
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected completed event");
+        };
+        assert_eq!(
+            full.response
+                .metadata
+                .as_ref()
+                .and_then(|map| { map.get(CACHE_READ_TOKENS_METADATA_KEY).map(String::as_str) }),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn usage_detail_completion_does_not_repair_malformed_details() {
+        // Container-level malformations block the completion entirely.
+        for bad in [r#"null"#, r#"7"#, r#""0""#] {
+            let data = USAGE_TERMINAL_COMPLETED.replace(r#"{"cached_tokens":0}"#, bad);
+            for input in [data.clone(), usage_terminal_without_details(&data)] {
+                assert!(
+                    normalize_response_usage_details(&input).is_none(),
+                    "{bad}: malformed details are not repaired"
+                );
+                assert!(
+                    decode_response_event(&input).is_err(),
+                    "{bad}: {input} stays a decoding failure"
+                );
+            }
+        }
+        // A present-but-invalid count keeps the event rejected. The
+        // completion may still supply the other genuinely missing container,
+        // but the malformed bytes survive and the SDK's final rejection
+        // stands. (`[0]` is deliberately absent: serde's derived struct
+        // decoding accepts the sequence form, so it is not a rejected shape.)
+        for bad in [
+            r#"{"cached_tokens":null}"#,
+            r#"{"cached_tokens":"0"}"#,
+            r#"{"cached_tokens":-1}"#,
+        ] {
+            let data = USAGE_TERMINAL_COMPLETED.replace(r#"{"cached_tokens":0}"#, bad);
+            for input in [data.clone(), usage_terminal_without_details(&data)] {
+                if let Some(normalized) = normalize_response_usage_details(&input) {
+                    assert!(
+                        normalized.contains(bad),
+                        "{bad}: the malformed count keeps its original bytes"
+                    );
+                }
+                match decode_response_event(&input) {
+                    Err(SamplingError::Serialization(_)) => {}
+                    other => panic!("{bad}: {input} stays a decoding failure, got {other:?}"),
+                }
+            }
+        }
+        // Duplicated detail containers or counts keep the SDK's rejection.
+        let duplicated_container = USAGE_TERMINAL_COMPLETED.replace(
+            r#""input_tokens_details":{"cached_tokens":0}"#,
+            r#""input_tokens_details":{"cached_tokens":0},"input_tokens_details":{"cached_tokens":1}"#,
+        );
+        assert!(normalize_response_usage_details(&duplicated_container).is_none());
+        assert!(decode_response_event(&duplicated_container).is_err());
+        let duplicated_count = USAGE_TERMINAL_COMPLETED.replace(
+            r#"{"cached_tokens":0}"#,
+            r#"{"cached_tokens":0,"cached_tokens":1}"#,
+        );
+        assert!(normalize_response_usage_details(&duplicated_count).is_none());
+        assert!(decode_response_event(&duplicated_count).is_err());
+    }
+
+    #[test]
+    fn usage_detail_completion_keeps_unknown_duplicate_extensions() {
+        let extended = USAGE_TERMINAL_COMPLETED
+            .replace(
+                r#""sequence_number":7"#,
+                r#""sequence_number":7,"vendor_ext":1,"vendor_ext":2"#,
+            )
+            .replace(
+                r#""input_tokens":100"#,
+                r#""ext_metric":3,"ext_metric":4,"input_tokens":100"#,
+            );
+        assert!(
+            decode_response_event(&extended).unwrap().is_some(),
+            "duplicated unknown members keep the SDK's tolerance"
+        );
+        let missing = usage_terminal_without_details(&extended);
+        let rs::ResponseStreamEvent::ResponseCompleted(_) =
+            decode_response_event(&missing).unwrap().unwrap()
+        else {
+            panic!("expected completed event");
+        };
+        let normalized = normalize_response_usage_details(&missing).unwrap();
+        assert!(normalized.contains(r#""vendor_ext":1,"vendor_ext":2"#));
+        assert!(normalized.contains(r#""ext_metric":3,"ext_metric":4"#));
+    }
+
+    #[test]
+    fn usage_detail_completion_qualifies_only_object_containers() {
+        // Positive control: complete sequence-form details are tolerated by
+        // the locked SDK's direct decode and stay untouched — the usage
+        // exception neither fires nor changes their acceptance.
+        let arrays = USAGE_TERMINAL_COMPLETED
+            .replace(r#"{"cached_tokens":0}"#, "[0]")
+            .replace(r#"{"reasoning_tokens":0}"#, "[0]");
+        assert!(
+            serde_json::from_str::<rs::ResponseStreamEvent>(&arrays).is_ok(),
+            "the locked SDK decodes sequence-form detail structs directly"
+        );
+        assert!(decode_response_event(&arrays).unwrap().is_some());
+        assert!(normalize_response_usage_details(&arrays).is_none());
+
+        // Pair: a sequence-form input detail beside a genuinely missing
+        // output detail keeps the missing-detail rejection. Supplying the
+        // missing container would let the sequence form ride through the
+        // usage exception, which is outside this completion's boundary.
+        let array_missing_other = arrays.replace(r#","output_tokens_details":[0]"#, "");
+        assert!(serde_json::from_str::<rs::ResponseStreamEvent>(&array_missing_other).is_err());
+        assert!(normalize_response_usage_details(&array_missing_other).is_none());
+        match decode_response_event(&array_missing_other) {
+            Err(SamplingError::Serialization(_)) => {}
+            other => panic!("sequence form beside a missing detail stays rejected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_usage_completion_never_admits_field_conflicts() {
+        let duplicate_name = USAGE_TERMINAL_COMPLETED.replace(
+            r#""name":"test_tool""#,
+            r#""name":"other_tool","name":"test_tool""#,
+        );
+        let duplicate_id = USAGE_TERMINAL_COMPLETED.replace(
+            r#""id":"resp-direct""#,
+            r#""id":"resp-conflict","id":"resp-direct""#,
+        );
+        let cases = [
+            (
+                "positive_full_usage",
+                USAGE_TERMINAL_COMPLETED.to_owned(),
+                true,
+            ),
+            (
+                "positive_missing_details",
+                usage_terminal_without_details(USAGE_TERMINAL_COMPLETED),
+                true,
+            ),
+            ("duplicate_name_full_usage", duplicate_name.clone(), false),
+            (
+                "duplicate_name_missing_details",
+                usage_terminal_without_details(&duplicate_name),
+                false,
+            ),
+            ("duplicate_id_full_usage", duplicate_id.clone(), false),
+            (
+                "duplicate_id_missing_details",
+                usage_terminal_without_details(&duplicate_id),
+                false,
+            ),
+        ];
+        for (label, terminal, accepted) in cases {
+            // Terminal-only SSE: L2 treats the final snapshot as authoritative.
+            // The synthetic test_tool is never executed.
+            let body = format!("data: {terminal}\n\n");
+            let (client, server) = responses_stream_client(body).await;
+            let result = client
+                .conversation_collect(ConversationRequest::new())
+                .await;
+            server.abort();
+            let _ = server.await;
+            if accepted {
+                let response = result.unwrap_or_else(|error| panic!("{label}: {error:?}"));
+                assert_eq!(response.tool_calls().len(), 1, "{label}");
+                let call = &response.tool_calls()[0];
+                assert_eq!(&*call.id, "call-direct", "{label}");
+                assert_eq!(call.name, "test_tool", "{label}");
+                assert_eq!(&*call.arguments, r#"{"a":1}"#, "{label}");
+                let usage = response.usage.as_ref().unwrap();
+                assert_eq!(usage.prompt_tokens, 100, "{label}");
+                assert_eq!(usage.completion_tokens, 5, "{label}");
+                assert_eq!(usage.total_tokens, 105, "{label}");
+                assert_eq!(
+                    usage.cache_read_tokens(),
+                    label.contains("full").then_some(0),
+                    "{label}: explicit zero stays known, omitted stays unknown"
+                );
+                assert!(
+                    matches!(response.provider_terminal, Some(sampling_types::ProviderTerminal::Responses { ref event, ref status, .. })
+                        if event == "response.completed" && status == "completed"),
+                    "{label}"
+                );
+            } else {
+                match result {
+                    Err(SamplingError::Serialization(error)) => {
+                        let message = error.to_string();
+                        assert!(
+                            message.contains("duplicate field"),
+                            "{label}: expected the original conflict, got {message}"
+                        );
+                    }
+                    other => panic!("{label}: expected a Serialization rejection, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_conflicting_terminal_rejects_after_initial_function_call() {
+        // The initial function call uses the absent-arguments exception; the
+        // terminal snapshot then carries a duplicated name plus omitted usage
+        // details. The candidate must still be rejected as a whole.
+        let duplicate_name = usage_terminal_without_details(&USAGE_TERMINAL_COMPLETED.replace(
+            r#""name":"test_tool""#,
+            r#""name":"other_tool","name":"test_tool""#,
+        ));
+        let mut body = responses_sse(&[
+            responses_created_event(),
+            responses_added_without_arguments_event(),
+            responses_args_delta_event(3, r#"{"a""#),
+            responses_args_delta_event(4, r#":1}"#),
+            responses_args_done_event(),
+            responses_item_done_event(),
+        ]);
+        body.push_str(&format!("data: {duplicate_name}\n\n"));
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        match result {
+            Err(SamplingError::Serialization(error)) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("duplicate field"),
+                    "expected the original conflict, got {message}"
+                );
+            }
+            other => panic!("expected a Serialization rejection, got {other:?}"),
+        }
+
+        // Control: the same initial-candidate stream with a legal
+        // missing-details terminal still completes through the exception.
+        let clean = usage_terminal_without_details(USAGE_TERMINAL_COMPLETED);
+        let mut body = responses_sse(&[
+            responses_created_event(),
+            responses_added_without_arguments_event(),
+            responses_args_delta_event(3, r#"{"a""#),
+            responses_args_delta_event(4, r#":1}"#),
+            responses_args_done_event(),
+            responses_item_done_event(),
+        ]);
+        body.push_str(&format!("data: {clean}\n\n"));
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        let response = result.expect("legal missing-details terminal completes");
+        assert_eq!(response.tool_calls().len(), 1);
+        assert_eq!(response.tool_calls()[0].name, "test_tool");
+        assert_eq!(response.usage.as_ref().unwrap().cache_read_tokens(), None);
+    }
+
     #[test]
     fn empty_text_part_annotations_are_inferred_only_when_absent() {
         let added = responses_text_events(serde_json::json!({"type": "output_text", "text": ""}))
@@ -3970,12 +4603,23 @@ mod tests {
     async fn responses_stream_client(
         body: String,
     ) -> (SamplingClient, tokio::task::JoinHandle<()>) {
+        sse_stream_client(ApiBackend::Responses, "/responses", body).await
+    }
+
+    /// Real HTTP/SSE server for one backend reader: the frame goes through
+    /// the production event stream, `try_parse_stream_error`, and typed
+    /// decode before `conversation_collect` settles the attempt.
+    async fn sse_stream_client(
+        backend: ApiBackend,
+        path: &'static str,
+        body: String,
+    ) -> (SamplingClient, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut config = minimal_config();
         config.base_url = format!("http://{}", listener.local_addr().unwrap());
-        config.api_backend = ApiBackend::Responses;
+        config.api_backend = backend;
         let app = axum::Router::new().route(
-            "/responses",
+            path,
             axum::routing::post(move || {
                 let body = body.clone();
                 async move {
@@ -3988,6 +4632,460 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (SamplingClient::new(config).expect("client"), server)
+    }
+
+    /// Asserts a whole-attempt rejection as the local malformed-ordinary
+    /// protocol error: Serialization, not retryable, no completed candidates.
+    fn assert_mixed_envelope_rejection(label: &str, result: Result<ConversationResponse>) {
+        match result {
+            Err(SamplingError::Serialization(error)) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("top-level error envelope"),
+                    "{label}: unexpected serialization message: {message}"
+                );
+            }
+            other => panic!("{label}: expected a Serialization rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_mixed_ordinary_error_frame_rejects_initial_tool_candidate() {
+        // A legal tool candidate is established first; the next chunk then
+        // carries Chat ordinary identity plus an HTTP-style top-level error.
+        // Old behavior classified the frame as a server error (retryable 5xx);
+        // the local malformed-ordinary contract rejects the whole attempt.
+        let chunk = |extra: &str| {
+            format!(
+                concat!(
+                    r#"{{"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":0,"model":"test-model","#,
+                    r#""choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"call-1","type":"function","#,
+                    r#""function":{{"name":"test_tool","arguments":"{{}}"}}}}]}},"finish_reason":null}}],{extra}}}"#
+                ),
+                extra = extra
+            )
+        };
+        let body = [
+            chunk(r#""usage":null"#),
+            format!(
+                concat!(
+                    r#"{{"id":"chatcmpl-mixed","object":"chat.completion.chunk","created":0,"model":"test-model","#,
+                    r#""choices":[],"error":{{"code":"server_error","message":"upstream boom"}}}}"#
+                )
+            ),
+        ]
+        .into_iter()
+        .map(|data| format!("data: {data}\n\n"))
+        .collect::<String>();
+        let (client, server) =
+            sse_stream_client(ApiBackend::ChatCompletions, "/chat/completions", body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_mixed_envelope_rejection("chat mixed frame", result);
+    }
+
+    #[tokio::test]
+    async fn responses_mixed_ordinary_error_frame_rejects_initial_tool_candidate() {
+        let mut body = responses_sse(&[
+            responses_created_event(),
+            responses_added_without_arguments_event(),
+            responses_args_delta_event(3, r#"{"a""#),
+            responses_args_delta_event(4, r#":1}"#),
+            responses_args_done_event(),
+            responses_item_done_event(),
+        ]);
+        // Ordinary Responses event identity (typed complete or not) plus a
+        // top-level error envelope: local Serialization, never an Api retry.
+        body.push_str(
+            "data: {\"type\":\"response.completed\",\"error\":{\"code\":\"server_error\",\"message\":\"upstream boom\"}}\n\n",
+        );
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_mixed_envelope_rejection("responses mixed frame", result);
+    }
+
+    /// A frame carrying the doom-loop check's SSE event name but an ordinary
+    /// body (`response.completed`) with a top-level error envelope must NOT
+    /// be swallowed as a check event: the mixed-ordinary qualification runs
+    /// before the collector, so the whole attempt rejects as Serialization.
+    #[tokio::test]
+    async fn responses_check_named_ordinary_error_frame_rejects_attempt() {
+        let mut body = responses_sse(&[responses_created_event()])
+            .trim_end()
+            .to_string();
+        body.push_str("\n\n");
+        body.push_str(concat!(
+            "event: response.doom_loop_check\n",
+            r#"data: {"type":"response.completed","error":{"code":"server_error","message":"upstream boom"}}"#,
+            "\n\n"
+        ));
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_mixed_envelope_rejection("check-named ordinary error frame", result);
+    }
+
+    /// Same qualification when only the payload `type` names the check event
+    /// (no SSE event name): a parseable check-typed body with a top-level
+    /// error envelope is a mixed ordinary error frame, not a swallow.
+    #[tokio::test]
+    async fn responses_check_typed_error_frame_rejects_attempt() {
+        let mut body = responses_sse(&[responses_created_event()])
+            .trim_end()
+            .to_string();
+        body.push_str("\n\n");
+        body.push_str(&format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "response.doom_loop_check",
+                "doom_loop_check": {"triggers": ["tail_repetition:4@response"]},
+                "error": {"code": "server_error", "message": "upstream boom"}
+            })
+        ));
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_mixed_envelope_rejection("check-typed error frame", result);
+    }
+
+    /// A legal check event (valid JSON, no error envelope) keeps today's
+    /// swallow-and-collect behavior, and the terminal completion after it
+    /// still settles the attempt.
+    #[tokio::test]
+    async fn responses_legal_check_event_swallowed_and_terminal_completes() {
+        let mut body = responses_sse(&[responses_created_event()])
+            .trim_end()
+            .to_string();
+        body.push_str("\n\n");
+        body.push_str(concat!(
+            "event: response.doom_loop_check\n",
+            r#"data: {"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:4@response"]}}"#,
+            "\n\n"
+        ));
+        body.push_str(&responses_sse(&[responses_completed_event()]));
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        let response = result.expect("legal check frame stays swallowed");
+        assert_eq!(response.tool_calls().len(), 1);
+        assert_eq!(response.tool_calls()[0].name, "test_tool");
+    }
+
+    /// A check-named frame whose body is not a complete legal JSON object
+    /// keeps the explicit malformed-check semantics: swallowed without
+    /// signals, ignored, and a later legal terminal event still completes the
+    /// attempt. Preserving the ignore for check bodies that do not form an
+    /// object (invalid JSON, scalars, null, arrays) is an existing
+    /// convention; object bodies — including duplicate-key objects — still
+    /// flow through the shared error gate first.
+    #[tokio::test]
+    async fn responses_check_named_garbage_payload_still_swallowed() {
+        for garbage in ["not json at all", "42", "null", "[]"] {
+            let mut body = responses_sse(&[responses_created_event()])
+                .trim_end()
+                .to_string();
+            body.push_str("\n\n");
+            body.push_str(concat!("event: response.doom_loop_check\n", "data: ",));
+            body.push_str(garbage);
+            body.push_str("\n\n");
+            body.push_str(&responses_sse(&[responses_completed_event()]));
+            let (client, server) = responses_stream_client(body).await;
+            let result = client
+                .conversation_collect(ConversationRequest::new())
+                .await;
+            server.abort();
+            let _ = server.await;
+            let response = result.expect("unstructured named check stays swallowed");
+            assert_eq!(
+                response.tool_calls().len(),
+                1,
+                "garbage body {garbage:?}: terminal completion must survive"
+            );
+            assert_eq!(response.tool_calls()[0].name, "test_tool");
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_unknown_extension_frames_stay_with_the_typed_decoder() {
+        // An unknown extension frame WITHOUT an error member is skipped by
+        // the typed decoder as before — the qualification gate does not rule.
+        let extension_without_error =
+            r#"data: {"type":"vendor.extension","object":{"x":1},"object":{"y":2}}"#;
+        let mut body = format!(
+            "{}\n\n",
+            responses_sse(&[responses_created_event()]).trim_end()
+        );
+        body.push_str(extension_without_error);
+        body.push_str("\n\n");
+        body.push_str(&responses_sse(&[responses_completed_event()]));
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        let response = result.expect("extension frame without error stays with the decoder");
+        assert_eq!(response.tool_calls().len(), 1);
+        assert_eq!(response.tool_calls()[0].name, "test_tool");
+
+        // The same extension shape WITH an error member gains ordinary
+        // identity (non-error nonempty `type`): local Serialization, never a
+        // retryable server Api error.
+        let extension_with_error = concat!(
+            r#"data: {"type":"vendor.extension","vendor":{"x":1},"#,
+            r#""error":{"code":"server_error","message":"upstream boom"}}"#
+        );
+        let mut body = format!(
+            "{}\n\n",
+            responses_sse(&[responses_created_event()]).trim_end()
+        );
+        body.push_str(extension_with_error);
+        body.push_str("\n\n");
+        body.push_str(&responses_sse(&[responses_completed_event()]));
+        let (client, server) = responses_stream_client(body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_mixed_envelope_rejection("responses extension with error", result);
+    }
+
+    #[tokio::test]
+    async fn standard_messages_stream_errors_reach_real_reader_with_original_facts() {
+        for (code, expected_status) in [("api_error", 500), ("timeout_error", 504)] {
+            for named in [false, true] {
+                let error_body = if named {
+                    serde_json::json!({"code": code, "message": "  original failure  ", "request_id": "provider-req-standard"})
+                } else {
+                    serde_json::json!({"type": "error", "error": {"type": code, "message": "  original failure  "}, "request_id": "provider-req-standard"})
+                };
+                let raw_body = format!("event: error\ndata: {error_body}\n\n");
+                let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let entries = captured.clone();
+                let sink: crate::audit::EvidenceSink = std::sync::Arc::new(move |entry| {
+                    entries.lock().unwrap().push(entry);
+                    Box::pin(async { Ok(()) })
+                });
+                let evidence = crate::audit::AttemptEvidence::new(sink);
+                let (client, server) =
+                    sse_stream_client(ApiBackend::Messages, "/messages", raw_body.clone()).await;
+                let local_id = crate::types::RequestId::from("local-standard-messages");
+                let events = evidence
+                    .scope(async {
+                        let (raw, metadata) = client
+                            .conversation_stream_messages(ConversationRequest::new())
+                            .await
+                            .unwrap();
+                        crate::stream::stream_messages(
+                            raw,
+                            metadata,
+                            local_id.clone(),
+                            std::time::Duration::from_secs(5),
+                        )
+                        .collect::<Vec<_>>()
+                        .await
+                    })
+                    .await;
+                evidence.finish(serde_json::json!({})).await.unwrap();
+                server.abort();
+                let _ = server.await;
+                let [
+                    crate::events::SamplingEvent::StreamStarted {
+                        request_id: started,
+                        ..
+                    },
+                    crate::events::SamplingEvent::Failed { request_id, error },
+                ] = events.as_slice()
+                else {
+                    panic!(
+                        "expected stream admission followed by one Messages failure: {events:?}"
+                    );
+                };
+                assert_eq!(started, &local_id);
+                assert_eq!(request_id, &local_id);
+                assert_eq!(
+                    error.status_code,
+                    Some(expected_status),
+                    "{code}/{named}: {error:?}"
+                );
+                assert!(error.is_retryable, "{code}/{named}: {error:?}");
+                assert!(
+                    error
+                        .message
+                        .contains(&format!("{code}:   original failure  "))
+                );
+                assert_eq!(error.message.contains("provider-req-standard"), named);
+                let error = crate::events::sampling_error_from_info(error);
+                assert!(matches!(
+                    crate::retry::classify_error(&error, 0, 2, 2),
+                    crate::retry::RetryDecision::RetryWithClientRebuild { .. }
+                ));
+                assert!(matches!(
+                    crate::retry::classify_error(&error, 1, 2, 2),
+                    crate::retry::RetryDecision::Fatal(_)
+                ));
+                let records = captured.lock().unwrap();
+                let response = records
+                    .iter()
+                    .find(|entry| entry.kind == "response")
+                    .unwrap();
+                assert_eq!(response.body.as_slice(), raw_body.as_bytes());
+                assert_eq!(response.metadata["status"], 200);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn standard_messages_stream_error_reader_keeps_negative_controls() {
+        for data in [
+            r#"{"type":"error","error":{"type":"api_error_suffix","message":"failed"}}"#,
+            r#"{"type":"error","error":{"type":"timeout_error_custom","message":"failed"}}"#,
+            r#"{"type":"message_start","error":{"type":"api_error","message":"failed"}}"#,
+            r#"{"type":"error","type":"error","error":{"type":"timeout_error","message":"failed"}}"#,
+            r#"{"type":7,"error":{"type":"timeout_error","message":"failed"}}"#,
+        ] {
+            let (client, server) = sse_stream_client(
+                ApiBackend::Messages,
+                "/messages",
+                format!("event: error\ndata: {data}\n\n"),
+            )
+            .await;
+            let error = client
+                .conversation_collect(ConversationRequest::new())
+                .await
+                .unwrap_err();
+            server.abort();
+            let _ = server.await;
+            if data.contains("suffix") || data.contains("custom") {
+                assert!(
+                    matches!(&error, SamplingError::Api { status, .. } if status.as_u16() == 500),
+                    "{data}: {error:?}"
+                );
+                assert!(error.is_retry_vetoed());
+            } else {
+                assert!(
+                    matches!(&error, SamplingError::Serialization(_)),
+                    "{data}: {error:?}"
+                );
+            }
+            assert!(!error.is_retryable());
+            assert!(matches!(
+                crate::retry::classify_error(&error, 0, 2, 2),
+                crate::retry::RetryDecision::Fatal(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn messages_mixed_ordinary_error_frame_rejects_stream() {
+        // The first frame is a normal `message_start` (normal event name,
+        // typed-decodable body): it must be accepted so the mixed frame below
+        // is what fails the attempt. Only the mixed frame uses `event: error`
+        // — the SSE event name must not override the body's ordinary identity.
+        let message_start = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","#,
+            r#""content":[],"model":"test-model","stop_reason":null,"stop_sequence":null,"#,
+            r#""usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            "\n\n"
+        );
+        let mixed_frame = concat!(
+            "event: error\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""},"#,
+            r#""error":{"code":"server_error","message":"upstream boom"}}"#,
+            "\n\n"
+        );
+        let body = format!("{message_start}{mixed_frame}");
+        let (client, server) = sse_stream_client(ApiBackend::Messages, "/messages", body).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_mixed_envelope_rejection("messages mixed frame", result);
+    }
+
+    #[tokio::test]
+    async fn legitimate_stream_error_envelopes_keep_reader_classification() {
+        // Named `event:error` frame through the real Messages reader: the
+        // provider facts stay an Api classification, not a local protocol error.
+        let named = concat!(
+            "event: error\n",
+            r#"data: {"request_id":"req-77","code":"InvalidParameter","message":"Output data may contain inappropriate content."}"#,
+            "\n\n"
+        );
+        let (client, server) =
+            sse_stream_client(ApiBackend::Messages, "/messages", named.to_string()).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        match result {
+            Err(SamplingError::Api {
+                status, message, ..
+            }) => {
+                assert_eq!(status.as_u16(), 400);
+                assert!(message.contains("InvalidParameter"), "{message}");
+                assert!(message.contains("req-77"), "{message}");
+            }
+            other => panic!("messages named error: expected Api, got {other:?}"),
+        }
+
+        // Legal typed error through the real Chat reader keeps the overload
+        // classification (bounded retry eligibility), unlike mixed frames.
+        let typed = "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n";
+        let (client, server) = sse_stream_client(
+            ApiBackend::ChatCompletions,
+            "/chat/completions",
+            typed.to_string(),
+        )
+        .await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        match result {
+            Err(error @ SamplingError::Api { status, .. }) => {
+                assert_eq!(status.as_u16(), 529);
+                assert!(error.is_overloaded());
+            }
+            other => panic!("chat typed error: expected Api overload, got {other:?}"),
+        }
+
+        // Bare legacy flat error through the real Responses reader.
+        let bare = concat!(
+            r#"data: {"code":"The service is currently unavailable","error":"Service temporarily unavailable."}"#,
+            "\n\n"
+        );
+        let (client, server) = responses_stream_client(bare.to_string()).await;
+        let result = client
+            .conversation_collect(ConversationRequest::new())
+            .await;
+        server.abort();
+        let _ = server.await;
+        match result {
+            Err(SamplingError::Api { status, .. }) => assert_eq!(status.as_u16(), 529),
+            other => panic!("responses bare legacy: expected Api, got {other:?}"),
+        }
     }
 
     #[tokio::test]

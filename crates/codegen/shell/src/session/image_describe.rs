@@ -258,59 +258,34 @@ fn valid_staging_batch_name(name: &str) -> bool {
         .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
 }
 
-/// Extract roots from physical User messages rather than the projected
-/// Surface: compaction and rewind cannot make a committed asset unowned.
-fn committed_image_batches(events: &[chat_state::TimelineEvent]) -> BTreeSet<String> {
-    let mut retained = BTreeSet::new();
-    for event in events {
-        let items: &[ConversationItem] = match &event.kind {
-            chat_state::TimelineEventKind::Messages(message) => &message.items,
-            chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
-                item, ..
-            }) => std::slice::from_ref(item),
-            chat_state::TimelineEventKind::Notification(
-                chat_state::NotificationEvent::Consumed {
-                    input: Some(item), ..
-                },
-            ) => std::slice::from_ref(item),
-            _ => continue,
-        };
-        for item in items {
-            let ConversationItem::User(user) = item else {
-                continue;
-            };
-            for part in &user.content {
-                let ContentPart::Text { text } = part else {
-                    continue;
-                };
-                for path in sampling_types::conversation::image_files_envelope_paths(text) {
-                    if let Some(name) = image_batch_name(&path) {
-                        retained.insert(name.to_owned());
-                    }
-                }
-            }
-        }
-    }
-    retained
-}
-
-/// Read authoritative committed facts before touching any asset. Callers hold
-/// the session's image admission gate and writer epoch while this runs.
+/// Map the canonical owner's committed paths through Shell's asset grammar.
+/// Callers hold the session's image admission gate and writer epoch from the
+/// authority query until this contained-directory sweep completes.
 pub(crate) fn reconcile_user_image_assets(
     session: &crate::session::storage::ContainedDirectory,
+    committed_paths: &BTreeSet<String>,
+    mut is_cancelled: impl FnMut() -> bool,
 ) -> std::io::Result<usize> {
-    let events =
-        crate::session::storage::JsonlStorageAdapter::read_timeline_from_directory(session)?;
-    let timeline = chat_state::Timeline::from_events(events)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let retained = committed_image_batches(timeline.events());
-    sweep_user_image_assets(session, &retained)
+    let mut retained = BTreeSet::new();
+    for path in committed_paths {
+        if is_cancelled() {
+            return Ok(0);
+        }
+        if let Some(name) = image_batch_name(path) {
+            retained.insert(name.to_owned());
+        }
+    }
+    sweep_user_image_assets(session, &retained, is_cancelled)
 }
 
 fn sweep_user_image_assets(
     session: &crate::session::storage::ContainedDirectory,
     retained: &BTreeSet<String>,
+    mut is_cancelled: impl FnMut() -> bool,
 ) -> std::io::Result<usize> {
+    if is_cancelled() {
+        return Ok(0);
+    }
     let assets =
         match session.open_relative(Path::new("assets"), "session image asset directory", false) {
             Ok(assets) => assets,
@@ -318,7 +293,13 @@ fn sweep_user_image_assets(
             Err(error) => return Err(error),
         };
     let mut removed = 0;
-    assets.visit_names(|name| {
+    let result = assets.visit_names(|name| {
+        if is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "user image asset reconciliation cancelled",
+            ));
+        }
         let Some(name_str) = name.to_str() else {
             return Ok(());
         };
@@ -332,8 +313,11 @@ fn sweep_user_image_assets(
             }
         }
         Ok(())
-    })?;
-    Ok(removed)
+    });
+    match result {
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(removed),
+        result => result.map(|()| removed),
+    }
 }
 
 fn persist_user_images_with(
@@ -545,15 +529,8 @@ mod tests {
         .unwrap()
     }
 
-    fn write_timeline(path: &Path, timeline: &chat_state::Timeline) {
-        let bytes =
-            crate::session::storage::JsonlStorageAdapter::encode_journal(timeline.events(), &[])
-                .unwrap();
-        std::fs::write(path.join("timeline.jsonl"), bytes).unwrap();
-    }
-
     #[test]
-    fn user_image_asset_reconciliation_follows_committed_physical_refs() {
+    fn user_image_asset_reconciliation_uses_committed_paths_and_shell_grammar() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let retained =
@@ -570,51 +547,100 @@ mod tests {
         std::fs::write(stage.join("image-1.png"), b"partial").unwrap();
         let unrelated = dir.path().join("assets").join("user-owned");
         std::fs::create_dir(&unrelated).unwrap();
-
-        assert!(reconcile_user_image_assets(&session).is_err());
-        assert!(retained_batch.is_dir());
-        assert!(orphan_batch.is_dir());
-        assert!(stage.is_dir());
-
-        std::fs::write(dir.path().join("timeline.jsonl"), b"{broken timeline}\n").unwrap();
-        assert!(reconcile_user_image_assets(&session).is_err());
-        assert!(orphan_batch.is_dir());
-        assert!(stage.is_dir());
-
-        let message =
-            render_image_files_block(&[retained[0].to_string_lossy().into_owned()]).unwrap();
-        let timeline =
-            chat_state::Timeline::from_seed(vec![ConversationItem::user(message)]).unwrap();
-        write_timeline(dir.path(), &timeline);
-        assert_eq!(reconcile_user_image_assets(&session).unwrap(), 2);
+        let unknown_batch = dir.path().join("assets/images-not-a-batch");
+        std::fs::create_dir(&unknown_batch).unwrap();
+        let paths = BTreeSet::from([
+            retained[0].to_string_lossy().into_owned(),
+            // Neither a bare path nor an invalid image index grants retention.
+            orphan_batch.to_string_lossy().into_owned(),
+            orphan_batch
+                .join("image-01.png")
+                .to_string_lossy()
+                .into_owned(),
+        ]);
+        assert_eq!(
+            reconcile_user_image_assets(&session, &paths, || false).unwrap(),
+            2
+        );
         assert!(retained_batch.is_dir());
         assert!(!orphan_batch.exists());
         assert!(!stage.exists());
         assert!(unrelated.is_dir());
+        assert!(unknown_batch.is_dir());
+        assert!(!dir.path().join("timeline.jsonl").exists());
     }
 
     #[test]
-    fn consumed_input_is_an_image_asset_root() {
-        let path = "/session/assets/images-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/image-1.png";
-        let message = render_image_files_block(&[path.to_owned()]).unwrap();
-        let event = chat_state::TimelineEvent {
-            version: chat_state::TIMELINE_SCHEMA_VERSION,
-            seq: chat_state::EventSeq::new(1),
-            at_ms: 0,
-            kind: chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
-                display_echo: None,
-                input_ids: vec!["input-1".into()],
-                turn: chat_state::TurnId(1),
-                item: ConversationItem::user(message),
-                skill_loads: Vec::new(),
-            }),
-        };
+    fn user_image_asset_reconciliation_without_assets_needs_no_timeline() {
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            committed_image_batches(&[event]),
-            BTreeSet::from([
-                "images-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()
-            ])
+            reconcile_user_image_assets(&test_session(dir.path()), &BTreeSet::new(), || false)
+                .unwrap(),
+            0
         );
+        assert!(!dir.path().join("assets").exists());
+        assert!(!dir.path().join("timeline.jsonl").exists());
+    }
+
+    #[test]
+    fn user_image_asset_reconciliation_stops_between_batch_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        for bytes in ["AQID", "BAUG", "BwgJ"] {
+            persist_user_images(&session, &[ImageContent::new(bytes, "image/png")]).unwrap();
+        }
+        let mut checks = 0;
+        let removed = reconcile_user_image_assets(&session, &BTreeSet::new(), || {
+            checks += 1;
+            // One check precedes opening assets, then one precedes each batch.
+            checks > 2
+        })
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("assets"))
+                .unwrap()
+                .count(),
+            2
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_image_asset_reconciliation_preserves_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let evidence = outside.path().join("keep.png");
+        std::fs::write(&evidence, b"keep").unwrap();
+        symlink(outside.path(), dir.path().join("assets")).unwrap();
+        assert!(
+            reconcile_user_image_assets(&test_session(dir.path()), &BTreeSet::new(), || false)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&evidence).unwrap(), b"keep");
+
+        let local = tempfile::tempdir().unwrap();
+        let session = test_session(local.path());
+        let retained =
+            persist_user_images(&session, &[ImageContent::new("AQID", "image/png")]).unwrap();
+        let unknown = local.path().join("assets/user-symlink");
+        symlink(outside.path(), &unknown).unwrap();
+        let orphan = local
+            .path()
+            .join("assets")
+            .join(format!("images-{}", "a".repeat(64)));
+        symlink(outside.path(), &orphan).unwrap();
+        let paths = BTreeSet::from([retained[0].to_string_lossy().into_owned()]);
+        assert_eq!(
+            reconcile_user_image_assets(&session, &paths, || false).unwrap(),
+            1
+        );
+        assert!(unknown.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(orphan.symlink_metadata().is_err());
+        assert!(retained[0].is_file());
+        assert_eq!(std::fs::read(&evidence).unwrap(), b"keep");
     }
     #[test]
     fn persist_and_prepend_image_files_writes_assets_and_lists_paths() {

@@ -744,24 +744,43 @@ fn load_definitions_from_dir(
 
 /// Recursively collect Markdown definitions in stable path order. A nested
 /// relative path is the Agent ID namespace.
+///
+/// Directory traversal tracks only the physical identities on the current
+/// ancestor chain: a link that revisits an ancestor terminates the cycle, and
+/// a directory whose identity cannot be canonicalized is skipped rather than
+/// recursed with an unproven lexical identity. Sibling aliases to the same
+/// non-ancestor target stay reachable under each lexical namespace because
+/// the identity leaves the chain when the recursion returns.
 fn agent_markdown_files(dir: &Path) -> Vec<PathBuf> {
-    fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    fn visit(
+        dir: &Path,
+        ancestors: &mut std::collections::HashSet<PathBuf>,
+        out: &mut Vec<PathBuf>,
+    ) {
+        let Ok(identity) = dir.canonicalize() else {
             return;
         };
-        let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
-        paths.sort();
-        for path in paths {
-            if path.is_dir() {
-                visit(&path, out);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-                out.push(path);
+        // Ownership: keep `identity` for the exit-side `remove` below.
+        if !ancestors.insert(identity.clone()) {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+            paths.sort();
+            for path in paths {
+                if path.is_dir() {
+                    visit(&path, ancestors, out);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                    out.push(path);
+                }
             }
         }
+        ancestors.remove(&identity);
     }
 
     let mut files = Vec::new();
-    visit(dir, &mut files);
+    let mut ancestors = std::collections::HashSet::new();
+    visit(dir, &mut ancestors, &mut files);
     files
 }
 
@@ -1641,5 +1660,79 @@ mod tests {
         let entries = all_subagents_with_home(tmp.path(), &toggle, None, None);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["general-purpose", "explore", "browser-use"]);
+    }
+
+    // Directory-cycle regressions rely on POSIX symlinks; no Windows
+    // field-equivalence is claimed.
+    #[cfg(unix)]
+    mod directory_cycles {
+        use super::*;
+
+        fn discovered_names(tmp: &std::path::Path) -> Vec<String> {
+            discover_with_home(tmp, None, None)
+                .into_iter()
+                .map(|d| d.name)
+                .collect()
+        }
+
+        #[test]
+        fn self_link_terminates_without_deep_aliases() {
+            let tmp = tempfile::tempdir().unwrap();
+            let agents_dir = tmp.path().join(".grow/agents");
+            fs::create_dir_all(&agents_dir).unwrap();
+            write_agent_file(&agents_dir, "root-agent.md", "root-agent", "Root");
+
+            std::os::unix::fs::symlink(".", agents_dir.join("loop")).unwrap();
+
+            let names = discovered_names(tmp.path());
+            assert_eq!(names, vec!["root-agent".to_string()]);
+        }
+
+        #[test]
+        fn child_link_to_ancestor_terminates() {
+            let tmp = tempfile::tempdir().unwrap();
+            let agents_dir = tmp.path().join(".grow/agents");
+            fs::create_dir_all(agents_dir.join("nested")).unwrap();
+            write_agent_file(&agents_dir, "top.md", "top", "Top");
+            write_agent_file(
+                &agents_dir.join("nested"),
+                "inner.md",
+                "nested/inner",
+                "Inner",
+            );
+
+            // Link back to a physical ancestor: recursion must stop here.
+            std::os::unix::fs::symlink(&agents_dir, agents_dir.join("nested/back")).unwrap();
+
+            let names = discovered_names(tmp.path());
+            assert_eq!(names, vec!["nested/inner".to_string(), "top".to_string()]);
+        }
+
+        #[test]
+        fn sibling_aliases_to_same_target_keep_both_namespaces() {
+            let tmp = tempfile::tempdir().unwrap();
+            let target = tmp.path().join("shared-target");
+            fs::create_dir_all(target.join("sub")).unwrap();
+            write_agent_file(&target, "shared.md", "unused", "Shared agent");
+            write_agent_file(&target.join("sub"), "deep.md", "unused", "Nested agent");
+
+            let agents_dir = tmp.path().join(".grow/agents");
+            fs::create_dir_all(&agents_dir).unwrap();
+            std::os::unix::fs::symlink(&target, agents_dir.join("a")).unwrap();
+            std::os::unix::fs::symlink(&target, agents_dir.join("b")).unwrap();
+
+            let names = discovered_names(tmp.path());
+            // Each lexical namespace is an independent ID; alias branches are
+            // not deduplicated against each other.
+            assert_eq!(
+                names,
+                vec![
+                    "a/shared".to_string(),
+                    "a/sub/deep".to_string(),
+                    "b/shared".to_string(),
+                    "b/sub/deep".to_string(),
+                ]
+            );
+        }
     }
 }

@@ -307,33 +307,15 @@ impl SessionActor {
                     };
                 }
                 let cwd = std::path::Path::new(&self.session_info.cwd);
-                let install_source =
-                    agent::plugins::git_install::parse_install_source(&source, cwd);
-                let registry = agent::plugins::InstallRegistry::load();
-                match agent::plugins::git_install::install_from_source(
-                    &install_source,
-                    &registry,
-                    crate::plugin::marketplace_require_sha(),
-                ) {
-                    Ok(result) => {
-                        let repo = agent::plugins::git_install::build_installed_repo(
-                            &result,
-                            &install_source,
-                        );
-                        let mut registry = registry;
-                        registry.insert(result.repo_key.clone(), repo);
-                        if let Err(e) = registry.save() {
-                            tracing::warn!("Failed to save install registry: {e}");
-                        }
-                        let (names, post_warnings) =
-                            crate::config::post_install_plugin(&result.repo_key);
-                        let count = names.len();
+                match crate::plugin::install_plugin(&source, cwd).await {
+                    Ok(outcome) => {
+                        let count = outcome.plugin_names.len();
                         let mut msg = format!(
                             "Installed {count} plugin(s) from {source}: {}",
-                            names.join(", ")
+                            outcome.plugin_names.join(", ")
                         );
-                        for w in &post_warnings {
-                            msg.push_str(&format!(" (warning: {w})"));
+                        for warning in &outcome.warnings {
+                            msg.push_str(&format!(" (warning: {warning})"));
                         }
                         ActionOutcome {
                             status: OutcomeStatus::Success,
@@ -412,79 +394,60 @@ impl SessionActor {
                 }
             }
             PluginsAction::Update { plugin_id } => {
-                let registry = agent::plugins::InstallRegistry::load();
-                let all_repos = registry.list();
-                if all_repos.is_empty() {
-                    return ActionOutcome {
-                        status: OutcomeStatus::NotFound,
-                        message: "No installed plugins to update.".into(),
-                        requires_reload: false,
-                        requires_restart: false,
-                    };
-                }
+                use crate::plugin::{PluginUpdateSelector, RepoUpdateOutcome, UpdateError};
 
-                let repos_to_update: Vec<(
-                    String,
-                    agent::plugins::install_registry::InstalledRepo,
-                )> = if let Some(ref id) = plugin_id {
-                    let name = id.rsplit('/').next().unwrap_or(id);
-                    match registry.find_plugin(name) {
-                        Some((key, repo, _plugin)) => vec![(key.to_string(), repo.clone())],
-                        None => {
-                            return ActionOutcome {
-                                status: OutcomeStatus::NotFound,
-                                message: format!("Plugin \"{name}\" not found."),
-                                requires_reload: false,
-                                requires_restart: false,
-                            };
-                        }
+                let selector = plugin_id.map(|id| {
+                    let name = id.rsplit('/').next().unwrap_or(&id).to_string();
+                    PluginUpdateSelector::PluginName(name)
+                });
+                let outcomes = match crate::plugin::update_plugins_by_selector(selector) {
+                    Ok(outcomes) if outcomes.is_empty() => {
+                        return ActionOutcome {
+                            status: OutcomeStatus::NotFound,
+                            message: "No installed plugins to update.".into(),
+                            requires_reload: false,
+                            requires_restart: false,
+                        };
                     }
-                } else {
-                    all_repos
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v.clone()))
-                        .collect()
+                    Ok(outcomes) => outcomes,
+                    Err(UpdateError::NotFound { name }) => {
+                        return ActionOutcome {
+                            status: OutcomeStatus::NotFound,
+                            message: format!("Plugin \"{name}\" not found."),
+                            requires_reload: false,
+                            requires_restart: false,
+                        };
+                    }
                 };
-
-                let mut messages = Vec::new();
-                let mut any_updated = false;
-                for (key, repo) in &repos_to_update {
-                    match agent::plugins::git_install::update_repo(
-                        key,
-                        repo,
-                        crate::plugin::marketplace_require_sha(),
-                    ) {
-                        Ok(status) => {
-                            use agent::plugins::git_install::UpdateStatus;
-                            match status {
-                                UpdateStatus::Updated(result) => {
-                                    if result.changed {
-                                        any_updated = true;
-                                        messages.push(format!("{key}: updated"));
-                                    } else {
-                                        messages.push(format!("{key}: already up to date"));
-                                    }
-                                }
-                                UpdateStatus::Pinned { ref_name } => {
-                                    messages.push(format!("{key}: pinned to {ref_name}"));
-                                }
-                                UpdateStatus::LiveLocal => {
-                                    messages.push(format!("{key}: local symlink (already live)"));
-                                }
-                            }
+                let requires_reload = outcomes
+                    .iter()
+                    .any(crate::plugin::repo_update_requires_reload);
+                let messages: Vec<String> = outcomes
+                    .iter()
+                    .map(|outcome| match outcome {
+                        RepoUpdateOutcome::Updated { repo_key, .. } => {
+                            format!("{repo_key}: updated")
                         }
-                        Err(e) => {
-                            messages.push(format!("{key}: update failed: {e}"));
+                        RepoUpdateOutcome::AlreadyUpToDate { repo_key } => {
+                            format!("{repo_key}: already up to date")
                         }
-                    }
-                }
-                if let Err(e) = registry.save() {
-                    tracing::warn!("Failed to save install registry after update: {e}");
-                }
+                        RepoUpdateOutcome::Pinned { repo_key, ref_name } => {
+                            format!("{repo_key}: pinned to {ref_name}")
+                        }
+                        RepoUpdateOutcome::LiveLocal { repo_key } => {
+                            format!(
+                                "{repo_key}: local snapshot (refresh on session start or reload)"
+                            )
+                        }
+                        RepoUpdateOutcome::Failed { repo_key, error } => {
+                            format!("{repo_key}: update failed: {error}")
+                        }
+                    })
+                    .collect();
                 ActionOutcome {
                     status: OutcomeStatus::Success,
                     message: messages.join("\n"),
-                    requires_reload: any_updated,
+                    requires_reload,
                     requires_restart: false,
                 }
             }
@@ -499,7 +462,7 @@ impl SessionActor {
                 }
                 let resolved = Self::resolve_path(&self.session_info.cwd, &path);
                 let path_str = resolved.display().to_string();
-                match crate::config::add_plugin_path(&path_str) {
+                match crate::config::add_plugin_path(&path_str).await {
                     Ok(()) => {
                         let mut msg = format!("Added plugin path: {path_str}");
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -524,8 +487,8 @@ impl SessionActor {
             }
             PluginsAction::Enable { plugin_id } => {
                 // Add to enabled list (for project plugins) and remove from disabled list.
-                let r1 = crate::config::add_enabled_plugin(&plugin_id);
-                let r2 = crate::config::remove_disabled_plugin(&plugin_id);
+                let r1 = crate::config::add_enabled_plugin(&plugin_id).await;
+                let r2 = crate::config::remove_disabled_plugin(&plugin_id).await;
                 match r1.and(r2) {
                     Ok(()) => {
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -555,8 +518,8 @@ impl SessionActor {
             }
             PluginsAction::Disable { plugin_id } => {
                 // Add to disabled list and remove from enabled list.
-                let r1 = crate::config::add_disabled_plugin(&plugin_id);
-                let r2 = crate::config::remove_enabled_plugin(&plugin_id);
+                let r1 = crate::config::add_disabled_plugin(&plugin_id).await;
+                let r2 = crate::config::remove_enabled_plugin(&plugin_id).await;
                 match r1.and(r2) {
                     Ok(()) => {
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -595,7 +558,7 @@ impl SessionActor {
                 }
                 let resolved = Self::resolve_path(&self.session_info.cwd, &path);
                 let path_str = resolved.display().to_string();
-                match crate::config::remove_plugin_path(&path_str) {
+                match crate::config::remove_plugin_path(&path_str).await {
                     Ok(()) => {
                         let mut msg = format!("Removed plugin path: {path_str}");
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -848,11 +811,13 @@ impl SessionActor {
         // Update session's plugin registry snapshot
         *self.plugin_registry.write() = new_registry_snapshot.clone();
 
-        // Reload hooks in the current session
+        // Reload hooks in the current session: collect the new snapshot's
+        // plugin specs (Some only), then unconditionally replace the
+        // `plugin/` contribution so None/empty snapshots revoke prior
+        // plugin hooks instead of leaving stale handlers registered.
         let t_hooks = std::time::Instant::now();
-        let mut hooks_reloaded = 0usize;
+        let mut new_specs = Vec::new();
         if let Some(ref new_registry) = new_registry_snapshot {
-            let mut new_specs = Vec::new();
             for plugin in new_registry.active_plugins() {
                 // File-based hooks
                 if let Some(ref hooks_path) = plugin.hooks_path {
@@ -882,29 +847,32 @@ impl SessionActor {
                     new_specs.extend(specs);
                 }
             }
-            hooks_reloaded = new_specs.len();
-            {
-                let mut reg = self.hooks.registry.borrow_mut();
-                if let Some(ref mut arc_reg) = *reg {
-                    let hook_reg = Arc::make_mut(arc_reg);
-                    hook_reg.remove_by_prefix("plugin/");
-                    hook_reg.append_specs(new_specs);
-                } else if !new_specs.is_empty() {
-                    // No registry yet: bootstrap config-layer and file hooks (as
-                    // reload_hooks_impl does), not empty sources, so a plugin-first
-                    // snapshot doesn't drop config hooks.
-                    let git_root =
-                        workspace::session::git::find_git_root_from_path(session_cwd).ok();
-                    let is_trusted =
-                        crate::agent::folder_trust::resolve_and_record(session_cwd, None, false);
-                    let (mut new_reg, _errs) =
-                        crate::util::hooks::discover_hooks(git_root.as_deref(), is_trusted);
-                    new_reg.append_specs(new_specs);
-                    *reg = Some(Arc::new(new_reg));
-                }
-            }
-            self.mark_hook_registry_changed();
         }
+        let hooks_reloaded = new_specs.len();
+        {
+            let mut reg = self.hooks.registry.borrow_mut();
+            if let Some(ref mut arc_reg) = *reg {
+                let hook_reg = Arc::make_mut(arc_reg);
+                hook_reg.remove_by_prefix("plugin/");
+                hook_reg.append_specs(new_specs);
+            } else if !new_specs.is_empty() {
+                // No registry yet: bootstrap config-layer and file hooks (as
+                // reload_hooks_impl does), not empty sources, so a plugin-first
+                // snapshot doesn't drop config hooks. An empty snapshot with no
+                // registry must not synthesize one or discover unrelated
+                // sources.
+                let git_root = workspace::session::git::find_git_root_from_path(session_cwd).ok();
+                let is_trusted =
+                    crate::agent::folder_trust::resolve_and_record(session_cwd, None, false);
+                let (mut new_reg, _errs) =
+                    crate::util::hooks::discover_hooks(git_root.as_deref(), is_trusted);
+                new_reg.append_specs(new_specs);
+                *reg = Some(Arc::new(new_reg));
+            }
+        }
+        // Publish the generation change even when the last plugin
+        // contribution was removed (None/empty snapshot).
+        self.mark_hook_registry_changed();
 
         ::diagnostics::unified_log::info(
             "reload_plugins_impl: hooks done",

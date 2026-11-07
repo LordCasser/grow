@@ -43,6 +43,20 @@ Local patch: adds the riscv64 SYS_OPENAT/SYS_OPENAT2 syscall table
              (see Cargo.toml header) — required for riscv64 and musl builds.
 
 --------------------------------------------------------------------------------
+nix (OpenHarmony patch)
+--------------------------------------------------------------------------------
+Path:       third_party/nix-ohos/
+License:    MIT
+License file: third_party/nix-ohos/LICENSE
+Upstream:   https://github.com/nix-rust/nix
+Version:    0.26.4
+crates.io:  https://crates.io/crates/nix/0.26.4
+Local patch: OHOS-as-musl cfg branches, explicit C ABI function pointers,
+             declared FreeBSD cfg and i64 TimeVal microsecond arithmetic.
+             This copy serves pprof's nix ^0.26 dependency; newer nix versions
+             in Cargo.lock remain registry packages (see Cargo.toml header).
+
+--------------------------------------------------------------------------------
 sqlite-vec
 --------------------------------------------------------------------------------
 Path:       third_party/sqlite-vec/
@@ -52,8 +66,11 @@ License files: third_party/sqlite-vec/LICENSE-MIT
 Upstream:   https://github.com/asg017/sqlite-vec
 Revision:   04d28bd21773981e2d266bbf6aa4efbd011eb4f6 (v0.1.10-alpha.4)
 crates.io:  https://crates.io/crates/sqlite-vec/0.1.10-alpha.4
-Local patch: adds four C implementation files omitted from the published crate
-             but included by sqlite-vec.c; each is unchanged from the same tag.
+Local patch: restores four omitted C implementation files and maintains
+             missing-IN/unsupported-dispatch validation, primary-key length
+             initialization, float-parser error ownership, metadata-name
+             destruction and warning-free compilation (see Cargo.toml header).
+             The maintained source is not byte-identical to the upstream tag.
 
 --------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.

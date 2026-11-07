@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-07
+skip_specs: true
+reason: Repair existing native sampling test fixtures to observe the established child actor retirement and canonical terminal boundary; no runtime behavior, public interface, or persisted contract changes.

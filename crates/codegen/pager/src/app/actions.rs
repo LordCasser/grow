@@ -114,6 +114,22 @@ pub enum Action {
     /// slash-command and exit-alias resolution (a `/always-approve` or `/quit`
     /// chip must never execute as a command).
     SubmitFollowUp(String),
+    /// Ask the shell for the canonical admission state of one advisory
+    /// card's stable reply identity before opening the local editor. The
+    /// card flips to `Checking`; the admission callback resolves the
+    /// projection (Available/Accepted/Rejected/Unconfirmed).
+    QueryAdvisoryReplyAdmission {
+        source_session_id: String,
+        tool_call_id: String,
+    },
+    /// Submit the user's late reply to an advisory question card as a
+    /// literal human prompt on the owning primary's current session entry
+    /// (bypasses slash/exit parsing; stable per-card prompt identity).
+    SubmitAdvisoryReply {
+        source_session_id: String,
+        tool_call_id: String,
+        text: String,
+    },
     /// Execute a slash command without consuming the prompt textarea.
     ///
     /// Used by modal-driven slash dispatchers (command palette, ArgPicker)
@@ -427,6 +443,9 @@ pub enum Action {
     /// Toggle the ask_user_question timeout. SHELL-owned; persisted to
     /// `[toolset.ask_user_question].timeout_enabled`. Applies to new sessions.
     SetAskUserQuestionTimeoutEnabled(bool),
+    /// Persist whether the Agent may continue with recommended answers.
+    /// SHELL resolves the preference again for the next ask admission.
+    SetAskUserQuestionAllowNonBlocking(bool),
     /// SHELL-owned `keep_text_selection` (`flash` | `hold`); cache + persist.
     SetKeepTextSelection(crate::appearance::TextSelection),
     /// Set the mouse-wheel scroll speed multiplier (1-100). Pager-owned
@@ -1454,6 +1473,10 @@ pub enum Effect {
         value: crate::settings::SettingValue,
         rollback_value: crate::settings::SettingValue,
     },
+    /// Persist a plugin CTA dismissal to `[plugin_cta].dismissed` in
+    /// `~/.grow/config.toml`. Purely a disk write: the UI has already applied
+    /// the local hide, so the task result carries no new state back.
+    PersistDismissedPluginCta { plugin_id: String },
     /// Send structured prompt blocks to the agent.
     /// Used for skill injection where the prompt consists of
     /// multiple content blocks (metadata + skill body).
@@ -1617,6 +1640,7 @@ pub enum Effect {
     FetchSkillsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        binding_epoch: u32,
     },
     FetchWorkflowsList {
         agent_id: AgentId,
@@ -1626,6 +1650,7 @@ pub enum Effect {
     ToggleSkill {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        binding_epoch: u32,
         skill_name: String,
         enabled: bool,
     },
@@ -2485,6 +2510,8 @@ pub enum TaskResult {
     /// Skills list loaded.
     SkillsListLoaded {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
         result: Result<Vec<tools::implementations::skills::types::SkillInfo>, String>,
     },
     WorkflowsListLoaded {
@@ -2495,6 +2522,8 @@ pub enum TaskResult {
     /// Skill toggle completed (enable/disable).
     SkillsToggleDone {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
         result: Result<Vec<tools::implementations::skills::types::SkillInfo>, String>,
     },
     /// Background marketplace auto-update completed.

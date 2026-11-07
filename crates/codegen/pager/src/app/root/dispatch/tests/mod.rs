@@ -9,6 +9,7 @@ mod rewind;
 mod router;
 mod session;
 mod settings;
+mod skills_binding;
 mod status;
 mod task_result;
 mod transcript;
@@ -140,6 +141,7 @@ fn test_app() -> AppView {
         show_tips: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
+        ask_user_question_allow_non_blocking: None,
         bundle_state: crate::app::bundle::BundleState::default(),
         scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
         fps_hud: crate::views::fps_hud::FpsHud::new(),
@@ -438,6 +440,7 @@ fn make_ask_user_question_args(
         session_id: "test-session".into(),
         tool_call_id: tool_call_id.into(),
         mode: tools::implementations::grow_build::ask_user_question::AskUserQuestionMode::Default,
+        blocking: true,
         questions: vec![Question {
             question: "ACP-driven question".into(),
             options: vec![QuestionOption {
@@ -447,6 +450,7 @@ fn make_ask_user_question_args(
                 id: None,
             }],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         }],
     };

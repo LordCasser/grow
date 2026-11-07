@@ -12,13 +12,14 @@ audit surface and pins exact source. Local patches and upgrade checklists live
 in each crate’s `Cargo.toml` header comments — treat those as the source of
 truth when re-vendoring.
 
-## Mermaid layout stack
+## Vendored sources
 
 | Crate | Version | License | Upstream | Full license text |
 |-------|---------|---------|----------|-------------------|
 | [`mermaid-to-svg`](./mermaid-to-svg/) | (path) | MIT | [warpdotdev/mermaid-to-svg](https://github.com/warpdotdev/mermaid-to-svg) | [`LICENSE`](./mermaid-to-svg/LICENSE) |
 | [`dagre_rust`](./dagre_rust/) | 0.0.5 | Apache-2.0 | [r3alst/dagre-rust](https://github.com/r3alst/dagre-rust) / Warp re-vendor | [`LICENCE`](./dagre_rust/LICENCE) |
 | [`nono`](./nono/) | 0.53.0 | Apache-2.0 | [always-further/nono](https://github.com/always-further/nono) | [`LICENSE`](./nono/LICENSE) |
+| [`nix-ohos`](./nix-ohos/) (`nix`) | 0.26.4 | MIT | [nix-rust/nix](https://github.com/nix-rust/nix) | [`LICENSE`](./nix-ohos/LICENSE) |
 | [`sqlite-vec`](./sqlite-vec/) | 0.1.10-alpha.4 | MIT OR Apache-2.0 | [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec) | [`LICENSE-MIT`](./sqlite-vec/LICENSE-MIT), [`LICENSE-APACHE`](./sqlite-vec/LICENSE-APACHE) |
 
 Dependency shape:
@@ -35,7 +36,11 @@ sandbox
   └── nono                    (Apache-2.0, riscv64 + musl patches)
 
 memory
-  └── sqlite-vec              (MIT OR Apache-2.0, packaging repair)
+  └── sqlite-vec              (MIT OR Apache-2.0, packaging + maintained source fixes)
+
+pprof 0.15.0
+  └── nix ^0.26 → nix-ohos 0.26.4 (MIT, OHOS/ABI patches)
+      workspace nix ^0.31 and other locked nix versions use crates.io
 ```
 
 ## Notices and ancestry
@@ -67,14 +72,19 @@ unchanged. The audited dependency stack does not currently have such a member:
 | `mermaid-to-svg` | `8d3f789c2eb49335d7bf247a06bb649f59b6d4ed` (current upstream `main`) | Grow carries parser, CJK sizing, wrapping, sequence/XY chart and hermetic-rendering changes. |
 | `dagre_rust` | `mermaid-to-svg`'s copy at the same revision | Grow replaces an unsynchronized `static mut` id counter with `AtomicUsize`. |
 | `nono` | 0.53.0 | This is the newest release compatible with the workspace's Rust 1.93.1 toolchain; Grow also carries riscv64 and musl portability patches. |
-| `sqlite-vec` | 0.1.10-alpha.4 | The published crate omits four C files included by `sqlite-vec.c`; Grow adds the byte-identical files from the same tag. The repository root is not a Cargo package, so it cannot be consumed unchanged as a submodule. |
+| `nix-ohos` (`nix`) | 0.26.4 | pprof 0.15.0 requires nix ^0.26. Grow maintains OHOS-as-musl cfgs, ABI/lint repairs and i64 TimeVal microsecond arithmetic. Newer locked nix versions still resolve from crates.io. |
+| `sqlite-vec` | 0.1.10-alpha.4 | Grow restores four omitted C files and maintains boundary validation, primary-key length, float-parser error ownership, metadata-name destruction and warning repairs. The maintained source differs from the upstream tag; its root is not a directly consumable Cargo package. |
 
 `graphlib_rust =0.0.2` and `ordered_hashmap =0.0.3` are exact crates.io
 dependencies. Their former in-tree copies had no semantic patches and were
 removed after verifying the registry sources against the Grow test suite.
 
-The sqlite-vec vendor should be removed once upstream publishes a self-contained
-crate that retains the musl portability fix.
+Reassess the sqlite-vec vendor only when a self-contained upstream crate retains
+the musl fix and provides equivalents for every maintained source repair.
+Before removing the patch, review the header checklist and run the strict normal
+and ASan/UBSan native boundary checks used by
+[Core regression](../.github/workflows/core-regression.yml). Correcting packaging
+alone does not satisfy this removal condition.
 
 ## Upgrading
 

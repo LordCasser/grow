@@ -1,0 +1,6 @@
+- [x] 核AC-03a当前bootstrap、sessionregistry、loader/trust、继承backend边界及既有规范。
+- [x] 明确最小所有者修复及真实公共入口/进程验证标准，建立delta和设计。
+- [x] 实际会话入口复现sharedlatest跨会话/遗漏sessionroots，保oldred证据（首pair真实ACP旧实现marker空，actual101；扩展矩阵中的OnceLock失败单列不计产品红）。
+- [x] 最小采用session快照，实际同名A/B、file/inline、samecwd/sessionroots、空贡献及继承控制通过（最终review修订逐会话归属，真实三阶段矩阵actual0；继承Some分支只保既有gate/Arc定向单测，未假称ACP覆盖）。
+- [x] 父核最终diff/日志及相关回归；同步开发说明/backlog（逐会话归属修订最终1pass/actual0；5项原LSP定向回归0；父核16个PID均已不存在）。
+- [x] strict validate/archive及全量/archived复查（归档前strict通过；已合入configuration-rules，归档后复查结果见verification.md）。

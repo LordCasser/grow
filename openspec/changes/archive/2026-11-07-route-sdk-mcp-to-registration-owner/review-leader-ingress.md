@@ -1,0 +1,11 @@
+# Parent review: leader ingress accepted
+
+MCP-F2增量1功能已验收；SDK注册/producer及其跨模块里程碑仍未通过，不据本文件关闭整个change。源码writer已终态释放，下一coder负责Session SDK owner。
+
+父亲读`server.rs`的私有metadata判别、actualClientId注入和真实ingress位置；new/load的有效object、absent/null都取得accepted connection身份，caller数值/错误类型被覆盖，既有capabilities政策保持。畸形metadata在last-active/subscriber/driver/backfill/pending-request/load-buffer之前直接invalid_params至原连接，无id丢弃；没有新增registry、schema或依赖。原target单播与断线不fallback实现未变。
+
+决定性证据：原行为在新断言中保caller7而非actual42，actual101；最终真实persistent leader分配两个不同连接id，完整有效new/load经socket转发，实际params可typedparse成功且保actualid；回送replay仅actual loader收到。父亲核最终single-test任务`01a1b312-7e35-7c10-98cf-87987afe5231` actual0及regress日志末尾1pass。其余定向filters包含malformed2、inject26、target2/5和driver/loadbuffer等，各轮零失败；重叠filters不合计唯一案例数。`git diff --check` actual0。
+
+两项审查修订已闭合：原方案假定ACP自然拒绝畸形meta，但锁定schema DefaultOnError把它吞成None，父据源码与最终typed Ok(None)修订leader早拒绝合同；初版typed测试缺mcpServers导致错误来源混淆，最终补齐必需字段，不再把此前green当meta拒绝证据。真实有效ingress输入也补齐mcpServers并新增typedparse成功control，避免仅检查一个本该下游拒绝的raw包。实际边界和命令见[验证记录](verification-leader-ingress.md)。
+
+未发现阻塞本增量的其它问题。此审查范围不包括真实GatewayAcpInvoker输出、resident/cold SDK注册、继承client及Windows/外部部署；这些是下一增量和最终change里程碑，未降低为static验证。

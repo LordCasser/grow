@@ -677,3 +677,138 @@ MCP 工具查找失败 SHALL 明确指出当前会话未注册该工具；仅在
 #### Scenario: MCP name cannot be resolved
 - **WHEN** use_tool 的 MCP qualified name 不在当前 dispatch registry
 - **THEN** 错误说明本会话注册缺失并引导刷新 search_tool；不重放其他工具或绕过资格。
+
+### Requirement: Empty plugin snapshots revoke prior Hook contributions
+
+Adopting a session plugin snapshot SHALL replace that snapshot's complete Hook contribution, including when the new registry is None or has no active plugins. Previously registered `plugin/` handlers SHALL no longer execute after their contribution disappears. Other configuration, file and Agent Hook sources SHALL remain intact. The existing Hook generation and listing SHALL reflect the adopted snapshot, while MCP and skill adoption retain their existing ownership and refresh rules.
+
+#### Scenario: Last plugin disappears
+
+- **WHEN** a session has an executable plugin Hook and adopts an empty None plugin snapshot
+- **THEN** the plugin list and Hook list no longer expose that contribution, the next matching event does not execute its handler, and non-plugin handlers still execute.
+
+#### Scenario: Plugins remain but none are active
+
+- **WHEN** a session adopts Some registry with no active plugins
+- **THEN** prior plugin handlers are removed with the same effect as None and no unrelated Hook contribution is removed.
+
+#### Scenario: Empty snapshot without a Hook registry
+
+- **WHEN** no Hook registry exists and the adopted plugin snapshot has no Hook specifications
+- **THEN** adoption does not discover unrelated Hook sources or create an unnecessary registry, and existing MCP/skills adoption still proceeds.
+
+### Requirement: SDK MCP duplicate declarations fail before session effects
+
+A recognized client SDK MCP declaration array SHALL be rejected when its successfully parsed entries repeat the canonical MCP server name, rather than silently retaining the first entry. New/load ingress SHALL return invalid parameters before session creation, storage preparation or retirement/replacement of an existing session. Valid declarations, absent metadata and established handling of malformed individual entries SHALL retain their current behavior. Cross-source precedence SHALL remain unchanged, and this requirement SHALL NOT add SDK declarations to an update endpoint that does not currently support them.
+
+#### Scenario: New session repeats an SDK name
+
+- **WHEN** session/new supplies two parsed grow/mcp/servers entries with the same name and different serverId values
+- **THEN** the whole declaration array is rejected with a duplicate-name validation error before publishing or preparing a session.
+
+#### Scenario: Load repeats a name while a session is resident
+
+- **WHEN** session/load supplies repeated SDK names for an existing resident session
+- **THEN** the request fails before lifecycle effects, and the existing handle, catalog and command stream remain unchanged.
+
+#### Scenario: Valid SDK registration remains accepted
+
+- **WHEN** SDK metadata is absent or contains distinct valid names together with entries handled by the established malformed-entry policy
+- **THEN** parsing preserves the existing valid registration set without changing precedence or reverse routing.
+
+### Requirement: MCP cancellation dispatch has a bounded Grow owner
+
+Grow's best-effort notification task for a dropped or timed-out MCP tool request SHALL wait at most three seconds for notification queueing and send confirmation. That separate dispatch budget SHALL NOT extend the original tool-call deadline. The task SHALL target only the originating service and request identity, send no duplicate retries, and distinguish unconfirmed or failed delivery from confirmed notification send. Stopping the Grow wait SHALL NOT claim that SDK transport work was withdrawn or remote side effects were reversed.
+
+#### Scenario: Peer stops reading cancellation
+
+- **WHEN** a tool request ends and its cancellation notification cannot complete because the transport is blocked
+- **THEN** the original call retains its deadline and the Grow dispatch task ends its own wait within three seconds, reporting unconfirmed delivery.
+
+#### Scenario: Service replacement after request admission
+
+- **WHEN** a request's client has been replaced before its old call is dropped
+- **THEN** cancellation uses the old service and exact old request id without sending that id to the replacement.
+
+#### Scenario: Completed request or duplicate cancellation
+
+- **WHEN** a request completes normally or an abandoned request has already caused its one cancellation attempt
+- **THEN** normal completion sends no cancellation and the abandoned request does not retry its notification.
+
+### Requirement: MCP calls revalidate the originating client after preparation
+
+A session-bound MCP tool invocation SHALL revalidate its captured originating client and current tool eligibility after asynchronous initialization or reconnect preparation and before dispatching `tools/call`. A removed, replaced or disabled client/tool SHALL fail without dispatching to that client or a same-name replacement. An inherited client SHALL additionally satisfy the existing live upstream client binding and tool ceiling. The invocation SHALL retain its admitted deadline and SHALL NOT gain replay or transport-reset authority from this rejection.
+
+#### Scenario: Eligibility changes during model initialization
+
+- **WHEN** an admitted model tool waits for initialization and the session removes or replaces the server or disables its tool before preparation completes
+- **THEN** releasing preparation causes an explicit pre-dispatch failure and both the originating and replacement services observe zero tool calls from that invocation.
+
+#### Scenario: A direct call waits through configuration change
+
+- **WHEN** a direct session MCP invocation captures a client and its initialization completes after removal, replacement or disablement
+- **THEN** it revalidates through the same current session state and fails without sending to either client or silently choosing a new endpoint.
+
+#### Scenario: An upstream revocation precedes child dispatch
+
+- **WHEN** a child still holds an inherited client while an ancestor has revoked its tool or replaced the authorized binding during preparation
+- **THEN** the pending invocation fails even if the child map has not reconciled, and no tool call is dispatched to the retired or replacement service.
+
+#### Scenario: The captured client remains eligible
+
+- **WHEN** preparation completes and the captured client, tool and applicable inherited ceiling remain current
+- **THEN** the invocation sends exactly once to that client within the original admitted deadline; unrelated catalog changes do not extend that deadline or cause replay.
+
+#### Scenario: Revocation follows an already dispatched request
+
+- **WHEN** the request was already dispatched before a later revocation or uncertain transport failure
+- **THEN** the existing originating-peer cancellation and uncertain-outcome semantics remain authoritative, without claiming rollback or automatically sending the operation again.
+
+### Requirement: SDK MCP reverse requests retain their registration connection
+
+An SDK MCP registration SHALL bind its reverse invoker to the registering session and connection. Leader ingress SHALL derive the connection identity from its actual accepted connection and overwrite any caller-supplied routing identity on session creation or load. Reverse SDK requests SHALL carry the bound session and, in leader mode, that connection target. The existing target route SHALL take precedence over the current session driver, and an unavailable registration owner SHALL NOT cause fallback to a driver, a same-serverId registration or the last active client. Standalone single-connection ACP SHALL continue using its own gateway.
+
+#### Scenario: Another connection is the session driver
+
+- **WHEN** connection A owns an SDK registration while connection B is the session's driver
+- **THEN** SDK initialize, list and tool calls continue to target A while ordinary driver-owned reverse requests retain their existing routing to B.
+
+#### Scenario: Another connection loads a resident session
+
+- **WHEN** connection B loads a still-resident session whose SDK tools were registered by A
+- **THEN** the existing SDK registration and invoker remain bound to A, and the load retains the existing join and driver policies.
+
+#### Scenario: Two registrations use the same server identifier
+
+- **WHEN** A and B each register an SDK server using the same serverId in their own sessions
+- **THEN** each reverse exchange targets the connection bound to that registration without using serverId to select a connection.
+
+#### Scenario: Registration owner disconnects
+
+- **WHEN** A disconnects while B remains the session driver and an SDK request is made through A's still-bound registration
+- **THEN** B receives no SDK request and the exchange fails under the existing gateway or timeout semantics without silently rebinding the registration.
+
+#### Scenario: A caller supplies a different connection identity
+
+- **WHEN** a new/load request supplies a forged routing owner or leaves optional metadata absent or null
+- **THEN** the leader forwards valid requests with its actual accepted connection identity.
+
+#### Scenario: Session metadata cannot carry an injected owner
+
+- **WHEN** a new/load request supplies non-null metadata that is not an object
+- **THEN** the leader rejects the request with invalid params to the originating connection before changing session routing or pending-load state, does not forward it to the agent, and does not normalize it into a successful ownerless request.
+
+#### Scenario: Cold load creates a new registration
+
+- **WHEN** a session is cold loaded on a new connection with fresh SDK declarations
+- **THEN** its newly created invoker binds the current registering connection and does not restore a prior process's ClientId.
+
+#### Scenario: A child inherits an already connected SDK client
+
+- **WHEN** the existing delegated MCP ceiling permits a child to inherit a connected SDK client
+- **THEN** that shared client retains the original registration invoker and owner without widening delegation or using the child's current driver as the SDK owner.
+
+#### Scenario: Direct ACP has one connection
+
+- **WHEN** SDK registration is created through standalone ACP without a leader target identity
+- **THEN** reverse requests use that connection's own gateway and retain the existing bounded response behavior.

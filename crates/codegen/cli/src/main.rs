@@ -277,12 +277,13 @@ struct StdioReplayState {
     /// Sessions to restore on reconnect, keyed by session id, in first-seen
     /// order (Vec keeps replay order deterministic).
     sessions: Vec<(String, CachedSession)>,
-    /// cwd/mcp from the most recent `session/new` REQUEST whose response has
-    /// not been observed yet. Folded into `sessions` when the response
-    /// carrying the assigned session id arrives. Never replayed while
-    /// unconfirmed (the id is unknown; the client's own request died with the
-    /// old leader and is its to retry).
-    pending_new: Option<CachedSession>,
+    /// cwd/mcp from `session/new` REQUESTs whose responses have not been
+    /// observed yet, keyed by the request's exact JSON-RPC id (numeric 1 and
+    /// string "1" are distinct ids). Each entry is folded into `sessions`
+    /// when the response carrying that id confirms an assigned session id.
+    /// Never replayed while unconfirmed (the id is unknown; the client's own
+    /// request died with the old leader and is its to retry).
+    pending_new: Vec<(serde_json::Value, CachedSession)>,
     /// Most recently created/loaded session id — reported in
     /// `grow/leader_reconnected` as the primary restored session.
     last_session_id: Option<String>,
@@ -336,18 +337,26 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
             }
         }
         "session/new" => {
+            // Only an ordinary request id can be correlated with its
+            // response; an id-less notification is not a creation.
+            let Some(id) = json.get("id").cloned() else {
+                return;
+            };
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             let params = json.get("params");
-            s.pending_new = Some(CachedSession {
-                load_request_json: None,
-                cwd: params
-                    .and_then(|p| p.get("cwd"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                mcp_servers_json: params
-                    .and_then(|p| p.get("mcpServers"))
-                    .and_then(|m| serde_json::to_string(m).ok()),
-            });
+            s.pending_new.push((
+                id,
+                CachedSession {
+                    load_request_json: None,
+                    cwd: params
+                        .and_then(|p| p.get("cwd"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    mcp_servers_json: params
+                        .and_then(|p| p.get("mcpServers"))
+                        .and_then(|m| serde_json::to_string(m).ok()),
+                },
+            ));
         }
         "grow/session/close" | "_grow/session/close" => {
             if let Some(sid) = json
@@ -362,19 +371,41 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
         _ => {}
     }
 }
+/// Settle one pending `session/new` against an incoming JSON-RPC *response*.
+///
+/// A response (no `method`) settles only the pending entry whose recorded
+/// request id it exactly matches (numeric `1` ≠ string `"1"`). An error
+/// response, or a success without a usable `sessionId`, removes that entry
+/// without confirming a session. Any unmatched response — including a
+/// `session/load` response, whose replay cache entry is owned by the
+/// outgoing load path — is a no-op. A settled entry cannot be recreated by a
+/// duplicate response.
 fn cache_incoming_session_id(msg: &str, state: &std::sync::Mutex<StdioReplayState>) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(msg) else {
         return;
     };
-    if let Some(sid) = json
-        .get("result")
-        .and_then(|r| r.get("sessionId"))
-        .and_then(|v| v.as_str())
+    if json.get("method").is_some() {
+        return;
+    }
+    let Some(id) = json.get("id") else {
+        return;
+    };
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(index) = s
+        .pending_new
+        .iter()
+        .position(|(pending_id, _)| pending_id == id)
+    else {
+        return;
+    };
+    let (_, pending) = s.pending_new.remove(index);
+    if json.get("error").is_none()
+        && let Some(sid) = json
+            .get("result")
+            .and_then(|r| r.get("sessionId"))
+            .and_then(|v| v.as_str())
     {
-        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pending) = s.pending_new.take() {
-            s.upsert_session(sid, pending);
-        }
+        s.upsert_session(sid, pending);
         s.last_session_id = Some(sid.to_string());
     }
 }
@@ -597,12 +628,10 @@ async fn forward_stdio_line_to_leader(
     if trimmed.is_empty() {
         return;
     }
-    if trimmed.contains("\"initialize\"")
-        || trimmed.contains("\"session/load\"")
-        || trimmed.contains("\"session/new\"")
-    {
-        cache_outgoing_acp_state(&trimmed, replay_state);
-    }
+    // Method identity (including close spellings) is owned by the cache
+    // parser; every nonempty line goes through it so unrelated methods are
+    // no-ops and lifecycle mutations apply to the same replay owner.
+    cache_outgoing_acp_state(&trimmed, replay_state);
     let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
         {
@@ -839,7 +868,10 @@ async fn run_agent_command(
                     loop {
                         match rx.recv().await {
                             Some(ref msg) => {
-                                if msg.contains("\"sessionId\"") {
+                                // Every response (cheap substring gate; a
+                                // response always carries an "id") gets a
+                                // chance to settle a pending session/new.
+                                if msg.contains("\"id\"") {
                                     cache_incoming_session_id(msg, &replay_state);
                                 }
                                 if stdout.write_all(msg.as_bytes()).await.is_err()
@@ -1295,6 +1327,69 @@ fn dispatch_du_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+fn recover_previous_crashes(crash_dir: &std::path::Path) -> std::io::Result<()> {
+    while let Some(report) = crash_handler::check_previous_crash(crash_dir)? {
+        eprintln!("Grow previously crashed.");
+        eprintln!("  Signal:  {}", report.signal_name);
+        eprintln!("  Version: {}", report.app_version);
+        eprintln!("  Report:  {}", report.report_path.display());
+        eprintln!();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pb05_tests {
+    use super::recover_previous_crashes;
+
+    fn crash_bytes(version: &str) -> Vec<u8> {
+        use crash_handler::format::{self, writer};
+        let mut bytes = vec![0; format::MAX_FILE_SIZE];
+        let mut field = [0; format::VERSION_STRING_LEN];
+        field[..version.len()].copy_from_slice(version.as_bytes());
+        // SAFETY: the buffer covers the complete fixed-size header.
+        let len =
+            unsafe { writer::write_header(&mut bytes, 6, 1, 0, 4242, 1_700_000_000, 0, &field) };
+        bytes.truncate(len);
+        bytes
+    }
+
+    #[test]
+    fn startup_crash_recovery_drains_multiple_captures() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, version) in [
+            ("capture-AAAAAAAAAAAAAAAA.bin", "startup-A"),
+            ("capture-BBBBBBBBBBBBBBBB.bin", "startup-B"),
+        ] {
+            std::fs::write(dir.path().join(name), crash_bytes(version)).unwrap();
+        }
+        recover_previous_crashes(dir.path()).unwrap();
+        assert!(!dir.path().join("capture-AAAAAAAAAAAAAAAA.bin").exists());
+        assert!(!dir.path().join("capture-BBBBBBBBBBBBBBBB.bin").exists());
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("history"))
+                .unwrap()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn startup_crash_recovery_stops_on_error_and_preserves_pending_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("capture-AAAAAAAAAAAAAAAA.bin");
+        let second = dir.path().join("capture-BBBBBBBBBBBBBBBB.bin");
+        let raw = crash_bytes("pending-B");
+        std::fs::write(&first, b"malformed evidence").unwrap();
+        std::fs::write(&second, &raw).unwrap();
+        let error = recover_previous_crashes(dir.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&first).unwrap(), b"malformed evidence");
+        assert_eq!(std::fs::read(&second).unwrap(), raw);
+        assert!(!dir.path().join("last-crash-report.txt").exists());
+    }
+}
+
 fn main() {
     if let Some(code) = pager::app::agent_view::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
@@ -1322,17 +1417,27 @@ fn main() {
     crash_handler::install_terminal_restore_only();
     if shell::util::config::load_crash_handler_enabled_sync() {
         let crash_dir = shell::util::grow_home::grow_home().join("crash");
-        if let Some(report) = crash_handler::check_previous_crash(&crash_dir) {
-            eprintln!("Grow crashed during your last session.");
-            eprintln!("  Signal:  {}", report.signal_name);
-            eprintln!("  Version: {}", report.app_version);
-            eprintln!("  Report:  {}", report.report_path.display());
-            eprintln!();
-        }
-        if !crash_handler::install(crash_handler::CrashHandlerConfig {
-            app_version: env!("VERSION_WITH_COMMIT").to_string(),
-            crash_dir: crash_dir.clone(),
-        }) {
+        // Keep the existing recovery-error policy: preserve evidence and leave
+        // terminal restoration installed without starting this session's capture.
+        let recovery_blocked = match recover_previous_crashes(&crash_dir) {
+            Ok(()) => false,
+            Err(err) => {
+                eprintln!(
+                    "warning: previous crash evidence was preserved in {} but could not be recovered into a report: {err}",
+                    crash_dir.display()
+                );
+                eprintln!(
+                    "warning: crash capture is disabled for this session while recovery is blocked"
+                );
+                true
+            }
+        };
+        if !recovery_blocked
+            && !crash_handler::install(crash_handler::CrashHandlerConfig {
+                app_version: env!("VERSION_WITH_COMMIT").to_string(),
+                crash_dir: crash_dir.clone(),
+            })
+        {
             eprintln!(
                 "warning: crash handler enabled but failed to install (check permissions on {})",
                 crash_dir.display()
@@ -2348,10 +2453,11 @@ mod tests {
             let s = state.lock().unwrap();
             assert_eq!(s.sessions.len(), 1);
             assert_eq!(s.sessions[0].0, "s1");
-            assert!(s.pending_new.is_some());
+            assert_eq!(s.pending_new.len(), 1);
             assert_eq!(
-                s.pending_new.as_ref().unwrap().cwd.as_deref(),
-                Some("/home")
+                s.pending_new[0].1.cwd.as_deref(),
+                Some("/home"),
+                "pending creation must carry its own snapshot"
             );
         }
         cache_incoming_session_id(
@@ -2359,7 +2465,7 @@ mod tests {
             &state,
         );
         let s = state.lock().unwrap();
-        assert!(s.pending_new.is_none());
+        assert!(s.pending_new.is_empty());
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.sessions[1].0, "s2");
         assert_eq!(s.sessions[1].1.cwd.as_deref(), Some("/home"));
@@ -2605,6 +2711,112 @@ mod tests {
         );
         responder.await.unwrap();
     }
+    /// Tier-3 regression for PB-01: the REAL forwarding path
+    /// (`forward_stdio_line_to_leader`) must observe session close so a later
+    /// reconnect never reloads a closed session. Runs both supported close
+    /// spellings through the same fixture in a compact loop.
+    #[tokio::test]
+    async fn forwarding_observes_close_so_replay_skips_closed_session() {
+        for close_method in ["grow/session/close", "_grow/session/close"] {
+            let state = make_state();
+            let (leader_tx, mut leader_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let leader_tx = tokio::sync::Mutex::new(leader_tx);
+            let cancel = CancellationToken::new();
+            async fn fwd(
+                line: &str,
+                tx: &tokio::sync::Mutex<tokio::sync::mpsc::UnboundedSender<String>>,
+                st: &std::sync::Mutex<StdioReplayState>,
+                cancel: &CancellationToken,
+            ) {
+                forward_stdio_line_to_leader(line.as_bytes().to_vec(), tx, st, cancel).await;
+            }
+            fwd(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                &leader_tx,
+                &state,
+                &cancel,
+            )
+            .await;
+            fwd(
+                r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"sess-A","cwd":"/a"}}"#,
+                &leader_tx,
+                &state,
+                &cancel,
+            )
+            .await;
+            fwd(
+                r#"{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"sess-B","cwd":"/b"}}"#,
+                &leader_tx,
+                &state,
+                &cancel,
+            )
+            .await;
+            fwd(
+                &format!(r#"{{"jsonrpc":"2.0","id":4,"method":"{close_method}","params":{{"sessionId":"sess-A"}}}}"#),
+                &leader_tx,
+                &state,
+                &cancel,
+            )
+            .await;
+            // First leader saw every forwarded message verbatim.
+            let mut forwarded = Vec::new();
+            while let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), leader_rx.recv()).await
+            {
+                forwarded.push(msg);
+            }
+            assert_eq!(forwarded.len(), 4, "all four messages must be forwarded");
+            assert!(forwarded[3].contains(close_method));
+            // Replacement leader: reconnect replay after leader loss.
+            let s = state.lock().unwrap().clone();
+            let (replay_tx, mut replay_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let responder = tokio::spawn(async move {
+                let _init = replay_rx.recv().await.unwrap();
+                response_tx
+                    .send(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_string())
+                    .unwrap();
+                let load = replay_rx.recv().await.unwrap();
+                let load_json: serde_json::Value = serde_json::from_str(&load).unwrap();
+                assert_eq!(
+                    load_json["params"]["sessionId"].as_str(),
+                    Some("sess-B"),
+                    "only the open session may be loaded: {load}"
+                );
+                response_tx
+                    .send(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#.to_string())
+                    .unwrap();
+                assert!(
+                    replay_rx.is_empty(),
+                    "the closed session must not be loaded"
+                );
+            });
+            let mut sink = Vec::new();
+            let primary =
+                replay_acp_state_after_reconnect(&replay_tx, &mut response_rx, &mut sink, &s).await;
+            assert_eq!(primary.as_deref(), Some("sess-B"));
+            responder.await.unwrap();
+        }
+    }
+    /// Method identity is owned by the cache parser: lifecycle text inside an
+    /// unrelated method's payload must not trigger cache mutations (and the
+    /// message still forwards).
+    #[tokio::test]
+    async fn forwarding_payload_text_does_not_trigger_cache_mutation() {
+        let state = make_state();
+        let (leader_tx, mut leader_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let leader_tx = tokio::sync::Mutex::new(leader_tx);
+        let cancel = CancellationToken::new();
+        let msg = r#"{"jsonrpc":"2.0","id":9,"method":"session/prompt","params":{"prompt":"please run session/load for me"}}"#;
+        forward_stdio_line_to_leader(msg.as_bytes().to_vec(), &leader_tx, &state, &cancel).await;
+        assert_eq!(leader_rx.recv().await.as_deref(), Some(msg));
+        let s = state.lock().unwrap();
+        assert!(
+            s.sessions.is_empty(),
+            "payload text must not cache a session"
+        );
+        assert!(s.last_session_id.is_none());
+    }
     /// Regression test for the post-leader-crash "unknown session id" bug.
     ///
     /// `session/load` streams replay notifications BEFORE its response. The
@@ -2762,6 +2974,200 @@ mod tests {
             replay_acp_state_after_reconnect(&leader_tx, &mut response_rx, &mut sink, &state).await;
         assert_eq!(result.as_deref(), Some("s-new"));
         responder.await.unwrap();
+    }
+    /// Drives the REAL client→bridge boundary: outgoing lines through
+    /// `forward_stdio_line_to_leader`, incoming responses through
+    /// `cache_incoming_session_id`, then a reconnect replay.
+    async fn drive_stdio_bridge(
+        lines: &[&str],
+    ) -> std::sync::Arc<std::sync::Mutex<StdioReplayState>> {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(StdioReplayState::default()));
+        let cancel = CancellationToken::new();
+        for line in lines {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let tx = tokio::sync::Mutex::new(tx);
+            forward_stdio_line_to_leader(line.as_bytes().to_vec(), &tx, &state, &cancel).await;
+            assert_eq!(
+                rx.recv().await.as_deref(),
+                Some(*line),
+                "must forward verbatim"
+            );
+        }
+        state
+    }
+    /// Two concurrent `session/new` confirmed in REVERSE response order: each
+    /// settled id keeps its OWN cwd/mcp snapshot, and replay follows
+    /// first-CONFIRMED order.
+    #[tokio::test]
+    async fn concurrent_creations_settle_by_id_in_confirmation_order() {
+        let state = drive_stdio_bridge(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":10,"method":"session/new","params":{"cwd":"/first","mcpServers":[{"type":"http","name":"a","url":"http://127.0.0.1:1/a","headers":[]}]}}"#,
+            r#"{"jsonrpc":"2.0","id":11,"method":"session/new","params":{"cwd":"/second","mcpServers":[{"type":"http","name":"b","url":"http://127.0.0.1:1/b","headers":[]}]}}"#,
+        ])
+        .await;
+        // Responses arrive in reverse order.
+        cache_incoming_session_id(
+            r#"{"jsonrpc":"2.0","id":11,"result":{"sessionId":"sess-11"}}"#,
+            &state,
+        );
+        cache_incoming_session_id(
+            r#"{"jsonrpc":"2.0","id":10,"result":{"sessionId":"sess-10"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.pending_new.is_empty(), "both creations settled");
+            assert_eq!(
+                s.sessions[0].0, "sess-11",
+                "replay order follows confirmation, not request order"
+            );
+            assert_eq!(s.sessions[0].1.cwd.as_deref(), Some("/second"));
+            assert_eq!(s.sessions[1].0, "sess-10");
+            assert_eq!(s.sessions[1].1.cwd.as_deref(), Some("/first"));
+            assert_eq!(s.last_session_id.as_deref(), Some("sess-10"));
+        }
+        let s = state.lock().unwrap().clone();
+        let (replay_tx, mut replay_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let responder = tokio::spawn(async move {
+            let _init = replay_rx.recv().await.unwrap();
+            response_tx
+                .send(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_string())
+                .unwrap();
+            let first = replay_rx.recv().await.unwrap();
+            assert!(first.contains("sess-11"), "confirmed order: {first}");
+            assert!(first.contains("/second"), "own cwd: {first}");
+            assert!(first.contains("\"b\""), "own mcp: {first}");
+            response_tx
+                .send(
+                    serde_json::json!({"jsonrpc":"2.0","id":"grow/leader-replay/session-load","result":{}}).to_string(),
+                )
+                .unwrap();
+            let second = replay_rx.recv().await.unwrap();
+            assert!(second.contains("sess-10"), "confirmed order: {second}");
+            assert!(second.contains("/first"), "own cwd: {second}");
+            response_tx
+                .send(
+                    serde_json::json!({"jsonrpc":"2.0","id":"grow/leader-replay/session-load","result":{}}).to_string(),
+                )
+                .unwrap();
+        });
+        let mut sink = Vec::new();
+        let result =
+            replay_acp_state_after_reconnect(&replay_tx, &mut response_rx, &mut sink, &s).await;
+        assert_eq!(result.as_deref(), Some("sess-10"));
+        responder.await.unwrap();
+    }
+    /// Numeric id `1` and string id `"1"` are DIFFERENT requests: a response
+    /// for one must never settle the other.
+    #[tokio::test]
+    async fn numeric_and_string_request_ids_never_cross() {
+        let state = drive_stdio_bridge(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/numeric"}}"#,
+            r#"{"jsonrpc":"2.0","id":"1","method":"session/new","params":{"cwd":"/string"}}"#,
+        ])
+        .await;
+        cache_incoming_session_id(
+            r#"{"jsonrpc":"2.0","id":"1","result":{"sessionId":"sess-str"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(s.sessions.len(), 1, "only the string-id creation settled");
+            assert_eq!(s.sessions[0].0, "sess-str");
+            assert_eq!(s.sessions[0].1.cwd.as_deref(), Some("/string"));
+            assert_eq!(s.pending_new.len(), 1, "numeric creation still pending");
+        }
+        cache_incoming_session_id(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-num"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 2);
+        assert_eq!(s.sessions[1].0, "sess-num");
+        assert_eq!(s.sessions[1].1.cwd.as_deref(), Some("/numeric"));
+        assert!(s.pending_new.is_empty());
+    }
+    /// A failed creation settles (and is dropped) by its own id; an unrelated
+    /// `session/load` response must neither steal the pending creation nor
+    /// move last_session_id.
+    #[tokio::test]
+    async fn failed_creation_and_unmatched_load_response_do_not_cross() {
+        let state = drive_stdio_bridge(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"session/new","params":{"cwd":"/will-fail"}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"session/load","params":{"sessionId":"sess-X","cwd":"/x"}}"#,
+        ])
+        .await;
+        // Unrelated load response (its own id, carries a sessionId) first.
+        cache_incoming_session_id(
+            r#"{"jsonrpc":"2.0","id":6,"result":{"sessionId":"sess-X"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(
+                s.pending_new.len(),
+                1,
+                "load response must not take pending"
+            );
+            assert_eq!(
+                s.last_session_id.as_deref(),
+                Some("sess-X"),
+                "last id stays with the outgoing load"
+            );
+        }
+        // Error response settles the creation without confirming a session.
+        cache_incoming_session_id(
+            r#"{"jsonrpc":"2.0","id":5,"error":{"code":-32000,"message":"boom"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.pending_new.is_empty(), "failed creation is settled");
+            assert_eq!(s.sessions.len(), 1, "only the loaded session remains");
+            assert_eq!(s.sessions[0].0, "sess-X");
+        }
+        // Replay restores the loaded session; the failed creation never appears.
+        let s = state.lock().unwrap().clone();
+        let (replay_tx, mut replay_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let responder = tokio::spawn(async move {
+            let _init = replay_rx.recv().await.unwrap();
+            response_tx
+                .send(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_string())
+                .unwrap();
+            let load = replay_rx.recv().await.unwrap();
+            assert!(load.contains("sess-X"), "only sess-X may replay: {load}");
+            response_tx
+                .send(r#"{"jsonrpc":"2.0","id":6,"result":{}}"#.to_string())
+                .unwrap();
+            assert!(replay_rx.is_empty(), "no second load may be sent");
+        });
+        let mut sink = Vec::new();
+        let result =
+            replay_acp_state_after_reconnect(&replay_tx, &mut response_rx, &mut sink, &s).await;
+        assert_eq!(result.as_deref(), Some("sess-X"));
+        responder.await.unwrap();
+    }
+    /// A duplicate response for an already-settled creation is a no-op: it
+    /// cannot recreate or overwrite the confirmed entry.
+    #[tokio::test]
+    async fn duplicate_creation_response_is_noop() {
+        let state = drive_stdio_bridge(&[
+            r#"{"jsonrpc":"2.0","id":7,"method":"session/new","params":{"cwd":"/dup"}}"#,
+        ])
+        .await;
+        let response = r#"{"jsonrpc":"2.0","id":7,"result":{"sessionId":"sess-dup"}}"#;
+        cache_incoming_session_id(response, &state);
+        cache_incoming_session_id(response, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 1);
+        assert_eq!(s.sessions[0].0, "sess-dup");
+        assert_eq!(s.sessions[0].1.cwd.as_deref(), Some("/dup"));
+        assert_eq!(s.last_session_id.as_deref(), Some("sess-dup"));
+        assert!(s.pending_new.is_empty());
     }
     fn multi_thread_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()

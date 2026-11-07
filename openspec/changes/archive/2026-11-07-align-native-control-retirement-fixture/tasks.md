@@ -1,0 +1,4 @@
+- [x] 核对三个失败的共同前提与已归档child终态/usage顺序，限定纯测试维护。
+- [x] 修正自然收尾三场景的阶段安排/退役证据读取，补足原actor准入拒绝覆盖。
+- [x] 运行完整native21case、owner10case及必要actor控制，父核触发、唯一终态和拒绝不重跑证据。
+- [x] 记录已执行/限制，严格校验并归档pure-maintenance change（父验收与归档前strict 22/0；归档及归档后结果见verification.md）。

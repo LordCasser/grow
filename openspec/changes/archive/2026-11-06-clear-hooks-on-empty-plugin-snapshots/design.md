@@ -1,0 +1,9 @@
+# Design
+
+`SessionActor::apply_plugin_registry_snapshot` owns adoption of one session's plugin snapshot and all runtime contributions. The stored plugin Arc does not invalidate already parsed HookSpecs. Existing MCP merging and skills refresh already run for None; Hook replacement must follow the same snapshot semantics.
+
+Collect the new plugin HookSpecs from Some when present, then unconditionally remove old `plugin/` specs and append the collected set in the existing registry. If no registry exists and new specs are nonempty, preserve the current bootstrap of config/file hooks before appending plugin specs. For None with no registry, do not synthesize an empty registry or discover unrelated sources. Mark the existing Hook registry generation through its current owner, even when the last plugin contribution is removed. No helper/public abstraction is required for this local ownership correction.
+
+Preserve source-prefixed removal, config/file/inline Agent hooks, per-session registry selection, Hook parsing/trust behavior, MCP order-insensitive diff, SkillManager baseline refresh, and serialized command-loop adoption. Do not change Add/Update/Install/Uninstall configuration persistence, LSP scope or skills API scope in this fix.
+
+Tier 3 acceptance uses the real actor adoption entry: install an observable plugin Hook, execute its event once as a positive control, adopt None and prove the Hook no longer executes, while a non-plugin Hook still does. Some with no active plugins is the paired existing path. Verify registry generation/listing and plugin list agree, plus no stale MCP/skill contribution where existing fixtures can observe those owners. Parent reviews actual diff and evidence; Cargo is serialized with other repairs and the coder must wait for a granted slot. All fixtures use temp roots and mock/gateway handlers, never user config or real plugin installation.

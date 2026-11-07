@@ -1,0 +1,3 @@
+- [x] 1. 追踪child Turn返回、execution_returned、输出artifact、child Result、父级结算/Ended、planning和receipt；核现有契约及trace命令。
+- [x] 2. 按纯代码范围核冻结用量、文件快照/刷盘、有限恢复与SessionEnd顺序，独立复核Windows结果文件路径，区分确定行为、缺陷与触发假设。
+- [x] 3. 父验收证据，记录分owner的后续处理与验证标准，完成严格文档及归档校验；不声称Windows现场根因或实施完成。

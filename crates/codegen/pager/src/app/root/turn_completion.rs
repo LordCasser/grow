@@ -71,6 +71,32 @@ impl AppView {
 
 /// Map durable terminal finalization to redraw and notification effects.
 impl AppView {
+    /// Observe the exact advisory input settled by the winning terminal rail.
+    /// Capture before drain can replace `finalized_prompt` with another turn.
+    pub(in crate::app) fn completed_advisory_reply_observation(
+        &mut self,
+        agent_id: AgentId,
+    ) -> Option<crate::app::actions::Effect> {
+        let agent = self.agents.get(&agent_id)?;
+        let prompt_id = agent.session.finalized_prompt.clone()?;
+        let session_id = agent.session.session_id.clone()?;
+        let binding_epoch = agent.session_binding_epoch;
+        let (source, call) = self.advisory_reply_card_identity(agent_id, &prompt_id)?;
+        if !self.set_advisory_reply_status(
+            &source,
+            &call,
+            crate::scrollback::blocks::tool::AdvisoryReplyStatus::Unconfirmed,
+        ) {
+            return None;
+        }
+        Some(crate::app::actions::Effect::QueryInputAdmissionStatus {
+            agent_id,
+            session_id,
+            binding_epoch,
+            prompt_id,
+        })
+    }
+
     pub(in crate::app) fn apply_terminal_outcome(
         &mut self,
         outcome: TerminalOutcome,
@@ -84,6 +110,9 @@ impl AppView {
         match apply {
             TerminalApply::Ignored => false,
             TerminalApply::ViewerFinalized => {
+                if let Some(query) = self.completed_advisory_reply_observation(agent_id) {
+                    self.pending_effects.push(query);
+                }
                 let page_flip_entry;
                 let mut queue_empty = true;
                 if let Some(agent) = self.agents.get_mut(&agent_id) {

@@ -19,6 +19,10 @@ use crate::slash::command::DoctorRequest;
 use acp_transport::protocol as acp;
 use diagnostics::session_ctx::log_event;
 
+#[cfg(test)]
+#[path = "tests/advisory_reply_admission.rs"]
+mod advisory_reply_admission_tests;
+
 fn scrollback_has_recent_context_too_large(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {
@@ -139,7 +143,10 @@ pub(crate) fn dispatch_initial_prompt(app: &mut AppView, prompt: String) -> Vec<
     effects
 }
 
-fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
+// `pub(super)`: the advisory-reply admission tests exercise the doctor-fix
+// replacement path (mechanical visibility for the test surface; behavior
+// unchanged).
+pub(super) fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
     DoctorFixTarget {
         agent_id: agent.session.id,
         session_id: agent.session.session_id.clone(),
@@ -191,6 +198,15 @@ pub(super) fn open_doctor_fix_question(
     let Some(agent) = app.agents.get_mut(&target.agent_id) else {
         return;
     };
+    if agent
+        .question_view
+        .as_ref()
+        .is_some_and(|view| view.is_advisory_reply_edit())
+    {
+        if let Some(view) = agent.take_question_view() {
+            agent.prompt.restore(view.stashed_prompt);
+        }
+    }
     if agent.question_view.is_some() {
         agent.scrollback.push_block(RenderBlock::notice(
             "Close the current question before applying this fix.",
@@ -215,6 +231,7 @@ pub(super) fn open_doctor_fix_question(
             },
         ],
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let stashed = agent.prompt.stash();
@@ -522,6 +539,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let ask_user_question_allow_non_blocking_from_app = app.ask_user_question_allow_non_blocking;
     // Set when a plain prompt is queued while a turn is running (local path);
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
@@ -642,6 +660,8 @@ pub(super) fn dispatch_send_prompt_inner(
                     respect_manual_folds: respect_manual_folds_from_app,
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+                    ask_user_question_allow_non_blocking:
+                        ask_user_question_allow_non_blocking_from_app,
                 },
             };
 
@@ -1059,6 +1079,393 @@ pub(super) fn dispatch_send_prompt_inner(
     effects
 }
 
+/// Submit one immutable reply identity through the ordinary literal FIFO.
+/// F3 atomically admits a first input or observes/rejects an existing identity;
+/// a local first submission does not need proof of canonical absence.
+pub(super) fn dispatch_submit_advisory_reply(
+    app: &mut AppView,
+    source_session_id: String,
+    tool_call_id: String,
+    text: String,
+) -> Vec<Effect> {
+    use crate::scrollback::blocks::tool::AdvisoryReplyStatus;
+    let stable_id = format!("question-reply:{source_session_id}:{tool_call_id}");
+    let source = acp::SessionId::new(source_session_id.clone());
+    let Some(matched) = crate::app::acp_handler::find_session_match(app, &source) else {
+        return advisory_reply_delivery_failed(app, &text, "the owning session view is gone");
+    };
+    let owner_id = matched.agent_id();
+    if app.advisory_reply_card_identity(owner_id, &stable_id)
+        != Some((source_session_id.clone(), tool_call_id.clone()))
+    {
+        return advisory_reply_delivery_failed(
+            app,
+            &text,
+            "the original question card is unavailable or ambiguous",
+        );
+    }
+    if !app.set_advisory_reply_status(
+        &source_session_id,
+        &tool_call_id,
+        AdvisoryReplyStatus::Checking,
+    ) {
+        return vec![];
+    }
+    let Some(agent) = app.agents.get_mut(&owner_id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return advisory_reply_delivery_failed(
+            app,
+            &text,
+            "the owning primary has no active session",
+        );
+    };
+    let binding_epoch = agent.session_binding_epoch;
+    let inflight = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .filter(|p| p.prompt_id.as_deref() == Some(stable_id.as_str()));
+    let terminal = inflight.and_then(|p| p.admission_resolved);
+    if let Some(accepted) = terminal {
+        agent.show_toast(if accepted {
+            "This question was already answered."
+        } else {
+            "This reply was rejected. Copy it into a normal message for a new request."
+        });
+        app.set_advisory_reply_status(
+            &source_session_id,
+            &tool_call_id,
+            if accepted {
+                AdvisoryReplyStatus::Accepted
+            } else {
+                AdvisoryReplyStatus::Rejected
+            },
+        );
+        return vec![];
+    }
+    if inflight.is_none()
+        && !agent
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.prompt_id.as_deref() == Some(stable_id.as_str()))
+    {
+        let id = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::session::QueuedPrompt {
+                prompt_id: Some(stable_id),
+                ..crate::app::session::QueuedPrompt::plain(
+                    id,
+                    text,
+                    crate::app::session::QueueEntryKind::Prompt,
+                )
+            });
+        let effects = if app.reconnect_pending {
+            vec![]
+        } else {
+            maybe_drain_queue(agent).effects
+        };
+        app.set_advisory_reply_status(
+            &source_session_id,
+            &tool_call_id,
+            AdvisoryReplyStatus::Unconfirmed,
+        );
+        return effects;
+    }
+    let frozen = inflight.map(|p| p.text.clone()).unwrap_or(text);
+    // Only this explicit reply action releases an idle uncertain snapshot for
+    // retry. Automatic transport reconciliation must never resend by itself.
+    if agent.session.state.is_idle() && agent.session.current_prompt_id.is_none() {
+        if agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .is_some_and(|p| p.prompt_id.as_deref() == Some(stable_id.as_str()))
+        {
+            agent.session.in_flight_prompt = None;
+        }
+    }
+    if !agent
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.prompt_id.as_deref() == Some(stable_id.as_str()))
+    {
+        let id = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::session::QueuedPrompt {
+                prompt_id: Some(stable_id.clone()),
+                requires_review: true,
+                ..crate::app::session::QueuedPrompt::plain(
+                    id,
+                    frozen,
+                    crate::app::session::QueueEntryKind::Prompt,
+                )
+            });
+    }
+    agent.show_toast("Checking the original reply's admission; its content is fixed.");
+    app.set_advisory_reply_status(
+        &source_session_id,
+        &tool_call_id,
+        AdvisoryReplyStatus::Checking,
+    );
+    vec![Effect::QueryInputAdmissionStatus {
+        agent_id: owner_id,
+        session_id,
+        binding_epoch,
+        prompt_id: stable_id,
+    }]
+}
+
+/// Called only after the observer validates the owning primary and durable
+/// response identity. Card lookup compares complete ids, never parsed text.
+pub(super) fn reconcile_advisory_reply(
+    app: &mut AppView,
+    owner_id: AgentId,
+    prompt_id: &str,
+    source: &str,
+    call: &str,
+    status: &Result<crate::app::actions::InputAdmissionStatusWire, String>,
+) -> Vec<Effect> {
+    use crate::app::actions::InputAdmissionStatusWire as Wire;
+    use crate::scrollback::blocks::tool::AdvisoryReplyStatus as Projection;
+    let accepted = matches!(
+        status,
+        Ok(Wire::Allowed { .. } | Wire::Consumed { .. } | Wire::Handled)
+    );
+    let rejected = matches!(status, Ok(Wire::Blocked { .. } | Wire::Dismissed { .. }));
+    let absent = matches!(status, Ok(Wire::Absent));
+    let unknown = matches!(status, Ok(Wire::UnknownUnconfirmed));
+    let has_frozen_payload = app.agents.get(&owner_id).is_some_and(|agent| {
+        agent
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.prompt_id.as_deref() == Some(prompt_id))
+            || agent
+                .session
+                .in_flight_prompt
+                .as_ref()
+                .is_some_and(|p| p.prompt_id.as_deref() == Some(prompt_id))
+    });
+    let editable = absent || (unknown && !has_frozen_payload);
+    let undecided = !accepted && !rejected && !matches!(status, Ok(Wire::Submitted));
+    let confirmed = app
+        .agents
+        .get(&owner_id)
+        .and_then(|agent| agent.session.in_flight_prompt.as_ref())
+        .filter(|p| p.prompt_id.as_deref() == Some(prompt_id))
+        .and_then(|p| p.admission_resolved);
+    if let Some(was_accepted) = confirmed
+        && (was_accepted != accepted || (!accepted && !rejected))
+    {
+        app.set_advisory_reply_status(
+            source,
+            call,
+            if was_accepted {
+                Projection::Accepted
+            } else {
+                Projection::Rejected
+            },
+        );
+        return vec![];
+    }
+    let can_send = !app.reconnect_pending;
+    let projection = if accepted {
+        Projection::Accepted
+    } else if rejected {
+        Projection::Rejected
+    } else if editable {
+        Projection::Available
+    } else {
+        Projection::Unconfirmed
+    };
+    // The card setter refuses any transition away from a canonical terminal.
+    // This also rejects old Absent responses after the in-flight row is gone.
+    if !app.set_advisory_reply_status(source, call, projection) {
+        return vec![];
+    }
+    let open = app.take_advisory_reply_open_intent(source, call);
+    // Missing-record facts can offer a first editor only in response to an
+    // explicit open intent. An automatic completion observation stays unknown.
+    if unknown && !open {
+        app.set_advisory_reply_status(source, call, Projection::Unconfirmed);
+    }
+    let Some(agent) = app.agents.get_mut(&owner_id) else {
+        return vec![];
+    };
+    let has_inflight = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .is_some_and(|p| p.prompt_id.as_deref() == Some(prompt_id));
+    // A one-shot Check intent can retry the immutable snapshot while idle;
+    // an active foreground/RPC remains observation-only.
+    let retry = open
+        && (unknown || absent)
+        && agent.session.state.is_idle()
+        && agent.session.current_prompt_id.is_none()
+        && (has_inflight
+            || agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.prompt_id.as_deref() == Some(prompt_id) && p.requires_review));
+    let active_inflight = has_inflight && !retry;
+    // Unknown ACK recovery can leave only the in-flight snapshot. Retain its
+    // original literal text in the existing review queue before observing it.
+    if has_inflight
+        && !agent
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.prompt_id.as_deref() == Some(prompt_id))
+    {
+        let text = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .unwrap()
+            .text
+            .clone();
+        let id = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::session::QueuedPrompt {
+                prompt_id: Some(prompt_id.to_owned()),
+                requires_review: true,
+                ..crate::app::session::QueuedPrompt::plain(
+                    id,
+                    text,
+                    crate::app::session::QueueEntryKind::Prompt,
+                )
+            });
+    }
+    if retry && has_inflight {
+        agent.session.in_flight_prompt = None;
+    }
+    if let Some(inflight) = agent
+        .session
+        .in_flight_prompt
+        .as_mut()
+        .filter(|p| p.prompt_id.as_deref() == Some(prompt_id))
+    {
+        // Unknown observations cannot erase a previously confirmed terminal.
+        if accepted || rejected {
+            inflight.admission_resolved = Some(accepted);
+        }
+    }
+    let mut has_payload = false;
+    for queued in &mut agent.session.pending_prompts {
+        if queued.prompt_id.as_deref() == Some(prompt_id) {
+            has_payload = true;
+            // A late missing-record observation cannot revoke the user's
+            // unsent first FIFO intent. Failed/uncertain rows stay frozen.
+            if retry {
+                queued.requires_review = false;
+            } else if !undecided || active_inflight {
+                queued.requires_review = true;
+            }
+        }
+    }
+    if accepted || rejected {
+        if rejected {
+            let text = agent
+                .session
+                .pending_prompts
+                .iter()
+                .find(|p| p.prompt_id.as_deref() == Some(prompt_id))
+                .map(|p| p.text.as_str())
+                .or_else(|| {
+                    agent
+                        .session
+                        .in_flight_prompt
+                        .as_ref()
+                        .filter(|p| p.prompt_id.as_deref() == Some(prompt_id))
+                        .map(|p| p.text.as_str())
+                })
+                .unwrap_or("")
+                .to_owned();
+            agent.scrollback.push_block(RenderBlock::notice(format!(
+                "Reply rejected. For a new request, copy this into a normal message:\n{text}"
+            )));
+        }
+        // Accepted payload is Shell-owned; rejected text stays copyable in
+        // history, rather than leaving a terminal row blocking the FIFO.
+        agent
+            .session
+            .pending_prompts
+            .retain(|p| p.prompt_id.as_deref() != Some(prompt_id));
+        agent.show_toast(if accepted {
+            "This question was answered."
+        } else {
+            "This reply was rejected; send corrections as a normal message."
+        });
+    }
+    let ready_queued = agent
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.prompt_id.as_deref() == Some(prompt_id) && !p.requires_review);
+    let release_following = accepted || rejected;
+    let effects = if ((retry || (absent && ready_queued)) && !active_inflight || release_following)
+        && can_send
+    {
+        // Canonical settlement removes a local retry barrier. The normal
+        // drain still guards idle, foreground ownership and queue editing.
+        maybe_drain_queue(agent).effects
+    } else {
+        vec![]
+    };
+    if absent && has_payload {
+        app.set_advisory_reply_status(source, call, Projection::Unconfirmed);
+    }
+    if accepted {
+        if let Some(session_id) = app
+            .agents
+            .get(&owner_id)
+            .and_then(|a| a.session.session_id.clone())
+        {
+            app.local_drafts
+                .transfer_input_identity(owner_id, &session_id.0, prompt_id);
+        }
+    }
+    if editable && !has_payload && !has_inflight && open {
+        app.open_advisory_reply_editor(source, call);
+    }
+    effects
+}
+
+/// The owning primary cannot accept the reply (view gone or session closed):
+/// keep the reply text selectable in history and fail explicitly. A late
+/// reply never creates a new session and never lands on another tab.
+fn advisory_reply_delivery_failed(app: &mut AppView, text: &str, reason: &str) -> Vec<Effect> {
+    tracing::warn!(reason, "advisory reply could not be delivered");
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.scrollback.push_block(RenderBlock::typed_notice(
+            NoticeTone::Error,
+            NoticeCategory::Command,
+            format!(
+                "Advisory reply not sent: {reason}. Copy the reply below and send it as a normal message:\n{text}"
+            ),
+            Some("The owning session no longer accepts input here; later corrections go through a normal prompt.".into()),
+        ));
+    }
+    vec![]
+}
+
 /// Enqueue a bash command and try to drain immediately.
 ///
 /// Bash commands go through the same enqueue/drain pipeline as normal prompts,
@@ -1204,6 +1611,88 @@ pub(super) fn supersede_open_reload_window(
 
 // TaskResult handlers.
 
+/// AdmissionReplay observes an immutable input, not a newly completed turn.
+/// Consume only the exact local advisory submission placeholder. Even malformed
+/// replay metadata must never fall through to a fabricated business terminal.
+fn consume_advisory_admission_replay(
+    app: &mut AppView,
+    agent_id: AgentId,
+    response: &acp::PromptResponse,
+    request_prompt_id: Option<&'_ str>,
+) -> Option<Vec<Effect>> {
+    let meta = response.meta.as_ref()?;
+    let replay = meta.get("grow/inputAdmission")?;
+    let prompt_id = request_prompt_id?;
+    let (source, call) = app.advisory_reply_card_identity(agent_id, prompt_id)?;
+    let agent = app.agents.get_mut(&agent_id)?;
+    let matches_snapshot = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .is_some_and(|p| p.prompt_id.as_deref() == Some(prompt_id));
+    if !matches_snapshot {
+        return Some(vec![]);
+    }
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return Some(vec![]);
+    };
+    let valid_status = replay
+        .get("status")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<crate::app::actions::InputAdmissionStatusWire>(value).ok()
+        })
+        .is_some_and(|status| {
+            matches!(
+                status,
+                crate::app::actions::InputAdmissionStatusWire::Submitted
+                    | crate::app::actions::InputAdmissionStatusWire::Allowed { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::Consumed { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::Handled
+                    | crate::app::actions::InputAdmissionStatusWire::Blocked { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::Dismissed { .. }
+            )
+        });
+    let valid = meta.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.0.as_ref())
+        && meta.get("promptId").and_then(|v| v.as_str()) == Some(prompt_id)
+        && replay
+            .get("inputId")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !id.is_empty())
+        && valid_status;
+    if agent.session.current_prompt_id.as_deref() != Some(prompt_id)
+        || !agent.session.state.is_turn_submitting()
+    {
+        // A duplicate, or another real foreground, owns this slot. Neither
+        // the observer nor its echoed status may finish that foreground.
+        return Some(vec![]);
+    }
+    agent.session.state = AgentState::Idle;
+    agent.session.current_prompt_id = None;
+    agent.mark_turn_finished();
+    agent.show_toast(if valid {
+        "Checking the original reply's saved admission."
+    } else {
+        "Reply status metadata was invalid; the original answer remains frozen."
+    });
+    let binding_epoch = agent.session_binding_epoch;
+    app.set_advisory_reply_status(
+        &source,
+        &call,
+        crate::scrollback::blocks::tool::AdvisoryReplyStatus::Unconfirmed,
+    );
+    Some(if valid {
+        vec![Effect::QueryInputAdmissionStatus {
+            agent_id,
+            session_id,
+            binding_epoch,
+            prompt_id: prompt_id.to_owned(),
+        }]
+    } else {
+        vec![]
+    })
+}
+
 pub(super) fn handle_prompt_response(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1211,6 +1700,12 @@ pub(super) fn handle_prompt_response(
     _http_status: Option<u16>,
     prompt_id: Option<String>,
 ) -> Vec<Effect> {
+    if let Ok(response) = &result
+        && let Some(effects) =
+            consume_advisory_admission_replay(app, agent_id, response, prompt_id.as_deref())
+    {
+        return effects;
+    }
     if result.is_err()
         && let Some(prompt_id) = prompt_id.as_deref()
         && app.agents.get(&agent_id).is_some_and(|agent| {
@@ -1401,6 +1896,9 @@ pub(super) fn handle_prompt_response(
             .unwrap_or_default();
     }
 
+    // The winning rail has retained the ended identity. Observe it before
+    // normal queue drain can start a different foreground input.
+    let completion_query = app.completed_advisory_reply_observation(agent_id);
     if let Err(ref err) = result {
         tracing::error!(agent = ?agent_id, error = %err, "Prompt failed");
     }
@@ -1416,17 +1914,18 @@ pub(super) fn handle_prompt_response(
     // `maybe_drain_queue` keeps the idle-only and editing-front
     // guards so we do not send from under the user.
     if app.reconnect_pending {
-        return vec![];
+        return completion_query.into_iter().collect();
     }
 
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
-            return vec![];
+            return completion_query.into_iter().collect();
         };
         maybe_drain_queue(agent)
     };
     let page_flip_entry = drain.page_flip_entry;
-    let mut effects = drain.effects;
+    let mut effects: Vec<_> = completion_query.into_iter().collect();
+    effects.extend(drain.effects);
 
     // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion
     // (the stale one was wiped by the finalizer) — but only after a clean,

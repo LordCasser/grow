@@ -13,7 +13,6 @@
 //! Wire types live in `workspace_types::rpc::fs` (the
 //! `ClientFs*` types), shared with the backend caller.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use workspace_types::rpc::fs::{
@@ -37,58 +36,6 @@ const MAX_LIST_LIMIT: u32 = 1000;
 /// referenced by tests now that the clamp lives in `walk::clamp_read_length`.
 #[cfg(test)]
 const MAX_READ_BYTES: u64 = super::walk::MAX_READ_BYTES;
-
-/// Bound on memoized hashes; the memo is cleared (not LRU-evicted) when
-/// full — entries simply re-hash on next use.
-const HASH_MEMO_CAPACITY: usize = 4096;
-
-// =========================================================================
-// (path, size, mtime_ms) → hash memo
-// =========================================================================
-
-#[derive(Debug, Clone)]
-struct MemoEntry {
-    size: u64,
-    mtime_ms: i64,
-    hash: String,
-}
-
-/// Memo of full-content SHA-256 digests keyed by absolute path and
-/// validated against `(size, mtime_ms)`, so unchanged files hash once
-/// instead of on every `client_fs_stat`. The memo only avoids redundant
-/// hashing — it never substitutes mtime for content addressing: a
-/// `(size, mtime_ms)` mismatch is a miss and the caller re-hashes.
-#[derive(Debug, Default)]
-pub(crate) struct FileHashMemo {
-    entries: parking_lot::Mutex<HashMap<PathBuf, MemoEntry>>,
-}
-
-impl FileHashMemo {
-    /// Return the memoized hash when `(size, mtime_ms)` still match.
-    pub(crate) fn lookup(&self, path: &Path, size: u64, mtime_ms: i64) -> Option<String> {
-        let entries = self.entries.lock();
-        let entry = entries.get(path)?;
-        (entry.size == size && entry.mtime_ms == mtime_ms).then(|| entry.hash.clone())
-    }
-
-    /// Record a freshly computed hash, replacing any stale entry for the
-    /// same path. Clears the whole memo when inserting a new path would
-    /// exceed [`HASH_MEMO_CAPACITY`].
-    pub(crate) fn store(&self, path: &Path, size: u64, mtime_ms: i64, hash: String) {
-        let mut entries = self.entries.lock();
-        if !entries.contains_key(path) && entries.len() >= HASH_MEMO_CAPACITY {
-            entries.clear();
-        }
-        entries.insert(
-            path.to_path_buf(),
-            MemoEntry {
-                size,
-                mtime_ms,
-                hash,
-            },
-        );
-    }
-}
 
 // =========================================================================
 // Path resolution
@@ -204,8 +151,11 @@ fn list_blocking(
 // stat
 // =========================================================================
 
-/// Stat `req.path`: existence, kind, size, mtime, and — for files — a
-/// full-content SHA-256 served through the workspace hash memo.
+/// Stat `req.path`: existence, kind, mtime — and, for files, a
+/// full-content SHA-256 plus size taken from one streamed read of the
+/// current content. `(size, mtime_ms)` cannot prove content generation
+/// (same-length rewrites that preserve mtime, atomic replacement), so no
+/// metadata tuple ever substitutes for hashing what is actually on disk.
 pub(crate) async fn stat(ws: &WorkspaceHandle, req: &FsStatReq) -> WorkspaceResult<FsStatRes> {
     let abs = resolve(ws, &req.path).await?;
     let md = match tokio::fs::metadata(&abs).await {
@@ -241,26 +191,15 @@ pub(crate) async fn stat(ws: &WorkspaceHandle, req: &FsStatReq) -> WorkspaceResu
             hash: None,
         });
     }
-    let size = md.len();
-    let memo = &ws.shared.client_fs_hash_memo;
-    let hash = match mtime_ms.and_then(|m| memo.lookup(&abs, size, m)) {
-        Some(hash) => hash,
-        None => {
-            let (hash, _, _) = crate::handle::stream_hash_and_range(&abs, 0, 0)
-                .await
-                .map_err(|e| {
-                    WorkspaceError::Operation(format!("hash failed for {}: {e}", req.path))
-                })?;
-            if let Some(m) = mtime_ms {
-                memo.store(&abs, size, m, hash.clone());
-            }
-            hash
-        }
-    };
+    // Full-stream pass: the digest and the reported size describe the same
+    // read of the currently-opened file, not pre-read metadata.
+    let (hash, _, streamed) = crate::handle::stream_hash_and_range(&abs, 0, 0)
+        .await
+        .map_err(|e| WorkspaceError::Operation(format!("hash failed for {}: {e}", req.path)))?;
     Ok(FsStatRes {
         exists: true,
         node_type: Some(FsNodeType::File),
-        size: Some(size),
+        size: Some(streamed),
         mtime_ms,
         hash: Some(hash),
     })
@@ -272,10 +211,11 @@ pub(crate) async fn stat(ws: &WorkspaceHandle, req: &FsStatReq) -> WorkspaceResu
 
 /// Read a byte range of `req.path` (binary-safe, capped at
 /// `min(req.max_bytes, MAX_READ_BYTES)`) together with the full-file
-/// SHA-256. When the hash is memoized for the current `(size, mtime)`
-/// only the requested range is read; otherwise the whole file streams
-/// once (via the shared [`crate::handle::stream_hash_and_range`]) to
-/// hash it.
+/// SHA-256. One streamed pass (via the shared
+/// [`crate::handle::stream_hash_and_range`]) yields the hash, the range
+/// bytes and the reported size from the same read of the
+/// currently-opened file; metadata only decides the file-vs-directory
+/// error branch.
 pub(crate) async fn read_file(
     ws: &WorkspaceHandle,
     req: &FsReadFileReq,
@@ -290,32 +230,16 @@ pub(crate) async fn read_file(
             req.path
         )));
     }
-    let size = md.len();
-    let mtime_ms = md.modified().ok().map(system_time_ms);
     let offset = req.offset.unwrap_or(0);
     // Server-side clamp: a hostile/buggy caller cannot lift the per-chunk
     // budget past MAX_READ_BYTES regardless of `maxBytes`.
     let length = super::walk::clamp_read_length(req.length, req.max_bytes);
 
-    let memo = &ws.shared.client_fs_hash_memo;
-    let (hash, chunk, size) = match mtime_ms.and_then(|m| memo.lookup(&abs, size, m)) {
-        Some(hash) => {
-            let chunk = super::walk::read_range(&abs, offset, length)
-                .await
-                .map_err(read_err)?;
-            (hash, chunk, size)
-        }
-        None => {
-            let (hash, chunk, streamed) =
-                crate::handle::stream_hash_and_range(&abs, offset, length)
-                    .await
-                    .map_err(read_err)?;
-            if let Some(m) = mtime_ms {
-                memo.store(&abs, streamed, m, hash.clone());
-            }
-            (hash, chunk, streamed)
-        }
-    };
+    // Single streamed pass: digest, range bytes and size are consistent
+    // with each other and with the content actually on disk.
+    let (hash, chunk, size) = crate::handle::stream_hash_and_range(&abs, offset, length)
+        .await
+        .map_err(read_err)?;
 
     // Shared encoder keeps the paired wire fields coherent with one UTF-8
     // validation pass; `type` is text iff the bytes were valid UTF-8.
@@ -491,56 +415,170 @@ mod tests {
         assert_eq!(good.is_symlink, Some(true));
     }
 
-    #[test]
-    fn memo_lookup_hits_and_invalidates_on_mismatch() {
-        let memo = FileHashMemo::default();
-        let path = Path::new("/ws/a.txt");
-        memo.store(path, 10, 1000, "h1".into());
-        assert_eq!(memo.lookup(path, 10, 1000).as_deref(), Some("h1"));
-        // Size change ⇒ miss.
-        assert_eq!(memo.lookup(path, 11, 1000), None);
-        // Mtime change ⇒ miss.
-        assert_eq!(memo.lookup(path, 10, 2000), None);
-        // Re-store replaces the stale entry.
-        memo.store(path, 11, 2000, "h2".into());
-        assert_eq!(memo.lookup(path, 11, 2000).as_deref(), Some("h2"));
-        assert_eq!(memo.lookup(path, 10, 1000), None);
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(data))
     }
 
-    /// `stat` consults the memo (no re-hash for an unchanged file) and
-    /// recomputes when `(size, mtime)` no longer match.
+    /// Restore `path`'s timestamps to `mtime` — used to keep a rewrite
+    /// inside the `(size, mtime_ms)` pair the removed WS-02 memo trusted.
+    fn set_mtime(path: &Path, mtime: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(mtime)
+                .set_modified(mtime),
+        )
+        .unwrap();
+    }
+
+    /// Regression (WS-02): a same-length rewrite that restores the file's
+    /// mtime leaves `(path, size, mtime_ms)` unchanged — the exact key the
+    /// old hash memo trusted as "content unchanged", so it served the
+    /// previous digest. The digest must describe the bytes on disk now.
     #[tokio::test]
-    async fn stat_uses_memo_until_file_changes() {
+    async fn stat_hash_follows_same_size_same_mtime_rewrite() {
+        use crate::workspace_ops::WorkspaceOp;
+
         let ws = make_handle();
         let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("data.txt"), b"hello world").unwrap();
+        let abs = root.join("data.txt");
+        let v1 = [b'x'; 32];
+        let v2 = [b'y'; 32];
+        std::fs::write(&abs, v1).unwrap();
 
         let req = FsStatReq {
             path: "data.txt".into(),
         };
-        let first = stat(&ws, &req).await.unwrap();
+        let first = req.execute(&ws, None).await.unwrap();
         assert!(first.exists);
         assert_eq!(first.node_type, Some(FsNodeType::File));
-        assert_eq!(first.size, Some(11));
-        let real_hash = first.hash.clone().expect("hash for files");
+        assert_eq!(first.size, Some(32));
+        assert_eq!(first.hash, Some(sha256_hex(&v1)));
 
-        // Plant a sentinel hash for the file's current (size, mtime). A
-        // second stat must return the sentinel — proof it did not re-hash.
+        // Same-length rewrite with the original mtime restored.
+        let mtime = std::fs::metadata(&abs).unwrap().modified().unwrap();
+        std::fs::write(&abs, v2).unwrap();
+        set_mtime(&abs, mtime);
+
+        let second = req.execute(&ws, None).await.unwrap();
+        // The mutation is invisible in the metadata the old memo keyed on…
+        assert_eq!(second.mtime_ms, first.mtime_ms);
+        // …yet digest and size must describe the new bytes.
+        assert_eq!(second.hash, Some(sha256_hex(&v2)));
+        assert_eq!(second.size, Some(32));
+    }
+
+    /// Regression (WS-02): memo hits previously served `read_file` from a
+    /// second range-only read, pairing fresh bytes with the stale digest
+    /// and size. A rewrite that keeps the length and stays inside the
+    /// original mtime millisecond must still yield digest, range and size
+    /// from one current read.
+    #[tokio::test]
+    async fn read_file_returns_current_bytes_after_same_ms_rewrite() {
+        use crate::workspace_ops::WorkspaceOp;
+
+        let ws = make_handle();
+        let root = ws.root_cwd().unwrap();
+        let abs = root.join("data.bin");
+        let v1 = [0x11u8; 64];
+        let v2 = [0x22u8; 64];
+        // FsReadFileRes carries plain size/hash (only FsStatRes wraps
+        // them in Option). A fixed base mtime — 100 ns past the epoch
+        // second 1700000000 — keeps the +1 ns rewrite bump provably
+        // inside the same millisecond, whatever the wall clock reads.
+        let mtime = std::time::SystemTime::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(1_700_000_000))
+            .unwrap()
+            .checked_add(std::time::Duration::from_nanos(100))
+            .unwrap();
+        std::fs::write(&abs, v1).unwrap();
+        set_mtime(&abs, mtime);
+
+        let req = FsReadFileReq {
+            path: "data.bin".into(),
+            offset: Some(16),
+            length: Some(8),
+            max_bytes: 1_048_576,
+            encoding: FsReadEncoding::Base64,
+        };
+        let first = req.execute(&ws, None).await.unwrap();
+        assert_eq!(first.size, 64);
+        assert_eq!(first.hash, sha256_hex(&v1));
+        let first_bytes = base64::engine::general_purpose::STANDARD
+            .decode(first.content_base64.unwrap())
+            .unwrap();
+        assert_eq!(first_bytes, v1[16..24]);
+
+        // Same-length rewrite; the restored mtime sits one nanosecond
+        // later inside the original millisecond.
+        let bumped = mtime
+            .checked_add(std::time::Duration::from_nanos(1))
+            .unwrap();
+        std::fs::write(&abs, v2).unwrap();
+        set_mtime(&abs, bumped);
+        let now_ms = system_time_ms(std::fs::metadata(&abs).unwrap().modified().unwrap());
+        assert_eq!(
+            now_ms,
+            system_time_ms(mtime),
+            "mutation must stay inside the original mtime millisecond"
+        );
+
+        let second = req.execute(&ws, None).await.unwrap();
+        assert_eq!(second.size, 64);
+        assert_eq!(second.hash, sha256_hex(&v2));
+        let second_bytes = base64::engine::general_purpose::STANDARD
+            .decode(second.content_base64.unwrap())
+            .unwrap();
+        assert_eq!(second_bytes, v2[16..24]);
+    }
+
+    /// Regression (WS-02): atomic replacement via rename swaps the inode
+    /// while equal length and a restored mtime keep the old memo key
+    /// valid. Both stat and read must follow the replaced content.
+    #[tokio::test]
+    async fn stat_and_read_follow_atomic_replacement_with_preserved_mtime() {
+        use crate::workspace_ops::WorkspaceOp;
+
+        let ws = make_handle();
+        let root = ws.root_cwd().unwrap();
         let abs = root.join("data.txt");
-        let md = std::fs::metadata(&abs).unwrap();
-        let mtime = system_time_ms(md.modified().unwrap());
-        ws.shared
-            .client_fs_hash_memo
-            .store(&abs, md.len(), mtime, "sentinel".into());
-        let memoized = stat(&ws, &req).await.unwrap();
-        assert_eq!(memoized.hash.as_deref(), Some("sentinel"));
+        let v1 = [b'o'; 32];
+        let v2 = [b'n'; 32];
+        std::fs::write(&abs, v1).unwrap();
+        let mtime = std::fs::metadata(&abs).unwrap().modified().unwrap();
 
-        // A size change invalidates the memo entry and re-hashes.
-        std::fs::write(&abs, b"hello brave new world").unwrap();
-        let rehashed = stat(&ws, &req).await.unwrap();
-        let new_hash = rehashed.hash.expect("hash for files");
-        assert_ne!(new_hash, "sentinel");
-        assert_ne!(new_hash, real_hash);
+        let stat_req = FsStatReq {
+            path: "data.txt".into(),
+        };
+        let read_req = FsReadFileReq {
+            path: "data.txt".into(),
+            offset: None,
+            length: None,
+            max_bytes: 1_048_576,
+            encoding: FsReadEncoding::Utf8,
+        };
+        let before = stat_req.execute(&ws, None).await.unwrap();
+        assert_eq!(before.hash, Some(sha256_hex(&v1)));
+
+        // Atomic replacement from a sibling temp file, mtime restored.
+        let tmp = root.join(".data.txt.repl");
+        std::fs::write(&tmp, v2).unwrap();
+        std::fs::rename(&tmp, &abs).unwrap();
+        set_mtime(&abs, mtime);
+
+        let stat = stat_req.execute(&ws, None).await.unwrap();
+        assert_eq!(stat.mtime_ms, before.mtime_ms);
+        assert_eq!(stat.hash, Some(sha256_hex(&v2)));
+        assert_eq!(stat.size, Some(32));
+
+        let read = read_req.execute(&ws, None).await.unwrap();
+        assert_eq!(read.hash, sha256_hex(&v2));
+        assert_eq!(read.size, 32);
+        assert_eq!(
+            read.content.as_deref(),
+            Some(std::str::from_utf8(&v2).unwrap())
+        );
     }
 
     /// A path with a *file* as an intermediate component (`ENOTDIR`) is an
@@ -608,8 +646,8 @@ mod tests {
         use sha2::{Digest, Sha256};
         assert_eq!(res.hash, format!("{:x}", Sha256::digest(&payload)));
 
-        // Memoized second read (range-only fast path) returns the
-        // identical chunk + hash.
+        // A second read re-streams the file and returns the identical
+        // chunk + hash.
         let again = read_file(&ws, &req).await.unwrap();
         assert_eq!(again.hash, res.hash);
         let again_bytes = base64::engine::general_purpose::STANDARD

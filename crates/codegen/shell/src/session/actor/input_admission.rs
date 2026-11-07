@@ -13,9 +13,15 @@ fn comparable_input_payload(
     Ok(value)
 }
 
+#[derive(Debug)]
 pub(super) struct AdmittedInput {
     pub input_id: String,
+    /// The attempt hit the canonical lifecycle of an already-recorded
+    /// immutable request. This is an observation of the durable identity, not
+    /// a fresh admission; no Hook, queue entry, or execution may be repeated.
     pub replayed: bool,
+    /// Canonical state of the recorded input when `replayed` is true.
+    pub replay_state: Option<chat_state::InputState>,
 }
 
 pub(super) enum InputAdmissionAttempt {
@@ -25,17 +31,8 @@ pub(super) enum InputAdmissionAttempt {
     },
     Existing {
         input_id: String,
-        state: ExistingInputState,
+        state: chat_state::InputState,
     },
-}
-
-pub(super) enum ExistingInputState {
-    Submitted,
-    Allowed,
-    Blocked(chat_state::InputBlockReason),
-    Consumed,
-    Handled,
-    Dismissed,
 }
 
 #[derive(serde::Deserialize)]
@@ -71,25 +68,15 @@ impl SessionActor {
         let (input_id, decision) = match attempt {
             InputAdmissionAttempt::New { input_id, decision } => (input_id, decision),
             InputAdmissionAttempt::Existing { input_id, state } => {
-                return match state {
-                    ExistingInputState::Submitted => Err(format!(
-                        "input admission remains unresolved for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                    ExistingInputState::Allowed => Ok(AdmittedInput {
-                        input_id,
-                        replayed: true,
-                    }),
-                    ExistingInputState::Blocked(reason) => Err(input_block_reason_message(reason)),
-                    ExistingInputState::Consumed => Err(format!(
-                        "input was already consumed for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                    ExistingInputState::Handled => Err(format!(
-                        "input was already handled for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                    ExistingInputState::Dismissed => Err(format!(
-                        "input was already dismissed for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                };
+                // A retry of an already-recorded immutable request is an
+                // observation of the canonical lifecycle, not a fresh
+                // admission: no Hook, queue entry, or execution is repeated,
+                // regardless of the recorded state.
+                return Ok(AdmittedInput {
+                    input_id,
+                    replayed: true,
+                    replay_state: Some(state),
+                });
             }
         };
         let (route, supersedes) = if matches!(decision, chat_state::InputAdmissionDecision::Allow) {
@@ -268,19 +255,23 @@ impl SessionActor {
             self.session_info.id.0.as_ref(),
             &prompt_id,
         );
-        let events = self
-            .chat_state_handle
-            .timeline_events()
-            .await
-            .ok_or_else(|| "Timeline unavailable while reconciling input identity".to_string())?;
-        if let Some(existing_id) = self
-            .find_existing_prompt_input(&events, &prompt_id, intent, &payload)
-            .await?
-        {
-            return Ok(InputAdmissionAttempt::Existing {
-                state: existing_input_state(&events, &existing_id)?,
-                input_id: existing_id,
-            });
+        // Canonical pre-check: fold the durable Timeline through the stable
+        // input identity, then read only the hit payload_ref to verify the
+        // original immutable request. Never scan every historical blob to
+        // discover the prompt's input.
+        match self.chat_state_handle.input_state(&input_id).await {
+            Err(error) => {
+                return Err(format!(
+                    "Timeline unavailable while reconciling input identity: {error}"
+                ));
+            }
+            Ok(Some(lifecycle)) => {
+                let state = self
+                    .verify_existing_input(lifecycle, intent, &payload)
+                    .await?;
+                return Ok(InputAdmissionAttempt::Existing { input_id, state });
+            }
+            Ok(None) => {}
         }
 
         let crate::session::input_inbox::InputPayload::Prompt {
@@ -311,17 +302,20 @@ impl SessionActor {
             .map_err(|error| format!("input submission was not durable: {error}"))?;
         if !submitted.created {
             drop(artifact_guard);
-            let events = self
-                .chat_state_handle
-                .timeline_events()
-                .await
-                .ok_or_else(|| {
-                    "Timeline unavailable while reconciling input identity".to_string()
-                })?;
-            return Ok(InputAdmissionAttempt::Existing {
-                state: existing_input_state(&events, &input_id)?,
-                input_id,
-            });
+            let state = match self.chat_state_handle.input_state(&input_id).await {
+                Ok(Some(lifecycle)) => lifecycle.state,
+                Ok(None) => {
+                    return Err(format!(
+                        "input identity evidence is unavailable for prompt {prompt_id} (input {input_id})"
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Timeline unavailable while reconciling input identity: {error}"
+                    ));
+                }
+            };
+            return Ok(InputAdmissionAttempt::Existing { input_id, state });
         }
         // The blob is now reachable from Timeline, so maintenance can no longer
         // classify it as an orphan. Do not serialize slow external Hook runs on
@@ -362,56 +356,58 @@ impl SessionActor {
         Ok(InputAdmissionAttempt::New { input_id, decision })
     }
 
-    async fn find_existing_prompt_input(
+    /// Verify that a canonical lifecycle hit carries the exact same immutable
+    /// request, then return its current state as a replay observation.
+    /// Server-side Prompt/Followup derivation for a FIFO payload does not
+    /// conflict; an explicit steer intent or any payload/route difference does.
+    async fn verify_existing_input(
         &self,
-        events: &[chat_state::TimelineEvent],
-        prompt_id: &str,
+        lifecycle: chat_state::InputLifecycle,
         intent: chat_state::InputIntent,
         requested: &crate::session::input_inbox::InputPayload,
-    ) -> Result<Option<String>, String> {
-        let mut matched = None;
-        for event in events {
-            let chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
-                input_id,
-                intent: existing_intent,
-                payload_ref,
-            }) = &event.kind
-            else {
-                continue;
-            };
-            let existing_prompt_id =
-                crate::session::input_inbox::read_prompt_id(&self.session_directory, payload_ref)
-                    .map_err(|error| {
-                    format!("input identity evidence is unavailable for {input_id}: {error}")
-                })?;
-            if existing_prompt_id != prompt_id {
-                continue;
-            }
-            if matched.is_some() {
-                return Err(format!(
-                    "input identity evidence is ambiguous for prompt {prompt_id}"
-                ));
-            }
-            if existing_intent != &intent {
-                return Err(format!(
-                    "input identity conflict for prompt {prompt_id}: intent differs"
-                ));
-            }
-            let existing_payload =
-                crate::session::input_inbox::read_payload(&self.session_directory, payload_ref)
-                    .map_err(|error| {
-                        format!("input payload evidence is unavailable for {input_id}: {error}")
-                    })?;
-            let existing_value = comparable_input_payload(&existing_payload)?;
-            let requested_value = comparable_input_payload(requested)?;
-            if existing_value != requested_value {
-                return Err(format!(
-                    "input identity conflict for prompt {prompt_id}: immutable payload or route differs"
-                ));
-            }
-            matched = Some(input_id.clone());
+    ) -> Result<chat_state::InputState, String> {
+        let input_id = lifecycle.input_id.clone();
+        let prompt_id = match requested {
+            crate::session::input_inbox::InputPayload::Prompt { prompt_id, .. } => prompt_id,
+        };
+        // Prompt/Followup is a server-side FIFO derivation; the payload
+        // comparison below still pins the immutable requested_route.
+        let intent_compatible = lifecycle.intent == intent
+            || matches!(
+                (lifecycle.intent, intent),
+                (
+                    chat_state::InputIntent::Prompt | chat_state::InputIntent::Followup,
+                    chat_state::InputIntent::Prompt | chat_state::InputIntent::Followup,
+                )
+            );
+        if !intent_compatible {
+            return Err(format!(
+                "input identity conflict for prompt {prompt_id}: intent differs"
+            ));
         }
-        Ok(matched)
+        let existing_payload = crate::session::input_inbox::read_payload(
+            &self.session_directory,
+            &lifecycle.payload_ref,
+        )
+        .map_err(|error| {
+            format!("input payload evidence is unavailable for {input_id}: {error}")
+        })?;
+        let existing_prompt_id = match &existing_payload {
+            crate::session::input_inbox::InputPayload::Prompt { prompt_id, .. } => prompt_id,
+        };
+        if existing_prompt_id != prompt_id {
+            return Err(format!(
+                "input identity evidence mismatch for prompt {prompt_id} (input {input_id})"
+            ));
+        }
+        let existing_value = comparable_input_payload(&existing_payload)?;
+        let requested_value = comparable_input_payload(requested)?;
+        if existing_value != requested_value {
+            return Err(format!(
+                "input identity conflict for prompt {prompt_id}: immutable payload or route differs"
+            ));
+        }
+        Ok(lifecycle.state)
     }
 
     pub(super) async fn resolve_human_input_admission(
@@ -442,6 +438,7 @@ impl SessionActor {
         Ok(AdmittedInput {
             input_id,
             replayed: false,
+            replay_state: None,
         })
     }
 
@@ -527,6 +524,24 @@ impl SessionActor {
     }
 
     pub(super) async fn restore_pending_human_inputs(&self) -> Result<(), String> {
+        // One canonical runtime query for the whole reconstruction: a Steer
+        // whose target Turn is still preserved by a suspended/restoring
+        // checkpoint must return to the actor's interjection buffer with its
+        // original identity instead of being rerouted into the FIFO (which the
+        // Timeline validator rejects while the Turn stays open). Any other
+        // runtime phase keeps the existing deterministic reroute path.
+        let preserved_turn = match self.chat_state_handle.runtime_state().await {
+            Ok(lifecycle) if lifecycle.preserves_open_turn() => lifecycle
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.turn.as_ref().map(|turn| turn.turn_id)),
+            Ok(_) => None,
+            Err(error) => {
+                return Err(format!(
+                    "runtime state unavailable while restoring pending inputs: {error}"
+                ));
+            }
+        };
         let pending = self
             .chat_state_handle
             .get_pending_allowed_inputs()
@@ -597,11 +612,49 @@ impl SessionActor {
                     {
                         return Err("pending human input payload has a synthetic identity".into());
                     }
-                    if matches!(pending.route, chat_state::InputRoute::Steer { .. }) {
+                    let steer_target = match pending.route {
+                        chat_state::InputRoute::Steer { target_turn } => Some(target_turn),
+                        chat_state::InputRoute::Fifo => None,
+                    };
+                    if let Some(target_turn) = steer_target {
+                        if preserved_turn == Some(target_turn) {
+                            // The checkpoint preserved the target Turn, so the
+                            // input's canonical route is still Steer(target).
+                            // Rebuild the actor's interjection buffer entry
+                            // with the original identity and full content; no
+                            // FIFO row, no reroute, no repeated Hook/Submitted.
+                            // The runtime release barrier still decides when
+                            // the resumed Turn may drain and consume it.
+                            let text = Self::queue_text_from_blocks(&prompt_blocks);
+                            let attachments = prompt_blocks
+                                .into_iter()
+                                .filter_map(|block| match block {
+                                    acp::ContentBlock::Image(image) => Some(image),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            self.pending_interjections.push(
+                                super::interjection::PendingInterjection {
+                                    text,
+                                    attachments,
+                                    requeue: Some(
+                                        super::interjection::ResidualInterjectionRequeue {
+                                            input_ids: vec![pending.input_id],
+                                            prompt_id,
+                                            origin,
+                                            turn_kind,
+                                            client_identifier,
+                                            screen_mode,
+                                            verbatim,
+                                            json_schema,
+                                        },
+                                    ),
+                                },
+                            );
+                            continue;
+                        }
                         self.reroute_input(pending.input_id.clone(), chat_state::InputRoute::Fifo)
                             .await?;
-                    } else if !matches!(pending.route, chat_state::InputRoute::Fifo) {
-                        return Err("pending prompt input has an incompatible route".into());
                     }
                     let queue_meta = queue.map(Into::into).unwrap_or_else(|| {
                         crate::session::prompt_queue::QueueEntryMeta {
@@ -614,6 +667,12 @@ impl SessionActor {
                             combined_texts: None,
                         }
                     });
+                    // The durable queue row owns the runtime/display identity.
+                    // An edited row's immutable payload keeps its own
+                    // `original:edit:N` admission identity; reusing it as the
+                    // runtime prompt id would split the restored row from its
+                    // queue identity.
+                    let prompt_id = queue_meta.id.clone();
                     let (respond_to, _response) = tokio::sync::oneshot::channel();
                     self.state.lock().await.pending_inputs.push_back(InputItem {
                         input_ids: vec![pending.input_id],
@@ -737,15 +796,43 @@ impl SessionActor {
         if shutdown.is_cancelled() {
             return;
         }
-        let _guard = self.input_artifact_gate.lock().await;
+        let _guard = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            guard = self.input_artifact_gate.lock() => guard,
+        };
+        if shutdown.is_cancelled() {
+            return;
+        }
+        // The live owner has already validated every committed physical User
+        // reference, including those no longer in the current Surface. Keep
+        // publication excluded from this query through the completed sweep.
+        let retained_paths = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            paths = self.chat_state_handle.committed_user_image_paths() => match paths {
+                Ok(paths) => paths,
+                Err(error) => {
+                    tracing::warn!(%error, "user image asset authority unavailable");
+                    return;
+                }
+            },
+        };
         if shutdown.is_cancelled() {
             return;
         }
         let Ok(directory) = self.session_directory.try_clone() else {
             return;
         };
+        let shutdown = shutdown.clone();
+        // Once admitted, deletion stays owned until its blocking task actually
+        // returns. Cancellation stops between batches; it never detaches I/O.
         match tokio::task::spawn_blocking(move || {
-            crate::session::image_describe::reconcile_user_image_assets(&directory)
+            crate::session::image_describe::reconcile_user_image_assets(
+                &directory,
+                &retained_paths,
+                || shutdown.is_cancelled(),
+            )
         })
         .await
         {
@@ -753,61 +840,6 @@ impl SessionActor {
             error => tracing::warn!(?error, "user image asset reconciliation failed"),
         }
     }
-}
-
-fn existing_input_state(
-    events: &[chat_state::TimelineEvent],
-    input_id: &str,
-) -> Result<ExistingInputState, String> {
-    let mut found = false;
-    let mut state = ExistingInputState::Submitted;
-    for event in events {
-        let chat_state::TimelineEventKind::Input(input) = &event.kind else {
-            continue;
-        };
-        match input {
-            chat_state::InputEvent::Submitted {
-                input_id: submitted_id,
-                ..
-            } if submitted_id == input_id => {
-                if found {
-                    return Err(format!("duplicate Submitted evidence for input {input_id}"));
-                }
-                found = true;
-            }
-            chat_state::InputEvent::AdmissionResolved {
-                input_id: resolved_id,
-                decision,
-                ..
-            } if resolved_id == input_id => {
-                state = match decision {
-                    chat_state::InputAdmissionDecision::Allow => ExistingInputState::Allowed,
-                    chat_state::InputAdmissionDecision::Block { reason } => {
-                        ExistingInputState::Blocked(reason.clone())
-                    }
-                };
-            }
-            chat_state::InputEvent::Consumed { input_ids, .. }
-                if input_ids.iter().any(|id| id == input_id) =>
-            {
-                state = ExistingInputState::Consumed;
-            }
-            chat_state::InputEvent::Handled { input_ids, .. }
-                if input_ids.iter().any(|id| id == input_id) =>
-            {
-                state = ExistingInputState::Handled;
-            }
-            chat_state::InputEvent::Dismissed { input_ids, .. }
-                if input_ids.iter().any(|id| id == input_id) =>
-            {
-                state = ExistingInputState::Dismissed;
-            }
-            _ => {}
-        }
-    }
-    found
-        .then_some(state)
-        .ok_or_else(|| format!("Submitted evidence is missing for input {input_id}"))
 }
 
 pub(super) fn input_block_reason_message(reason: chat_state::InputBlockReason) -> String {
@@ -846,6 +878,264 @@ mod tests {
         );
         *prompt_blocks = vec![acp::ContentBlock::Text(text)];
         payload
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_image_asset_reconciliation_retains_current_and_historical_owner_refs() {
+        use crate::session::image_describe::{persist_user_images, render_image_files_block};
+        use std::future::Future as _;
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let historical = persist_user_images(
+                    &actor.session_directory,
+                    &[acp::ImageContent::new("AQID", "image/png")],
+                )
+                .unwrap();
+                let historical_message =
+                    render_image_files_block(&[historical[0].to_string_lossy().into_owned()])
+                        .unwrap();
+                actor
+                    .chat_state_handle
+                    .push_user_message_durably(sampling_types::ConversationItem::user(
+                        historical_message.clone(),
+                    ))
+                    .await
+                    .unwrap();
+                let (mut replacement, revision) = actor
+                    .chat_state_handle
+                    .get_conversation_with_revision()
+                    .await
+                    .unwrap();
+                // ContextRebuild must preserve the canonical stable System head.
+                replacement
+                    .retain(|item| matches!(item, sampling_types::ConversationItem::System(_)));
+                replacement.push(sampling_types::ConversationItem::user_meta(
+                    "replacement context",
+                ));
+                actor
+                    .chat_state_handle
+                    .replace_context_durably(replacement, revision)
+                    .await
+                    .unwrap();
+                assert!(
+                    !format!("{:?}", actor.chat_state_handle.get_conversation().await)
+                        .contains(&historical[0].to_string_lossy().into_owned())
+                );
+
+                // Publication owns the same gate. A reconciliation started here
+                // must query only after the new User reference is committed.
+                let publication = actor.input_artifact_gate.lock().await;
+                let current = persist_user_images(
+                    &actor.session_directory,
+                    &[acp::ImageContent::new("BAUG", "image/png")],
+                )
+                .unwrap();
+                let orphan = persist_user_images(
+                    &actor.session_directory,
+                    &[acp::ImageContent::new("BwgJ", "image/png")],
+                )
+                .unwrap();
+                let staging = actor
+                    .session_dir
+                    .join("assets")
+                    .join(format!(".images-{}.tmp", uuid::Uuid::new_v4()));
+                std::fs::create_dir(&staging).unwrap();
+                let unknown = actor.session_dir.join("assets/user-owned");
+                std::fs::create_dir(&unknown).unwrap();
+                // The owner is valid; this disk source must never be replayed
+                // by live maintenance, even when deletable assets exist.
+                let disk_evidence = b"{broken timeline}\n";
+                std::fs::write(actor.session_dir.join("timeline.jsonl"), disk_evidence).unwrap();
+                let shutdown = tokio_util::sync::CancellationToken::new();
+                let cleanup = actor.reconcile_user_image_assets(&shutdown);
+                tokio::pin!(cleanup);
+                std::future::poll_fn(|cx| {
+                    assert!(cleanup.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                actor
+                    .chat_state_handle
+                    .push_user_message_durably(sampling_types::ConversationItem::user(
+                        render_image_files_block(&[current[0].to_string_lossy().into_owned()])
+                            .unwrap(),
+                    ))
+                    .await
+                    .unwrap();
+                drop(publication);
+                cleanup.await;
+                assert!(historical[0].is_file());
+                assert!(current[0].is_file());
+                assert!(!orphan[0].parent().unwrap().exists());
+                assert!(!staging.exists());
+                assert!(unknown.is_dir());
+                assert_eq!(
+                    std::fs::read(actor.session_dir.join("timeline.jsonl")).unwrap(),
+                    disk_evidence
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_image_asset_reconciliation_preserves_assets_when_owner_exits() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut actor, _gateway) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let owner_shutdown = tokio_util::sync::CancellationToken::new();
+                let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+                Arc::get_mut(&mut actor).unwrap().chat_state_handle =
+                    chat_state::ChatStateActor::spawn(
+                        vec![],
+                        config,
+                        Box::new(chat_state::NullTimelinePersistence),
+                        events,
+                        owner_shutdown.clone(),
+                    );
+                // Establish the real owner before terminating it; this is not
+                // an injected empty result or a no-op handle.
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .committed_user_image_paths()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                owner_shutdown.cancel();
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .committed_user_image_paths()
+                        .await
+                        .is_err()
+                );
+                let orphan = crate::session::image_describe::persist_user_images(
+                    &actor.session_directory,
+                    &[acp::ImageContent::new("AQID", "image/png")],
+                )
+                .unwrap();
+                let staging = actor
+                    .session_dir
+                    .join("assets")
+                    .join(format!(".images-{}.tmp", uuid::Uuid::new_v4()));
+                std::fs::create_dir(&staging).unwrap();
+                actor
+                    .reconcile_user_image_assets(&tokio_util::sync::CancellationToken::new())
+                    .await;
+                assert!(orphan[0].is_file());
+                assert!(staging.is_dir());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_image_asset_reconciliation_cancellation_stops_before_authority_query() {
+        use std::future::Future as _;
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let orphan = crate::session::image_describe::persist_user_images(
+                    &actor.session_directory,
+                    &[acp::ImageContent::new("AQID", "image/png")],
+                )
+                .unwrap();
+                let shutdown = tokio_util::sync::CancellationToken::new();
+                let publication = actor.input_artifact_gate.lock().await;
+                let cleanup = actor.reconcile_user_image_assets(&shutdown);
+                tokio::pin!(cleanup);
+                std::future::poll_fn(|cx| {
+                    assert!(cleanup.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                shutdown.cancel();
+                tokio::time::timeout(std::time::Duration::from_secs(1), cleanup)
+                    .await
+                    .unwrap();
+                assert!(orphan[0].is_file());
+                drop(publication);
+                actor.reconcile_user_image_assets(&shutdown).await;
+                assert!(orphan[0].is_file());
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .committed_user_image_paths()
+                        .await
+                        .is_ok()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_image_asset_reconciliation_cancellation_keeps_pending_owner_write() {
+        use std::future::Future as _;
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut actor, _gateway) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let (persistence, mut acknowledgements) =
+                    chat_state::MockTimelinePersistence::new_with_manual_timeline_ack();
+                let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+                Arc::get_mut(&mut actor).unwrap().chat_state_handle =
+                    chat_state::ChatStateActor::spawn(
+                        vec![],
+                        config,
+                        Box::new(persistence),
+                        events,
+                        tokio_util::sync::CancellationToken::new(),
+                    );
+                let orphan = crate::session::image_describe::persist_user_images(
+                    &actor.session_directory,
+                    &[acp::ImageContent::new("AQID", "image/png")],
+                )
+                .unwrap();
+                let write = actor.chat_state_handle.push_user_message_durably(
+                    sampling_types::ConversationItem::user("pending durable message"),
+                );
+                tokio::pin!(write);
+                std::future::poll_fn(|cx| {
+                    assert!(write.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                let ack = acknowledgements.next_timeline_ack().await.unwrap();
+                let shutdown = tokio_util::sync::CancellationToken::new();
+                let cleanup = actor.reconcile_user_image_assets(&shutdown);
+                tokio::pin!(cleanup);
+                std::future::poll_fn(|cx| {
+                    assert!(cleanup.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                shutdown.cancel();
+                tokio::time::timeout(std::time::Duration::from_secs(1), cleanup)
+                    .await
+                    .unwrap();
+                assert!(orphan[0].is_file());
+                // Stopping optional maintenance does not cancel the canonical
+                // owner, its accepted write, or the original acknowledgement.
+                ack.send(Ok(())).unwrap();
+                write.await.unwrap();
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .committed_user_image_paths()
+                        .await
+                        .is_ok()
+                );
+                assert!(orphan[0].is_file());
+                assert!(actor.input_artifact_gate.try_lock().is_ok());
+            })
+            .await;
     }
 
     #[test]
@@ -1219,12 +1509,12 @@ mod tests {
                     attempt,
                     InputAdmissionAttempt::Existing {
                         input_id,
-                        state: ExistingInputState::Blocked(
-                            chat_state::InputBlockReason::ProcessInterrupted
-                        ),
+                        state: chat_state::InputState::Blocked {
+                            reason: chat_state::InputBlockReason::ProcessInterrupted,
+                        },
                     } if input_id == original_input_id
                 ));
-                let retry_error = match actor
+                let replayed = actor
                     .admit_human_input(
                         chat_state::InputIntent::Prompt,
                         input_inbox::tests::text_payload(PROMPT_ID, "durable submitted input"),
@@ -1233,11 +1523,15 @@ mod tests {
                         Vec::new(),
                     )
                     .await
-                {
-                    Err(error) => error,
-                    Ok(_) => panic!("interrupted stable input cannot be re-admitted"),
-                };
-                assert_eq!(retry_error, "input admission was interrupted");
+                    .expect("interrupted stable input replays its canonical observation");
+                assert_eq!(replayed.input_id, original_input_id);
+                assert!(replayed.replayed);
+                assert!(matches!(
+                    replayed.replay_state,
+                    Some(chat_state::InputState::Blocked {
+                        reason: chat_state::InputBlockReason::ProcessInterrupted,
+                    })
+                ));
                 let after_retry = chat_state.timeline_events().await.unwrap();
                 assert_eq!(after_retry.len(), before_retry.len());
                 assert_eq!(
@@ -1565,7 +1859,7 @@ mod tests {
                     ) if id == &input_id
                 )));
 
-                let unresolved_retry = match actor
+                let unresolved_retry = actor
                     .admit_human_input(
                         chat_state::InputIntent::Prompt,
                         payload.clone(),
@@ -1574,11 +1868,12 @@ mod tests {
                         Vec::new(),
                     )
                     .await
-                {
-                    Err(error) => error,
-                    Ok(_) => panic!("Submitted without admission cannot be retried as accepted"),
-                };
-                assert!(unresolved_retry.contains("remains unresolved"));
+                    .expect("unresolved retry observes the durable Submitted state");
+                assert!(unresolved_retry.replayed);
+                assert_eq!(
+                    unresolved_retry.replay_state,
+                    Some(chat_state::InputState::Submitted)
+                );
                 assert_eq!(
                     actor
                         .chat_state_handle
@@ -1608,7 +1903,7 @@ mod tests {
                     ) if id == &input_id
                 )));
 
-                let recovered_retry = match actor
+                let recovered_retry = actor
                     .admit_human_input(
                         chat_state::InputIntent::Prompt,
                         payload.clone(),
@@ -1617,11 +1912,14 @@ mod tests {
                         Vec::new(),
                     )
                     .await
-                {
-                    Err(error) => error,
-                    Ok(_) => panic!("recovered input must remain durably blocked"),
-                };
-                assert_eq!(recovered_retry, "input admission was interrupted");
+                    .expect("blocked retry observes the durable interruption");
+                assert!(recovered_retry.replayed);
+                assert!(matches!(
+                    recovered_retry.replay_state,
+                    Some(chat_state::InputState::Blocked {
+                        reason: chat_state::InputBlockReason::ProcessInterrupted,
+                    })
+                ));
                 actor.restore_pending_human_inputs().await.unwrap();
                 assert!(
                     actor.state.lock().await.pending_inputs.is_empty(),
@@ -2143,6 +2441,1106 @@ mod tests {
                         .unwrap()
                         .hook_prompt(),
                     input_inbox::tests::image_payload().hook_prompt()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stable_fifo_retry_observes_canonical_state_across_derived_intents() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let payload =
+                    input_inbox::tests::text_payload("fifo-intent-derivation", "same request");
+                let first = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        payload.clone(),
+                        Some("fifo-intent-derivation".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("idle admission");
+                assert!(!first.replayed);
+                // The server re-derives Prompt vs Followup from idle/running state;
+                // that derivation is not a user intent change and must not conflict.
+                let second = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Followup,
+                        payload.clone(),
+                        Some("fifo-intent-derivation".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("derived-intent retry is an observation");
+                assert!(second.replayed);
+                assert_eq!(second.input_id, first.input_id);
+                assert_eq!(
+                    second.replay_state,
+                    Some(chat_state::InputState::Allowed {
+                        route: chat_state::InputRoute::Fifo,
+                    })
+                );
+                // Reverse direction: first admitted as Followup, retried as Prompt.
+                let reverse_payload =
+                    input_inbox::tests::text_payload("fifo-intent-reverse", "reverse");
+                actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Followup,
+                        reverse_payload.clone(),
+                        Some("fifo-intent-reverse".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("followup admission");
+                let reverse_retry = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        reverse_payload,
+                        Some("fifo-intent-reverse".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("prompt retry is an observation");
+                assert!(reverse_retry.replayed);
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Input(
+                                chat_state::InputEvent::Submitted { .. }
+                            ) | chat_state::TimelineEventKind::Hook(
+                                chat_state::HookEvent::Triggered { .. }
+                            )
+                        ))
+                        .count(),
+                    4,
+                    "two admissions only: one Submitted plus one Hook each, retries add none"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stable_retry_returns_each_canonical_state_as_observation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+
+                // Submitted: durable submission without a resolved admission.
+                let submitted_payload =
+                    input_inbox::tests::text_payload("state-submitted", "pending hook");
+                let payload_ref =
+                    input_inbox::write_payload(&actor.session_directory, &submitted_payload)
+                        .unwrap();
+                let submitted_id = input_inbox::input_id_for_prompt(
+                    actor.session_info.id.0.as_ref(),
+                    "state-submitted",
+                );
+                actor
+                    .chat_state_handle
+                    .submit_input_durably(
+                        submitted_id.clone(),
+                        chat_state::InputIntent::Prompt,
+                        payload_ref,
+                    )
+                    .await
+                    .unwrap();
+                let submitted_replay = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        submitted_payload,
+                        Some("state-submitted".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("submitted retry observes the canonical state");
+                assert_eq!(submitted_replay.input_id, submitted_id);
+                assert_eq!(
+                    submitted_replay.replay_state,
+                    Some(chat_state::InputState::Submitted)
+                );
+
+                // Blocked, Handled and Dismissed (including RouteSuperseded) all
+                // replay as observations of their durable state.
+                for prompt_id in [
+                    "state-blocked",
+                    "state-handled",
+                    "state-dismissed",
+                    "state-superseded",
+                ] {
+                    let payload = input_inbox::tests::text_payload(prompt_id, "terminal states");
+                    let input_id = if prompt_id == "state-blocked" {
+                        // A durable submission resolves to Blocked; an
+                        // Allowed admission is terminal and cannot be
+                        // re-folded into Blocked, so the blocked fixture is
+                        // driven straight from submission to denial.
+                        let payload_ref =
+                            input_inbox::write_payload(&actor.session_directory, &payload).unwrap();
+                        let input_id = input_inbox::input_id_for_prompt(
+                            actor.session_info.id.0.as_ref(),
+                            prompt_id,
+                        );
+                        actor
+                            .chat_state_handle
+                            .submit_input_durably(
+                                input_id.clone(),
+                                chat_state::InputIntent::Prompt,
+                                payload_ref,
+                            )
+                            .await
+                            .unwrap();
+                        // The causal fold derives an admission resolution
+                        // from a completed Hook occurrence; with no declared
+                        // handlers the aggregate is Allow, so the blocked
+                        // fixture records the same durable facts
+                        // recover_interrupted produces: an empty-handler
+                        // completed hook resolving to Block with the
+                        // ProcessInterrupted reason.
+                        let occurrence_id = format!("{prompt_id}-denied-hook");
+                        actor
+                            .chat_state_handle
+                            .record_timeline_event_durably(chat_state::TimelineEventKind::Hook(
+                                chat_state::HookEvent::Triggered {
+                                    occurrence_id: occurrence_id.clone(),
+                                    event: chat_state::HookEventType::UserPromptSubmit,
+                                    gate: chat_state::HookGateKind::Prompt,
+                                    cause: chat_state::HookCause::Input {
+                                        input_id: input_id.clone(),
+                                    },
+                                    config_generation: 0,
+                                    handlers: Vec::new(),
+                                },
+                            ))
+                            .await
+                            .unwrap();
+                        actor
+                            .chat_state_handle
+                            .record_timeline_event_durably(chat_state::TimelineEventKind::Hook(
+                                chat_state::HookEvent::Completed {
+                                    occurrence_id: occurrence_id.clone(),
+                                    decision: chat_state::HookAggregateDecision::Prompt {
+                                        decision: chat_state::HookGateDecision::Allow,
+                                    },
+                                },
+                            ))
+                            .await
+                            .unwrap();
+                        actor
+                            .record_input_event(chat_state::InputEvent::AdmissionResolved {
+                                input_id: input_id.clone(),
+                                decision: chat_state::InputAdmissionDecision::Block {
+                                    reason: chat_state::InputBlockReason::ProcessInterrupted,
+                                },
+                                route: None,
+                                supersedes: Vec::new(),
+                            })
+                            .await
+                            .unwrap();
+                        input_id
+                    } else {
+                        let admitted = actor
+                            .admit_human_input(
+                                chat_state::InputIntent::Prompt,
+                                payload.clone(),
+                                Some(prompt_id.into()),
+                                chat_state::InputRoute::Fifo,
+                                Vec::new(),
+                            )
+                            .await
+                            .unwrap();
+                        match prompt_id {
+                            "state-handled" => {
+                                // Handled folds from a real FIFO turn: the
+                                // validator requires the input to be the
+                                // turn's reserved input while the turn is
+                                // active, so the fixture records the same
+                                // durable facts a completed turn produces.
+                                let handled_turn = chat_state::TurnId(1);
+                                actor
+                                    .chat_state_handle
+                                    .record_timeline_event_durably(
+                                        chat_state::TimelineEventKind::Turn(
+                                            chat_state::TurnEvent::Started {
+                                                prompt_id: "state-handled-prompt".into(),
+                                                id: handled_turn,
+                                                input_ids: vec![admitted.input_id.clone()],
+                                                identity: chat_state::TurnIdentity {
+                                                    origin: "user".into(),
+                                                    turn_kind: "user".into(),
+                                                    goal_id: None,
+                                                    goal_definition_revision: None,
+                                                    stage_id: None,
+                                                },
+                                                model_id: "test-model".into(),
+                                                input_message_count: 0,
+                                                prompt_index: 0,
+                                                prompt_text: "terminal states".into(),
+                                                input_kind: chat_state::TurnInputKind::Prompt,
+                                                redirect_kind: None,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                    .unwrap();
+                                actor
+                                    .complete_unmodeled_fifo_inputs(
+                                        vec![admitted.input_id.clone()],
+                                        handled_turn,
+                                    )
+                                    .await
+                                    .unwrap();
+                                // End the turn so the remaining terminal
+                                // states stay independent of the active
+                                // turn boundary.
+                                actor
+                                    .chat_state_handle
+                                    .record_timeline_event_durably(
+                                        chat_state::TimelineEventKind::Turn(
+                                            chat_state::TurnEvent::Ended {
+                                                id: handled_turn,
+                                                outcome: "completed".into(),
+                                                duration_ms: 1,
+                                                tool_count: 0,
+                                                terminal: chat_state::TurnTerminal {
+                                                    source: chat_state::TurnTerminalSource::Host,
+                                                    stop_reason: "end_turn".into(),
+                                                    completion_kind: "completed".into(),
+                                                },
+                                                cancellation_category: None,
+                                                details: None,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                    .unwrap();
+                            }
+                            "state-dismissed" => {
+                                actor
+                                    .dismiss_input_ids(
+                                        vec![admitted.input_id.clone()],
+                                        chat_state::InputDismissReason::UserRemoved,
+                                    )
+                                    .await
+                                    .unwrap();
+                            }
+                            "state-superseded" => {
+                                actor
+                                    .dismiss_input_ids(
+                                        vec![admitted.input_id.clone()],
+                                        chat_state::InputDismissReason::RouteSuperseded,
+                                    )
+                                    .await
+                                    .unwrap();
+                            }
+                            _ => unreachable!(),
+                        }
+                        admitted.input_id
+                    };
+                    let replay = actor
+                        .admit_human_input(
+                            chat_state::InputIntent::Prompt,
+                            payload,
+                            Some(prompt_id.into()),
+                            chat_state::InputRoute::Fifo,
+                            Vec::new(),
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("{prompt_id} retry must observe: {error}"));
+                    assert_eq!(replay.input_id, input_id, "{prompt_id}");
+                    assert!(replay.replayed, "{prompt_id}");
+                    let expected = match prompt_id {
+                        "state-blocked" => Some(chat_state::InputState::Blocked {
+                            reason: chat_state::InputBlockReason::ProcessInterrupted,
+                        }),
+                        "state-handled" => Some(chat_state::InputState::Handled {
+                            route: chat_state::InputRoute::Fifo,
+                        }),
+                        "state-dismissed" => Some(chat_state::InputState::Dismissed {
+                            reason: chat_state::InputDismissReason::UserRemoved,
+                        }),
+                        "state-superseded" => Some(chat_state::InputState::Dismissed {
+                            reason: chat_state::InputDismissReason::RouteSuperseded,
+                        }),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(replay.replay_state, expected, "{prompt_id}");
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stable_retry_conflicts_on_changed_payload_or_explicit_steer() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let payload =
+                    input_inbox::tests::text_payload("conflict-prompt", "original request");
+                let admitted = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        payload.clone(),
+                        Some("conflict-prompt".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .unwrap();
+                let changed = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        input_inbox::tests::text_payload("conflict-prompt", "changed request"),
+                        Some("conflict-prompt".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect_err("changed payload under one identity must conflict");
+                assert!(
+                    changed.contains("immutable payload or route differs"),
+                    "unexpected conflict message: {changed}"
+                );
+                let mut steer_payload =
+                    input_inbox::tests::text_payload("conflict-prompt", "original request");
+                if let input_inbox::InputPayload::Prompt {
+                    requested_route, ..
+                } = &mut steer_payload
+                {
+                    *requested_route = input_inbox::InputRequestRoute::Steer {
+                        expected_turn_id: "conflict-prompt".into(),
+                    };
+                }
+                let steer = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Steer,
+                        steer_payload,
+                        Some("conflict-prompt".into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect_err("explicit steer under a FIFO identity must conflict");
+                assert!(
+                    steer.contains("conflict"),
+                    "unexpected steer conflict message: {steer}"
+                );
+                // The original input is untouched and the conflicts admitted nothing.
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Input(
+                                chat_state::InputEvent::Submitted { .. }
+                            )
+                        ))
+                        .count(),
+                    1,
+                    "no new Submitted facts for conflicting retries"
+                );
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .input_state(&admitted.input_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    chat_state::InputState::Allowed {
+                        route: chat_state::InputRoute::Fifo,
+                    }
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_input_retry_returns_admission_replay_once() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let prompt_id = "queue-retry-prompt".to_string();
+                let blocks = || {
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "queue retry request",
+                    ))]
+                };
+                let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+                let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .queue_input(
+                        blocks(),
+                        prompt_id.clone(),
+                        crate::session::PromptOrigin::User,
+                        crate::session::TurnKind::User,
+                        None,
+                        None,
+                        false,
+                        None,
+                        respond_tx,
+                        Some(ack_tx),
+                    )
+                    .await;
+                assert!(
+                    ack_rx.try_recv().is_err(),
+                    "first submission is not a replay"
+                );
+                let (retry_tx, retry_rx) = tokio::sync::oneshot::channel();
+                let (retry_ack_tx, retry_ack_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .queue_input(
+                        blocks(),
+                        prompt_id.clone(),
+                        crate::session::PromptOrigin::User,
+                        crate::session::TurnKind::User,
+                        None,
+                        None,
+                        false,
+                        None,
+                        retry_tx,
+                        Some(retry_ack_tx),
+                    )
+                    .await;
+                let replay = retry_rx
+                    .await
+                    .expect("retry RPC resolves as an admission replay")
+                    .expect("replay is not an error");
+                assert_eq!(replay.stop_reason, acp::StopReason::EndTurn);
+                assert_eq!(replay.total_tokens, 0);
+                assert!(replay.usage.is_none() && replay.structured_output.is_none());
+                let expected_input_id =
+                    input_inbox::input_id_for_prompt(actor.session_info.id.0.as_ref(), &prompt_id);
+                let completion_kind = match replay.completion_kind {
+                    crate::session::commands::PromptCompletionKind::AdmissionReplay {
+                        input_id,
+                        state,
+                    } => {
+                        assert_eq!(input_id, expected_input_id);
+                        state
+                    }
+                    other => panic!("retry must not fabricate a turn terminal: {other:?}"),
+                };
+                assert_eq!(
+                    completion_kind,
+                    chat_state::InputState::Allowed {
+                        route: chat_state::InputRoute::Fifo,
+                    }
+                );
+                // The persist acknowledgement is returned after the observation.
+                retry_ack_rx
+                    .await
+                    .expect("retry returns the original persist acknowledgement");
+                // The queue holds exactly one entry; the retry neither requeued nor
+                // removed the original row, and the first RPC is still pending.
+                assert_eq!(actor.state.lock().await.pending_inputs.len(), 1);
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Input(
+                                chat_state::InputEvent::Submitted { .. }
+                            ) | chat_state::TimelineEventKind::Hook(
+                                chat_state::HookEvent::Triggered { .. }
+                            )
+                        ))
+                        .count(),
+                    2,
+                    "hook and submission each ran exactly once"
+                );
+                drop(respond_rx);
+            })
+            .await;
+    }
+
+    struct DurableQueueSession {
+        root: tempfile::TempDir,
+        storage: crate::session::storage::jsonl::JsonlStorageAdapter,
+        info: crate::session::info::Info,
+    }
+
+    /// A real JSONL session whose seed Timeline is already durable on disk.
+    /// Every later accepted admission appends through the same adapter, so a
+    /// cold load reads exactly the acknowledged facts.
+    async fn durable_queue_session() -> DurableQueueSession {
+        use crate::session::storage::StorageAdapter as _;
+
+        let root = tempfile::tempdir().expect("durable session root");
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
+            root.path().to_path_buf(),
+        );
+        let info = crate::session::info::Info {
+            id: acp::SessionId::new("test-actor"),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        };
+        storage
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .expect("initialize the durable session");
+        let seed = chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::system(
+            "test system prompt",
+        )])
+        .expect("seed Timeline");
+        for event in seed.events() {
+            storage
+                .append_timeline_event_durable(&info, event)
+                .await
+                .expect("seed durable Timeline");
+        }
+        DurableQueueSession {
+            root,
+            storage,
+            info,
+        }
+    }
+
+    fn durable_sampling_config() -> sampling_types::SamplingConfig {
+        sampling_types::SamplingConfig {
+            base_url: "http://localhost".into(),
+            model: "test".into(),
+            output_limit: None,
+            temperature: None,
+            top_p: None,
+            api_backend: Default::default(),
+            extra_headers: Default::default(),
+            query_params: Default::default(),
+            env_http_headers: Default::default(),
+            context_window: std::num::NonZeroU64::new(256_000).unwrap(),
+            reasoning_effort: None,
+            stream_tool_calls: None,
+        }
+    }
+
+    /// Wire a test SessionActor to a ChatState owner that appends every
+    /// accepted event to the real JSONL session, replacing the in-memory test
+    /// owner entirely.
+    async fn actor_with_durable_chat_state(
+        storage: &crate::session::storage::jsonl::JsonlStorageAdapter,
+        info: &crate::session::info::Info,
+        timeline: chat_state::Timeline,
+    ) -> std::sync::Arc<SessionActor> {
+        use crate::session::storage::StorageAdapter as _;
+
+        let directory = storage
+            .open_session(info)
+            .expect("open the durable session")
+            .directory_handle();
+        let directory_path = directory.display_path().to_path_buf();
+        let (mut actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+        let chat_state = chat_state::ChatStateActor::spawn_from_validated_timeline(
+            timeline,
+            durable_sampling_config(),
+            None,
+            Box::new(JsonlTimelinePersistence {
+                storage: storage.clone(),
+                info: info.clone(),
+            }),
+            tokio::sync::mpsc::unbounded_channel().0,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("durable ChatState owner");
+        let inner = std::sync::Arc::get_mut(&mut actor).expect("single test actor owner");
+        inner.session_info = info.clone();
+        inner.session_dir = directory_path;
+        inner.session_directory = directory;
+        inner.events = crate::session::events::EventTracker::new(chat_state.clone());
+        inner.chat_state_handle = chat_state;
+        actor
+    }
+
+    async fn queue_human_row(
+        actor: &SessionActor,
+        queue_id: &str,
+        blocks: Vec<acp::ContentBlock>,
+        client_identifier: Option<&str>,
+        screen_mode: Option<&str>,
+        verbatim: bool,
+        json_schema: Option<serde_json::Value>,
+    ) -> String {
+        let (respond_to, _response) = tokio::sync::oneshot::channel();
+        actor
+            .queue_input(
+                blocks,
+                queue_id.to_string(),
+                crate::session::PromptOrigin::User,
+                crate::session::TurnKind::User,
+                client_identifier.map(str::to_owned),
+                screen_mode.map(str::to_owned),
+                verbatim,
+                json_schema,
+                respond_to,
+                None,
+            )
+            .await;
+        actor
+            .state
+            .lock()
+            .await
+            .pending_inputs
+            .iter()
+            .find(|item| {
+                item.queue_meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.id == queue_id)
+            })
+            .and_then(|item| item.input_ids.first().cloned())
+            .expect("admitted queue row")
+    }
+
+    async fn save_queue_edit(
+        actor: &SessionActor,
+        id: &str,
+        expected_version: u64,
+        edit_id: &str,
+        text: &str,
+        leader_client_id: u64,
+    ) -> String {
+        use crate::session::prompt_queue::{QueueControlOperation, QueueControlRequest};
+
+        let request = |operation, new_text: Option<String>| QueueControlRequest {
+            session_id: actor.session_id_string(),
+            operation,
+            id: id.to_string(),
+            expected_version,
+            edit_id: Some(edit_id.to_string()),
+            new_text,
+            leader_client_id: Some(leader_client_id),
+        };
+        let hold = actor
+            .handle_queue_control(request(QueueControlOperation::Hold, None))
+            .await;
+        assert!(hold.applied, "hold rejected: {:?}", hold.reason);
+        let saved = actor
+            .handle_queue_control(request(QueueControlOperation::Save, Some(text.to_string())))
+            .await;
+        assert!(saved.applied, "save rejected: {:?}", saved.reason);
+        assert_eq!(saved.version, Some(expected_version + 1));
+        actor
+            .state
+            .lock()
+            .await
+            .pending_inputs
+            .iter()
+            .find(|item| item.queue_meta.as_ref().is_some_and(|meta| meta.id == id))
+            .and_then(|item| item.input_ids.first().cloned())
+            .expect("edited queue row")
+    }
+
+    fn row_text(item: &InputItem) -> String {
+        item.prompt_blocks
+            .iter()
+            .find_map(|block| match block {
+                acp::ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .expect("queue row has prompt text")
+    }
+
+    /// Cold-restore identity for an edited FIFO row: a real JSONL session,
+    /// three admitted rows, two consecutive edits of A and one edit of B, then
+    /// the live owner is retired and rebuilt from the acknowledged file.
+    /// Restoration must reuse the durable row id as the runtime prompt id,
+    /// read the newest immutable payload for content, and leave the replacement
+    /// admission identity untouched.
+    #[tokio::test(flavor = "current_thread")]
+    async fn edited_queue_rows_restore_row_identity_from_latest_immutable_payload() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::storage::StorageAdapter as _;
+
+                let DurableQueueSession {
+                    root,
+                    storage,
+                    info,
+                } = durable_queue_session().await;
+                let timeline = storage
+                    .open_session(&info)
+                    .expect("open seeded session")
+                    .validated_timeline(&info.id.to_string())
+                    .expect("validated seed")
+                    .timeline;
+                let actor = actor_with_durable_chat_state(&storage, &info, timeline).await;
+
+                let image = crate::session::actor::tests::support::test_image_content();
+                let a_original = queue_human_row(
+                    &actor,
+                    "queue-a",
+                    vec![
+                        acp::ContentBlock::Text(acp::TextContent::new("alpha")),
+                        acp::ContentBlock::Image(image.clone()),
+                    ],
+                    Some("client-a"),
+                    Some("screen-a"),
+                    false,
+                    None,
+                )
+                .await;
+                let b_original = queue_human_row(
+                    &actor,
+                    "queue-b",
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("bravo"))],
+                    Some("client-b"),
+                    None,
+                    true,
+                    None,
+                )
+                .await;
+                let c_original = queue_human_row(
+                    &actor,
+                    "queue-c",
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("charlie"))],
+                    None,
+                    None,
+                    false,
+                    Some(serde_json::json!({"type": "object"})),
+                )
+                .await;
+
+                let a_edit_one =
+                    save_queue_edit(&actor, "queue-a", 0, "edit-a-1", "alpha edit one", 1).await;
+                let a_edit_two =
+                    save_queue_edit(&actor, "queue-a", 1, "edit-a-2", "alpha edit two", 1).await;
+                let b_edit =
+                    save_queue_edit(&actor, "queue-b", 0, "edit-b-1", "bravo edited", 2).await;
+
+                // Live rows keep the original queue/runtime identity while the
+                // newest immutable payload carries the replacement identity.
+                {
+                    let state = actor.state.lock().await;
+                    let row = state
+                        .pending_inputs
+                        .iter()
+                        .find(|item| item.queue_meta.as_ref().is_some_and(|m| m.id == "queue-a"))
+                        .expect("live edited row");
+                    assert_eq!(row.prompt_id, "queue-a");
+                    assert_eq!(row.input_ids, vec![a_edit_two.clone()]);
+                    assert_eq!(row.queue_meta.as_ref().unwrap().version, 2);
+                    assert_eq!(row.queue_meta.as_ref().unwrap().text, "alpha edit two");
+                    assert_eq!(row_text(row), "alpha edit two");
+                    assert_eq!(row.prompt_blocks.len(), 2, "edited row keeps its image");
+                }
+                let live_pending = actor
+                    .chat_state_handle
+                    .get_pending_allowed_inputs()
+                    .await
+                    .expect("canonical pending query");
+                assert_eq!(
+                    live_pending
+                        .iter()
+                        .map(|pending| pending.input_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![a_edit_two.as_str(), b_edit.as_str(), c_original.as_str()],
+                    "the replacement inherits A's canonical FIFO slot"
+                );
+                let live_payload_ids = live_pending
+                    .iter()
+                    .map(|pending| {
+                        input_inbox::read_prompt_id(
+                            actor.session_directory.as_ref(),
+                            &pending.payload_ref,
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    live_payload_ids,
+                    vec!["queue-a:edit:3", "queue-b:edit:2", "queue-c"]
+                );
+                let live_events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(
+                    live_events
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Input(
+                                chat_state::InputEvent::Submitted { .. }
+                            )
+                        ))
+                        .count(),
+                    6,
+                    "A twice, B once and three originals were each admitted"
+                );
+
+                // Retire the whole live owner, then rebuild from the file. The
+                // writer lease lives in the adapter, so both the actor and the
+                // local handle must be gone before the cold load.
+                let previous = std::sync::Arc::downgrade(&actor);
+                drop(actor);
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while previous.upgrade().is_some() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the live actor and its persistence clone retired");
+                drop(storage);
+                let cold_storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
+                    root.path().to_path_buf(),
+                );
+                let loaded = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        match cold_storage
+                            .load_session_for_write_without_updates(&info)
+                            .await
+                        {
+                            Ok(loaded) => break loaded,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                            }
+                            Err(error) => panic!("cold writer load failed: {error}"),
+                        }
+                    }
+                })
+                .await
+                .expect("cold writer load");
+                assert_eq!(
+                    loaded.timeline.events().len(),
+                    live_events.len(),
+                    "the cold Timeline contains every acknowledged admission"
+                );
+
+                let restored_actor =
+                    actor_with_durable_chat_state(&cold_storage, &info, loaded.timeline).await;
+                let before_restore = restored_actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap();
+                restored_actor
+                    .restore_pending_human_inputs()
+                    .await
+                    .expect("cold input reconstruction");
+                let after_restore = restored_actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    after_restore.len(),
+                    before_restore.len(),
+                    "reconstruction records nothing new"
+                );
+                for input_id in [
+                    &a_original,
+                    &a_edit_one,
+                    &a_edit_two,
+                    &b_original,
+                    &b_edit,
+                    &c_original,
+                ] {
+                    assert_eq!(
+                        after_restore
+                            .iter()
+                            .filter(|event| matches!(
+                                &event.kind,
+                                chat_state::TimelineEventKind::Hook(
+                                    chat_state::HookEvent::Triggered {
+                                        event: chat_state::HookEventType::UserPromptSubmit,
+                                        cause: chat_state::HookCause::Input { input_id: cause },
+                                        ..
+                                    }
+                                ) if cause == input_id
+                            ))
+                            .count(),
+                        1,
+                        "cold reconstruction must not replay the admission Hook for {input_id}"
+                    );
+                }
+
+                {
+                    let state = restored_actor.state.lock().await;
+                    assert_eq!(state.pending_inputs.len(), 3);
+                    let rows = state.pending_inputs.iter().collect::<Vec<_>>();
+                    assert_eq!(
+                        rows.iter()
+                            .map(|row| (
+                                row.prompt_id.as_str(),
+                                row.queue_meta
+                                    .as_ref()
+                                    .map(|meta| (meta.id.as_str(), meta.version)),
+                                row.input_ids.clone(),
+                            ))
+                            .collect::<Vec<_>>(),
+                        vec![
+                            ("queue-a", Some(("queue-a", 2)), vec![a_edit_two.clone()]),
+                            ("queue-b", Some(("queue-b", 1)), vec![b_edit.clone()]),
+                            ("queue-c", Some(("queue-c", 0)), vec![c_original.clone()]),
+                        ],
+                        "restored rows keep canonical order, row identity and newest input ids"
+                    );
+                    let a_row = rows[0];
+                    assert_eq!(a_row.queue_meta.as_ref().unwrap().text, "alpha edit two");
+                    assert_eq!(row_text(a_row), "alpha edit two");
+                    assert_eq!(a_row.client_identifier.as_deref(), Some("client-a"));
+                    assert_eq!(a_row.screen_mode.as_deref(), Some("screen-a"));
+                    assert_eq!(a_row.prompt_blocks.len(), 2);
+                    assert_eq!(a_row.prompt_blocks[1], acp::ContentBlock::Image(image));
+                    let b_row = rows[1];
+                    assert_eq!(row_text(b_row), "bravo edited");
+                    assert!(b_row.verbatim);
+                    assert_eq!(b_row.client_identifier.as_deref(), Some("client-b"));
+                    let c_row = rows[2];
+                    assert_eq!(row_text(c_row), "charlie");
+                    assert_eq!(
+                        c_row.json_schema,
+                        Some(serde_json::json!({"type": "object"}))
+                    );
+                }
+
+                let restored_pending = restored_actor
+                    .chat_state_handle
+                    .get_pending_allowed_inputs()
+                    .await
+                    .expect("restored canonical pending query");
+                assert_eq!(
+                    restored_pending
+                        .iter()
+                        .map(|pending| pending.input_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![a_edit_two.as_str(), b_edit.as_str(), c_original.as_str()]
+                );
+                let restored_payload_ids = restored_pending
+                    .iter()
+                    .map(|pending| {
+                        input_inbox::read_prompt_id(
+                            restored_actor.session_directory.as_ref(),
+                            &pending.payload_ref,
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    restored_payload_ids,
+                    vec!["queue-a:edit:3", "queue-b:edit:2", "queue-c"],
+                    "the newest immutable payload, not the original request, is read"
+                );
+                let restored_payload = input_inbox::read_payload(
+                    restored_actor.session_directory.as_ref(),
+                    &restored_pending[0].payload_ref,
+                )
+                .unwrap();
+                let InputPayload::Prompt {
+                    prompt_id,
+                    prompt_blocks,
+                    queue,
+                    ..
+                } = restored_payload;
+                assert_eq!(prompt_id, "queue-a:edit:3");
+                let queue = queue.expect("edited row keeps its stored queue entry");
+                assert_eq!((queue.id.as_str(), queue.version), ("queue-a", 2));
+                assert_eq!(queue.text, "alpha edit two");
+                assert_eq!(prompt_blocks.len(), 2);
+
+                for superseded in [&a_original, &a_edit_one, &b_original] {
+                    assert_eq!(
+                        restored_actor
+                            .chat_state_handle
+                            .input_state(superseded)
+                            .await
+                            .unwrap()
+                            .map(|lifecycle| lifecycle.state),
+                        Some(chat_state::InputState::Dismissed {
+                            reason: chat_state::InputDismissReason::RouteSuperseded,
+                        }),
+                        "replaced admission {superseded} stays RouteSuperseded"
+                    );
+                }
+                assert_eq!(
+                    restored_actor
+                        .chat_state_handle
+                        .input_state(&a_edit_two)
+                        .await
+                        .unwrap()
+                        .map(|lifecycle| lifecycle.state),
+                    Some(chat_state::InputState::Allowed {
+                        route: chat_state::InputRoute::Fifo,
+                    })
+                );
+
+                // The restored row is consumable exactly once through the real
+                // durable entry; the replacement input id, not the old row,
+                // owns the consumption.
+                let turn = chat_state::TurnId(7);
+                restored_actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Turn(
+                        chat_state::TurnEvent::Started {
+                            prompt_id: "queue-a".into(),
+                            id: turn,
+                            input_ids: vec![a_edit_two.clone()],
+                            identity: chat_state::TurnIdentity {
+                                origin: "user".into(),
+                                turn_kind: "user".into(),
+                                goal_id: None,
+                                goal_definition_revision: None,
+                                stage_id: None,
+                            },
+                            model_id: "test".into(),
+                            input_message_count: 1,
+                            prompt_index: 0,
+                            prompt_text: "alpha edit two".into(),
+                            input_kind: chat_state::TurnInputKind::Prompt,
+                            redirect_kind: None,
+                        },
+                    ))
+                    .await
+                    .expect("durable user turn reserves the restored row");
+                restored_actor
+                    .consume_fifo_inputs(
+                        vec![a_edit_two.clone()],
+                        turn,
+                        sampling_types::ConversationItem::user("alpha edit two"),
+                        None,
+                    )
+                    .await
+                    .expect("consume the restored row once");
+                let pending_after = restored_actor
+                    .chat_state_handle
+                    .get_pending_allowed_inputs()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    pending_after
+                        .iter()
+                        .map(|pending| pending.input_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![b_edit.as_str(), c_original.as_str()]
+                );
+                assert_eq!(
+                    restored_actor
+                        .chat_state_handle
+                        .input_state(&a_edit_two)
+                        .await
+                        .unwrap()
+                        .map(|lifecycle| lifecycle.state),
+                    Some(chat_state::InputState::Consumed {
+                        route: chat_state::InputRoute::Fifo,
+                    })
+                );
+                assert_eq!(
+                    after_restore
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Input(
+                                chat_state::InputEvent::Consumed { input_ids, .. }
+                            ) if input_ids == &vec![a_edit_two.clone()]
+                        ))
+                        .count(),
+                    0,
+                    "cold reconstruction never consumes on its own"
                 );
             })
             .await;

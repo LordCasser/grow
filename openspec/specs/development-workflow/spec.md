@@ -87,7 +87,7 @@ Official release builds SHALL embed the version and seven-character source prefi
 - **THEN** existing Git-based identity discovery and the Git-unavailable unknown fallback remain available
 
 ### Requirement: Exact Cargo regression runners expose bounded phases
-The exact Cargo regression runner SHALL distinguish compilation, test enumeration, and test execution; stream command output while a phase is running; and enforce configurable phase deadlines.
+The exact Cargo regression runner SHALL distinguish compilation, test enumeration, and test execution; stream command output while a phase is running; and enforce configurable phase deadlines. Cleanup confirmation SHALL describe the process scope actually owned and verified. On Unix, signalling the launched process group, reaping its direct child and observing output EOF SHALL NOT establish that descendants that may have detached into another session have stopped.
 
 #### Scenario: A selected test is compiled and executed
 - **WHEN** the runner starts an exact test selection
@@ -104,6 +104,10 @@ The exact Cargo regression runner SHALL distinguish compilation, test enumeratio
 #### Scenario: A descendant keeps an inherited output pipe open after its parent exits
 - **WHEN** a Cargo phase's direct child exits but a descendant keeps the merged output pipe open past the phase deadline
 - **THEN** the runner SHALL finish cleanup waiting within a bounded interval and fail with an explicit cleanup-unconfirmed result if it cannot confirm the tree has stopped.
+
+#### Scenario: A detached descendant closes inherited output
+- **WHEN** a Unix phase is forcibly interrupted after its child created a descendant in another session with no inherited output pipe
+- **THEN** bounded process-group signalling and direct-child reaping still run, and the result explicitly reports detached-descendant cleanup as unconfirmed instead of asserting the entire process tree stopped.
 
 #### Scenario: A configured deadline is not finite and positive
 - **WHEN** a phase deadline is zero, negative, NaN, or infinite

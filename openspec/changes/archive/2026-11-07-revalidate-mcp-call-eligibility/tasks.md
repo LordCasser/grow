@@ -1,0 +1,5 @@
+- [x] 核当前模型/direct发送路径、McpState当前client与disabled状态、live inherited资格和已归档no-replay契约，确定同owner修复。
+- [x] 建可控初始化barrier，取得模型入口移除/替换/禁用/祖先撤销的真实旧红，区分fixture错误；direct同owner窗口以修复后的真实barrier矩阵及Shell调用方控制验收，未重复回退源码取旧红。
+- [x] MCP owner落实共同发送前资格检查及direct现状态参数适配，原deadline/一次派发/取消/结果保持；有效控制与失败矩阵通过（最终16pass、原MCP197pass）。
+- [x] 父核最终diff、原no-replay/replacement/cancellation回归，更新开发说明、backlog与验证记录（Shell13pass含实际endpoint控制，R1/R2修订验收）。
+- [x] strict校验、归档合入规范并完成全量/archived复查（归档前22/0；合入extension-runtime，归档后复查结果见verification.md）。

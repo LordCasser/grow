@@ -71,6 +71,39 @@ pub fn format_accepted_tool_result(
     )
 }
 
+// ── Advisory presentation (blocking = false) ────────────────────────────
+
+/// Format the tool result for an effective advisory question after the
+/// client acknowledged presentation (`Presented`).
+///
+/// The model continues on its own recommendations. The text must make the
+/// provenance unambiguous: these are Agent recommendations, the user has
+/// NOT answered, and this is not an approval or permission.
+pub fn format_presented_advisory(questions: &[Question]) -> String {
+    let lines: Vec<String> = questions
+        .iter()
+        .map(|q| {
+            let rec = q.recommended_option.as_deref().unwrap_or_default();
+            let description = q
+                .options
+                .iter()
+                .find(|o| o.label == rec)
+                .map(|o| o.description.as_str())
+                .unwrap_or_default();
+            format!(
+                "- \"{}\" recommended: \"{}\" — {}",
+                q.question, rec, description
+            )
+        })
+        .collect();
+    format!(
+        "The optional questions were shown to the user; you are continuing with your own recommendations (Agent recommendation — the user has NOT answered):\n\
+         {}\n\
+         The user may answer later as a normal user message; their reply is not attached to this tool result. These recommendations are not user approval or permission.",
+        lines.join("\n")
+    )
+}
+
 // ── Path B: Chat about this (plan mode) ─────────────────────────────────
 
 /// Format the tool result for Path B ("Chat about this" / respond-to-agent).
@@ -171,6 +204,7 @@ mod tests {
                 })
                 .collect(),
             multi_select: None,
+            recommended_option: None,
             id: None,
         }
     }

@@ -1214,6 +1214,8 @@ pub(crate) async fn run(
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
+    app.ask_user_question_allow_non_blocking =
+        config_session_bools.ask_user_question_allow_non_blocking;
     app.subagent_permission_mode = effective_config
         .as_ref()
         .and_then(|root| {
@@ -2492,6 +2494,7 @@ struct InitialConfigSessionBools {
     show_tips: Option<bool>,
     auto_update: Option<bool>,
     ask_user_question_timeout_enabled: Option<bool>,
+    ask_user_question_allow_non_blocking: Option<bool>,
 }
 
 fn load_initial_config_session_bools() -> InitialConfigSessionBools {
@@ -2502,6 +2505,11 @@ fn load_initial_config_session_bools() -> InitialConfigSessionBools {
     InitialConfigSessionBools {
         show_tips: cli_bool("show_tips"),
         auto_update: cli_bool("auto_update"),
+        ask_user_question_allow_non_blocking: root
+            .get("toolset")
+            .and_then(|t| t.get("ask_user_question"))
+            .and_then(|a| a.get("allow_non_blocking"))
+            .and_then(|v| v.as_bool()),
         ask_user_question_timeout_enabled: root
             .get("toolset")
             .and_then(|t| t.get("ask_user_question"))
@@ -3418,6 +3426,99 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn non_blocking_preference_persists_and_initial_snapshot_reloads() {
+        use crate::settings::SettingValue;
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::non_blocking_preference_persists_and_initial_snapshot_reloads"
+        )) {
+            return;
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("GROW_HOME").unwrap());
+        let path = home.join("config.toml");
+        let original = "[toolset.ask_user_question]\ntimeout_enabled = false\ntimeout_secs = 91\nfuture_option = 'preserve'\n[future_settings]\nkeep = 42\n";
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(
+            load_initial_config_session_bools().ask_user_question_allow_non_blocking,
+            None
+        );
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let writes =
+            dispatch::dispatch(Action::SetAskUserQuestionAllowNonBlocking(false), &mut app);
+        let Effect::PersistSetting { key, value, .. } = writes
+            .into_iter()
+            .find(|effect| matches!(effect, Effect::PersistSetting { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        effects::persist_setting(key, value.clone()).await.unwrap();
+        dispatch::dispatch(
+            Action::TaskComplete(TaskResult::SettingPersisted { key, value }),
+            &mut app,
+        );
+        let raw: toml::Value =
+            toml::from_str::<toml::Value>(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw["toolset"]["ask_user_question"]["allow_non_blocking"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            raw["toolset"]["ask_user_question"]["timeout_enabled"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            raw["toolset"]["ask_user_question"]["timeout_secs"].as_integer(),
+            Some(91)
+        );
+        assert_eq!(
+            raw["toolset"]["ask_user_question"]["future_option"].as_str(),
+            Some("preserve")
+        );
+        assert_eq!(raw["future_settings"]["keep"].as_integer(), Some(42));
+        let initial = load_initial_config_session_bools();
+        assert_eq!(initial.ask_user_question_allow_non_blocking, Some(false));
+        let mut restarted = crate::app::root::tests::test_app_with_agent();
+        restarted.ask_user_question_allow_non_blocking =
+            initial.ask_user_question_allow_non_blocking;
+        let snapshot = dispatch::build_pager_snapshot(&restarted);
+        assert_eq!(
+            crate::settings::current_value_for(key, &restarted.current_ui, &snapshot),
+            Some(SettingValue::Bool(false))
+        );
+
+        // A real writer failure must preserve both the previous UI preference
+        // and the unreadable raw document, rather than overwrite it with defaults.
+        let invalid = "[toolset.ask_user_question\n";
+        std::fs::write(&path, invalid).unwrap();
+        let writes = dispatch::dispatch(Action::SetAskUserQuestionAllowNonBlocking(true), &mut app);
+        let Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } = writes
+            .into_iter()
+            .find(|effect| matches!(effect, Effect::PersistSetting { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let error = effects::persist_setting(key, value)
+            .await
+            .expect_err("invalid TOML must fail");
+        dispatch::dispatch(
+            Action::TaskComplete(TaskResult::SettingPersistFailed {
+                key,
+                rollback_value,
+                error,
+            }),
+            &mut app,
+        );
+        assert_eq!(app.ask_user_question_allow_non_blocking, Some(false));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
+    }
 
     #[tokio::test]
     async fn image_first_send_reaches_acp_and_preserves_failed_request() {

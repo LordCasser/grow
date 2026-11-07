@@ -1,0 +1,11 @@
+# UI / transport review — 2026-11-06
+
+父核过worker三项判别及14回归后，追加独立只读review `01a1b024-062e-7200-ab2b-47e78bfb39cd`，覆盖真实gateway/connection、Pager问答提交、InteractionResolved、turn计时与replay清理。当前仍未复现用户“原任务完毕后迟答导致主会话卡住”。
+
+两层oneshot需分开：worker放弃ext await只丢它的receiver，gateway spawned forward仍可能持请求，Pager旧response_tx未必dead。`QuestionViewState::send_ext_response`和gateway `after_request`会吞掉send失败；但本地提交无论结果都会take_question_view、restore composer并cleanup，因此仅这个silentdrop不证明busy或卡住。`turn_paused_duration`过大也只影响显示，turn终止清零，不是调度门闩。原cancel/durable resolution通知按session+call关闭弹层的链路闭合。
+
+保留一个未证候选：如果transport/reconnect窗口丢失InteractionResolved，旧question_view可能继续拦键盘。render.rs注释与测试承认finished child可能有残留view，但这是防御场景的建模，**不能作为该race已在真实重连发生的证据**。而且用户提交旧问时当前代码会清理view，所以它本身尚不能解释“回复后”持续卡住。`begin_replay_window`已经调用clear_transport_interactions_for_replay；新问替换旧问也有取消+restore，不能为猜测另造cancel协议。
+
+最小后续判别应通过实际connect_agent_v1/connect_client_v1 duplex而非直接持test oneshot：打开阻塞问→原foreground receiver关闭/transport断开→真实resolution或replay清理→迟答→新普通prompt/问题能够继续，分别观测旧result计数、question_pending/composer、真实请求路由和canonicalTurn。分别控制replay先/后、替换问先/后；不能从任意手工drop通知推断生产会漏发，也不能把正常presentation待用户状态当deadlock。
+
+新的advisory feature另有规范和共享交接，真实晚答走普通durable输入，不能因为实现了这个需求就把本原故障宣布已修。后续Pager集成回归应同时守住此阻塞基线；目前只接受调查范围和反证，未接受候选为根因。

@@ -13580,3 +13580,743 @@ async fn timeline_suffix_query_freezes_frontier_and_does_not_clone_prior_events(
     );
     assert_eq!(h.handle.timeline_events_from(next).await.unwrap().len(), 1);
 }
+
+fn runtime_tree_test_spawn(subagent_id: &str, child_session_id: &str) -> crate::SubagentSpawnEvent {
+    crate::SubagentSpawnEvent {
+        subagent_id: subagent_id.into(),
+        child_session_id: child_session_id.into(),
+        origin_tool_call_id: Some(format!("call-{subagent_id}")),
+        security_parent_session_id: "parent-session".into(),
+        parent_step_id: None,
+        subagent_type: "task".into(),
+        description: "runtime tree snapshot test".into(),
+        prompt: format!("complete the task for {subagent_id}"),
+        execution_recipe: serde_json::json!({"task": subagent_id, "cwd": "/tmp"}),
+        context_source: crate::SubagentContextSource::New,
+        source_ref: None,
+        context_normalized: false,
+        resumed_from: None,
+        parent_prompt_id: None,
+        capability_mode: None,
+        birth_mcp_servers: Some(Default::default()),
+        permission_mode: None,
+        effective_permission_mode: None,
+        workflow_run_id: None,
+        goal_id: None,
+        goal_definition_revision: None,
+        surface_completion: true,
+        child_cwd: "/tmp".into(),
+        worktree_path: None,
+        effective_model_id: "test-model".into(),
+        model_transport_key: sampling_types::model_image_input_key(&test_config()),
+        reasoning_effort: None,
+    }
+}
+
+#[tokio::test]
+async fn runtime_tree_snapshot_preserves_canonical_facts_without_unrelated_bodies() {
+    let unrelated_body = "unrelated-history-body".repeat(32 * 1024);
+    let h = TestHarness::with_conversation(vec![ConversationItem::user(&unrelated_body)]);
+    let mut expected = Vec::new();
+    for (subagent_id, child_session_id) in [("task-a", "child-a"), ("task-b", "child-b")] {
+        expected.push(
+            h.handle
+                .record_timeline_event_durably(crate::TimelineEventKind::Subagent(
+                    crate::SubagentEvent::Spawned(Box::new(runtime_tree_test_spawn(
+                        subagent_id,
+                        child_session_id,
+                    ))),
+                ))
+                .await
+                .unwrap(),
+        );
+        h.handle
+            .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "test".into(),
+                    name: "unrelated-body".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(serde_json::json!(&unrelated_body)),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    request_runtime_suspension(&h.handle, "runtime-tree-op").await;
+    let (runtime_before, facts_before) = h.handle.runtime_tree_snapshot().await.unwrap();
+    assert_eq!(
+        runtime_before.phase,
+        crate::session_runtime::RuntimePhase::Suspending
+    );
+    assert_eq!(
+        runtime_before.operation_id.as_deref(),
+        Some("runtime-tree-op")
+    );
+    assert_eq!(
+        serde_json::to_value(&facts_before).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+
+    expected.push(
+        h.handle
+            .record_timeline_event_durably(crate::TimelineEventKind::Subagent(
+                crate::SubagentEvent::Ended(crate::SubagentTerminalEvent {
+                    subagent_id: "task-a".into(),
+                    child_session_id: "child-a".into(),
+                    outcome: crate::SubagentOutcome::Completed,
+                    duration_ms: 19,
+                    tool_calls: 1,
+                    turns: 1,
+                    tokens_used: 7,
+                    error: None,
+                    result_ref: Some(crate::TimelineRangeRef {
+                        timeline_id: "child-a".into(),
+                        first_seq: 1,
+                        last_seq: 1,
+                    }),
+                    snapshot_ref: Some("snapshot-a".into()),
+                }),
+            ))
+            .await
+            .unwrap(),
+    );
+    let (runtime, facts) = h.handle.runtime_tree_snapshot().await.unwrap();
+    let full = h.handle.timeline_events().await.unwrap();
+    let ledger_facts: Vec<_> = full
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                crate::TimelineEventKind::Subagent(
+                    crate::SubagentEvent::Spawned(_) | crate::SubagentEvent::Ended(_)
+                )
+            )
+        })
+        .collect();
+    assert_eq!(
+        serde_json::to_value(&facts).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&facts).unwrap(),
+        serde_json::to_value(&ledger_facts).unwrap()
+    );
+    assert_eq!(
+        runtime,
+        *crate::Timeline::from_events(full.clone())
+            .unwrap()
+            .runtime_lifecycle()
+    );
+    assert!(facts.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+    assert_eq!(
+        facts_before.len(),
+        2,
+        "earlier snapshot keeps its original frontier"
+    );
+    let encoded = serde_json::to_string(&facts).unwrap();
+    assert!(!encoded.contains("unrelated-history-body"));
+    assert!(encoded.len() < unrelated_body.len());
+
+    // Recovery validates the full ledger before exposing the same narrow facts.
+    let (restored, _persistence) = cold_actor_from_events(full).await;
+    let (restored_runtime, restored_facts) = restored.runtime_tree_snapshot().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(restored_facts).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    assert_eq!(restored_runtime, restored.runtime_state().await.unwrap());
+}
+
+#[tokio::test]
+async fn runtime_tree_snapshot_without_children_returns_current_runtime_and_empty_facts() {
+    let h = TestHarness::new();
+    request_runtime_suspension(&h.handle, "empty-tree-op").await;
+    let (runtime, facts) = h.handle.runtime_tree_snapshot().await.unwrap();
+    assert_eq!(runtime, h.handle.runtime_state().await.unwrap());
+    assert_eq!(runtime.operation_id.as_deref(), Some("empty-tree-op"));
+    assert!(facts.is_empty());
+}
+
+#[tokio::test]
+async fn runtime_tree_snapshot_reports_closed_owner_and_dropped_reply_as_errors() {
+    let closed = crate::handle::ChatStateHandle::noop();
+    assert_eq!(
+        closed.runtime_tree_snapshot().await.unwrap_err(),
+        "runtime tree authority is unavailable"
+    );
+
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let handle =
+        crate::handle::ChatStateHandle::new(cmd_tx, tokio_util::sync::CancellationToken::new());
+    let owner = tokio::spawn(async move {
+        let command = cmd_rx.recv().await.unwrap();
+        assert!(matches!(
+            command,
+            crate::commands::ChatStateCommand::GetRuntimeTreeSnapshot { .. }
+        ));
+        drop(command);
+    });
+    assert_eq!(
+        handle.runtime_tree_snapshot().await.unwrap_err(),
+        "runtime tree authority is unavailable"
+    );
+    owner.await.unwrap();
+}
+
+// ============================================================================
+// Committed physical User image references
+// ============================================================================
+
+#[tokio::test]
+async fn committed_user_image_paths_matches_full_history_scan_and_consumed_sources() {
+    use sampling_types::ContentPart;
+    use std::collections::BTreeSet;
+
+    let shared = "assets/images-shared/0.png";
+    let input_path = "assets/images-input/0.png";
+    let notification_path = "assets/images-notification/0.png";
+    let raw_path = "unrecognized/raw-image-path.png";
+    let body = "unrelated-user-body".repeat(32 * 1024);
+    let mut user = ConversationItem::user(format!(
+        "{body}\n<image_files>\n1. {shared}\n2. {shared}\n</image_files>"
+    ));
+    let ConversationItem::User(user_item) = &mut user else {
+        unreachable!()
+    };
+    user_item.content.push(ContentPart::Text {
+        text: format!("<image_files>\n1. {raw_path}\n</image_files>").into(),
+    });
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("<image_files>\n1. system-only\n</image_files>"),
+        user,
+        ConversationItem::assistant("<image_files>\n1. assistant-only\n</image_files>"),
+    ]);
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+            crate::ObservationEvent {
+                scope: "test".into(),
+                name: "unrelated-image-envelope".into(),
+                turn: None,
+                step: None,
+                data: Some(serde_json::json!(
+                    "<image_files>\n1. observation-only\n</image_files>"
+                )),
+            },
+        ))
+        .await
+        .unwrap();
+
+    submit_prompt_input(&h, "image-input").await;
+    allow_prompt_input_fifo(&h, "image-input", Vec::new()).await;
+    let turn = crate::TurnId(1);
+    start_user_turn_for_inputs(&h, turn, vec!["image-input".into()]).await;
+    record_durable_input_event(
+        &h,
+        crate::InputEvent::Consumed {
+            input_ids: vec!["image-input".into()],
+            turn,
+            item: ConversationItem::user(format!(
+                "<image_files>\n1. {shared}\n2. {input_path}\n</image_files>"
+            )),
+            display_echo: None,
+            skill_loads: Vec::new(),
+        },
+    )
+    .await;
+    end_turn_from_host(&h, turn).await;
+
+    let source = crate::NotificationSource::TaskCompleted {
+        task_id: "image-notification".into(),
+        task_kind: crate::NotificationTaskKind::Task,
+        owner: crate::NotificationOwner::Session,
+    };
+    let version = crate::NotificationSourceVersion::Ordinal { value: 1 };
+    let notification_body =
+        format!("<image_files>\n1. {shared}\n2. {notification_path}\n</image_files>");
+    h.handle
+        .receive_notification_durably(
+            "session-1".into(),
+            source.clone(),
+            version.clone(),
+            plan_guidance_test_payload(&notification_body),
+        )
+        .await
+        .unwrap();
+    let turn = crate::TurnId(2);
+    let mut notification_input = ConversationItem::task_completed(notification_body);
+    notification_input.set_prompt_index(h.handle.get_prompt_index().await);
+    plan_guidance_test_start_turn(&h.handle, turn).await;
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Notification(
+            crate::NotificationEvent::Consumed {
+                notification_ids: vec![
+                    crate::notification_id("session-1", &source, &version).unwrap(),
+                ],
+                turn,
+                input: Some(notification_input),
+            },
+        ))
+        .await
+        .unwrap();
+    plan_guidance_test_end_turn(&h.handle, turn).await;
+
+    let expected = BTreeSet::from([
+        shared.to_owned(),
+        input_path.to_owned(),
+        notification_path.to_owned(),
+        raw_path.to_owned(),
+    ]);
+    let paths = h.handle.committed_user_image_paths().await.unwrap();
+    assert_eq!(paths, expected);
+    assert!(serde_json::to_string(&paths).unwrap().len() < body.len());
+
+    // The old cleanup first cloned/replayed the complete ledger. Compare its
+    // physical User scan before Shell's batch grammar with the narrow query.
+    let full = h.handle.timeline_events().await.unwrap();
+    let replayed = crate::Timeline::from_events(full.clone()).unwrap();
+    let old_full_scan: BTreeSet<_> = replayed
+        .events()
+        .iter()
+        .flat_map(|event| match &event.kind {
+            crate::TimelineEventKind::Messages(message) => message.items.as_slice(),
+            crate::TimelineEventKind::Input(crate::InputEvent::Consumed { item, .. }) => {
+                std::slice::from_ref(item)
+            }
+            crate::TimelineEventKind::Notification(crate::NotificationEvent::Consumed {
+                input: Some(item),
+                ..
+            }) => std::slice::from_ref(item),
+            _ => &[],
+        })
+        .filter_map(|item| match item {
+            ConversationItem::User(user) => Some(&user.content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text),
+            _ => None,
+        })
+        .flat_map(|text| sampling_types::conversation::image_files_envelope_paths(text))
+        .collect();
+    assert_eq!(paths, old_full_scan);
+    let (restored, _persistence) = cold_actor_from_events(full).await;
+    assert_eq!(
+        restored.committed_user_image_paths().await.unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn committed_user_image_paths_retains_history_after_compaction_and_rewind() {
+    use std::collections::BTreeSet;
+
+    for compact in [true, false] {
+        let path = "assets/images-historical/0.png";
+        let h = TestHarness::new();
+        seed_test_system(&h.handle, "system").await;
+        h.handle
+            .push_user_message_durably(marked_user(
+                format!("<image_files>\n1. {path}\n</image_files>"),
+                0,
+            ))
+            .await
+            .unwrap();
+        record_prompt(&h.handle, "historical image").await;
+        if compact {
+            commit_compaction_range(&h.handle, vec![ConversationItem::user_meta("summary")]).await;
+        } else {
+            h.handle.rewind_durably(0).await.unwrap();
+        }
+        assert!(
+            h.handle
+                .get_conversation()
+                .await
+                .iter()
+                .all(|item| !item.text_content().contains(path))
+        );
+        let expected = BTreeSet::from([path.to_owned()]);
+        assert_eq!(
+            h.handle.committed_user_image_paths().await.unwrap(),
+            expected
+        );
+        let (restored, _persistence) =
+            cold_actor_from_events(h.handle.timeline_events().await.unwrap()).await;
+        assert_eq!(
+            restored.committed_user_image_paths().await.unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn committed_user_image_paths_without_references_returns_an_empty_set() {
+    let h = TestHarness::with_conversation(vec![ConversationItem::user("ordinary text")]);
+    assert!(
+        h.handle
+            .committed_user_image_paths()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let empty = TestHarness::new();
+    assert!(
+        empty
+            .handle
+            .committed_user_image_paths()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn committed_user_image_paths_reports_closed_owner_and_dropped_reply_as_errors() {
+    let closed = crate::ChatStateHandle::noop();
+    assert_eq!(
+        closed.committed_user_image_paths().await.unwrap_err(),
+        "committed user image authority is unavailable"
+    );
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let handle = crate::ChatStateHandle::new(cmd_tx, tokio_util::sync::CancellationToken::new());
+    let owner = tokio::spawn(async move {
+        let command = cmd_rx.recv().await.unwrap();
+        assert!(matches!(
+            command,
+            crate::commands::ChatStateCommand::GetCommittedUserImagePaths { .. }
+        ));
+        drop(command);
+    });
+    assert_eq!(
+        handle.committed_user_image_paths().await.unwrap_err(),
+        "committed user image authority is unavailable"
+    );
+    owner.await.unwrap();
+}
+
+// ============================================================================
+// Canonical input lifecycle query
+// ============================================================================
+
+async fn record_durable_input_event(h: &TestHarness, kind: crate::InputEvent) {
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Input(kind))
+        .await
+        .unwrap();
+}
+
+async fn submit_prompt_input(h: &TestHarness, input_id: &str) {
+    record_durable_input_event(
+        h,
+        crate::InputEvent::Submitted {
+            input_id: input_id.into(),
+            intent: crate::InputIntent::Prompt,
+            payload_ref: crate::InputPayloadRef {
+                blake3: blake3::hash(input_id.as_bytes()).to_hex().to_string(),
+                bytes: input_id.len() as u64,
+            },
+        },
+    )
+    .await;
+}
+
+async fn allow_prompt_input_fifo(h: &TestHarness, input_id: &str, supersedes: Vec<String>) {
+    let occurrence_id = format!("hook-{input_id}");
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Hook(
+            crate::HookEvent::Triggered {
+                occurrence_id: occurrence_id.clone(),
+                event: crate::HookEventType::UserPromptSubmit,
+                gate: crate::HookGateKind::Prompt,
+                cause: crate::HookCause::Input {
+                    input_id: input_id.into(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Hook(
+            crate::HookEvent::Completed {
+                occurrence_id,
+                decision: crate::HookAggregateDecision::Prompt {
+                    decision: crate::HookGateDecision::Allow,
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    record_durable_input_event(
+        h,
+        crate::InputEvent::AdmissionResolved {
+            input_id: input_id.into(),
+            decision: crate::InputAdmissionDecision::Allow,
+            route: Some(crate::InputRoute::Fifo),
+            supersedes,
+        },
+    )
+    .await;
+}
+
+async fn start_user_turn_for_inputs(h: &TestHarness, turn: crate::TurnId, input_ids: Vec<String>) {
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: format!("prompt-{}", turn.0),
+            id: turn,
+            input_ids,
+            identity: crate::TurnIdentity {
+                origin: "user".into(),
+                turn_kind: "user".into(),
+                goal_id: None,
+                goal_definition_revision: None,
+                stage_id: None,
+            },
+            model_id: "test-model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "durable prompt".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+}
+
+async fn end_turn_from_host(h: &TestHarness, turn: crate::TurnId) {
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Ended {
+            id: turn,
+            outcome: "completed".into(),
+            duration_ms: 1,
+            tool_count: 0,
+            terminal: crate::TurnTerminal {
+                source: crate::TurnTerminalSource::Host,
+                stop_reason: "end_turn".into(),
+                completion_kind: "completed".into(),
+            },
+            cancellation_category: None,
+            details: None,
+        }))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn input_state_query_reports_canonical_lifecycle_through_the_actor() {
+    let h = TestHarness::new();
+
+    // Submitted → Allowed → Consumed through one real handle.
+    submit_prompt_input(&h, "input-consume").await;
+    assert!(matches!(
+        h.handle
+            .input_state("input-consume")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::InputState::Submitted
+    ));
+    allow_prompt_input_fifo(&h, "input-consume", Vec::new()).await;
+    assert!(matches!(
+        h.handle
+            .input_state("input-consume")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::InputState::Allowed {
+            route: crate::InputRoute::Fifo
+        }
+    ));
+    let consume_turn = crate::TurnId(1);
+    start_user_turn_for_inputs(&h, consume_turn, vec!["input-consume".into()]).await;
+    record_durable_input_event(
+        &h,
+        crate::InputEvent::Consumed {
+            input_ids: vec!["input-consume".into()],
+            turn: consume_turn,
+            item: ConversationItem::user("durable prompt"),
+            display_echo: None,
+            skill_loads: Vec::new(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        h.handle
+            .input_state("input-consume")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::InputState::Consumed {
+            route: crate::InputRoute::Fifo
+        }
+    ));
+    end_turn_from_host(&h, consume_turn).await;
+
+    // A Handled terminal stays distinct from Consumed on the same projection.
+    submit_prompt_input(&h, "input-handle").await;
+    allow_prompt_input_fifo(&h, "input-handle", Vec::new()).await;
+    let handled_turn = crate::TurnId(2);
+    start_user_turn_for_inputs(&h, handled_turn, vec!["input-handle".into()]).await;
+    record_durable_input_event(
+        &h,
+        crate::InputEvent::Handled {
+            input_ids: vec!["input-handle".into()],
+            turn: handled_turn,
+        },
+    )
+    .await;
+    assert!(matches!(
+        h.handle
+            .input_state("input-handle")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::InputState::Handled {
+            route: crate::InputRoute::Fifo
+        }
+    ));
+    end_turn_from_host(&h, handled_turn).await;
+
+    // A later admission superseding an allowed input dismisses the old identity.
+    submit_prompt_input(&h, "input-old").await;
+    allow_prompt_input_fifo(&h, "input-old", Vec::new()).await;
+    submit_prompt_input(&h, "input-new").await;
+    allow_prompt_input_fifo(&h, "input-new", vec!["input-old".into()]).await;
+    assert!(matches!(
+        h.handle
+            .input_state("input-old")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::InputState::Dismissed {
+            reason: crate::InputDismissReason::RouteSuperseded
+        }
+    ));
+    assert!(matches!(
+        h.handle
+            .input_state("input-new")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::InputState::Allowed {
+            route: crate::InputRoute::Fifo
+        }
+    ));
+
+    // An identity without a durable submission is not-found, not a failure.
+    assert!(
+        h.handle
+            .input_state("input-unknown")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // The same projection survives a cold Timeline replay of the actor's events.
+    let events = h.handle.timeline_events().await.unwrap();
+    let replayed = crate::Timeline::from_events(events).unwrap();
+    assert!(matches!(
+        replayed.input_state("input-handle").unwrap().state,
+        crate::InputState::Handled {
+            route: crate::InputRoute::Fifo
+        }
+    ));
+    assert!(matches!(
+        replayed.input_state("input-old").unwrap().state,
+        crate::InputState::Dismissed {
+            reason: crate::InputDismissReason::RouteSuperseded
+        }
+    ));
+}
+
+#[tokio::test]
+async fn pending_allowed_query_inherits_replacement_slots_through_the_actor() {
+    let h = TestHarness::new();
+    for input_id in ["input-a", "input-b", "input-c"] {
+        submit_prompt_input(&h, input_id).await;
+        allow_prompt_input_fifo(&h, input_id, Vec::new()).await;
+    }
+
+    for (input_id, supersedes, expected_ids) in [
+        (
+            "input-a-edit-1",
+            "input-a",
+            ["input-a-edit-1", "input-b", "input-c"],
+        ),
+        (
+            "input-a-edit-2",
+            "input-a-edit-1",
+            ["input-a-edit-2", "input-b", "input-c"],
+        ),
+        (
+            "input-b-edit-1",
+            "input-b",
+            ["input-a-edit-2", "input-b-edit-1", "input-c"],
+        ),
+    ] {
+        submit_prompt_input(&h, input_id).await;
+        allow_prompt_input_fifo(&h, input_id, vec![supersedes.into()]).await;
+        let expected: Vec<_> = expected_ids
+            .iter()
+            .map(|id| crate::PendingAllowedInput {
+                input_id: (*id).into(),
+                intent: crate::InputIntent::Prompt,
+                payload_ref: crate::InputPayloadRef {
+                    blake3: blake3::hash(id.as_bytes()).to_hex().to_string(),
+                    bytes: id.len() as u64,
+                },
+                route: crate::InputRoute::Fifo,
+            })
+            .collect();
+        let events = h.handle.timeline_events().await.unwrap();
+        let pending = h.handle.get_pending_allowed_inputs().await.unwrap();
+        assert_eq!(pending, expected, "public actor query after {input_id}");
+        let replayed = crate::Timeline::from_events(events.clone()).unwrap();
+        assert_eq!(replayed.pending_allowed_inputs(), expected);
+        assert_eq!(
+            h.handle
+                .input_state(supersedes)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            crate::InputState::Dismissed {
+                reason: crate::InputDismissReason::RouteSuperseded,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(h.handle.timeline_events().await.unwrap()).unwrap(),
+            serde_json::to_value(events).unwrap(),
+            "pending queries must not append Submitted or Hook events"
+        );
+    }
+}
+
+#[tokio::test]
+async fn input_state_query_distinguishes_actor_failure_from_missing_identity() {
+    let (mock, _rx) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let token = tokio_util::sync::CancellationToken::new();
+    let handle = ChatStateActor::spawn(
+        vec![],
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        token.clone(),
+    );
+    token.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let error = handle
+        .input_state("input-any")
+        .await
+        .expect_err("a closed actor must surface a query failure");
+    assert!(!error.is_empty());
+}

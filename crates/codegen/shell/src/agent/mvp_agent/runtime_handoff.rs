@@ -361,10 +361,15 @@ impl MvpAgent {
         mut arguments: acp::LoadSessionRequest,
         info: &SessionInfo,
     ) -> Result<acp::LoadSessionRequest, acp::Error> {
-        if !crate::session::storage::same_workspace_directory(std::path::Path::new(&info.cwd), &arguments.cwd).await
-            .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
+        if !crate::session::storage::same_workspace_directory(
+            std::path::Path::new(&info.cwd),
+            &arguments.cwd,
+        )
+        .await
+        .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
         {
-            return Err(acp::Error::invalid_params().data("Session workspace differs from its recorded directory."));
+            return Err(acp::Error::invalid_params()
+                .data("Session workspace differs from its recorded directory."));
         }
         arguments.cwd = std::path::PathBuf::from(&info.cwd);
         Ok(arguments)
@@ -380,9 +385,13 @@ impl MvpAgent {
         })
         .await
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-        let Some(summary) = summary else { return Ok(arguments); };
+        let Some(summary) = summary else {
+            return Ok(arguments);
+        };
         if summary.parent_session_id.is_none() {
-            return self.resolve_original_workspace_alias(arguments, &summary.info).await;
+            return self
+                .resolve_original_workspace_alias(arguments, &summary.info)
+                .await;
         }
         let (child, observer) = crate::session::persistence::load_light(&summary.info, None, false)
             .await
@@ -390,13 +399,17 @@ impl MvpAgent {
         drop(observer);
         let runtime = child.timeline.runtime_lifecycle();
         if runtime.phase == RuntimePhase::Running {
-            return self.resolve_original_workspace_alias(arguments, &summary.info).await;
+            return self
+                .resolve_original_workspace_alias(arguments, &summary.info)
+                .await;
         }
         let root_id = runtime.root_session_id.clone().ok_or_else(|| {
             acp::Error::internal_error().data("suspended child has no lifecycle root")
         })?;
         if root_id == arguments.session_id.0.as_ref() {
-            return self.resolve_original_workspace_alias(arguments, &summary.info).await;
+            return self
+                .resolve_original_workspace_alias(arguments, &summary.info)
+                .await;
         }
         let root_lookup = root_id.clone();
         let root_summary = tokio::task::spawn_blocking(move || {
@@ -449,18 +462,15 @@ impl MvpAgent {
     ) -> Result<
         (
             chat_state::session_runtime::RuntimeLifecycle,
-            Vec<chat_state::TimelineEvent>,
+            CanonicalChildFacts,
         ),
         String,
     > {
         if !handle.cmd_tx.is_closed() {
-            let runtime = handle.chat_state_handle.runtime_state().await?;
-            let events = handle
-                .chat_state_handle
-                .timeline_events()
-                .await
-                .ok_or("runtime Timeline unavailable")?;
-            return Ok((runtime, events));
+            let (runtime, events) = handle.chat_state_handle.runtime_tree_snapshot().await?;
+            // The canonical owner already validated this source. This is the
+            // complete Spawned/Ended projection, not a standalone ledger.
+            return Ok((runtime, CanonicalChildFacts::scan(&events)?));
         }
         let (loaded, observer) = crate::session::persistence::load_light(
             &handle.info,
@@ -471,7 +481,7 @@ impl MvpAgent {
         .map_err(|error| error.to_string())?;
         let snapshot = (
             loaded.timeline.runtime_lifecycle().clone(),
-            loaded.timeline.events().to_vec(),
+            CanonicalChildFacts::from_validated_timeline(&loaded.timeline)?,
         );
         drop(observer);
         Ok(snapshot)
@@ -509,7 +519,7 @@ impl MvpAgent {
     ) -> Result<
         (
             chat_state::session_runtime::RuntimeLifecycle,
-            Vec<chat_state::TimelineEvent>,
+            CanonicalChildFacts,
         ),
         String,
     > {
@@ -696,7 +706,10 @@ impl MvpAgent {
             )
             .map_err(|error| format!("original child {}: {error}", spawn.subagent_id))?;
             if spawn.birth_mcp_servers.is_none() {
-                return Err(format!("original child {} is missing birth MCP membership", spawn.subagent_id));
+                return Err(format!(
+                    "original child {} is missing birth MCP membership",
+                    spawn.subagent_id
+                ));
             }
             let recipe = SubagentExecutionRecipe::from_value(&spawn.execution_recipe)
                 .map_err(|error| error.to_string())?;
@@ -1079,6 +1092,7 @@ impl MvpAgent {
         root: &acp::SessionId,
         deadline: tokio::time::Instant,
     ) -> Result<(String, Vec<RuntimeNodeRef>), String> {
+        let started = std::time::Instant::now();
         let root = root.clone();
         let root_handle = self
             .control_session_handle(&root)
@@ -1087,10 +1101,11 @@ impl MvpAgent {
             .runtime_suspend
             .store(true, std::sync::atomic::Ordering::Release);
         let (runtime, initial_facts) = self.runtime_snapshot_before(&root_handle, deadline).await?;
-        let initial_open_ids = CanonicalChildFacts::read(initial_facts)?
+        let initial_open_ids = initial_facts
             .open()
             .map(|(task_id, _)| task_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
+        tracing::info!(root_session_id = %root, phase = "initial_facts", elapsed_ms = started.elapsed().as_millis() as u64, "tree suspension progress");
         if runtime.phase == RuntimePhase::Restoring {
             return Err("tree restoration still owns this runtime".into());
         }
@@ -1133,8 +1148,8 @@ impl MvpAgent {
             .await
             .map_err(|_| "child initialization is still settling".to_string())?;
         };
-        let (_, facts) = self.runtime_snapshot_before(&root_handle, deadline).await?;
-        let canonical = CanonicalChildFacts::read(facts)?;
+        let (_, canonical) = self.runtime_snapshot_before(&root_handle, deadline).await?;
+        tracing::info!(root_session_id = %root, phase = "frozen_facts", elapsed_ms = started.elapsed().as_millis() as u64, "tree suspension progress");
         let frozen_ids = frozen_children
             .iter()
             .map(|child| child.task_id.clone())
@@ -1346,12 +1361,13 @@ impl MvpAgent {
             .await
             .map_err(|_| "child writers are still retiring".to_string())?;
         }
+        tracing::info!(root_session_id = %root, phase = "children_retired", elapsed_ms = started.elapsed().as_millis() as u64, "tree suspension progress");
         // Child retirement drains finalization and receipt writes. Re-read the
         // root facts only after that owner confirms completion, so a terminal
         // committed during the checkpoint race is reflected in the barrier.
-        let (latest_runtime, latest_events) =
+        let (latest_runtime, latest_facts) =
             self.runtime_snapshot_before(&root_handle, deadline).await?;
-        let latest_facts = CanonicalChildFacts::read(latest_events)?;
+        tracing::info!(root_session_id = %root, phase = "latest_facts", elapsed_ms = started.elapsed().as_millis() as u64, "tree suspension progress");
         let latest_terminal_ids = self
             .verify_ended_children(
                 &root_handle,
@@ -1495,6 +1511,877 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "real long-history ACP exit measurement; runs in an isolated home"]
+    fn long_history_exit_through_acp() {
+        const TEST: &str =
+            "agent::mvp_agent::runtime_handoff::tests::long_history_exit_through_acp";
+        const HOME_ENV: &str = "GROW_TEST_EXIT_HISTORY_HOME";
+        let Ok(home) = std::env::var(HOME_ENV) else {
+            let temp = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    TEST,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("HOME", temp.path())
+                .env("GROW_HOME", temp.path())
+                .env(HOME_ENV, temp.path())
+                .output()
+                .unwrap();
+            println!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "long-history subprocess failed");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        };
+        super::super::tests::run_local_for_bridge_test(|| async move {
+            use acp_transport::AcpAgentHandler as _;
+            let _ = tracing_subscriber::fmt()
+                .with_test_writer()
+                .with_env_filter("shell::agent::mvp_agent=info,shell::session=info")
+                .try_init();
+            let cwd = std::path::Path::new(&home).join("workspace");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let raw: toml::Value = toml::from_str(
+                r#"
+[models]
+default = "test/default"
+[provider.test]
+api_backend = "chat_completions"
+[provider.test.options]
+base_url = "http://127.0.0.1:9/v1"
+api_key = "test-only"
+[provider.test.models.default]
+context_window = 128000
+"#,
+            )
+            .unwrap();
+            let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+            cfg.default_model_override = None;
+            cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::task::spawn_local(async move {
+                while let Some(message) = rx.recv().await {
+                    match message {
+                        acp_transport::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        acp_transport::AcpClientMessage::ExtNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            let agent = MvpAgent::new(GatewaySender::new(tx), &cfg).unwrap();
+            agent.initialize(acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(
+                serde_json::json!({"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true}}).as_object().cloned()
+            )).await.unwrap();
+            agent.set_auth_method(acp::AuthMethodId::new("provider.api_key"));
+            let sid = agent
+                .new_session(acp::NewSessionRequest::new(cwd))
+                .await
+                .unwrap()
+                .session_id;
+            let handle = agent.control_session_handle(&sid).unwrap();
+            let count = std::env::var("GROW_TEST_EXIT_HISTORY_EVENTS")
+                .map(|value| value.parse::<usize>().unwrap())
+                .unwrap_or(8_000);
+            let payload = "x".repeat(4096);
+            let setup = std::time::Instant::now();
+            for _ in 0..count {
+                handle
+                    .chat_state_handle
+                    .push_user_message(sampling_types::ConversationItem::user(&payload));
+            }
+            // Same mailbox: this durable barrier follows all ordinary history
+            // appends, so fixture setup cannot be mistaken for exit failure.
+            handle
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Observation(
+                    chat_state::ObservationEvent {
+                        scope: "exit_history_fixture".into(),
+                        name: "ready".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    },
+                ))
+                .await
+                .unwrap();
+            let events = handle.chat_state_handle.timeline_events().await.unwrap();
+            let bytes = serde_json::to_vec(&events).unwrap().len();
+            let event_count = events.len();
+            assert!(
+                event_count >= count,
+                "all history appends must reach the canonical owner"
+            );
+            drop(events);
+            println!(
+                "exit_history ready input_events={count} canonical_events={event_count} serialized_bytes={bytes} setup_ms={}",
+                setup.elapsed().as_millis()
+            );
+            let started = std::time::Instant::now();
+            let response = agent
+                .ext_method(acp::ExtRequest::new(
+                    "grow/session/suspend_for_exit",
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({"exit_id":uuid::Uuid::now_v7().to_string()}),
+                    )
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let elapsed = started.elapsed();
+            let result: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
+            println!(
+                "exit_history result={result} elapsed_ms={} deadline_ms=5000",
+                elapsed.as_millis()
+            );
+            assert_eq!(
+                result["status"], "suspended",
+                "actual five-second exit remained unconfirmed: {result}"
+            );
+            assert!(
+                agent.control_session_handle(&sid).is_none(),
+                "actor must retire"
+            );
+            assert!(
+                !agent.session_threads.borrow().contains_key(&sid),
+                "writer must retire"
+            );
+            let (loaded, observer) =
+                crate::session::persistence::load_light(&handle.info, None, false)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                loaded.timeline.runtime_lifecycle().phase,
+                RuntimePhase::Suspended
+            );
+            assert_eq!(loaded.timeline.runtime_lifecycle().tree.len(), 1);
+            assert!(loaded.timeline.events().len() > event_count);
+            drop(observer);
+            assert!(handle.cmd_tx.is_closed());
+            let (cold_runtime, cold_facts) = agent.runtime_snapshot(&handle).await.unwrap();
+            assert_eq!(cold_runtime, *loaded.timeline.runtime_lifecycle());
+            assert!(cold_facts.spawned.is_empty());
+            // The disposable session has no remaining writer. Even this
+            // known-handle branch must validate fresh storage on every read.
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(crate::session::persistence::session_dir(&handle.info).join("timeline.jsonl"))
+                .unwrap()
+                .write_all(b"not-a-json-record\n")
+                .unwrap();
+            assert!(agent.runtime_snapshot(&handle).await.is_err());
+        });
+    }
+
+    fn complex_exit_history(
+        session_id: &str,
+        exchanges: usize,
+        result_bytes: usize,
+    ) -> (chat_state::Timeline, Vec<chat_state::SidebandTimeline>) {
+        use chat_state::{
+            MessageCause, MessageEvent, RequestEvent, StepEvent, TimelineEventKind as K, TurnEvent,
+        };
+        use sampling_types::ConversationItem;
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .append(
+                ConversationItem::system("complex exit canonical fixture"),
+                MessageCause::Seed,
+            )
+            .unwrap();
+        for index in 0..exchanges {
+            let turn = chat_state::TurnId(index as u64 + 1);
+            let step = chat_state::StepId { turn, index: 0 };
+            let request = format!("complex-request-{index}");
+            let call = format!("complex-call-{index}");
+            timeline
+                .record(K::Turn(TurnEvent::Started {
+                    id: turn,
+                    prompt_id: format!("complex-prompt-{index}"),
+                    input_ids: vec![],
+                    identity: chat_state::TurnIdentity {
+                        origin: "user".into(),
+                        turn_kind: "internal".into(),
+                        goal_id: None,
+                        goal_definition_revision: None,
+                        stage_id: None,
+                    },
+                    model_id: "test/default".into(),
+                    input_message_count: timeline.surface_len(),
+                    prompt_index: index,
+                    prompt_text: format!("fixture task {index}"),
+                    input_kind: chat_state::TurnInputKind::Prompt,
+                    redirect_kind: None,
+                }))
+                .unwrap();
+            timeline
+                .append(
+                    ConversationItem::user(format!("fixture task {index}")),
+                    MessageCause::User,
+                )
+                .unwrap();
+            timeline
+                .record(K::Step(StepEvent::Started { id: step }))
+                .unwrap();
+            timeline
+                .record(K::Request(RequestEvent::Started {
+                    id: request.clone(),
+                    turn,
+                    step,
+                    model_id: "test/default".into(),
+                    input_message_count: timeline.surface_len(),
+                    tool_count: 1,
+                }))
+                .unwrap();
+            timeline
+                .record(K::Request(RequestEvent::Completed {
+                    id: request.clone(),
+                    duration_ms: 1,
+                    time_to_first_token_ms: None,
+                    usage: Default::default(),
+                    response_message_count: 1,
+                    attempt: 1,
+                    provider_terminal: None,
+                }))
+                .unwrap();
+            timeline
+                .record(K::Messages(MessageEvent {
+                    cause: MessageCause::Assistant,
+                    items: vec![ConversationItem::assistant_tool_calls(vec![
+                        sampling_types::ToolCall {
+                            id: call.clone().into(),
+                            name: "read_file".into(),
+                            arguments: "{\"path\":\"fixture.txt\"}".into(),
+                        },
+                    ])],
+                    surface: chat_state::SurfaceOp::Append,
+                    response_admission: Some(chat_state::ResponseAdmission {
+                        identity: chat_state::ResponseAdmissionIdentity {
+                            request_id: request,
+                            attempt: 1,
+                        },
+                        quarantined_tool_exchanges: 0,
+                    }),
+                }))
+                .unwrap();
+            timeline
+                .append(
+                    ConversationItem::tool_result(
+                        call,
+                        format!("fixture result {index}\n{}", "x".repeat(result_bytes)),
+                    ),
+                    MessageCause::ToolResult,
+                )
+                .unwrap();
+            timeline
+                .record(K::Step(StepEvent::Ended {
+                    id: step,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            timeline
+                .record(K::Turn(TurnEvent::Ended {
+                    id: turn,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                    tool_count: 1,
+                    terminal: chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
+                        stop_reason: "end_turn".into(),
+                        completion_kind: "completed".into(),
+                    },
+                    cancellation_category: None,
+                    details: None,
+                }))
+                .unwrap();
+        }
+        // Genuine duplicate-result repair: retain every original append and
+        // record the repaired Surface as a new canonical replacement fact.
+        for _ in 0..17 {
+            let duplicate = timeline.surface().last().unwrap().clone();
+            assert!(matches!(duplicate, ConversationItem::ToolResult(_)));
+            timeline
+                .append(duplicate, MessageCause::ToolResult)
+                .unwrap();
+            let mut repaired = timeline.surface().to_vec();
+            sampling_types::dedup_duplicate_tool_results(&mut repaired);
+            assert_eq!(repaired.len() + 1, timeline.surface_len());
+            timeline
+                .replace_all(repaired, MessageCause::IntegrityRepair)
+                .unwrap();
+        }
+        // All summary evidence is generated in this disposable fixture. No
+        // external root, child tree, or provider is consulted.
+        let mut sidebands = Vec::new();
+        for index in 0..31 {
+            let id = format!("fixture-compaction-{index}");
+            timeline
+                .record(K::Compaction(chat_state::CompactionEvent::Started {
+                    id: id.clone(),
+                    mode: chat_state::CompactionMode::Foreground,
+                    source_items: 3,
+                    prompt_index: exchanges - 1,
+                }))
+                .unwrap();
+            let input_ref = chat_state::TimelineRangeRef {
+                timeline_id: session_id.into(),
+                first_seq: 0,
+                last_seq: timeline.next_seq().get() - 1,
+            };
+            let sideband_id = uuid::Uuid::now_v7().to_string();
+            timeline
+                .record(K::Sideband(chat_state::SidebandSpawnEvent {
+                    sideband_id: sideband_id.clone(),
+                    purpose: chat_state::SidebandPurpose::CompactionSummary,
+                    source_refs: vec![input_ref.clone()],
+                }))
+                .unwrap();
+            let raw_output = format!("fixture compacted exchange {index}");
+            let mut sideband = chat_state::SidebandTimeline::new(sideband_id.clone()).unwrap();
+            for kind in [
+                chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
+                    purpose: chat_state::SidebandPurpose::CompactionSummary,
+                    prompt: "summarize the fixture exchange".into(),
+                    source_refs: vec![input_ref.clone()],
+                    budget_policy: chat_state::SidebandBudgetPolicy {
+                        max_attempts: 1,
+                        max_input_tokens_per_attempt: 1,
+                        max_output_tokens_per_attempt: Some(1),
+                    },
+                    route: chat_state::SidebandRoute {
+                        model: "test".into(),
+                        backend: sampling_types::ApiBackend::ChatCompletions,
+                    },
+                    initiator_ref: format!("t:{session_id}/sideband:{sideband_id}"),
+                    executor: "main".into(),
+                    output_schema: None,
+                }),
+                chat_state::SidebandEventKind::Attempt(chat_state::SidebandAttempt {
+                    attempt_no: 1,
+                    input_refs: vec![input_ref.clone()],
+                    assembly_manifest: chat_state::SidebandAssemblyManifest {
+                        strategy: "all-sources".into(),
+                        strategy_version: 1,
+                        source_revision: Some(1),
+                        context_surface_ids: vec![],
+                        selected_surface_ids: vec![],
+                        materialized_input_tokens: 1,
+                        max_output_tokens: Some(1),
+                    },
+                    feedback: None,
+                }),
+                chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
+                    raw_output: raw_output.clone(),
+                    structured_output: None,
+                    usage: Default::default(),
+                    finish: "stop".into(),
+                    source_event_seqs: [0, 1],
+                    evidence_refs: vec![],
+                }),
+                chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Completed,
+                    error: None,
+                }),
+            ] {
+                let event = sideband.prepare(kind).unwrap();
+                sideband.accept(event).unwrap();
+            }
+            let start = if index == 0 { 1 } else { 2 };
+            let ids = timeline.surface_ids()[start..start + 3].to_vec();
+            let target = chat_state::SurfaceRange {
+                start: ids[0],
+                end: ids[2],
+                shadowed: ids,
+            };
+            timeline
+                .record(K::Compaction(chat_state::CompactionEvent::Summary {
+                    id: id.clone(),
+                    input_ref,
+                    result_ref: chat_state::TimelineRangeRef {
+                        timeline_id: sideband_id,
+                        first_seq: 2,
+                        last_seq: 2,
+                    },
+                    target: target.clone(),
+                    source_tokens: 1,
+                    summary_chars: raw_output.chars().count(),
+                }))
+                .unwrap();
+            timeline
+                .replace_compaction_range(
+                    target,
+                    vec![ConversationItem::user_meta(
+                        compaction::format_compact_summary_content(&raw_output),
+                    )],
+                )
+                .unwrap();
+            timeline
+                .record(K::Compaction(chat_state::CompactionEvent::Completed {
+                    id,
+                    source_items: 3,
+                    result_items: 1,
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            sidebands.push(sideband);
+        }
+        (timeline, sidebands)
+    }
+
+    #[test]
+    #[ignore = "real complex canonical history load and five-second ACP exit"]
+    fn complex_history_exit_through_acp() {
+        const TEST: &str =
+            "agent::mvp_agent::runtime_handoff::tests::complex_history_exit_through_acp";
+        const HOME_ENV: &str = "GROW_TEST_COMPLEX_EXIT_HOME";
+        let Ok(home) = std::env::var(HOME_ENV) else {
+            let temp = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    TEST,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("HOME", temp.path())
+                .env("GROW_HOME", temp.path())
+                .env(HOME_ENV, temp.path())
+                .output()
+                .unwrap();
+            println!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "complex-history subprocess failed");
+            return;
+        };
+        super::super::tests::run_local_for_bridge_test(|| async move {
+            use crate::session::history::{ResponseAnchor, encode_domain};
+            use acp_transport::AcpAgentHandler as _;
+            use sha2::{Digest, Sha256};
+            use std::io::Write as _;
+            let _ = tracing_subscriber::fmt()
+                .with_test_writer()
+                .with_env_filter("shell::agent::mvp_agent=info,shell::session=info")
+                .try_init();
+            let home = std::path::PathBuf::from(home);
+            assert!(
+                home.canonicalize()
+                    .unwrap()
+                    .starts_with(std::path::Path::new("/tmp").canonicalize().unwrap())
+                    || std::env::var(HOME_ENV).unwrap().contains("/var/folders/")
+            );
+            let cwd = home.join("workspace");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let info = SessionInfo {
+                id: acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
+                cwd: cwd.canonicalize().unwrap().to_string_lossy().into_owned(),
+            };
+            let config_text = r#"
+[models]
+default = "test/default"
+[provider.test]
+api_backend = "chat_completions"
+[provider.test.options]
+base_url = "http://127.0.0.1:9/v1"
+api_key = "test-only"
+[provider.test.models.default]
+context_window = 128000
+"#;
+            std::fs::write(home.join("config.toml"), config_text).unwrap();
+            let mut cfg = crate::agent::config::Config::new_from_toml_cfg(
+                &toml::from_str(config_text).unwrap(),
+            )
+            .unwrap();
+            cfg.default_model_override = None;
+            cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
+            let exchanges = std::env::var("GROW_TEST_COMPLEX_EXCHANGES")
+                .map(|v| v.parse::<usize>().unwrap())
+                .unwrap_or(256);
+            let result_bytes = std::env::var("GROW_TEST_COMPLEX_RESULT_BYTES")
+                .map(|v| v.parse::<usize>().unwrap())
+                .unwrap_or(65536);
+            assert!(exchanges >= 32);
+            let started = std::time::Instant::now();
+            let (timeline, sidebands) =
+                complex_exit_history(info.id.0.as_ref(), exchanges, result_bytes);
+            let source_events = timeline.events().len();
+            let build_ms = started.elapsed().as_millis();
+            let started = std::time::Instant::now();
+            let old_facts = CanonicalChildFacts::read(timeline.events().to_vec()).unwrap();
+            let old_elapsed = started.elapsed();
+            assert!(old_facts.spawned.is_empty());
+            println!(
+                "complex_exit build_ms={build_ms} exchanges={exchanges} result_bytes={result_bytes} source_events={source_events} old_copy_replay_ms={} deadline_ms=5000 old_budget_exhausted={}",
+                old_elapsed.as_millis(),
+                old_elapsed >= std::time::Duration::from_secs(5)
+            );
+            let storage =
+                crate::session::storage::jsonl::JsonlStorageAdapter::with_root(home.clone());
+            storage
+                .init_session(&info, crate::agent::models::ModelId::new("test/default"))
+                .await
+                .unwrap();
+            for sideband in &sidebands {
+                for event in sideband.events() {
+                    storage
+                        .append_sideband_event_durable(&info, event)
+                        .await
+                        .unwrap();
+                }
+            }
+            drop(sidebands);
+            drop(storage);
+            let path = crate::session::persistence::session_dir(&info).join("timeline.jsonl");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                0,
+                "only initialize this disposable new source"
+            );
+            let mut file = std::io::BufWriter::new(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap(),
+            );
+            let mut hash = Sha256::new();
+            let mut source_bytes = 0usize;
+            for (position, event) in timeline.events().iter().enumerate() {
+                let anchor = event
+                    .messages()
+                    .and_then(|message| message.response_admission.as_ref())
+                    .map(|_| ResponseAnchor::Admission);
+                let record = encode_domain(
+                    position as u64,
+                    &serde_json::value::to_raw_value(event).unwrap(),
+                    anchor,
+                )
+                .unwrap();
+                hash.update(&record);
+                file.write_all(&record).unwrap();
+                source_bytes += record.len();
+            }
+            file.flush().unwrap();
+            file.get_ref().sync_all().unwrap();
+            drop(file);
+            let source_hash = format!("{:x}", hash.finalize());
+            std::fs::write(home.join("complex-exit-fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({"sessionId":info.id.0.as_ref(),"cwd":info.cwd,"timeline":path,"sourceBytes":source_bytes,"sourceEvents":source_events,"sha256":source_hash,"oldCopyReplayMs":old_elapsed.as_millis()})).unwrap()).unwrap();
+            println!(
+                "complex_exit fixture={} source_bytes={source_bytes} source_hash={source_hash}",
+                home.join("complex-exit-fixture.json").display()
+            );
+            drop(timeline);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::task::spawn_local(async move {
+                while let Some(message) = rx.recv().await {
+                    match message {
+                        acp_transport::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        acp_transport::AcpClientMessage::ExtNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            let agent = MvpAgent::new(GatewaySender::new(tx), &cfg).unwrap();
+            agent.initialize(acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(serde_json::json!({"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true}}).as_object().cloned())).await.unwrap();
+            agent.set_auth_method(acp::AuthMethodId::new("provider.api_key"));
+            let started = std::time::Instant::now();
+            agent
+                .load_session(acp::LoadSessionRequest::new(
+                    info.id.clone(),
+                    std::path::PathBuf::from(&info.cwd),
+                ))
+                .await
+                .unwrap();
+            println!(
+                "complex_exit real_load_ms={}",
+                started.elapsed().as_millis()
+            );
+            let started = std::time::Instant::now();
+            let response = agent
+                .ext_method(acp::ExtRequest::new(
+                    "grow/session/suspend_for_exit",
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({"exit_id":uuid::Uuid::now_v7().to_string()}),
+                    )
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
+            println!(
+                "complex_exit actual_acp_result={result} elapsed_ms={} deadline_ms=5000",
+                started.elapsed().as_millis()
+            );
+            assert_eq!(
+                result["status"], "suspended",
+                "actual complex-history exit unconfirmed: {result}"
+            );
+            assert!(agent.control_session_handle(&info.id).is_none());
+            assert!(!agent.session_threads.borrow().contains_key(&info.id));
+            // Verify immutable original prefix and the actual durable tree.
+            let mut file = std::fs::File::open(&path).unwrap();
+            use std::io::Read as _;
+            let mut prefix = Sha256::new();
+            let mut remaining = source_bytes;
+            let mut buffer = [0u8; 65536];
+            while remaining > 0 {
+                let limit = remaining.min(buffer.len());
+                let count = file.read(&mut buffer[..limit]).unwrap();
+                assert!(
+                    count > 0,
+                    "the immutable source prefix must remain complete"
+                );
+                prefix.update(&buffer[..count]);
+                remaining -= count;
+            }
+            assert_eq!(format!("{:x}", prefix.finalize()), source_hash);
+            let started = std::time::Instant::now();
+            let (loaded, observer) = crate::session::persistence::load_light(&info, None, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                loaded.timeline.runtime_lifecycle().phase,
+                RuntimePhase::Suspended
+            );
+            assert_eq!(loaded.timeline.runtime_lifecycle().tree.len(), 1);
+            assert!(loaded.timeline.events().len() > source_events);
+            drop(observer);
+            println!(
+                "complex_exit cold_validation_ms={} source_prefix_unchanged=true writers_retired=true",
+                started.elapsed().as_millis()
+            );
+            // B verifies the real exit chain; A separately proves the field
+            // ledger exhausts the old five-second budget. Keep B's old timing
+            // as a measured control without making it a product assertion.
+        });
+    }
+
+    #[test]
+    #[ignore = "real validated owner deadline measurement; requires pinned /tmp field ledger"]
+    fn validated_owner_snapshot_deadline_probe() {
+        super::super::tests::run_local_for_bridge_test(|| async {
+            use crate::session::history::{JournalFact, decode_record};
+            let path =
+                std::path::PathBuf::from(std::env::var("GROW_TEST_EXIT_TIMELINE_COPY").unwrap());
+            assert!(
+                path.canonicalize()
+                    .unwrap()
+                    .starts_with(std::path::Path::new("/tmp").canonicalize().unwrap())
+            );
+            let setup = std::time::Instant::now();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(bytes.ends_with(b"\n"));
+            let events = bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| match decode_record(line).unwrap().fact {
+                    JournalFact::Domain { event, .. } => Some(event),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            drop(bytes);
+            let timeline = chat_state::Timeline::from_events(events).unwrap();
+            let source_events = timeline.events().len();
+            println!(
+                "owner_probe setup_decode_validate_ms={} source_events={source_events}",
+                setup.elapsed().as_millis()
+            );
+            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let config = serde_json::from_value(serde_json::json!({"base_url":"http://127.0.0.1:9", "model":"test", "context_window":256000})).unwrap();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let owner_started = std::time::Instant::now();
+            let chat = chat_state::ChatStateActor::spawn_from_validated_timeline(
+                timeline,
+                config,
+                None,
+                Box::new(chat_state::NullTimelinePersistence),
+                event_tx,
+                cancel.clone(),
+            )
+            .await
+            .unwrap();
+            chat.runtime_state().await.unwrap();
+            println!(
+                "owner_probe owner_ready_ms={}",
+                owner_started.elapsed().as_millis()
+            );
+            let agent = super::super::tests::build_minimal_agent_for_tests();
+            let (mut handle, _commands) =
+                super::super::tests::make_test_handle_with_receiver("test", None);
+            handle.chat_state_handle = chat.clone();
+            assert!(!handle.cmd_tx.is_closed());
+            let budget = std::time::Duration::from_secs(5);
+            let old_started = std::time::Instant::now();
+            let old_deadline = tokio::time::Instant::now() + budget;
+            // Exact old split: timeout enclosed owner queries; the caller
+            // synchronously reconstructed facts after that timeout returned.
+            let (old_runtime, old_events) = tokio::time::timeout_at(old_deadline, async {
+                let runtime = chat.runtime_state().await?;
+                let events = chat
+                    .timeline_events()
+                    .await
+                    .ok_or("runtime Timeline unavailable")?;
+                Ok::<_, String>((runtime, events))
+            })
+            .await
+            .expect("old canonical query must actually complete")
+            .unwrap();
+            let query_ms = old_started.elapsed().as_millis();
+            let replay_started = std::time::Instant::now();
+            let old = CanonicalChildFacts::read(old_events).unwrap();
+            let old_elapsed = old_started.elapsed();
+            let old_expired = tokio::time::Instant::now() >= old_deadline;
+            println!(
+                "owner_probe old_return=ok query_ms={query_ms} replay_ms={} total_ms={} deadline_ms=5000 deadline_expired={old_expired}",
+                replay_started.elapsed().as_millis(),
+                old_elapsed.as_millis()
+            );
+            assert!(
+                old_expired && old_elapsed >= budget,
+                "field ledger must reproduce old synchronous budget exhaustion"
+            );
+            // Tokio cannot preempt synchronous replay: old_return was Ok, but
+            // the following suspension stage inherits an expired deadline.
+            let new_started = std::time::Instant::now();
+            let new_deadline = tokio::time::Instant::now() + budget;
+            let (new_runtime, new) = agent
+                .runtime_snapshot_before(&handle, new_deadline)
+                .await
+                .unwrap();
+            let new_elapsed = new_started.elapsed();
+            println!(
+                "owner_probe new_return=ok total_us={} deadline_ms=5000 deadline_expired={} spawned={} ended={}",
+                new_elapsed.as_micros(),
+                tokio::time::Instant::now() >= new_deadline,
+                new.spawned.len(),
+                new.ended.len()
+            );
+            assert_eq!(old_runtime, new_runtime);
+            assert!(old == new);
+            assert!(new_elapsed < budget && tokio::time::Instant::now() < new_deadline);
+            cancel.cancel();
+        });
+    }
+
+    #[test]
+    #[ignore = "read-only fixed-prefix field ledger timing; requires /tmp copy"]
+    fn fixed_prefix_child_facts_probe() {
+        use crate::session::history::{JournalFact, decode_record};
+        use sha2::{Digest, Sha256};
+        let path = std::path::PathBuf::from(
+            std::env::var("GROW_TEST_EXIT_TIMELINE_COPY")
+                .expect("set GROW_TEST_EXIT_TIMELINE_COPY to the pinned /tmp copy"),
+        );
+        assert!(
+            path.canonicalize()
+                .unwrap()
+                .starts_with(std::path::Path::new("/tmp").canonicalize().unwrap()),
+            "probe only accepts a disposable /tmp copy"
+        );
+        let started = std::time::Instant::now();
+        let bytes = std::fs::read(&path).unwrap();
+        let read_ms = started.elapsed().as_millis();
+        assert!(
+            bytes.ends_with(b"\n"),
+            "fixed prefix must end at a complete physical record"
+        );
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let started = std::time::Instant::now();
+        let mut events = Vec::new();
+        let mut physical_records = 0usize;
+        let mut previous = None;
+        let mut replacements = 0usize;
+        let mut causes = std::collections::BTreeMap::<String, usize>::new();
+        for line in bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let record = decode_record(line).unwrap();
+            if let Some(previous) = previous {
+                assert_eq!(record.seq, previous + 1);
+            }
+            previous = Some(record.seq);
+            physical_records += 1;
+            if let JournalFact::Domain { event, .. } = record.fact {
+                if let chat_state::TimelineEventKind::Messages(message) = &event.kind {
+                    *causes.entry(format!("{:?}", message.cause)).or_default() += 1;
+                    replacements += usize::from(matches!(
+                        message.surface,
+                        chat_state::SurfaceOp::Replace { .. }
+                    ));
+                }
+                events.push(event);
+            }
+        }
+        let decode_ms = started.elapsed().as_millis();
+        println!(
+            "field_probe path={} bytes={} sha256={hash} complete_newline=true physical_records={physical_records} last_physical_seq={previous:?} domain_events={} last_domain_seq={:?} replacements={replacements} causes={causes:?} read_ms={read_ms} decode_ms={decode_ms}",
+            path.display(),
+            bytes.len(),
+            events.len(),
+            events.last().map(|event| event.seq.get())
+        );
+        drop(bytes);
+        let started = std::time::Instant::now();
+        let timeline = chat_state::Timeline::from_events(events).unwrap();
+        println!(
+            "field_probe first_full_validation_ms={}",
+            started.elapsed().as_millis()
+        );
+        let started = std::time::Instant::now();
+        let full = timeline.events().to_vec();
+        let full_copy_us = started.elapsed().as_micros();
+        let replay_started = std::time::Instant::now();
+        let old = CanonicalChildFacts::read(full).unwrap();
+        println!(
+            "field_probe old_full_copy_us={full_copy_us} old_replay_us={} old_total_us={}",
+            replay_started.elapsed().as_micros(),
+            started.elapsed().as_micros()
+        );
+        let started = std::time::Instant::now();
+        let projection = timeline
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Spawned(_) | chat_state::SubagentEvent::Ended(_)
+                    )
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let new = CanonicalChildFacts::scan(&projection).unwrap();
+        let narrow_us = started.elapsed().as_micros();
+        assert!(
+            old == new,
+            "full replay and validated projection must have identical child facts"
+        );
+        println!(
+            "field_probe narrow_filter_scan_us={narrow_us} projection_events={} projection_bytes={} spawned={} ended={} facts_equal=true",
+            projection.len(),
+            serde_json::to_vec(&projection).unwrap().len(),
+            new.spawned.len(),
+            new.ended.len()
+        );
+    }
+
     fn read_borrowed_clone_path(
         events: &[chat_state::TimelineEvent],
     ) -> Result<CanonicalChildFacts, String> {
@@ -1583,6 +2470,7 @@ mod tests {
         duplicate.seq = EventSeq::new(2);
         events.push(duplicate);
 
+        assert!(CanonicalChildFacts::scan(&events).is_err());
         assert!(CanonicalChildFacts::read(events).is_err());
     }
 
@@ -1613,7 +2501,286 @@ mod tests {
         );
         events.push(mismatched_terminal);
 
+        assert!(CanonicalChildFacts::scan(&events).is_err());
         assert!(CanonicalChildFacts::read(events).is_err());
+    }
+
+    #[test]
+    fn canonical_child_facts_reject_duplicate_and_unspawned_terminals() {
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(Box::new(spawn("task", "child", "root"))),
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                    subagent_id: "task".into(),
+                    child_session_id: "child".into(),
+                    outcome: chat_state::SubagentOutcome::Cancelled,
+                    duration_ms: 0,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: Some("fixture cancellation".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                }),
+            ))
+            .unwrap();
+        let mut events = timeline.events().to_vec();
+        assert!(CanonicalChildFacts::scan(&events[1..]).is_err());
+        let mut duplicate = events[1].clone();
+        duplicate.seq = EventSeq::new(3);
+        events.push(duplicate);
+        assert!(CanonicalChildFacts::scan(&events).is_err());
+    }
+
+    async fn suspension_observes_child_retirement_frontier(late_terminal: bool) {
+        use tools::implementations::grow_build::task::types::{FrozenChildRef, SubagentEvent};
+        let agent = super::super::tests::build_minimal_agent_for_tests();
+        let (root_tx, root_exit) = std::sync::mpsc::channel();
+        let root_thread = std::thread::spawn(move || {
+            let _ = root_exit.recv();
+        });
+        let mut root_chat = None;
+        let mut drivers = Vec::new();
+        for sid in ["test", "child"] {
+            let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+            let config = serde_json::from_value(serde_json::json!({
+                "base_url":"http://localhost", "model":"test", "context_window":256000
+            }))
+            .unwrap();
+            let chat = chat_state::ChatStateActor::spawn(
+                vec![],
+                config,
+                Box::new(chat_state::NullTimelinePersistence),
+                events,
+                tokio_util::sync::CancellationToken::new(),
+            );
+            if sid == "test" {
+                root_chat = Some(chat.clone());
+            }
+            let (mut handle, mut commands) =
+                super::super::tests::make_test_handle_with_receiver("test", None);
+            handle.info.id = acp::SessionId::new(sid);
+            handle.chat_state_handle = chat.clone();
+            agent
+                .sessions
+                .borrow_mut()
+                .insert(handle.info.id.clone(), handle);
+            let release = root_tx.clone();
+            drivers.push(tokio::spawn(async move {
+                let SessionCommand::SuspendRuntimeNode {
+                    operation_id,
+                    deadline,
+                    respond_to,
+                    ..
+                } = commands.recv().await.unwrap()
+                else {
+                    panic!("expected checkpoint");
+                };
+                if chat.runtime_state().await.unwrap().phase == RuntimePhase::Running {
+                    chat.record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                        SessionRuntimeEvent::SuspendRequested {
+                            operation_id: operation_id.clone(),
+                            root_session_id: "test".into(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                }
+                chat.record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                    SessionRuntimeEvent::CommandsSettled {
+                        operation_id: operation_id.clone(),
+                        commands: vec![],
+                    },
+                ))
+                .await
+                .unwrap();
+                let checkpoint = chat
+                    .checkpoint_runtime(operation_id, "a".repeat(64), None, None, deadline)
+                    .await
+                    .unwrap();
+                respond_to
+                    .send(Ok(RuntimeNodeRef {
+                        session_id: sid.into(),
+                        checkpoint_seq: checkpoint.seq,
+                    }))
+                    .unwrap();
+                let SessionCommand::RetireSuspendedRuntime { respond_to, .. } =
+                    commands.recv().await.unwrap()
+                else {
+                    panic!("expected retirement");
+                };
+                respond_to.send(Ok(())).unwrap();
+                if sid == "test" {
+                    let _ = release.send(());
+                }
+            }));
+        }
+        let root = acp::SessionId::new("test");
+        agent.session_threads.borrow_mut().insert(
+            root.clone(),
+            crate::session::SessionThread::from_handle(root_thread),
+        );
+        let chat = root_chat.unwrap();
+        chat.record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(Box::new(spawn("task", "child", "test"))),
+        ))
+        .await
+        .unwrap();
+        let mut coordinator = agent.subagent_event_rx.borrow_mut().take().unwrap();
+        let final_chat = chat.clone();
+        let coordination = tokio::spawn(async move {
+            let Some(SubagentEvent::FreezeAdmission { respond_to, .. }) = coordinator.recv().await
+            else {
+                panic!("expected freeze");
+            };
+            respond_to
+                .send(Ok(vec![FrozenChildRef {
+                    task_id: "task".into(),
+                    session_id: "child".into(),
+                    security_parent_session_id: "test".into(),
+                    origin_tool_call_id: None,
+                    initializing: false,
+                }]))
+                .unwrap();
+            let Some(SubagentEvent::CheckSuspendedRetirement { respond_to, .. }) =
+                coordinator.recv().await
+            else {
+                panic!("expected retirement frontier");
+            };
+            if late_terminal {
+                // Fault injection: a terminal appears only while the child
+                // finalization owner drains. Its missing result must still
+                // prevent a successful tree barrier after retirement.
+                final_chat
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                            subagent_id: "task".into(),
+                            child_session_id: "child".into(),
+                            outcome: chat_state::SubagentOutcome::Cancelled,
+                            duration_ms: 0,
+                            tool_calls: 0,
+                            turns: 0,
+                            tokens_used: 0,
+                            error: Some("fixture cancellation".into()),
+                            result_ref: None,
+                            snapshot_ref: None,
+                        }),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            respond_to.send(Ok(true)).unwrap();
+        });
+        let result = agent
+            .suspend_session_tree(
+                &root,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await;
+        if late_terminal {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("has no canonical result reference"),
+                "{error}"
+            );
+            assert!(chat.runtime_state().await.unwrap().tree.is_empty());
+        } else {
+            let (_, nodes) = result.unwrap();
+            assert_eq!(nodes.len(), 2);
+            assert!(nodes.iter().any(|node| node.session_id == "child"));
+            assert_eq!(chat.runtime_state().await.unwrap().tree, nodes);
+        }
+        coordination.await.unwrap();
+        let _ = root_tx.send(());
+        for driver in drivers {
+            if late_terminal {
+                driver.abort();
+                let _ = driver.await;
+            } else {
+                driver.await.unwrap();
+            }
+        }
+        if let Some(thread) = agent.session_threads.borrow_mut().remove(&root) {
+            thread.join().unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn suspension_preserves_an_open_child_checkpoint() {
+        suspension_observes_child_retirement_frontier(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn suspension_rechecks_a_terminal_committed_at_child_retirement() {
+        suspension_observes_child_retirement_frontier(true).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_snapshot_scans_complete_child_projection_and_observes_late_terminal() {
+        let agent = super::super::tests::build_minimal_agent_for_tests();
+        let (mut handle, _commands) =
+            super::super::tests::make_test_handle_with_receiver("test", None);
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = serde_json::from_value(serde_json::json!({
+            "base_url":"http://localhost", "model":"test", "context_window":256000
+        }))
+        .unwrap();
+        let chat = chat_state::ChatStateActor::spawn(
+            vec![],
+            config,
+            Box::new(chat_state::NullTimelinePersistence),
+            events,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        handle.chat_state_handle = chat.clone();
+        chat.push_user_message(sampling_types::ConversationItem::user("unrelated history"));
+        chat.record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(Box::new(spawn("task", "child", "test"))),
+        ))
+        .await
+        .unwrap();
+        let (runtime, first) = agent.runtime_snapshot(&handle).await.unwrap();
+        assert_eq!(runtime, chat.runtime_state().await.unwrap());
+        assert_eq!(
+            first.open().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["task"]
+        );
+        chat.record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                subagent_id: "task".into(),
+                child_session_id: "child".into(),
+                outcome: chat_state::SubagentOutcome::Cancelled,
+                duration_ms: 0,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                error: Some("fixture cancellation".into()),
+                result_ref: None,
+                snapshot_ref: None,
+            }),
+        ))
+        .await
+        .unwrap();
+        let (_, latest) = agent.runtime_snapshot(&handle).await.unwrap();
+        assert_eq!(latest.spawned, first.spawned);
+        assert_eq!(latest.ended["task"].child_session_id, "child");
+        assert_eq!(latest.open().count(), 0);
+        assert_eq!(first.open().count(), 1, "an earlier snapshot cannot mutate");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_snapshot_reports_unavailable_live_owner() {
+        let agent = super::super::tests::build_minimal_agent_for_tests();
+        let (mut handle, _commands) =
+            super::super::tests::make_test_handle_with_receiver("test", None);
+        handle.chat_state_handle = chat_state::ChatStateHandle::noop();
+        assert!(!handle.cmd_tx.is_closed());
+        assert!(agent.runtime_snapshot(&handle).await.is_err());
     }
 
     #[test]

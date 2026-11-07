@@ -204,7 +204,13 @@ impl AgentView {
         question: Option<crate::views::question_view::QuestionViewState>,
     ) -> Option<crate::views::question_view::QuestionViewState> {
         let old = std::mem::replace(&mut self.question_view, question);
-        self.session.question_pending = self.question_view.is_some();
+        // A local advisory-reply edit temporarily takes over input but is
+        // not a blocking question: while it is open the agent keeps running,
+        // so the session must not project "waiting for the user".
+        self.session.question_pending = self
+            .question_view
+            .as_ref()
+            .is_some_and(|qv| !qv.is_advisory_reply_edit());
         old
     }
 
@@ -823,6 +829,12 @@ impl AgentView {
                         ) {
                             return self.submit_question_answers(true);
                         }
+                        if qv.is_advisory_reply_edit() {
+                            // Advisory edit: Esc only closes the local edit.
+                            // Nothing is cancelled server-side and the agent
+                            // keeps running on its recommendation.
+                            return self.dismiss_question_view();
+                        }
                         let active = qv.active_tab;
                         if let Some(sel) = qv.selections.get_mut(active) {
                             match sel {
@@ -1387,6 +1399,131 @@ impl AgentView {
             .unwrap_or("");
         self.prompt.set_text_preserving(new_text);
     }
+    /// Open the local advisory-reply editor for a scrollback suggestion
+    /// card. The edit temporarily borrows input but is NOT a blocking
+    /// question: no `question_pending`, no turn pause, and an already-open
+    /// (blocking) question always wins. Esc discards only the draft.
+    /// Whether the turn-status ◆ should read "waiting on the user" right
+    /// now. Single source for the render-site projection:
+    /// - an empty permission queue never lights it;
+    /// - a real (blocking) own question does; a local advisory-reply edit
+    ///   does NOT (the agent keeps running while the edit borrows input);
+    /// - a child question lights it only for a non-finished subagent whose
+    ///   own ACP question is parked on its child view — finished children's
+    ///   residual views and child-local questions (e.g. /fork modals) must
+    ///   not, matching `activity::AgentActivityProjection::from_sessions`.
+    pub(crate) fn pending_user_input_for_turn_status(&self) -> bool {
+        !self.permission_queue.is_empty()
+            || self
+                .question_view
+                .as_ref()
+                .is_some_and(|qv| !qv.is_advisory_reply_edit())
+            || self.subagent_views.iter().any(|(child_sid, child)| {
+                child.question_view.as_ref().is_some_and(|question| {
+                    !question.is_advisory_reply_edit()
+                        && question.source_session_id.as_deref() == Some(child_sid.as_str())
+                }) && self
+                    .session
+                    .subagent_sessions
+                    .get(child_sid)
+                    .is_some_and(|info| !info.finished)
+            })
+    }
+
+    /// Resolve the reply-query target for the advisory card at scrollback
+    /// entry `idx`: `(resolved source session, tool call id)`. Empty card
+    /// sources (replay recovery) resolve against this view's own session
+    /// identity. Failed presentations offer no reply entry.
+    pub(crate) fn advisory_card_query_target_at(&self, idx: usize) -> Option<(String, String)> {
+        use crate::scrollback::blocks::tool::AdvisoryCardStatus;
+        let entry = self.scrollback.get(idx)?;
+        let crate::scrollback::block::RenderBlock::ToolCall(
+            crate::scrollback::ToolCallBlock::Other(other),
+        ) = &entry.block
+        else {
+            return None;
+        };
+        let card = other.advisory.as_ref()?;
+        if card.status == AdvisoryCardStatus::Failed {
+            return None;
+        }
+        let source = if card.source_session_id.is_empty() {
+            self.session
+                .session_id
+                .as_ref()
+                .map(|id| id.0.to_string())
+                .unwrap_or_default()
+        } else {
+            card.source_session_id.clone()
+        };
+        (!source.is_empty()).then(|| (source, card.tool_call_id.clone()))
+    }
+
+    pub(crate) fn open_advisory_reply(
+        &mut self,
+        source_session_id: &str,
+        tool_call_id: &str,
+    ) -> bool {
+        use crate::scrollback::blocks::tool::{AdvisoryCardStatus, AdvisoryReplyStatus};
+        if self.question_view.is_some() {
+            return false;
+        }
+        // Only a confirmed/confirmable card with an Available reply
+        // projection opens: a blocking overlay wins, terminal or unknown
+        // projections stay read-only, and a Failed presentation must not
+        // feed the reply serializer a "continued on recommendation" fact it
+        // never confirmed.
+        let mut questions = None;
+        for idx in 0..self.scrollback.len() {
+            let Some(entry) = self.scrollback.get(idx) else {
+                continue;
+            };
+            if let crate::scrollback::block::RenderBlock::ToolCall(
+                crate::scrollback::ToolCallBlock::Other(other),
+            ) = &entry.block
+                && let Some(card) = &other.advisory
+                && card.tool_call_id == tool_call_id
+                && card.status != AdvisoryCardStatus::Failed
+                && card.reply_status == AdvisoryReplyStatus::Available
+            {
+                questions = Some(card.questions.clone());
+                break;
+            }
+        }
+        let Some(questions) = questions else {
+            return false;
+        };
+        let stashed = self.prompt.stash();
+        self.replace_question_view(Some(
+            crate::views::question_view::QuestionViewState::new(
+                tool_call_id.to_owned(),
+                questions,
+                stashed,
+            )
+            .with_local_kind(
+                crate::views::question_view::LocalQuestionKind::AdvisoryReply {
+                    source_session_id: source_session_id.to_owned(),
+                    tool_call_id: tool_call_id.to_owned(),
+                },
+            ),
+        ));
+        self.prompt.set_text("");
+        // The user explicitly requested this edit (`r` / reply click through
+        // the admission callback). While the pane stays Scrollback the input
+        // gate keeps routing keys to the history area, leaving the freshly
+        // opened edit keyboard-dead — move only THIS view off Scrollback so
+        // the question view owns the keyboard immediately. Protocol-driven
+        // transition (the caller owns the composer lifecycle: it is stashed
+        // above), so `force_active_pane` matches its contract. Every refusal
+        // path above returns early with no focus change.
+        if self.active_pane == AgentPane::Scrollback {
+            self.force_active_pane(AgentPane::Prompt);
+        }
+        self.pending_scrollback_click = None;
+        self.cleanup_question_state();
+        true
+    }
+
     /// Dismiss (hide) the question view without submitting answers.
     ///
     /// Restores the original prompt text that was stashed when the question
@@ -1405,7 +1542,11 @@ impl AgentView {
             return self.submit_question_answers(true);
         }
         if let Some(qv) = self.take_question_view() {
-            self.session.turn_paused_duration += qv.opened_at.elapsed();
+            if !qv.is_advisory_reply_edit() {
+                // Advisory-reply edits never paused the turn (the agent kept
+                // running); only blocking questions accrue pause on dismiss.
+                self.session.turn_paused_duration += qv.opened_at.elapsed();
+            }
             self.prompt.restore(qv.stashed_prompt);
         }
         self.cleanup_question_state();
@@ -1521,8 +1662,38 @@ impl AgentView {
         let Some(mut qv) = self.take_question_view() else {
             return InputOutcome::Changed;
         };
-        self.session.turn_paused_duration += qv.opened_at.elapsed();
+        if !qv.is_advisory_reply_edit() {
+            // A local advisory-reply edit never paused the turn (the agent
+            // kept running on its recommendation); only blocking questions
+            // accumulate pause on submit/cancel.
+            self.session.turn_paused_duration += qv.opened_at.elapsed();
+        }
         if let Some(kind) = qv.local_kind.take() {
+            if let crate::views::question_view::LocalQuestionKind::AdvisoryReply {
+                ref source_session_id,
+                ref tool_call_id,
+            } = kind
+            {
+                if skipped {
+                    // Esc / dismiss: drop the local edit only. The suggestion
+                    // card stays in history and stays replyable.
+                    self.prompt.restore(qv.stashed_prompt);
+                    self.cleanup_question_state();
+                    return InputOutcome::Changed;
+                }
+                // The reply is ordinary human input: serialized as literal
+                // text and submitted on the owning primary's current session
+                // entry (never a second result for the old tool call).
+                let text = qv.build_advisory_reply_text(source_session_id, tool_call_id);
+                let action = Action::SubmitAdvisoryReply {
+                    source_session_id: source_session_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                    text,
+                };
+                self.prompt.restore(qv.stashed_prompt);
+                self.cleanup_question_state();
+                return InputOutcome::Action(action);
+            }
             let is_project_select = matches!(
                 &kind,
                 crate::views::question_view::LocalQuestionKind::ProjectSelect { .. }
@@ -1646,6 +1817,7 @@ mod question_plan_action_tests {
                 },
             ],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2298,6 +2470,7 @@ mod question_no_freeform_tests {
                 opt("Use advanced settings", "More control"),
             ],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         }
     }

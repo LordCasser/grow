@@ -14,7 +14,7 @@ path = "src/main.rs"
 ptyctl = { path = "../ptyctl" }
 axum = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "query"] }
 diagnostics = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }

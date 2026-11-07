@@ -1,0 +1,4 @@
+- [x] 核shared install/actor重复链、typed InstallError、CLI public run/diagnostic、post-install依赖及现fallible loader/save故障入口，冻结单一安装操作合同。
+- [x] 隔离普通plugin安装取得保存失败仍Ok的真实旧红，修共享load/save失败传播和actor复用，正常安装及部分完成状态控制通过。
+- [x] 真实ACP Install和CLI public run验证错误/无成功diagnostic或reload/无post-enable；坏registry先失败且旧字节/artifact保持，父核实际diff和证据。
+- [x] 同步docs/backlog仅关闭AC-08安装子项，保卸载/更新独立开放，strict/archive及all/archived复查。

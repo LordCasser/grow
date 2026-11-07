@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-06
+skip_specs: true
+reason: 纯诊断记录（analysis-only），不改任何行为、接口、状态或持久化契约；不引入虚构 delta。

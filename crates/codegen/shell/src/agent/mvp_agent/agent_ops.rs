@@ -1423,6 +1423,18 @@ impl MvpAgent {
             session_permission_mode,
             prompt_display_cwd,
         } = spec;
+        // SDK MCP declarations are validated (and parsed once) before the first
+        // preparation side effect below, so a duplicate name cannot leak partial
+        // trust/persistence state; the parsed Vec is reused at spawn.
+        let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(session_meta)
+            .map_err(|error| acp::Error::invalid_params().data(error))?;
+        // Bind the SDK registration to the accepted connection that sent this
+        // new/cold-load request. The owner comes from the same request meta as
+        // the declarations (the leader overwrote any caller value); the
+        // process-global initialize meta is not a routing authority.
+        let acp_mcp_leader_client_id = session_meta
+            .and_then(|meta| meta.get("grow/leaderClientId"))
+            .and_then(serde_json::Value::as_u64);
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
         let preparation_timer = crate::instrumentation_timer!("session.spawn.prepare");
         let spawn_remote_settings = self.cfg.borrow().remote_settings.clone();
@@ -1733,11 +1745,13 @@ impl MvpAgent {
         };
         let lsp_tools_enabled = self.cfg.borrow().resolve_lsp_tools().value;
         if lsp_tools_enabled && tool_ctx.lsp.is_none() {
-            let snapshot = self.plugin_registry_handle.snapshot();
-            let active: Vec<_> = snapshot
-                .iter()
-                .flat_map(|reg| reg.active_plugins())
-                .collect();
+            // This session's own snapshot, not the process shared latest: plugin
+            // execution config must come from the same cwd, trust and
+            // `_meta.pluginDirs` that resolved this session's agent.
+            let active: Vec<_> = session_plugin_registry
+                .as_deref()
+                .map(|registry| registry.active_plugins())
+                .unwrap_or_default();
             let (plugin_lsp_paths, plugin_names): (Vec<std::path::PathBuf>, Vec<&str>) = active
                 .iter()
                 .filter_map(|p| {
@@ -1917,9 +1931,6 @@ impl MvpAgent {
                     agent_name: Some(agent_definition.selector_identity()),
                     reasoning_effort: initial_reasoning_effort,
                 });
-            let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
-                session_meta,
-            );
             let git_head_changed = init
                 .client_capabilities
                 .meta
@@ -1959,6 +1970,7 @@ impl MvpAgent {
                     mcp_meta_config_map,
                     None,
                     acp_mcp_servers,
+                    acp_mcp_leader_client_id,
                     support_permission,
                     auto_update,
                     persistence,
@@ -2045,7 +2057,12 @@ impl MvpAgent {
         };
         self.session_threads
             .borrow_mut()
-            .insert(session_info.id.clone(), session_thread);
+            // Observation-only clone for the activity entry (below): the
+            // map/reaper keep join ownership; the entry observes full-
+            // incarnation retirement (actor thread + persistence), which the
+            // command channel can no longer express once `cmd_rx.close()`
+            // precedes the SessionEnd lifecycle.
+            .insert(session_info.id.clone(), session_thread.clone());
         tracing::debug!(session_id = %session_info.id.0, "spawn_session_on_thread complete");
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
@@ -2094,7 +2111,8 @@ impl MvpAgent {
                 source: source.to_string(),
             });
         self.notify_session_cwd_for_watch(&session_info.id, std::path::Path::new(&session_info.cwd));
-        self.activity.register_session(&session_info.id.0, &handle);
+        self.activity
+            .register_session(&session_info.id.0, &handle, session_thread);
         if let Some(old) = self
             .sessions
             .borrow_mut()

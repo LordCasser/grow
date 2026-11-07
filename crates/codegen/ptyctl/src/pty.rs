@@ -30,20 +30,19 @@ pub struct PtyHandle {
     writer: Box<dyn Write + Send>,
 }
 
-/// Resize-capable master half of a dismantled [`PtyHandle`].
-///
-/// portable-pty's unix master is not `Sync` (interior `RefCell`), so it sits
-/// behind a mutex that is only held for the synchronous resize ioctl.
+/// Resize and (on Windows) retirement share the one actual master handle.
+#[derive(Clone)]
 pub struct PtyMaster {
-    master: std::sync::Mutex<Box<dyn MasterPty + Send>>,
+    master: std::sync::Arc<std::sync::Mutex<Option<Box<dyn MasterPty + Send>>>>,
 }
 
 impl PtyMaster {
     /// Resize the PTY (TIOCSWINSZ; the kernel delivers SIGWINCH to the child).
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.master
-            .lock()
-            .unwrap()
+        let guard = self.master.lock().unwrap();
+        guard
+            .as_ref()
+            .context("PTY master has retired")?
             .resize(PtySize {
                 rows,
                 cols,
@@ -51,6 +50,19 @@ impl PtyMaster {
                 pixel_height: 0,
             })
             .context("failed to resize PTY")
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn close(&self) {
+        // ClosePseudoConsole can wait for output to drain on older Windows.
+        // The owner calls this on its owned close worker while the reader and
+        // FIFO consumer are still running; never hold the resize mutex in Drop.
+        let master = self
+            .master
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(master);
     }
 }
 
@@ -60,9 +72,50 @@ pub struct PtyChild {
 }
 
 impl PtyChild {
-    /// Check if the child process is still alive.
-    pub fn is_alive(&mut self) -> bool {
-        self.child.try_wait().ok().flatten().is_none()
+    /// Observe actual child exit without discarding an observation failure.
+    pub fn try_wait(&mut self) -> Result<Option<u32>> {
+        #[cfg(windows)]
+        {
+            // portable-pty 0.9.0 reports every 259 (STILL_ACTIVE) status from
+            // GetExitCodeProcess as "still running" and turns observation
+            // failures into None; liveness must come from the scheduler.
+            self.try_wait_windows()
+        }
+
+        #[cfg(unix)]
+        {
+            self.child
+                .try_wait()
+                .map(|status| status.map(|status| status.exit_code()))
+                .context("failed to observe child exit")
+        }
+    }
+
+    /// Liveness comes from WaitForSingleObject on this child's own process
+    /// handle, not from GetExitCodeProcess: a genuinely exited child whose
+    /// code is 259 would otherwise be reported as still running forever.
+    #[cfg(windows)]
+    fn try_wait_windows(&mut self) -> Result<Option<u32>> {
+        use portable_pty::Child as _;
+        use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+        let handle = self
+            .child
+            .as_raw_handle()
+            .context("PTY child has no process handle to observe")?;
+        // SAFETY: the child object owns this process handle for as long as
+        // this PtyChild exists; a zero timeout only polls the signaled state.
+        match unsafe { WaitForSingleObject(handle as _, 0) } {
+            WAIT_TIMEOUT => Ok(None),
+            // The same child reaps the real status; a genuine 259 is preserved.
+            WAIT_OBJECT_0 => self.wait().map(Some),
+            WAIT_FAILED => Err(anyhow::Error::new(std::io::Error::last_os_error())
+                .context("failed to observe child exit")),
+            status => Err(anyhow::Error::msg(format!(
+                "unexpected WaitForSingleObject status {status}"
+            ))),
+        }
     }
 
     /// Get the child process ID.
@@ -110,12 +163,23 @@ impl PtyHandle {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
 
-        // Not session-scoped: ptyctl's child is the process it exists to run.
-        #[allow(clippy::disallowed_methods)]
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .context("failed to spawn command in PTY")?;
+        // dup readers and writers share the master's open-file description.
+        // Set nonblocking before child spawn, and handle retries on both streams.
+        #[cfg(unix)]
+        {
+            let fd = pair
+                .master
+                .as_raw_fd()
+                .context("PTY master has no raw fd")?;
+            // SAFETY: the actual master remains alive throughout both fcntl calls.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags == -1
+                || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+            {
+                return Err(std::io::Error::last_os_error())
+                    .context("failed to make PTY I/O nonblocking");
+            }
+        }
 
         let reader = pair
             .master
@@ -126,6 +190,14 @@ impl PtyHandle {
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
+
+        // Acquire every fallible I/O primitive before creating the actual child.
+        // Only the Session owner receives the resulting child handle.
+        #[allow(clippy::disallowed_methods)]
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("failed to spawn command in PTY")?;
 
         Ok(Self {
             master: pair.master,
@@ -147,7 +219,7 @@ impl PtyHandle {
     ) {
         (
             PtyMaster {
-                master: std::sync::Mutex::new(self.master),
+                master: std::sync::Arc::new(std::sync::Mutex::new(Some(self.master))),
             },
             PtyChild { child: self.child },
             self.reader,

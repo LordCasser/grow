@@ -82,6 +82,7 @@ pub fn build_project_question(
                  This gives Grow full context of your codebase for better results."
                 .into(),
             id: None,
+            recommended_option: None,
             options,
             multi_select: Some(false),
         },

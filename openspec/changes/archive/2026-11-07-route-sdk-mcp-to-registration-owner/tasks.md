@@ -1,0 +1,6 @@
+- [x] 核真实SDK producer/注册、new/cold/resident load、leader trusted ingress/target优先级、SharedMcpPool的SDK继承及现有测试接口，冻结owner分工与wire字段。
+- [x] leader ingress以实际ClientId覆盖new/load路由身份；absent/null及forged值、畸形metadata在路由状态变更前invalid_params早拒绝（锁定ACP DefaultOnError不能提供该保证）与原replay/driver定向回归通过，父审查接受增量1，见verification-leader-ingress.md。
+- [x] session SDK注册与GatewayAcpInvoker绑定session/owner，必要spawn参数贯穿；真实producer单连接与leader A/B同serverId、Bdriver、owner断线场景通过。
+- [x] 核resident保原owner、cold新连接重绑、继承SDK Arc保原invoker的实际证据与限制；父完成模块和跨边界审查。
+  - 独立生命周期 fixture `tests/test_sdk_mcp_registration_owner.rs` 已由父在最终2.6.2实际编译/运行通过：真实 Mvp＋leader、resident SDK Arc 身份、SharedMcpPool 导入后实际请求/响应、owner断线，以及 close 后立即 cold load 的 writer guard 链。旧namespace和合法双list预期已按事实修正，原失败保留；见[验证记录](verification-sdk-lifecycle.md)。
+- [x] 同步开发说明/backlog及验证记录，strict/archive并复查all/archived。

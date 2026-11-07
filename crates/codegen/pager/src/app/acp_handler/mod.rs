@@ -56,9 +56,9 @@ use permissions::{apply_recap_block, handle_permission_request, should_drop_late
 
 // Child modules using `super::*` need these sibling symbols in scope.
 use routing::{
-    SessionMatch, find_exact_session_match, find_permission_session_match, find_session_match,
-    is_matched_agent_active, is_matched_view_active, mcp_target_agent, resolve_notif_agent,
-    resolve_target_agent_view, resolve_target_view,
+    SessionMatch, find_exact_session_match, find_permission_session_match, is_matched_agent_active,
+    is_matched_view_active, mcp_target_agent, resolve_notif_agent, resolve_target_agent_view,
+    resolve_target_view,
 };
 
 pub(crate) use background::{apply_task_backgrounded, apply_task_completed};
@@ -114,6 +114,10 @@ use follow_ups::handle_follow_ups;
 pub(crate) use interactions::handle_ask_user_question;
 use interactions::handle_plan_approval;
 use mcp::{handle_mcp_init_progress, handle_mcp_initialized, handle_mcp_server_status};
+/// Owner-primary resolution shared with the advisory-reply submit dispatch
+/// (`crate::app::root::dispatch`): which agent's view graph contains a
+/// session id (root or subagent child).
+pub(crate) use routing::find_session_match;
 use settings::{
     handle_announcements_update, handle_models_update, handle_sessions_changed,
     handle_settings_update,

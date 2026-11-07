@@ -22,12 +22,13 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dependencies]
-backtrace = { workspace = true }
+# Runtime dependency for atomic report publication (exclusive sibling temp
+# file with owner-only mode, atomic replace). Existing workspace crate.
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "io-util", "net"] }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

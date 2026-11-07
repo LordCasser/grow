@@ -25,6 +25,9 @@ use chrono::{DateTime, Local, TimeZone};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use tools::implementations::grow_build::set_subagent_model::{
+    SET_SUBAGENT_MODEL_TOOL_NAME, SubagentModelStatus,
+};
 use tools::types::output::{BashOutput, ToolOutput};
 use tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
 use tools::util::strip_redundant_session_cd;
@@ -622,6 +625,88 @@ impl AcpUpdateTracker {
     pub fn remove_pending_tool(&mut self, tool_call_id: &str) {
         self.pending_tools.remove(tool_call_id);
     }
+
+    /// Advisory card currently attached to a tool row, if any (used to
+    /// carry the ext-presented card across the in-place result replace).
+    fn advisory_card_on_entry(
+        &self,
+        tool_call_id: &str,
+        scrollback: &ScrollbackState,
+    ) -> Option<crate::scrollback::blocks::tool::AdvisoryCard> {
+        self.tool_entry_id(tool_call_id, scrollback)
+            .and_then(|id| scrollback.get_by_id(id))
+            .and_then(|entry| match &entry.block {
+                RenderBlock::ToolCall(ToolCallBlock::Other(other)) => other.advisory.clone(),
+                _ => None,
+            })
+    }
+
+    /// Present an advisory question card on the `ask_user_question` row for
+    /// `tool_call_id` — called by the ext handler BEFORE it acknowledges
+    /// `Presented`, so the ACK always follows a renderable card. Upserts the
+    /// existing row (duplicate ext delivery and the pre-result window merge
+    /// into one card); pushes a registered row when the ToolCallUpdate has
+    /// not landed yet. The row IS the storage — no pending registry.
+    pub fn present_advisory_card(
+        &mut self,
+        source_session_id: &str,
+        tool_call_id: &str,
+        questions: Vec<tools::implementations::grow_build::ask_user_question::Question>,
+        scrollback: &mut ScrollbackState,
+    ) {
+        use crate::scrollback::blocks::tool::{
+            AdvisoryCard, AdvisoryCardStatus, AdvisoryReplyStatus,
+        };
+        let mut card = AdvisoryCard {
+            source_session_id: source_session_id.to_owned(),
+            tool_call_id: tool_call_id.to_owned(),
+            questions,
+            status: AdvisoryCardStatus::Presented,
+            reply_status: AdvisoryReplyStatus::Unobserved,
+            reply_open_intent: false,
+        };
+        if let Some(id) = self.tool_entry_id(tool_call_id, scrollback) {
+            let existing = scrollback
+                .get_by_id_mut(id)
+                .and_then(|entry| match &mut entry.block {
+                    RenderBlock::ToolCall(ToolCallBlock::Other(other)) => {
+                        let previous = other.advisory.take();
+                        entry.invalidate_cache();
+                        Some(previous)
+                    }
+                    _ => None,
+                });
+            if let Some(previous) = existing {
+                // Duplicate ext delivery merges into the SAME card: keep the
+                // confirmed presentation and the human-reply projection — a
+                // late re-presentation must not reset an answered state.
+                if let Some(previous) = previous {
+                    if previous.status == AdvisoryCardStatus::Confirmed {
+                        card.status = AdvisoryCardStatus::Confirmed;
+                    }
+                    if previous.status == AdvisoryCardStatus::Failed {
+                        card.status = AdvisoryCardStatus::Failed;
+                    }
+                    card.reply_status = previous.reply_status;
+                    card.reply_open_intent = previous.reply_open_intent;
+                }
+                if let Some(entry) = scrollback.get_by_id_mut(id) {
+                    if let RenderBlock::ToolCall(ToolCallBlock::Other(other)) = &mut entry.block {
+                        other.advisory = Some(card);
+                    }
+                }
+                scrollback.mark_height_dirty(id);
+                return;
+            }
+        }
+        let block = crate::scrollback::blocks::tool::OtherToolCallBlock::new(
+            "ask_user_question",
+            "advisory question",
+        )
+        .with_advisory_card(card);
+        let id = scrollback.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(block)));
+        self.register_tool_entry(tool_call_id.to_owned(), Some(id), scrollback);
+    }
     /// Get the tool_call_id of the currently running Execute tool, if any.
     ///
     /// Used by demotion (Ctrl+B) to know which tool to background.
@@ -733,7 +818,30 @@ impl AcpUpdateTracker {
         is_replay: bool,
     ) -> EntryId {
         let wants_hl = Self::edit_wants_file_hl(&block);
-        let id = scrollback.push_block(block);
+        // An advisory card row registered by `present_advisory_card` before
+        // the tool event landed IS the row for this call: confirm it in
+        // place instead of pushing a duplicate row.
+        let existing_advisory_row = self
+            .tool_entries
+            .get(&tool_call_id)
+            .copied()
+            .flatten()
+            .filter(|id| {
+                scrollback.get_by_id(*id).is_some_and(|entry| {
+                    matches!(
+                        &entry.block,
+                        RenderBlock::ToolCall(ToolCallBlock::Other(other))
+                            if other.advisory.is_some()
+                    )
+                })
+            });
+        let id = if let Some(id) = existing_advisory_row {
+            scrollback.replace_tool_block(id, block, None);
+            scrollback.mark_height_dirty(id);
+            id
+        } else {
+            scrollback.push_block(block)
+        };
         self.register_tool_entry(tool_call_id, Some(id), scrollback);
         if !is_replay && wants_hl {
             self.pending_edit_hl.push(id);
@@ -1461,7 +1569,9 @@ impl AcpUpdateTracker {
         let tc_id = tc.tool_call_id.0.to_string();
         if let Some(orphan) = self.orphan_updates.remove(&tc_id) {
             let merged = merge_tool_call_update(tc, orphan);
-            let block = tool_call_to_block(&merged, self.session_cwd.as_deref());
+            let mut block = tool_call_to_block(&merged, self.session_cwd.as_deref());
+            let previous = self.advisory_card_on_entry(&tc_id, scrollback);
+            apply_advisory_result(&mut block, &merged, previous);
             self.finish_completed_tool(tc_id, block, scrollback, is_replay);
             return true;
         }
@@ -1470,11 +1580,59 @@ impl AcpUpdateTracker {
             acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
         );
         if is_completed {
-            let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+            let mut block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+            let previous = self.advisory_card_on_entry(&tc_id, scrollback);
+            apply_advisory_result(&mut block, &tc, previous);
             self.finish_completed_tool(tc_id, block, scrollback, is_replay);
         } else {
-            let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
-            let id = scrollback.push_block(block);
+            // Ext-presented advisory card row already registered for this
+            // call (ext raced ahead of the ToolCall event): fold the pending
+            // tool state into that same row instead of a second one.
+            let existing_advisory_row =
+                self.tool_entries
+                    .get(&tc_id)
+                    .copied()
+                    .flatten()
+                    .filter(|id| {
+                        scrollback.get_by_id(*id).is_some_and(|entry| {
+                            matches!(
+                                &entry.block,
+                                RenderBlock::ToolCall(ToolCallBlock::Other(other))
+                                    if other.advisory.is_some()
+                            )
+                        })
+                    });
+            let (id, card) = if let Some(id) = existing_advisory_row {
+                let card = scrollback
+                    .get_by_id_mut(id)
+                    .and_then(|entry| match &mut entry.block {
+                        RenderBlock::ToolCall(ToolCallBlock::Other(other)) => {
+                            let card = other.advisory.take();
+                            entry.invalidate_cache();
+                            card
+                        }
+                        _ => None,
+                    });
+                // Build per-branch: `block` moved here must not flow through
+                // the tuple into the push path below.
+                let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+                scrollback.replace_tool_block(id, block, None);
+                (Some(id), card)
+            } else {
+                (None, None)
+            };
+            let id = match id {
+                Some(id) => id,
+                None => scrollback.push_block(tool_call_to_block(&tc, self.session_cwd.as_deref())),
+            };
+            if let Some(card) = card
+                && let Some(entry) = scrollback.get_by_id_mut(id)
+                && let RenderBlock::ToolCall(ToolCallBlock::Other(other)) = &mut entry.block
+            {
+                other.advisory = Some(card);
+                entry.invalidate_cache();
+            }
+            scrollback.mark_height_dirty(id);
             self.register_tool_entry(tc_id.clone(), Some(id), scrollback);
             scrollback.set_entry_running_with_clock(id, true, !is_replay);
             // Offline replay uses persisted facts for elapsed time. A local
@@ -1644,7 +1802,18 @@ impl AcpUpdateTracker {
         }
         if let Some(pending) = self.pending_tools.remove(&tc_id) {
             let merged = merge_tool_call_update(pending.base, tcu);
-            let block = tool_call_to_block(&merged, self.session_cwd.as_deref());
+            let mut block = tool_call_to_block(&merged, self.session_cwd.as_deref());
+            // The in-place replace rebuilds the row from the tool call; fold
+            // the ext-presented card back so the result confirms (or fails)
+            // the SAME card instead of dropping it.
+            let previous = pending
+                .entry_id
+                .and_then(|id| scrollback.get_by_id(id))
+                .and_then(|entry| match &entry.block {
+                    RenderBlock::ToolCall(ToolCallBlock::Other(other)) => other.advisory.clone(),
+                    _ => None,
+                });
+            apply_advisory_result(&mut block, &merged, previous);
             if let Some(entry_id) = pending.entry_id {
                 if scrollback.replace_tool_block(entry_id, block, pending.started_at)
                     && let Some(entry) = scrollback.get_by_id(entry_id)
@@ -2358,16 +2527,195 @@ fn communication_tool_call_to_block(tc: &acp::ToolCall) -> Option<OtherToolCallB
     }
     Some(block)
 }
+/// Identity of the parent-bound sampling control tool.
+///
+/// Only the typed `SetSubagentModel` variant or the verified Grow tool
+/// identity establishes protocol semantics. The ACP title is Shell prose
+/// (`Queue subagent … model: …`), so a matching title alone stays generic.
+fn is_set_subagent_model_tool(tc: &acp::ToolCall) -> bool {
+    matches!(extract_variant(tc), Some("SetSubagentModel"))
+        || canonical_tool_name(tc) == Some(SET_SUBAGENT_MODEL_TOOL_NAME)
+}
+
+/// Compact phrase for the fields the call actually requests.
+///
+/// An effort-only call names only effort: it patches the child's newest
+/// desired model, so repeating a model id here would misreport the request.
+fn subagent_model_request(model: Option<&str>, effort: Option<&str>) -> String {
+    match (model, effort) {
+        (Some(model), Some(effort)) => format!("model {model} · effort {effort}"),
+        (Some(model), None) => format!("model {model}"),
+        (None, Some(effort)) => format!("effort {effort}"),
+        (None, None) => "model and/or effort".to_owned(),
+    }
+}
+
+/// Project the parent's sampling control onto one compact tool row.
+///
+/// The row keeps its own identity for the whole call: `Dispatching` while the
+/// parent waits for target admission, then the terminal state in place. Only
+/// the typed `queued` result for the SAME target proves admission, and
+/// admission never means the selection is already applied — the child applies
+/// it at its next closed Step. A missing or differently-shaped result is not
+/// read as success.
+fn subagent_model_tool_call_to_block(tc: &acp::ToolCall) -> Option<OtherToolCallBlock> {
+    if !is_set_subagent_model_tool(tc) {
+        return None;
+    }
+    let input = tc.raw_input.as_ref();
+    let request_field = |name: &str| {
+        input
+            .and_then(|value| value.get(name))
+            .and_then(serde_json::Value::as_str)
+    };
+    let subagent_id = request_field("subagent_id").unwrap_or("unknown");
+    let request = subagent_model_request(request_field("model"), request_field("effort"));
+    let admitted = tc
+        .raw_output
+        .as_ref()
+        .and_then(|raw| serde_json::from_value::<ToolOutput>(raw.clone()).ok())
+        .and_then(|output| match output {
+            ToolOutput::SetSubagentModel(output) => Some(output),
+            _ => None,
+        })
+        .is_some_and(|output| {
+            matches!(output.status, SubagentModelStatus::Queued)
+                && output.subagent_id == subagent_id
+        });
+    let status = match tc.status {
+        acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress => "Dispatching",
+        acp::ToolCallStatus::Failed => "Failed",
+        _ if admitted => "Queued",
+        _ => "Unconfirmed",
+    };
+    // Status leads the summary so a narrow row still shows it ahead of the
+    // requested fields instead of hiding it behind a long target/model id.
+    let mut block = OtherToolCallBlock::new(
+        format!(
+            "{} → subagent「{subagent_id}」",
+            SET_SUBAGENT_MODEL_TOOL_NAME
+        ),
+        format!("{status} · {request}"),
+    );
+    let mut lines = vec![
+        format!("Target: subagent「{subagent_id}」"),
+        format!("Target ID: {subagent_id}"),
+        format!("Requested: {request}"),
+        format!("Status: {status}"),
+    ];
+    if admitted {
+        lines.push(
+            "Queued means the target actor admitted the request; the new selection applies at its next closed Step."
+                .to_owned(),
+        );
+    }
+    if let Some(raw) = &tc.raw_input
+        && let Ok(raw) = serde_json::to_string_pretty(raw)
+    {
+        lines.push(format!("Arguments: {raw}"));
+    }
+    if let Some(raw) = &tc.raw_output
+        && let Ok(raw) = serde_json::to_string_pretty(raw)
+    {
+        lines.push(format!("Result: {raw}"));
+    }
+    block.set_output_text(lines.join("\n"));
+    if tc.status == acp::ToolCallStatus::Failed {
+        // The failure envelope carries no typed rejection reason, so preserve
+        // the reported error rather than inferring one from its prose.
+        let error = content_text(tc);
+        block.error = Some(if error.is_empty() {
+            tc.raw_output
+                .as_ref()
+                .and_then(|raw| raw.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Sampling control failed")
+                .to_owned()
+        } else {
+            error
+        });
+    }
+    Some(block)
+}
+
 /// Convert an ACP ToolCall to a RenderBlock.
 ///
 /// Parses `tool_call.kind` to create the appropriate block type,
 /// extracting fields from `raw_input` JSON when available. `session_cwd` sets
 /// execute `header_display` when a leading `cd <cwd>` is redundant.
+/// Fold an `ask_user_question` terminal result into the advisory card.
+///
+/// A successful result's structured `advisory` payload confirms the
+/// presentation and restores the card on replay (no ext request is
+/// replayed); a failure keeps any previously presented card as
+/// unconfirmed/failed. Never marks a user answer. `previous` is the card
+/// presented by the ext handler before the result landed.
+fn apply_advisory_result(
+    block: &mut RenderBlock,
+    tc: &acp::ToolCall,
+    previous: Option<crate::scrollback::blocks::tool::AdvisoryCard>,
+) {
+    use crate::scrollback::blocks::tool::{AdvisoryCard, AdvisoryCardStatus, AdvisoryReplyStatus};
+    let RenderBlock::ToolCall(ToolCallBlock::Other(other)) = block else {
+        return;
+    };
+    // No name guard: result-built rows carry the ACP title ("ask user"),
+    // not the tool name. The precise discriminators are the typed advisory
+    // payload (only ask outputs produce it) and a previously presented card
+    // (only ask rows carry one) — both leave unrelated tools untouched.
+    let success = !matches!(tc.status, acp::ToolCallStatus::Failed);
+    // The structured advisory payload lives in `raw_output` as the typed
+    // `ToolOutput` (same conversion the Read branch consumes); the content
+    // blocks carry only the model-facing message text and never contain the
+    // advisory structure.
+    let parsed = tc
+        .raw_output
+        .as_ref()
+        .and_then(|raw| serde_json::from_value::<ToolOutput>(raw.clone()).ok())
+        .and_then(|output| match output {
+            ToolOutput::AskUserQuestion(out) => out.advisory,
+            _ => None,
+        });
+    other.advisory = match (success, parsed) {
+        (true, Some(advisory)) => {
+            // A late/duplicate successful result re-merges into the SAME
+            // card: keep the confirmed human-reply projection instead of
+            // resetting an answered state. A replay-recovered card (no live
+            // ext presentation) starts Unobserved.
+            let (reply_status, reply_open_intent) = previous
+                .as_ref()
+                .map(|card| (card.reply_status, card.reply_open_intent))
+                .unwrap_or((AdvisoryReplyStatus::Unobserved, false));
+            Some(AdvisoryCard {
+                // Live ext presentation supplied the source; a replay-recovered
+                // card resolves the owning view's session at reply-open time.
+                source_session_id: previous
+                    .as_ref()
+                    .map(|card| card.source_session_id.clone())
+                    .unwrap_or_default(),
+                tool_call_id: advisory.tool_call_id,
+                questions: advisory.questions,
+                status: AdvisoryCardStatus::Confirmed,
+                reply_status,
+                reply_open_intent,
+            })
+        }
+        (true, None) => previous,
+        (false, _) => previous.map(|mut card| {
+            card.status = AdvisoryCardStatus::Failed;
+            card
+        }),
+    };
+}
+
 fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderBlock {
     if canonical_tool_kind(tc) == Some("skill") {
         return skill_call_to_block(tc);
     }
     if let Some(block) = communication_tool_call_to_block(tc) {
+        return RenderBlock::ToolCall(ToolCallBlock::Other(block));
+    }
+    if let Some(block) = subagent_model_tool_call_to_block(tc) {
         return RenderBlock::ToolCall(ToolCallBlock::Other(block));
     }
     let success = !matches!(tc.status, acp::ToolCallStatus::Failed);
@@ -6844,6 +7192,202 @@ mod tests {
         .kind(acp::ToolKind::Other)
         .status(acp::ToolCallStatus::Pending)
     }
+
+    // ── Advisory suggestion card (Task A) ─────────────────────────────────
+    fn advisory_question() -> tools::implementations::grow_build::ask_user_question::Question {
+        use tools::implementations::grow_build::ask_user_question::{Question, QuestionOption};
+        Question {
+            question: "Which cache?".into(),
+            options: vec![
+                QuestionOption {
+                    label: "Redis".into(),
+                    description: "in-memory".into(),
+                    preview: None,
+                    id: None,
+                },
+                QuestionOption {
+                    label: "Postgres".into(),
+                    description: "relational".into(),
+                    preview: None,
+                    id: None,
+                },
+            ],
+            multi_select: Some(false),
+            recommended_option: Some("Redis".into()),
+            id: None,
+        }
+    }
+
+    /// Completed ask tool call in the ACTUAL producer shape: the structured
+    /// advisory payload rides `raw_output` as the typed `ToolOutput`; the
+    /// content blocks carry only the model-facing message text.
+    fn advisory_completed_tool_call(id: &str) -> acp::SessionUpdate {
+        use tools::types::output::{AdvisoryQuestion, AskUserQuestionOutput, ToolOutput};
+        let output = AskUserQuestionOutput {
+            message: "Proceeding with the Redis recommendation.".into(),
+            advisory: Some(AdvisoryQuestion {
+                tool_call_id: id.into(),
+                questions: vec![advisory_question()],
+            }),
+        };
+        let mut tc =
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), "ask user".to_string())
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Completed)
+                .content(vec![])
+                .locations(vec![]);
+        tc.raw_output = Some(serde_json::to_value(ToolOutput::AskUserQuestion(output)).unwrap());
+        acp::SessionUpdate::ToolCall(tc)
+    }
+
+    fn advisory_failed_tool_call(id: &str) -> acp::SessionUpdate {
+        let mut tc =
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), "ask user".to_string())
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Failed)
+                .content(vec![])
+                .locations(vec![]);
+        tc.raw_output = Some(serde_json::json!({"error": "transport dropped"}));
+        acp::SessionUpdate::ToolCall(tc)
+    }
+
+    fn advisory_cards_in(
+        sb: &ScrollbackState,
+    ) -> Vec<crate::scrollback::blocks::tool::AdvisoryCard> {
+        let mut cards = Vec::new();
+        for idx in 0..sb.len() {
+            let Some(entry) = sb.get(idx) else { continue };
+            if let RenderBlock::ToolCall(crate::scrollback::ToolCallBlock::Other(other)) =
+                &entry.block
+                && let Some(card) = &other.advisory
+            {
+                cards.push(card.clone());
+            }
+        }
+        cards
+    }
+
+    #[test]
+    fn advisory_success_result_confirms_card_from_typed_raw_output() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.present_advisory_card("sess-1", "call-a", vec![advisory_question()], &mut sb);
+        // The old parser read the display content text and never found the
+        // structured advisory; the typed raw_output parse confirms the card.
+        assert!(tracker.handle_update(advisory_completed_tool_call("call-a"), &meta(), &mut sb));
+        let cards = advisory_cards_in(&sb);
+        assert_eq!(cards.len(), 1, "one card row after the result");
+        assert_eq!(
+            cards[0].status,
+            crate::scrollback::blocks::tool::AdvisoryCardStatus::Confirmed
+        );
+        assert_eq!(cards[0].tool_call_id, "call-a");
+        assert_eq!(cards[0].questions.len(), 1);
+        assert_eq!(
+            cards[0].questions[0].recommended_option.as_deref(),
+            Some("Redis")
+        );
+    }
+
+    #[test]
+    fn advisory_cold_result_restores_card_without_ext_presentation() {
+        // Fresh tracker + scrollback (reconnect/replay): no ext request is
+        // replayed, the successful result alone restores one Confirmed card
+        // with a fresh (Unobserved) reply projection.
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        assert!(tracker.handle_update(advisory_completed_tool_call("call-cold"), &meta(), &mut sb));
+        let cards = advisory_cards_in(&sb);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].status,
+            crate::scrollback::blocks::tool::AdvisoryCardStatus::Confirmed
+        );
+        assert_eq!(
+            cards[0].reply_status,
+            crate::scrollback::blocks::tool::AdvisoryReplyStatus::Unobserved
+        );
+        assert_eq!(cards[0].reply_open_intent, false);
+    }
+
+    #[test]
+    fn advisory_failure_marks_presented_card_failed() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.present_advisory_card("sess-1", "call-f", vec![advisory_question()], &mut sb);
+        assert!(tracker.handle_update(advisory_failed_tool_call("call-f"), &meta(), &mut sb));
+        let cards = advisory_cards_in(&sb);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].status,
+            crate::scrollback::blocks::tool::AdvisoryCardStatus::Failed
+        );
+    }
+
+    #[test]
+    fn advisory_duplicate_ext_and_ext_before_tool_call_keep_single_row() {
+        // Duplicate ext delivery merges into the same card…
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.present_advisory_card("sess-1", "call-x", vec![advisory_question()], &mut sb);
+        tracker.present_advisory_card("sess-1", "call-x", vec![advisory_question()], &mut sb);
+        assert_eq!(advisory_cards_in(&sb).len(), 1, "duplicate ext → one card");
+        // …and the ToolCall event landing AFTER the ext presentation folds
+        // into the registered row instead of pushing a second one.
+        assert!(tracker.handle_update(
+            tool_call("call-x", acp::ToolKind::Other, "ask user"),
+            &meta(),
+            &mut sb
+        ));
+        assert_eq!(
+            advisory_cards_in(&sb).len(),
+            1,
+            "ext before ToolCall → one row"
+        );
+        let rows = (0..sb.len())
+            .filter(|idx| {
+                sb.get(*idx).is_some_and(|entry| {
+                    matches!(
+                        &entry.block,
+                        RenderBlock::ToolCall(crate::scrollback::ToolCallBlock::Other(other))
+                            if other.advisory.is_some()
+                    )
+                })
+            })
+            .count();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn advisory_duplicate_success_preserves_reply_projection() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.present_advisory_card("sess-1", "call-p", vec![advisory_question()], &mut sb);
+        // Mark the card answered (as the admission callback would).
+        let entry_id = (0..sb.len())
+            .find_map(|idx| sb.get(idx).map(|entry| entry.id))
+            .expect("card row");
+        if let Some(entry) = sb.get_by_id_mut(entry_id)
+            && let RenderBlock::ToolCall(crate::scrollback::ToolCallBlock::Other(other)) =
+                &mut entry.block
+            && let Some(card) = other.advisory.as_mut()
+        {
+            card.reply_status = crate::scrollback::blocks::tool::AdvisoryReplyStatus::Accepted;
+            entry.invalidate_cache();
+        }
+        // A late duplicate successful result must not reset the projection.
+        assert!(tracker.handle_update(advisory_completed_tool_call("call-p"), &meta(), &mut sb));
+        let cards = advisory_cards_in(&sb);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].reply_status,
+            crate::scrollback::blocks::tool::AdvisoryReplyStatus::Accepted
+        );
+        assert_eq!(
+            cards[0].status,
+            crate::scrollback::blocks::tool::AdvisoryCardStatus::Confirmed
+        );
+    }
     #[test]
     fn is_task_tool_recognizes_grow_build_variant() {
         assert!(is_task_tool(&initial_tool_call("tc1", "task")));
@@ -7885,6 +8429,401 @@ mod tests {
                     .output
                     .as_deref()
                     .is_some_and(|details| details.contains(&format!("Phase: {phase}")))
+            );
+        }
+    }
+
+    // ── Parent sampling control row ───────────────────────────────────────
+
+    use tools::implementations::grow_build::set_subagent_model::{
+        SetSubagentModelOutput, SubagentModelStatus,
+    };
+
+    fn set_model_input(model: Option<&str>, effort: Option<&str>) -> serde_json::Value {
+        let mut input = serde_json::json!({
+            "variant": "SetSubagentModel",
+            "subagent_id": "child-alpha",
+        });
+        if let Some(model) = model {
+            input["model"] = serde_json::json!(model);
+        }
+        if let Some(effort) = effort {
+            input["effort"] = serde_json::json!(effort);
+        }
+        input
+    }
+
+    /// The exact terminal update Shell's producer emits for a queued
+    /// admission, so the consumer is tested against the real wire shape
+    /// instead of a hand-written guess.
+    fn set_model_queued_completion(id: &str, subagent_id: &str) -> acp::ToolCallUpdate {
+        let output = ToolOutput::SetSubagentModel(SetSubagentModelOutput {
+            subagent_id: subagent_id.to_owned(),
+            status: SubagentModelStatus::Queued,
+        });
+        shell::session::acp_conversion::acp_tool_update(&output, id, None, None)
+            .expect("a queued admission must emit a terminal update")
+    }
+
+    fn set_model_start(id: &str, input: serde_json::Value) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(Arc::from(id)),
+                "Queue subagent child-alpha model: catalog-model".to_string(),
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![])
+            .locations(vec![])
+            .raw_input(Some(input)),
+        )
+    }
+
+    fn set_model_update(
+        id: &str,
+        status: acp::ToolCallStatus,
+        content: Option<&str>,
+        raw_output: Option<serde_json::Value>,
+    ) -> acp::SessionUpdate {
+        let mut fields = acp::ToolCallUpdateFields::new().status(Some(status));
+        if let Some(content) = content {
+            fields = fields.content(Some(vec![acp::ToolCallContent::from(
+                acp::ContentBlock::Text(acp::TextContent::new(content.to_owned())),
+            )]));
+        }
+        if let Some(raw_output) = raw_output {
+            fields = fields.raw_output(Some(raw_output));
+        }
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(id)),
+            fields,
+        ))
+    }
+
+    fn sampling_row(sb: &ScrollbackState, index: usize) -> (&OtherToolCallBlock, EntryId) {
+        let entry = sb.get(index).expect("sampling control row");
+        let RenderBlock::ToolCall(ToolCallBlock::Other(row)) = &entry.block else {
+            panic!("expected an Other tool row, got {:?}", entry.block);
+        };
+        (row, entry.id)
+    }
+
+    #[test]
+    fn set_subagent_model_queues_in_place_on_the_same_row() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        assert!(tracker.handle_update(
+            set_model_start(
+                "model-control",
+                set_model_input(Some("catalog-model"), Some("high")),
+            ),
+            &meta(),
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1);
+        let (row, entry_id) = sampling_row(&sb, 0);
+        assert_eq!(
+            row.name, "set_subagent_model → subagent「child-alpha」",
+            "the target stays on every state"
+        );
+        assert_eq!(
+            row.summary, "Dispatching · model catalog-model · effort high",
+            "status leads the requested fields"
+        );
+
+        // Shell's preparation update arrives before admission.
+        assert!(tracker.handle_update(
+            set_model_update("model-control", acp::ToolCallStatus::InProgress, None, None),
+            &meta(),
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1, "an update must not add a second row");
+        let (row, same_id) = sampling_row(&sb, 0);
+        assert_eq!(same_id, entry_id, "the row keeps its identity");
+        assert_eq!(
+            row.summary,
+            "Dispatching · model catalog-model · effort high"
+        );
+
+        assert!(tracker.handle_update(
+            acp::SessionUpdate::ToolCallUpdate(set_model_queued_completion(
+                "model-control",
+                "child-alpha",
+            )),
+            &meta(),
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1, "completion reuses the dispatching row");
+        let (row, same_id) = sampling_row(&sb, 0);
+        assert_eq!(same_id, entry_id, "the same EntryId carries the result");
+        assert_eq!(row.summary, "Queued · model catalog-model · effort high");
+        assert!(row.error.is_none());
+        let details = row.output.as_deref().expect("expanded details");
+        for expected in [
+            "Target ID: child-alpha",
+            "Requested: model catalog-model · effort high",
+            "Status: Queued",
+            "\"status\": \"queued\"",
+        ] {
+            assert!(details.contains(expected), "missing {expected}: {details}");
+        }
+        assert!(
+            details.contains("applies at its next closed Step"),
+            "queued must stay admission-only: {details}"
+        );
+        for claim in ["Applied", "switched", "ModelChanged"] {
+            assert!(
+                !details.contains(claim) && !row.summary.contains(claim),
+                "admission must not claim {claim}: {details}"
+            );
+        }
+        assert!(
+            details.contains("\"model\": \"catalog-model\"")
+                && details.contains("\"effort\": \"high\""),
+            "the full arguments stay in the expanded row: {details}"
+        );
+    }
+
+    #[test]
+    fn set_subagent_model_completion_without_typed_admission_is_not_queued() {
+        for (raw_output, case) in [
+            (None, "no output"),
+            (
+                Some(serde_json::json!({"status": "queued"})),
+                "untyped shape",
+            ),
+            (
+                Some(
+                    serde_json::to_value(ToolOutput::SetSubagentModel(SetSubagentModelOutput {
+                        subagent_id: "other-child".to_owned(),
+                        status: SubagentModelStatus::Queued,
+                    }))
+                    .expect("typed queued output serializes"),
+                ),
+                "another target admitted",
+            ),
+        ] {
+            let mut sb = ScrollbackState::new();
+            let mut tracker = AcpUpdateTracker::new();
+            tracker.handle_update(
+                set_model_start(
+                    "model-control",
+                    set_model_input(Some("catalog-model"), None),
+                ),
+                &meta(),
+                &mut sb,
+            );
+            tracker.handle_update(
+                set_model_update(
+                    "model-control",
+                    acp::ToolCallStatus::Completed,
+                    None,
+                    raw_output,
+                ),
+                &meta(),
+                &mut sb,
+            );
+            let (row, _) = sampling_row(&sb, 0);
+            assert_eq!(sb.len(), 1, "{case}");
+            assert!(
+                !row.summary.contains("Queued"),
+                "{case} must not be read as admission: {}",
+                row.summary
+            );
+            assert_eq!(row.summary, "Unconfirmed · model catalog-model", "{case}");
+        }
+    }
+
+    #[test]
+    fn set_subagent_model_failure_keeps_the_original_error_in_place() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            set_model_start("model-control", set_model_input(None, Some("xhigh"))),
+            &meta(),
+            &mut sb,
+        );
+        let (_, entry_id) = sampling_row(&sb, 0);
+        let error = "Tool `set_subagent_model` failed: subagent_model_rejected: actor rejected";
+        assert!(tracker.handle_update(
+            set_model_update(
+                "model-control",
+                acp::ToolCallStatus::Failed,
+                Some(error),
+                Some(serde_json::json!({
+                    "error": "tool_execution_failed",
+                    "message": "actor rejected",
+                })),
+            ),
+            &meta(),
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1);
+        let (row, same_id) = sampling_row(&sb, 0);
+        assert_eq!(same_id, entry_id);
+        assert_eq!(row.summary, "Failed · effort xhigh");
+        assert_eq!(row.error.as_deref(), Some(error));
+        assert!(
+            row.output
+                .as_deref()
+                .is_some_and(|details| details.contains("Status: Failed")),
+            "the expanded view keeps the terminal state"
+        );
+    }
+
+    #[test]
+    fn set_subagent_model_title_lookalike_stays_a_generic_row() {
+        // The ACP title is Shell prose. Without the typed variant or verified
+        // Grow tool identity it carries no sampling semantics.
+        let call = acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("lookalike")),
+            "Queue subagent child-alpha model: catalog-model".to_string(),
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Completed)
+        .content(vec![])
+        .raw_input(Some(serde_json::json!({
+            "subagent_id": "child-alpha",
+            "model": "catalog-model",
+        })));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(row)) = tool_call_to_block(&call, None)
+        else {
+            panic!("expected a generic Other row");
+        };
+        assert_eq!(row.name, "Queue subagent child-alpha model: catalog-model");
+        assert!(!row.name.starts_with("set_subagent_model"));
+
+        // The verified Grow identity envelope projects without a variant tag.
+        let verified = call.clone().meta(Some(
+            [(
+                "grow/tool".to_owned(),
+                serde_json::json!({"name": "set_subagent_model"}),
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(row)) = tool_call_to_block(&verified, None)
+        else {
+            panic!("expected a sampling control row");
+        };
+        assert_eq!(row.name, "set_subagent_model → subagent「child-alpha」");
+        // Identity alone does not admit anything: a completion without the
+        // typed queued result for this target stays unconfirmed.
+        assert_eq!(row.summary, "Unconfirmed · model catalog-model");
+    }
+
+    #[test]
+    fn repeated_set_subagent_model_completion_keeps_one_row() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            set_model_start(
+                "model-control",
+                set_model_input(Some("catalog-model"), Some("high")),
+            ),
+            &meta(),
+            &mut sb,
+        );
+        let completion = || {
+            acp::SessionUpdate::ToolCallUpdate(set_model_queued_completion(
+                "model-control",
+                "child-alpha",
+            ))
+        };
+        assert!(tracker.handle_update(completion(), &meta(), &mut sb));
+        let (_, entry_id) = sampling_row(&sb, 0);
+        assert!(
+            !tracker.handle_update(completion(), &meta(), &mut sb),
+            "a repeated completion must not mutate the transcript"
+        );
+        assert_eq!(sb.len(), 1, "one completed row per owning call");
+        let (row, same_id) = sampling_row(&sb, 0);
+        assert_eq!(same_id, entry_id);
+        assert_eq!(row.summary, "Queued · model catalog-model · effort high");
+    }
+
+    #[test]
+    fn set_subagent_model_effort_only_summary_names_only_effort() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            set_model_start("model-control", set_model_input(None, Some("xhigh"))),
+            &meta(),
+            &mut sb,
+        );
+        let (row, _) = sampling_row(&sb, 0);
+        assert_eq!(row.summary, "Dispatching · effort xhigh");
+        assert!(
+            !row.summary.contains("model"),
+            "an effort-only patch keeps the child's desired model: {}",
+            row.summary
+        );
+        let details = row.output.as_deref().expect("expanded details");
+        assert!(details.contains("Requested: effort xhigh"), "{details}");
+    }
+
+    #[test]
+    fn set_subagent_model_status_stays_readable_on_a_narrow_row() {
+        use crate::scrollback::block::BlockContent;
+        use crate::scrollback::types::{BlockContext, DisplayMode};
+
+        let call = acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("model-control")),
+            "Queue subagent child-alpha model: a-very-long-catalog-model-id-here".to_string(),
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Completed)
+        .content(vec![])
+        .raw_input(Some(set_model_input(
+            Some("a-very-long-catalog-model-id-here"),
+            Some("xhigh"),
+        )))
+        .raw_output(
+            set_model_queued_completion("model-control", "child-alpha")
+                .fields
+                .raw_output,
+        );
+        let block = tool_call_to_block(&call, None);
+        for width in [40u16, 80] {
+            let rendered = block.output(&BlockContext {
+                width,
+                mode: DisplayMode::Collapsed,
+                is_running: false,
+                raw: false,
+                max_lines: None,
+                appearance: Default::default(),
+                is_selected: false,
+                cwd: None,
+            });
+            let lines: Vec<String> = rendered
+                .lines
+                .iter()
+                .map(|line| {
+                    line.content
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<Vec<_>>()
+                        .concat()
+                })
+                .collect();
+            let text = lines.join("\n");
+            // The header wraps mid-word on a narrow row, so a layout line
+            // boundary can split the target (`child-` / `alpha`). The target is
+            // readable exactly when its glyphs appear in order, so compare the
+            // rendered characters with only those line breaks removed.
+            let glyphs = lines.concat();
+            assert!(
+                text.contains("Queued"),
+                "width={width}: status lost: {text}"
+            );
+            assert!(
+                text.contains("set_subagent_model"),
+                "width={width}: tool identity lost: {text}"
+            );
+            assert!(
+                glyphs.contains("child-alpha"),
+                "width={width}: target lost: {text}"
             );
         }
     }

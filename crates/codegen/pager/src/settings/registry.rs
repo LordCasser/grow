@@ -268,6 +268,8 @@ pub struct PagerLocalSnapshot {
     /// `[toolset.ask_user_question].timeout_enabled` mirror (effective TOML
     /// merge, like `show_tips`). `None` = unset in TOML → default `true`.
     pub ask_user_question_timeout_enabled: Option<bool>,
+    /// Saved TOML preference; the environment may override it at ask admission.
+    pub ask_user_question_allow_non_blocking: Option<bool>,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -291,6 +293,7 @@ impl Default for PagerLocalSnapshot {
             respect_manual_folds: crate::appearance::ScrollConfig::default().respect_manual_folds,
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
+            ask_user_question_allow_non_blocking: None,
         }
     }
 }
@@ -587,6 +590,12 @@ pub fn current_value_for(
         // toggles (other layers feed the effective gate at spawn). None → false.
         "remember_tool_approvals" => Some(SettingValue::Bool(
             ui.remember_tool_approvals.unwrap_or(false),
+        )),
+        // Saved preference only; Shell applies env precedence at each admission.
+        "toolset.ask_user_question.allow_non_blocking" => Some(SettingValue::Bool(
+            pager
+                .ask_user_question_allow_non_blocking
+                .unwrap_or(ask_user_question::DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING),
         )),
         // ask_user_question timeout: reflects the effective TOML merge; the
         // toggle writes the user layer, and env/remote settings tiers feed the
@@ -906,6 +915,13 @@ mod tests {
                 }
                 // ask_user_question timeout: no UiConfig mirror (lives under
                 // `[toolset]`); default anchored on the resolver-shared const.
+                ("toolset.ask_user_question.allow_non_blocking", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ask_user_question::DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING
+                    );
+                    assert!(!meta.restart_required);
+                }
                 ("toolset.ask_user_question.timeout_enabled", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,

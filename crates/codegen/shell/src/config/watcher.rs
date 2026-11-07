@@ -56,14 +56,27 @@ impl<W: notify::Watcher> notify::Watcher for AccessFilteredWatcher<W> {
     }
 }
 
-/// `new_debouncer` equivalent that builds the debouncer on top of
-/// [`AccessFilteredWatcher`] instead of the raw `RecommendedWatcher`.
+// FSEvents registration can block in FSEventStreamStart even on its first path.
+// Discovery uses metadata polling on macOS without reading arbitrary root files.
+#[cfg(target_os = "macos")]
+type DiscoveryWatchBackend = notify::PollWatcher;
+#[cfg(not(target_os = "macos"))]
+type DiscoveryWatchBackend = notify::RecommendedWatcher;
+type DiscoveryDebouncer = Debouncer<AccessFilteredWatcher<DiscoveryWatchBackend>>;
+
+/// Build discovery debounce over the platform backend, retaining Access filtering.
 fn new_filtered_debouncer<F: notify_debouncer_mini::DebounceEventHandler>(
     timeout: Duration,
     event_handler: F,
-) -> Result<Debouncer<AccessFilteredWatcher>, notify::Error> {
-    let config = notify_debouncer_mini::Config::default().with_timeout(timeout);
-    new_debouncer_opt::<F, AccessFilteredWatcher>(config, event_handler)
+) -> Result<DiscoveryDebouncer, notify::Error> {
+    let config = notify_debouncer_mini::Config::default()
+        .with_timeout(timeout)
+        .with_notify_config(
+            notify::Config::default()
+                .with_poll_interval(timeout)
+                .with_compare_contents(false),
+        );
+    new_debouncer_opt::<F, AccessFilteredWatcher<DiscoveryWatchBackend>>(config, event_handler)
 }
 
 // FSEvents rebuilds its stream for every path mutation. Config directories
@@ -788,7 +801,7 @@ fn plan_skills_watch_targets(
 /// After a [`DiscoveryChange`], call [`Self::refresh_new_dirs`] so newly created
 /// seed dirs get watches attached.
 pub struct ProjectDiscoveryWatcher {
-    debouncer: Debouncer<AccessFilteredWatcher>,
+    debouncer: DiscoveryDebouncer,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
     refreshed_dirs: HashMap<PathBuf, same_file::Handle>,
 }
@@ -863,7 +876,7 @@ impl ProjectDiscoveryWatcher {
 
 /// Watches skill/command/workflow discovery dirs and classifies disk changes.
 pub struct SkillsFileWatcher {
-    debouncer: Debouncer<AccessFilteredWatcher>,
+    debouncer: DiscoveryDebouncer,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
     refreshed_dirs: HashMap<PathBuf, same_file::Handle>,
 }
@@ -1100,6 +1113,56 @@ mod tests {
             .chain(grow_discovery_refresh_dirs(&project_grow))
             .collect::<Vec<_>>();
         assert_eq!(plan.refresh_dirs, expected);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn discovery_poll_uses_metadata_without_comparing_large_file_contents() {
+        use notify::Watcher;
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("large-file");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.set_len(64 * 1024 * 1024).unwrap();
+        let modified = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        file.set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut debouncer = new_filtered_debouncer(
+            Duration::from_millis(40),
+            move |events: DebounceEventResult| {
+                let _ = tx.send(events);
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            DiscoveryWatchBackend::kind(),
+            notify::WatcherKind::PollWatcher
+        );
+        debouncer
+            .watcher()
+            .watch(temp.path(), RecursiveMode::Recursive)
+            .unwrap();
+
+        // Changing bytes while preserving metadata must not trigger hashing.
+        file.write_all(b"changed contents").unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), rx.recv())
+                .await
+                .is_err(),
+            "discovery must not compare arbitrary file contents"
+        );
+        file.set_times(std::fs::FileTimes::new().set_modified(modified + Duration::from_secs(2)))
+            .unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("metadata change missing")
+            .expect("watcher closed")
+            .expect("polling failed");
+        assert!(events.iter().any(|event| event.path == path));
     }
 
     #[test]
@@ -1385,6 +1448,37 @@ mod replacement_discovery_tests {
         std::fs::create_dir_all(grow.join("skills")).unwrap();
         assert!(watcher.refresh_new_discovery_dirs());
         assert!(!watcher.refresh_new_discovery_dirs());
+    }
+
+    #[tokio::test]
+    async fn custom_skill_root_observes_create_modify_and_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let custom = root.join("custom-skills");
+        std::fs::create_dir(&custom).unwrap();
+        let (_watcher, mut rx) = SkillsFileWatcher::start_with_dirs(
+            std::slice::from_ref(&custom),
+            &root.join(".grow"),
+            None,
+        )
+        .unwrap();
+        let skill = custom.join("SKILL.md");
+        std::fs::write(&skill, "first").unwrap();
+        next_change(&mut rx).await;
+        while rx.try_recv().is_ok() {}
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&skill)
+            .unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        std::fs::write(&skill, "updated").unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(modified + Duration::from_secs(2)))
+            .unwrap();
+        next_change(&mut rx).await;
+        while rx.try_recv().is_ok() {}
+        drop(file);
+        std::fs::remove_file(&skill).unwrap();
+        next_change(&mut rx).await;
     }
 
     #[tokio::test]

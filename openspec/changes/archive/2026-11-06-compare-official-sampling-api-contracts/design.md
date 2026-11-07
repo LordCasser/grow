@@ -1,0 +1,15 @@
+# Evidence and comparison boundary
+
+本次分析的权威顺序为：官方API/OpenAPI的明确字段与生命周期要求；官方SDK的类型和实际解析/累积行为；Grow锁定SDK及本地实现；原始现场wire与受控实验。官网指南示例可能省略细节，不能覆盖schema.required；SDK宽松构造或JSON.parse不是供应方允许缺省的证明。官方当前main修订也不能替代现场route/服务版本。
+
+父负责OpenAI Responses/OpenAPI、Python/Node运行时与跨来源结论，两个只读子调查分别负责Anthropic Messages和OpenAI/DeepSeek Chat。各自只写临时证据；父写本change及关联分析/backlog说明。固定来源sha/hash和抓取日期，不修改已发布2.6.1或业务代码。
+
+当前OpenAI官网部分页面fetch返回404，Context7官网索引提供导航及正文片段；最终required与SDK行为结论以直接下载的官方仓库固定修订原文复核，不以搜索摘要单独判定。OpenAPI5.1MB原文已固定，摘取selected-schemas仅作阅读辅助，仍保留原文hash。官方Python/Node SDK已直接下载必要模型、构造器和stream reader，严格区分schema字段、对象构造、snapshot累积与自动重试。
+
+本次按用户后续澄清，以跨协议、跨模型切换链路为主线：源响应事实和native分开保存，route替换后重建目标history，核完整工具配对、签名/加密状态可读范围、reasoning回传要求与runtime事实的表达。单次流解析/错误类型仅作关联分析，不能把其修复等同于模型切换修复。
+
+要解决的关键决策：目标API对完整历史reasoning和客户端合成工具往返的要求，是否与Grow中性历史投影匹配；旧native/已学习reasoning状态在route替换时是否清除；原arguments/annotations/稀疏failed是官网承诺还是代理差异；官方错误分类有无已建模但Grow遗漏的标准类型。新增发现只记录单一owner及验证门槛，不顺带实施，也不为容错建立新公共实体。
+
+按用户授权，额外尝试使用gpt-6.1-sol/high、gpt-6-luna/medium及flash默认effort对目标DeepSeekChat历史接纳边界作独立只读复核；这些可选模型阶段没有形成源码读取证据，已终止释放，不计独立review。父保留跨模块裁决并亲核实际请求转换和官方正文。验证沿用现有portable/learned/runtime投影与ChatState六方向matrix，不新增探针或调用真实provider。24次执行、去重22项通过只证明本地状态与wire规则，不证明官方目标端接受。
+
+父验收子报告时核原文和固定源码，结论注明未调用真实API、未验证用户routeheader/version和默认SDK是否跑过。若官方依据推翻或限定此前结论，同步原分析及backlog并保留原实验事实，不能以引用官网掩盖实现差异。

@@ -774,7 +774,36 @@ impl SessionActor {
         mut notification: GrowSessionNotification,
         forward_to_gateway: bool,
         restored: bool,
+        respond_to: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) -> Result<(), chat_state::TimelineWriteError> {
+        // Start the bound before observing hooks or persistence. Their original
+        // ownership and fail-stop semantics outlive an unconfirmed receipt.
+        let publication = respond_to.map(|mut respond_to| {
+            let (publication, result) = tokio::sync::oneshot::channel();
+            let cancel = self.durable_ui_cancel.clone();
+            let persistence_tx = self.notifications.persistence_tx.clone();
+            let preview = self.sampling_preview.lock().as_ref()
+                .map(|(id, attempt, _)| (id.clone(), *attempt));
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            tokio::spawn(async move {
+                let (result, report_failure) = tokio::select! {
+                    biased;
+                    _ = respond_to.closed() => (Err("publication unconfirmed: receipt receiver closed".to_owned()), true),
+                    _ = cancel.cancelled() => (Err("publication unconfirmed: session stopped".to_owned()), true),
+                    _ = tokio::time::sleep_until(deadline) => (Err("publication unconfirmed: 30 second deadline elapsed".to_owned()), true),
+                    result = result => (result.unwrap_or_else(|_| Err("publication unconfirmed: Hook or persistence did not complete".to_owned())), false),
+                };
+                if report_failure
+                    && let Err(reason) = &result
+                    && let Some((request_id, attempt)) = preview {
+                    let _ = persistence_tx.send(PersistenceMsg::SamplingPreviewFailure {
+                        request_id, attempt, reason: reason.clone(),
+                    });
+                }
+                let _ = respond_to.send(result);
+            });
+            publication
+        });
         if !matches!(
             &notification.update,
             GrowSessionUpdate::SubagentProgress { .. }
@@ -811,7 +840,19 @@ impl SessionActor {
             crate::util::event_id::ensure_event_id_meta(&self.session_info.id.0, &mut meta_map);
             notification.meta = meta_map.map(serde_json::Value::Object);
         }
-        if !self.persist_grow_notification(&notification).await {
+        // Receipt callers require an actual durable ACK. Preserve the active
+        // attempt's PreviewIndependent owner and the original None path.
+        let persisted = if publication.is_some() && self.sampling_preview.lock().is_none() {
+            self.notifications
+                .append_update_durably(crate::session::storage::SessionUpdate::Grow(Box::new(
+                    notification.clone(),
+                )))
+                .await
+                .is_ok()
+        } else {
+            self.persist_grow_notification(&notification).await
+        };
+        if !persisted {
             return Err(chat_state::TimelineWriteError::Persistence(
                 std::io::Error::other("Grow presentation append was not confirmed"),
             ));
@@ -823,6 +864,11 @@ impl SessionActor {
             // Progress reports current child context pressure and remains
             // a transient UI hint. Model-settlement usage is delivered by
             // the shared Goal usage window instead.
+            if let Some(publication) = publication {
+                let _ = publication.send(Err(
+                    "publication unconfirmed: progress is persist-only".to_owned()
+                ));
+            }
             return Ok(());
         }
         let goal_owned_spawn = match &notification.update {
@@ -837,7 +883,11 @@ impl SessionActor {
             _ => false,
         };
         if forward_to_gateway {
-            self.forward_grow_notification_unhooked(notification);
+            self.forward_grow_notification_unhooked_with_receipt(notification, publication);
+        } else if let Some(publication) = publication {
+            let _ = publication.send(Err(
+                "publication unconfirmed: gateway forwarding was not requested".to_owned(),
+            ));
         }
         if goal_owned_spawn && self.goal_runtime_available() {
             let tokens_used = self.goal_tokens_used();
@@ -1299,6 +1349,14 @@ impl SessionActor {
     }
 
     fn forward_grow_notification_unhooked(&self, notification: GrowSessionNotification) {
+        self.forward_grow_notification_unhooked_with_receipt(notification, None);
+    }
+
+    fn forward_grow_notification_unhooked_with_receipt(
+        &self,
+        notification: GrowSessionNotification,
+        publication: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) {
         let params = match serde_json::value::to_raw_value(&notification) {
             Ok(params) => params,
             Err(error) => {
@@ -1310,6 +1368,11 @@ impl SessionActor {
                     );
                 }
                 tracing::warn!(%error, "failed to serialize Grow notification");
+                if let Some(publication) = publication {
+                    let _ = publication.send(Err(format!(
+                        "publication unconfirmed: serialization failed: {error}"
+                    )));
+                }
                 return;
             }
         };
@@ -1320,25 +1383,72 @@ impl SessionActor {
             .lock()
             .as_ref()
             .map(|(id, attempt, _)| (id.clone(), *attempt));
-        if let Some((request_id, attempt)) = preview {
+        let permit = if preview.is_some() {
             match self
                 .notifications
                 .reserve_preview_delivery(&ext_notification)
             {
-                Ok(permit) => {
-                    let completed = self
-                        .notifications
-                        .gateway
-                        .forward_with_completion(ext_notification);
-                    tokio::spawn(async move {
-                        let _ = completed.await;
-                        drop(permit);
-                    });
-                }
+                Ok(permit) => Some(permit),
                 Err(error) => {
-                    self.report_preview_delivery_failure(request_id, attempt, error.to_string())
+                    if let Some((request_id, attempt)) = preview {
+                        self.report_preview_delivery_failure(
+                            request_id,
+                            attempt,
+                            error.to_string(),
+                        );
+                    }
+                    if let Some(publication) = publication {
+                        let _ = publication.send(Err(format!(
+                            "publication unconfirmed: preview gateway budget: {error}"
+                        )));
+                    }
+                    return;
                 }
             }
+        } else {
+            None
+        };
+        if let Some(mut publication) = publication {
+            let completed = self
+                .notifications
+                .gateway
+                .forward_with_completion(ext_notification);
+            let persistence_tx = self.notifications.persistence_tx.clone();
+            tokio::spawn(async move {
+                // The receipt watchdog owns the deadline and cancellation.
+                // Closing its input also retires this monitor and its credit.
+                let result = tokio::select! {
+                    biased;
+                    _ = publication.closed() => None,
+                    completed = completed => Some(match completed {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => Err(format!("publication unconfirmed: gateway failed: {error}")),
+                        Err(_) => Err("publication unconfirmed: gateway completion acknowledgement lost".to_owned()),
+                    }),
+                };
+                drop(permit);
+                if let Some(result) = result {
+                    if let Err(reason) = &result
+                        && let Some((request_id, attempt)) = preview
+                    {
+                        let _ = persistence_tx.send(PersistenceMsg::SamplingPreviewFailure {
+                            request_id,
+                            attempt,
+                            reason: reason.clone(),
+                        });
+                    }
+                    let _ = publication.send(result);
+                }
+            });
+        } else if let Some(permit) = permit {
+            let completed = self
+                .notifications
+                .gateway
+                .forward_with_completion(ext_notification);
+            tokio::spawn(async move {
+                let _ = completed.await;
+                drop(permit);
+            });
         } else {
             self.notifications
                 .gateway
@@ -1346,6 +1456,10 @@ impl SessionActor {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/publication_receipt_tests.rs"]
+mod publication_receipt_tests;
 
 #[cfg(test)]
 fn acking_persistence_channel() -> (
@@ -1505,6 +1619,7 @@ mod grow_event_id_stamping_tests {
                         },
                         true,
                         false,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -1924,6 +2039,7 @@ mod grow_event_id_stamping_tests {
                         },
                         false,
                         false,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -1943,6 +2059,7 @@ mod grow_event_id_stamping_tests {
                         },
                         true,
                         false,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -2289,6 +2406,7 @@ mod grow_event_id_stamping_tests {
                             },
                             false,
                             false,
+                            None,
                         )
                         .await
                         .unwrap();

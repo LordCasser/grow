@@ -34,7 +34,7 @@ pub use types::{
 };
 
 use crate::notification::types::UserQuestionAsked;
-use crate::types::output::AskUserQuestionOutput;
+use crate::types::output::{AdvisoryQuestion, AskUserQuestionOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::NotificationHandle;
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -54,6 +54,17 @@ pub const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// settings registry both anchor on this const.
 pub const DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED: bool = true;
 
+/// Default for `allow_non_blocking` across every resolver tier and settings
+/// surface: the Agent may select `blocking = false` per call unless the user
+/// disables it. Single source, same anchoring as the timeout default above.
+pub const DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING: bool = true;
+
+/// Fixed presentation budget shared by the tool and the shell worker for
+/// effective advisory questions (`blocking = false`): one deadline covering
+/// enqueueing and the presentation acknowledgement round-trip. Not a user
+/// wait budget — the user is never waited on in advisory mode.
+pub const ADVISORY_PRESENTATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Runtime-configurable parameters for the `ask_user_question` tool,
 /// injected via `Params<AskUserQuestionParams>` in `SharedResources`.
 ///
@@ -68,6 +79,16 @@ pub struct AskUserQuestionParams {
     pub timeout_enabled: bool,
     /// Wait budget in seconds when the timer is armed (positive integer).
     pub timeout_secs: std::num::NonZeroU64,
+    /// Whether the Agent may select nonblocking (advisory) questions.
+    /// `false` forces every call to the blocking form, even when the model
+    /// requests `blocking = false`.
+    #[serde(default = "default_allow_non_blocking")]
+    pub allow_non_blocking: bool,
+}
+
+/// Serde default for `allow_non_blocking`, anchored on the shared const.
+fn default_allow_non_blocking() -> bool {
+    DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING
 }
 
 impl Default for AskUserQuestionParams {
@@ -76,11 +97,35 @@ impl Default for AskUserQuestionParams {
             timeout_enabled: DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED,
             timeout_secs: std::num::NonZeroU64::new(RESPONSE_TIMEOUT.as_secs())
                 .expect("default timeout is non-zero"),
+            allow_non_blocking: DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING,
         }
     }
 }
 
 crate::register_resource!("grow_build", "AskUserQuestion", AskUserQuestionParams);
+
+/// Resource: live policy resolver injected by the shell (Factory), letting
+/// the shell own config IO while the tool takes a fresh effective snapshot
+/// on every admission. Same dependency-inversion pattern as
+/// `Params<AskUserQuestionParams>` / `TaskModelValidator`.
+///
+/// Each call re-resolves env > effective TOML > default; a disk parse
+/// failure returns `Err` rather than silently reopening a gate. When the
+/// resolver is present it takes precedence over the injected
+/// `Params<AskUserQuestionParams>`. The resource lock is released before
+/// any user wait — never hold it while blocking.
+#[derive(Clone, educe::Educe)]
+#[educe(Debug)]
+pub struct UserQuestionPolicyResolver(
+    #[educe(Debug(ignore))]
+    pub  std::sync::Arc<dyn Fn() -> Result<AskUserQuestionParams, String> + Send + Sync>,
+);
+
+crate::register_resource!(
+    "grow_build",
+    "UserQuestionPolicyResolver",
+    UserQuestionPolicyResolver
+);
 
 impl AskUserQuestionParams {
     /// Effective wait budget: `Some(duration)` = bounded, `None` = wait forever.
@@ -138,6 +183,16 @@ pub struct Question {
     )]
     pub multi_select: Option<bool>,
 
+    /// Explicitly recommended option for this question; must exactly match
+    /// one of this question's explicit option labels. Any present-but-invalid
+    /// value is rejected as invalid arguments in both modes. Required on
+    /// every question of an effective advisory (`blocking = false`) call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Optional recommended option; must exactly match one option label. Required for every question when blocking=false."
+    )]
+    pub recommended_option: Option<String>,
+
     /// See `QuestionOption.id`. Hidden from the JSON schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
@@ -152,6 +207,21 @@ pub struct AskUserQuestionInput {
     /// is required.
     #[schemars(description = "The questions to ask, each with its own options.")]
     pub questions: Vec<Question>,
+
+    /// `true` (default): the tool waits for the user's necessary decision.
+    /// `false`: present optional advice and continue on the Agent's
+    /// recommendation without waiting for a user answer. The effective mode
+    /// also depends on the user's persisted preference.
+    #[serde(default = "default_input_blocking")]
+    #[schemars(
+        description = "true (default) waits for the user's necessary decision; false presents optional advice and continues without a user answer."
+    )]
+    pub blocking: bool,
+}
+
+/// Serde default for `AskUserQuestionInput.blocking`: absent means blocking.
+fn default_input_blocking() -> bool {
+    true
 }
 
 /// `AskUserQuestion` tool.
@@ -185,7 +255,8 @@ impl crate::types::tool_metadata::ToolMetadata for AskUserQuestionTool {
         r#"Ask the user one or more multiple-choice questions.
 
 - Every question automatically gets an "Other" choice where the user can type their own answer.
-- Put your recommended option first and append "(Recommended)" to its label."#
+- Put your recommended option first and append "(Recommended)" to its label.
+- Keep blocking=true (default) when you need the user's decision. Use blocking=false only to present optional advice you can proceed on: every question must set recommended_option to one of its exact option labels; the tool returns once the questions are shown, and the user has not answered."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -258,33 +329,77 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                         )));
                     }
                 }
+                // An explicit recommendation must exactly match one of this
+                // question's option labels in both modes; nothing is guessed
+                // from label text or ordering.
+                if let Some(rec) = &q.recommended_option
+                    && !q.options.iter().any(|o| &o.label == rec)
+                {
+                    return Err(tool_runtime::ToolError::invalid_arguments(format!(
+                        "recommended_option {:?} does not match any option label in question {:?}",
+                        rec, q.question
+                    )));
+                }
             }
         }
 
-        // ── Step 2: Obtain UserQuestionSender ───────────────────────────
-        let (sender, wait) = {
+        // ── Step 2: Obtain sender and one effective policy snapshot ────
+        // The shell-injected resolver (when present) wins over the injected
+        // Params; either way the lock is released before any wait below.
+        let (sender, params) = {
             let res = resources.lock().await;
-            (
-                res.get::<UserQuestionSender>().cloned(),
+            let params = if let Some(resolver) = res.get::<UserQuestionPolicyResolver>() {
+                resolver.0().map_err(|error| {
+                    tool_runtime::ToolError::custom(
+                        "ask_user_question_policy",
+                        format!("failed to resolve ask_user_question policy: {error}"),
+                    )
+                })?
+            } else {
                 res.get::<crate::types::resources::Params<AskUserQuestionParams>>()
                     .map(|p| p.0)
                     .unwrap_or_default()
-                    .wait_budget(),
-            )
+            };
+            (res.get::<UserQuestionSender>().cloned(), params)
         };
 
         let sender = sender.ok_or_else(|| {
             tool_runtime::ToolError::custom("missing_resource", "UserQuestionSender".to_string())
         })?;
 
-        // ── Step 3: Create oneshot ──────────────────────────────────────
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let deadline = wait.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
+        // Effective mode: advisory only when the model asked for
+        // non-blocking AND the user's policy allows it. A disabled
+        // preference forces the blocking form; already-admitted questions
+        // keep this committed value for the whole call.
+        let advisory = !input.blocking && params.allow_non_blocking;
+        if advisory {
+            for q in &input.questions {
+                if q.recommended_option.is_none() {
+                    return Err(tool_runtime::ToolError::invalid_arguments(format!(
+                        "question {:?} is missing recommended_option; every question in a non-blocking call needs one exact option label",
+                        q.question
+                    )));
+                }
+            }
+        }
+        let wait = params.wait_budget();
 
-        // ── Step 4: Send UserQuestionRequest ────────────────────────────
+        // ── Step 3: Create oneshot and deadline ────────────────────────
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        // Blocking: the user-wait budget. Advisory: the fixed presentation
+        // budget, shared with the shell worker, counted from before enqueue
+        // (queue time included).
+        let deadline = if advisory {
+            Some(tokio::time::Instant::now() + ADVISORY_PRESENTATION_BUDGET)
+        } else {
+            wait.and_then(|duration| tokio::time::Instant::now().checked_add(duration))
+        };
+
+        // ── Step 4: Send UserQuestionRequest (effective blocking) ──────
         let request = types::UserQuestionRequest {
             tool_call_id: ctx.call_id.as_str().to_owned(),
             questions: input.questions.clone(),
+            blocking: !advisory,
             deadline,
             result_tx,
         };
@@ -332,6 +447,19 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                 ));
             }
             Err(_elapsed) => {
+                if advisory {
+                    tracing::warn!(
+                        question_count,
+                        "Advisory question presentation was not acknowledged within the budget"
+                    );
+                    // Presentation failed: an infrastructure failure, never a
+                    // fake user cancel. Drop the receiver; the shell worker
+                    // races `result_tx.closed()` and stops waiting.
+                    return Err(tool_runtime::ToolError::execution(
+                        tool_protocol::ToolId::new("ask_user_question").expect("valid"),
+                        "Advisory question presentation timed out before the client acknowledged it",
+                    ));
+                }
                 tracing::info!(
                     question_count,
                     timeout_secs = ?wait.map(|d| d.as_secs()),
@@ -343,18 +471,43 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                 // a new ext_method arrives). Same model text as cancel.
                 return Ok(AskUserQuestionOutput {
                     message: format::CANCEL_TEXT.to_string(),
+                    advisory: None,
                 });
             }
         };
 
         // ── Step 7: Map result to formatter or error ────────────────────
+        // The two modes accept disjoint response sets: advisory only the
+        // presentation ACK, blocking only the four user paths. A late human
+        // answer never becomes an advisory tool result and vice versa.
+        if advisory {
+            return match result {
+                Ok(UserQuestionResponse::Presented) => Ok(AskUserQuestionOutput {
+                    message: format::format_presented_advisory(&input.questions),
+                    advisory: Some(AdvisoryQuestion {
+                        tool_call_id: ctx.call_id.as_str().to_owned(),
+                        questions: input.questions.clone(),
+                    }),
+                }),
+                Ok(other) => Err(tool_runtime::ToolError::execution(
+                    tool_protocol::ToolId::new("ask_user_question").expect("valid"),
+                    format!(
+                        "Client returned a user response to an advisory question (expected presentation acknowledgement): {other:?}"
+                    ),
+                )),
+                Err(error) => Err(map_user_question_error(error)),
+            };
+        }
         match result {
             Ok(UserQuestionResponse::Accepted {
                 answers,
                 annotations,
             }) => {
                 let message = format::format_accepted_tool_result(&answers, &annotations);
-                Ok(AskUserQuestionOutput { message })
+                Ok(AskUserQuestionOutput {
+                    message,
+                    advisory: None,
+                })
             }
             Ok(UserQuestionResponse::ChatAboutThis {
                 questions,
@@ -366,7 +519,10 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                     &partial_answers,
                     annotations.as_ref(),
                 );
-                Ok(AskUserQuestionOutput { message })
+                Ok(AskUserQuestionOutput {
+                    message,
+                    advisory: None,
+                })
             }
             Ok(UserQuestionResponse::SkipInterview {
                 questions,
@@ -378,22 +534,35 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                     &partial_answers,
                     annotations.as_ref(),
                 );
-                Ok(AskUserQuestionOutput { message })
+                Ok(AskUserQuestionOutput {
+                    message,
+                    advisory: None,
+                })
             }
             Ok(UserQuestionResponse::Cancelled) => Ok(AskUserQuestionOutput {
                 message: format::CANCEL_TEXT.to_string(),
+                advisory: None,
             }),
-            Err(UserQuestionError::TransportError(msg)) => Err(tool_runtime::ToolError::execution(
+            Ok(UserQuestionResponse::Presented) => Err(tool_runtime::ToolError::execution(
                 tool_protocol::ToolId::new("ask_user_question").expect("valid"),
-                format!("Failed to reach the client for user question: {msg}"),
+                "Client returned a presentation acknowledgement to a blocking question",
             )),
-            Err(UserQuestionError::MalformedResponse(msg)) => {
-                Err(tool_runtime::ToolError::execution(
-                    tool_protocol::ToolId::new("ask_user_question").expect("valid"),
-                    format!("Client returned an invalid response to user question: {msg}"),
-                ))
-            }
+            Err(error) => Err(map_user_question_error(error)),
         }
+    }
+}
+
+/// Map an infrastructure failure from the coordinator to a tool error.
+fn map_user_question_error(error: types::UserQuestionError) -> tool_runtime::ToolError {
+    match error {
+        types::UserQuestionError::TransportError(msg) => tool_runtime::ToolError::execution(
+            tool_protocol::ToolId::new("ask_user_question").expect("valid"),
+            format!("Failed to reach the client for user question: {msg}"),
+        ),
+        types::UserQuestionError::MalformedResponse(msg) => tool_runtime::ToolError::execution(
+            tool_protocol::ToolId::new("ask_user_question").expect("valid"),
+            format!("Client returned an invalid response to user question: {msg}"),
+        ),
     }
 }
 
@@ -418,6 +587,7 @@ mod tests {
                 })
                 .collect(),
             multi_select: None,
+            recommended_option: None,
             id: None,
         }
     }
@@ -537,7 +707,10 @@ mod tests {
         let shared = resources.into_shared();
         let tool = AskUserQuestionTool;
 
-        let input = AskUserQuestionInput { questions: vec![] };
+        let input = AskUserQuestionInput {
+            questions: vec![],
+            blocking: true,
+        };
 
         let error =
             tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "test-call"), input)
@@ -553,6 +726,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Pick one?", &["A", "B"])],
         };
 
@@ -571,6 +745,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![
                 make_question("Same question?", &["A"]),
                 make_question("Same question?", &["B"]),
@@ -596,6 +771,7 @@ mod tests {
             question.options[1].id = Some("second".into());
             question.options[1].description = "Different meaning".into();
             let input = AskUserQuestionInput {
+                blocking: true,
                 questions: vec![question],
             };
             let result = tokio::time::timeout(
@@ -622,6 +798,7 @@ mod tests {
     async fn option_labels_can_repeat_across_questions() {
         let (shared, mut rx) = resources_with_sender();
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![
                 make_question("First?", &["Yes", "No"]),
                 make_question("Second?", &["Yes", "No"]),
@@ -663,6 +840,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Which database?", &["Redis", "Postgres"])],
         };
 
@@ -703,6 +881,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Q?", &["A"])],
         };
 
@@ -730,6 +909,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![
                 make_question("Q1?", &["A", "B"]),
                 make_question("Q2?", &["C", "D"]),
@@ -758,6 +938,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Which database?", &["Redis", "Postgres"])],
         };
 
@@ -807,6 +988,7 @@ mod tests {
         let disabled = AskUserQuestionParams {
             timeout_enabled: false,
             timeout_secs: timeout_secs(30),
+            allow_non_blocking: true,
         };
         assert_eq!(disabled.wait_budget(), None, "disabled timer waits forever");
         assert!(
@@ -826,10 +1008,12 @@ mod tests {
         let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
             timeout_enabled: true,
             timeout_secs: timeout_secs(5),
+            allow_non_blocking: true,
         });
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Q?", &["A", "B"])],
         };
 
@@ -855,10 +1039,12 @@ mod tests {
         let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
             timeout_enabled: false,
             timeout_secs: timeout_secs(1),
+            allow_non_blocking: true,
         });
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Which database?", &["Redis", "Postgres"])],
         };
 
@@ -895,6 +1081,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Q?", &["A"])],
         };
 
@@ -919,6 +1106,7 @@ mod tests {
         let tool = AskUserQuestionTool;
 
         let input = AskUserQuestionInput {
+            blocking: true,
             questions: vec![make_question("Q?", &["A"])],
         };
 
@@ -941,5 +1129,353 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Failed to reach the client"), "msg: {msg}");
         assert!(msg.contains("connection reset"), "msg: {msg}");
+    }
+
+    // ── Advisory (blocking = false) tests ───────────────────────────────
+
+    /// Question with an explicit recommendation on the first label.
+    fn make_advisory_question(question: &str, labels: &[&str], recommended: &str) -> Question {
+        let mut q = make_question(question, labels);
+        q.recommended_option = Some(recommended.to_string());
+        q
+    }
+
+    fn advisory_input() -> AskUserQuestionInput {
+        AskUserQuestionInput {
+            blocking: false,
+            questions: vec![make_advisory_question(
+                "Which database?",
+                &["Redis", "Postgres"],
+                "Redis",
+            )],
+        }
+    }
+
+    #[tokio::test]
+    async fn advisory_presented_round_trip() {
+        let (shared, mut rx) = resources_with_sender();
+        let tool = AskUserQuestionTool;
+        let input = advisory_input();
+
+        let handle = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "adv-1"), input).await
+            }
+        });
+
+        let request = rx.recv().await.expect("should receive request");
+        assert_eq!(request.tool_call_id, "adv-1");
+        // The request carries the effective mode, not the requested one.
+        assert!(
+            !request.blocking,
+            "effective advisory request must be non-blocking"
+        );
+
+        request
+            .result_tx
+            .send(Ok(UserQuestionResponse::Presented))
+            .unwrap();
+
+        let output = handle.await.unwrap().unwrap();
+        // Structured advisory payload only after the presentation ACK.
+        let advisory = output.advisory.expect("presented advisory must be Some");
+        assert_eq!(advisory.tool_call_id, "adv-1");
+        assert_eq!(advisory.questions.len(), 1);
+        assert_eq!(
+            advisory.questions[0].recommended_option.as_deref(),
+            Some("Redis")
+        );
+        // Model text names the recommendation, its provenance, and the fact
+        // that the user has not answered.
+        assert!(output.message.contains("\"Which database?\""));
+        assert!(output.message.contains("\"Redis\""));
+        assert!(output.message.contains("Agent recommendation"));
+        assert!(output.message.contains("NOT answered"));
+        assert!(!output.message.contains("User has answered"));
+    }
+
+    #[tokio::test]
+    async fn advisory_missing_recommendation_rejected_before_send() {
+        let (shared, mut rx) = resources_with_sender();
+        let tool = AskUserQuestionTool;
+
+        let input = AskUserQuestionInput {
+            blocking: false,
+            questions: vec![make_question("Which database?", &["Redis", "Postgres"])],
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "adv-missing"), input),
+        )
+        .await
+        .expect("missing recommendation must fail before waiting");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("recommended_option"), "got: {msg}");
+        assert!(rx.try_recv().is_err(), "no question should be sent");
+    }
+
+    #[tokio::test]
+    async fn invalid_recommended_label_rejected_in_both_modes() {
+        for blocking in [true, false] {
+            let resources = Resources::new();
+            let shared = resources.into_shared();
+            let input = AskUserQuestionInput {
+                blocking,
+                questions: vec![make_advisory_question(
+                    "Which database?",
+                    &["Redis", "Postgres"],
+                    "Redis (Recommended)",
+                )],
+            };
+            let err = tool_runtime::Tool::run(
+                &AskUserQuestionTool,
+                test_ctx_with_call_id(shared, "adv-bad-label"),
+                input,
+            )
+            .await
+            .expect_err("explicit invalid recommendation must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("does not match any option label"),
+                "got: {msg}"
+            );
+        }
+    }
+
+    /// Advisory timeout (5s shared budget, queue included) is an
+    /// infrastructure failure, never a fake user cancel.
+    #[tokio::test(start_paused = true)]
+    async fn advisory_timeout_is_failure_not_cancel() {
+        let (shared, mut rx) = resources_with_sender();
+        let tool = AskUserQuestionTool;
+        let input = advisory_input();
+
+        let handle = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "adv-t"), input).await
+            }
+        });
+
+        let request = rx.recv().await.expect("should receive request");
+        assert!(request.deadline.is_some(), "advisory always has a deadline");
+        // Never reply; the fixed presentation budget expires.
+        tokio::time::advance(ADVISORY_PRESENTATION_BUDGET + std::time::Duration::from_secs(1))
+            .await;
+
+        let err = handle
+            .await
+            .unwrap()
+            .expect_err("advisory timeout must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "got: {msg}");
+        assert!(
+            !msg.contains(format::CANCEL_TEXT),
+            "must not fake a user cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn advisory_receiving_human_answer_is_error() {
+        let (shared, mut rx) = resources_with_sender();
+        let tool = AskUserQuestionTool;
+        let input = advisory_input();
+
+        let handle = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "adv-a"), input).await
+            }
+        });
+
+        let request = rx.recv().await.unwrap();
+        let mut answers = IndexMap::new();
+        answers.insert("Which database?".to_string(), vec!["Redis".to_string()]);
+        request
+            .result_tx
+            .send(Ok(UserQuestionResponse::Accepted {
+                answers,
+                annotations: None,
+            }))
+            .unwrap();
+
+        let err = handle
+            .await
+            .unwrap()
+            .expect_err("human answers cannot become advisory results");
+        assert!(
+            err.to_string()
+                .contains("expected presentation acknowledgement")
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_receiving_presented_is_error() {
+        let (shared, mut rx) = resources_with_sender();
+        let tool = AskUserQuestionTool;
+
+        let input = AskUserQuestionInput {
+            blocking: true,
+            questions: vec![make_advisory_question("Q?", &["A", "B"], "A")],
+        };
+
+        let handle = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "blk-p"), input).await
+            }
+        });
+
+        let request = rx.recv().await.unwrap();
+        assert!(request.blocking);
+        request
+            .result_tx
+            .send(Ok(UserQuestionResponse::Presented))
+            .unwrap();
+
+        let err = handle
+            .await
+            .unwrap()
+            .expect_err("blocking questions cannot accept a presentation ACK");
+        assert!(err.to_string().contains("blocking question"));
+    }
+
+    /// A disabled `allow_non_blocking` preference forces the blocking form,
+    /// even when the model requested `blocking = false`.
+    #[tokio::test(start_paused = true)]
+    async fn preference_disabled_forces_blocking() {
+        let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
+            timeout_enabled: true,
+            timeout_secs: timeout_secs(5),
+            allow_non_blocking: false,
+        });
+        let tool = AskUserQuestionTool;
+        let input = advisory_input();
+
+        let handle = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "force-blk"), input)
+                    .await
+            }
+        });
+
+        let request = rx.recv().await.expect("should receive request");
+        assert!(request.blocking, "forced blocking keeps the wait policy");
+        // Unanswered blocking question: old cancel-text policy, advisory None.
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.message, format::CANCEL_TEXT);
+        assert!(result.advisory.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolver_failure_is_admission_failure() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut resources = Resources::new();
+        resources.insert(UserQuestionSender(tx));
+        resources.insert(UserQuestionPolicyResolver(std::sync::Arc::new(|| {
+            Err("config.toml [toolset.ask_user_question] failed to parse".to_string())
+        })));
+        let shared = resources.into_shared();
+
+        let input = advisory_input();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            tool_runtime::Tool::run(
+                &AskUserQuestionTool,
+                test_ctx_with_call_id(shared, "res-fail"),
+                input,
+            ),
+        )
+        .await
+        .expect("resolver failure must fail admission without waiting")
+        .unwrap_err();
+        assert!(err.to_string().contains("failed to resolve"), "got: {err}");
+        assert!(rx.try_recv().is_err(), "no question should be sent");
+    }
+
+    /// The shell resolver takes precedence over an injected Params snapshot.
+    #[tokio::test]
+    async fn resolver_overrides_injected_params() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut resources = Resources::new();
+        resources.insert(UserQuestionSender(tx));
+        // Params say allowed; resolver says disabled — resolver wins.
+        resources.insert(crate::types::resources::Params(AskUserQuestionParams {
+            allow_non_blocking: true,
+            ..Default::default()
+        }));
+        resources.insert(UserQuestionPolicyResolver(std::sync::Arc::new(|| {
+            Ok(AskUserQuestionParams {
+                allow_non_blocking: false,
+                ..Default::default()
+            })
+        })));
+        let shared = resources.into_shared();
+
+        let handle = tokio::spawn(async move {
+            tool_runtime::Tool::run(
+                &AskUserQuestionTool,
+                test_ctx_with_call_id(shared, "res-win"),
+                advisory_input(),
+            )
+            .await
+        });
+        let request = rx.recv().await.expect("should receive request");
+        assert!(request.blocking, "resolver snapshot wins over Params");
+        request
+            .result_tx
+            .send(Ok(UserQuestionResponse::Cancelled))
+            .unwrap();
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.message, format::CANCEL_TEXT);
+    }
+
+    // ── Wire/default serde for the new fields ──────────────────────────
+
+    #[test]
+    fn input_blocking_defaults_true() {
+        let input: AskUserQuestionInput = serde_json::from_value(serde_json::json!({
+            "questions": [{ "question": "Q?", "options": [{"label": "A", "description": "d"}] }]
+        }))
+        .unwrap();
+        assert!(input.blocking);
+        assert!(input.questions[0].recommended_option.is_none());
+        // Recommendation round-trips when present.
+        let input: AskUserQuestionInput = serde_json::from_value(serde_json::json!({
+            "questions": [{
+                "question": "Q?",
+                "options": [{"label": "A", "description": "d"}],
+                "recommended_option": "A"
+            }],
+            "blocking": false
+        }))
+        .unwrap();
+        assert!(!input.blocking);
+        assert_eq!(input.questions[0].recommended_option.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn output_advisory_omitted_when_none() {
+        let json = serde_json::to_value(AskUserQuestionOutput {
+            message: "m".to_string(),
+            advisory: None,
+        })
+        .unwrap();
+        assert!(json.get("advisory").is_none());
+
+        let json = serde_json::to_value(AskUserQuestionOutput {
+            message: "m".to_string(),
+            advisory: Some(AdvisoryQuestion {
+                tool_call_id: "tc".to_string(),
+                questions: vec![make_advisory_question("Q?", &["A"], "A")],
+            }),
+        })
+        .unwrap();
+        assert_eq!(json["advisory"]["tool_call_id"], "tc");
+        assert_eq!(json["advisory"]["questions"].as_array().unwrap().len(), 1);
     }
 }

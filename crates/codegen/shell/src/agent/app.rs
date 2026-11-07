@@ -233,6 +233,133 @@ fn start_skills_file_watcher(
     )
 }
 
+type SkillsWatchRegistration = (
+    crate::config::watcher::SkillsFileWatcher,
+    mpsc::UnboundedReceiver<crate::config::watcher::DiscoveryChange>,
+);
+
+/// The leader owns discovery registrations independently of config delivery.
+/// A watch receiver retains changes arriving while OS registration is blocked.
+async fn run_leader_skills_file_watcher<W, F>(
+    mut paths_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    skills_tx: Arc<TokioMutex<W>>,
+    cancel: tokio_util::sync::CancellationToken,
+    start: F,
+) -> anyhow::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + 'static,
+    F: Fn(Vec<String>) -> Option<SkillsWatchRegistration> + Clone + Send + 'static,
+{
+    let mut active: Option<SkillsWatchRegistration> = None;
+    let mut active_paths = None;
+    let mut paths = paths_rx.borrow_and_update().clone();
+    loop {
+        let register = start.clone();
+        let requested_paths = paths.clone();
+        let registration = tokio::task::spawn_blocking(move || register(requested_paths));
+        match finish_blocking_registration(registration, &cancel).await {
+            Ok(Some(Some(replacement))) => {
+                let previous = active.replace(replacement);
+                active_paths = Some(paths.clone());
+                // Native watcher teardown can block, just like registration.
+                let retirement = tokio::task::spawn_blocking(move || drop(previous));
+                if finish_blocking_registration(retirement, &cancel)
+                    .await?
+                    .is_none()
+                {
+                    break;
+                }
+            }
+            Ok(Some(None)) => {
+                warn!(
+                    ?paths,
+                    "Skills watcher registration failed; retaining previous discovery watches"
+                );
+            }
+            Ok(None) => break,
+            Err(error) => {
+                warn!(%error, ?paths, "Skills watcher registration task failed; retaining previous discovery watches");
+            }
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                changed = paths_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    paths = paths_rx.borrow_and_update().clone();
+                    if active_paths.as_ref() != Some(&paths) {
+                        break;
+                    }
+                }
+                change = async {
+                    match &mut active {
+                        Some((_, events)) => events.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(change) = change {
+                        let (watcher, _) = active.as_mut().expect("active event source");
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break,
+                            _ = forward_discovery_change(watcher, change, &skills_tx) => {}
+                        }
+                    } else {
+                        // A closed event source must not spin; retain config updates.
+                        let previous = active.take();
+                        active_paths = None;
+                        let retirement = tokio::task::spawn_blocking(move || drop(previous));
+                        if finish_blocking_registration(retirement, &cancel).await?.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if cancel.is_cancelled() || paths_rx.has_changed().is_err() {
+            break;
+        }
+    }
+    let retirement = tokio::task::spawn_blocking(move || drop(active));
+    // On cancellation the blocking closure continues to own the registration
+    // until native teardown finishes; the leader need not wait for that OS call.
+    let _ = finish_blocking_registration(retirement, &cancel).await?;
+    Ok(())
+}
+
+async fn forward_discovery_change<W>(
+    watcher: &mut crate::config::watcher::SkillsFileWatcher,
+    change: crate::config::watcher::DiscoveryChange,
+    skills_tx: &Arc<TokioMutex<W>>,
+) where
+    W: tokio::io::AsyncWrite + Unpin + 'static,
+{
+    let created_discovery_dir = watcher.refresh_new_discovery_dirs();
+    let (id, method) = match change {
+        crate::config::watcher::DiscoveryChange::Skills if !created_discovery_dir => {
+            info!("Skill directory changed on disk, reloading skills for all sessions");
+            ("skills-reload", "grow/internal/reload_skills")
+        }
+        crate::config::watcher::DiscoveryChange::Skills => {
+            info!("Discovery directory created on disk, reloading skills and workflows");
+            ("skills-reload", "grow/internal/reload_skills")
+        }
+        crate::config::watcher::DiscoveryChange::Workflows => {
+            info!("Workflow directory changed on disk, re-advertising commands for all sessions");
+            ("workflows-reload", "grow/internal/reload_workflows")
+        }
+    };
+    let line = internal_reload_request_line(id, method, serde_json::json!({}));
+    let mut tx = skills_tx.lock().await;
+    if let Err(e) = tx.write_all(line.as_bytes()).await {
+        warn!(error = %e, "failed to inject skills reload into ACP stream");
+    }
+}
+
 async fn run_skills_file_watcher<W>(
     mut watcher: crate::config::watcher::SkillsFileWatcher,
     mut skills_rx: mpsc::UnboundedReceiver<crate::config::watcher::DiscoveryChange>,
@@ -241,38 +368,13 @@ async fn run_skills_file_watcher<W>(
     W: tokio::io::AsyncWrite + Unpin + 'static,
 {
     while let Some(change) = skills_rx.recv().await {
-        let created_discovery_dir = watcher.refresh_new_discovery_dirs();
-        let (id, method) = match change {
-            crate::config::watcher::DiscoveryChange::Skills if !created_discovery_dir => {
-                info!("Skill directory changed on disk, reloading skills for all sessions");
-                ("skills-reload", "grow/internal/reload_skills")
-            }
-            crate::config::watcher::DiscoveryChange::Skills => {
-                info!("Discovery directory created on disk, reloading skills and workflows");
-                ("skills-reload", "grow/internal/reload_skills")
-            }
-            crate::config::watcher::DiscoveryChange::Workflows => {
-                info!(
-                    "Workflow directory changed on disk, re-advertising commands for all sessions"
-                );
-                ("workflows-reload", "grow/internal/reload_workflows")
-            }
-        };
-        let line = internal_reload_request_line(id, method, serde_json::json!({}));
-        let mut tx = skills_tx.lock().await;
-        if let Err(e) = tx.write_all(line.as_bytes()).await {
-            warn!(
-                error = %e,
-                "failed to inject skills reload into ACP stream"
-            );
-        }
+        forward_discovery_change(&mut watcher, change, &skills_tx).await;
     }
 }
 
-/// Keep the watcher result in its blocking task if cancellation wins. Tokio
-/// cannot cancel an in-flight OS registration call; dropping this handle lets
-/// the LocalSet shut down while the blocking task retains and eventually drops
-/// any watcher it constructs.
+/// Retire a cancelled registration handle off the LocalSet. Dropping a finished
+/// handle can synchronously drop its watcher output; an unfinished task retains
+/// its eventual output until completion. Neither native teardown may block here.
 pub async fn finish_blocking_registration<T: Send + 'static>(
     mut registration: tokio::task::JoinHandle<T>,
     cancel: &tokio_util::sync::CancellationToken,
@@ -280,7 +382,7 @@ pub async fn finish_blocking_registration<T: Send + 'static>(
     tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            drop(registration);
+            tokio::task::spawn_blocking(move || drop(registration));
             Ok(None)
         },
         result = &mut registration => return Ok(Some(result?)),
@@ -791,10 +893,15 @@ pub async fn run_leader(
                 (None, None)
             };
 
-            let skills_paths = agent_config.skills.paths.clone();
-            let skills_registration = tokio::task::spawn_blocking(move || {
-                start_skills_file_watcher(&skills_paths)
-            });
+            let (skills_paths_tx, skills_paths_rx) =
+                watch::channel(agent_config.skills.paths.clone());
+            let skills_cancel = cancel_clone.child_token();
+            let mut skills_task = tokio::task::spawn_local(run_leader_skills_file_watcher(
+                skills_paths_rx,
+                acp_incoming_tx.clone(),
+                skills_cancel.clone(),
+                |paths| start_skills_file_watcher(&paths),
+            ));
 
             let ipc_tx_for_config = agent_to_ipc_tx.clone();
             let acp_tx_for_config = acp_incoming_tx.clone();
@@ -865,8 +972,18 @@ pub async fn run_leader(
                         ConfigUpdate::Skills(skills) => {
                             info!(
                                 paths = skills.paths.len(),
-                                "Skills config change detected by watcher"
+                                "Skills config change detected — reloading all sessions"
                             );
+                            skills_paths_tx.send_replace(skills.paths);
+                            let line = internal_reload_request_line(
+                                "config-reload-skills",
+                                "grow/internal/reload_skills",
+                                serde_json::json!({}),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(e) = tx.write_all(line.as_bytes()).await {
+                                warn!(error = %e, "failed to inject skills config reload into ACP stream");
+                            }
                         }
                         ConfigUpdate::Ui {
                             theme,
@@ -909,19 +1026,6 @@ pub async fn run_leader(
                 );
             });
 
-            let Some(skills_watcher) =
-                finish_blocking_registration(skills_registration, &cancel_clone).await?
-            else {
-                return Ok(());
-            };
-            let mut skills_task = skills_watcher.map(|(watcher, events)| {
-                tokio::task::spawn_local(run_skills_file_watcher(
-                    watcher,
-                    events,
-                    acp_incoming_tx.clone(),
-                ))
-            });
-
             // Wait for IPC server shutdown or cancellation.
             // ipc_handle is a JoinHandle from tokio::spawn — awaitable directly.
             tokio::select! {
@@ -939,10 +1043,8 @@ pub async fn run_leader(
                 task.abort();
                 let _ = task.await;
             }
-            if let Some(task) = skills_task.as_mut() {
-                task.abort();
-                let _ = task.await;
-            }
+            skills_cancel.cancel();
+            (&mut skills_task).await??;
 
             anyhow::Ok(())
         })
@@ -950,6 +1052,9 @@ pub async fn run_leader(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod leader_skills_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1037,6 +1142,82 @@ mod tests {
                     .await
                     .expect("the blocking task must drop its eventual watcher result");
                 assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_watcher_registration_cancellation_drops_output_off_local_set() {
+        struct RegistrationOwner {
+            drop_started: Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>,
+            release: std::sync::mpsc::Receiver<()>,
+            drop_finished: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for RegistrationOwner {
+            fn drop(&mut self) {
+                let _ = self
+                    .drop_started
+                    .take()
+                    .unwrap()
+                    .send(std::thread::current().id());
+                // Bound a regression's synchronous Drop so a failure cannot
+                // leave the test process hung on the LocalSet thread.
+                let _ = self.release.recv_timeout(Duration::from_secs(5));
+                let _ = self.drop_finished.take().unwrap().send(());
+            }
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let local_thread = std::thread::current().id();
+                let (drop_started_tx, drop_started_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let (drop_finished_tx, mut drop_finished_rx) = tokio::sync::oneshot::channel();
+                let registration = tokio::task::spawn_blocking(move || RegistrationOwner {
+                    drop_started: Some(drop_started_tx),
+                    release: release_rx,
+                    drop_finished: Some(drop_finished_tx),
+                });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !registration.is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("registration must finish before cancellation");
+                assert!(registration.is_finished());
+
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                assert!(
+                    finish_blocking_registration(registration, &cancel)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let drop_thread = tokio::time::timeout(Duration::from_secs(5), drop_started_rx)
+                    .await
+                    .expect("cancelled output teardown must start")
+                    .unwrap();
+                assert_ne!(drop_thread, local_thread, "native Drop ran on the LocalSet");
+
+                let actor = tokio::task::spawn_local(async { std::thread::current().id() });
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(1), actor)
+                        .await
+                        .expect("another LocalSet actor must progress during native Drop")
+                        .unwrap(),
+                    local_thread
+                );
+                assert!(matches!(
+                    drop_finished_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                release_tx.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), drop_finished_rx)
+                    .await
+                    .expect("blocking teardown must release its final owner")
+                    .unwrap();
             })
             .await;
     }

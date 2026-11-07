@@ -1288,6 +1288,7 @@ pub(super) mod paste_key_tests {
                 },
             ],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
         let mut state = crate::views::question_view::QuestionViewState::new(

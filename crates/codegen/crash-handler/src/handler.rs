@@ -13,10 +13,32 @@
 //! The crash PC is written to disk before frame walking so a secondary
 //! fault during the walk still produces a usable report.
 
+/// Publish a uniquely named capture only after locking its original handle.
+/// The temporary name is deliberately outside recovery's raw-name grammar.
+#[cfg(any(unix, windows))]
+fn create_capture(crash_dir: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(crash_dir)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".capture-").suffix(".bin").rand_bytes(16);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    // Named tempfiles use normal Windows sharing; ownership is the OS lock,
+    // not a share-mode denial that would hide real open errors from recovery.
+    let tmp = builder.tempfile_in(crash_dir)?;
+    tmp.as_file().try_lock()?;
+    let name = tmp.path().file_name().unwrap().to_str().unwrap();
+    let path = crash_dir.join(name.strip_prefix('.').unwrap());
+    // persist_noclobber moves the name and returns the same locked File. It
+    // neither reopens the path nor risks replacing an existing capture.
+    tmp.persist_noclobber(path).map_err(|err| err.error)
+}
+
 #[cfg(unix)]
 mod imp {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::fd::IntoRawFd;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -451,37 +473,16 @@ mod imp {
     /// Install the crash handler. Must be called early in `main()`, before any
     /// terminal initialization or async runtime setup.
     pub fn install(crash_dir: &Path, app_version: &str) -> bool {
-        let crash_file = crash_dir.join("last-crash.bin");
-
-        // Create the crash directory if it doesn't exist.
-        if std::fs::create_dir_all(crash_dir).is_err() {
-            return false;
-        }
-
-        // Open crash file (pre-opened fd for the signal handler).
-        let c_path = match CString::new(crash_file.as_os_str().as_bytes()) {
-            Ok(p) => p,
+        let file = match super::create_capture(crash_dir) {
+            Ok(file) => file,
             Err(_) => return false,
         };
-        // Owner-only: crash blobs hold stack IPs / fault addresses.
-        let fd = unsafe {
-            libc::open(
-                c_path.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return false;
+        // std/tempfile open Unix files with close-on-exec. Transfer the exact
+        // locked descriptor into signal state; no other handle can prolong it.
+        let previous = CRASH_FD.swap(file.into_raw_fd(), Ordering::Relaxed);
+        if previous >= 0 {
+            unsafe { libc::close(previous) };
         }
-        // open's mode is create-only; tighten upgrades of older 0644 blobs.
-        if unsafe { libc::fchmod(fd, 0o600) } != 0 {
-            unsafe {
-                libc::close(fd);
-            }
-            return false;
-        }
-        CRASH_FD.store(fd, Ordering::Relaxed);
 
         // Store version string.
         unsafe {
@@ -549,10 +550,6 @@ mod win {
     const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
     const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
 
-    // CreateFileW constants.
-    const GENERIC_WRITE: u32 = 0x40000000;
-    const CREATE_ALWAYS: u32 = 2;
-    const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
     const FILE_BEGIN: u32 = 0;
 
     /// Walk the frame-pointer chain, collecting return addresses.
@@ -770,36 +767,17 @@ mod win {
     }
 
     pub fn install(crash_dir: &Path, version: &str) -> bool {
-        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::IntoRawHandle;
 
-        let crash_file = crash_dir.join("last-crash.bin");
-
-        if std::fs::create_dir_all(crash_dir).is_err() {
-            return false;
-        }
-
-        let wide_path: Vec<u16> = crash_file
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let handle = unsafe {
-            windows_sys::Win32::Storage::FileSystem::CreateFileW(
-                wide_path.as_ptr(),
-                GENERIC_WRITE,
-                0,
-                std::ptr::null(),
-                CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL,
-                std::ptr::null_mut(),
-            )
+        let file = match super::create_capture(crash_dir) {
+            Ok(file) => file,
+            Err(_) => return false,
         };
-
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return false;
+        // The filter writes through the exact handle that owns the OS lock.
+        let previous = CRASH_HANDLE.swap(file.into_raw_handle(), Ordering::Relaxed);
+        if !previous.is_null() && previous != INVALID_HANDLE_VALUE {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(previous) };
         }
-        CRASH_HANDLE.store(handle, Ordering::Relaxed);
 
         unsafe {
             let version_buffer = &mut *std::ptr::addr_of_mut!(APP_VERSION);
@@ -863,6 +841,44 @@ pub fn enable_terminal_escape_restore() {}
 
 #[cfg(not(any(unix, windows)))]
 pub fn disable_terminal_escape_restore() {}
+
+#[cfg(all(test, any(unix, windows)))]
+mod capture_tests {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    #[test]
+    fn published_capture_keeps_original_lock_and_allows_owner_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = super::create_capture(dir.path()).unwrap();
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "staging name must be retired");
+        let path = &entries[0];
+        assert!(crate::capture_identity(path.file_name().unwrap().to_str().unwrap()).is_some());
+        let other = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("normal sharing must permit open even for a live Windows capture");
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        owner
+            .write_all(b"owner writes through locked handle")
+            .unwrap();
+        owner.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = Vec::new();
+        owner.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"owner writes through locked handle");
+        drop(owner);
+        other
+            .try_lock()
+            .expect("retired original handle releases its lock");
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -964,14 +980,23 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create crash dir");
 
         assert!(super::install(&dir, "test-version"));
-        let path = dir.join("last-crash.bin");
+        let path = std::fs::read_dir(&dir)
+            .expect("read captures")
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("capture-")
+            })
+            .expect("unique capture");
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "new last-crash.bin must be owner-only");
+        assert_eq!(mode & 0o777, 0o600, "new capture must be owner-only");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn install_tightens_preexisting_0644_crash_blob() {
+    fn install_preserves_preexisting_legacy_crash_blob() {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = SIGNAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -992,10 +1017,11 @@ mod tests {
 
         assert!(super::install(&dir, "test-version"));
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(std::fs::read(&path).expect("legacy bytes"), b"old");
         assert_eq!(
             mode & 0o777,
-            0o600,
-            "install must fchmod preexisting 0644 blobs to owner-only"
+            0o644,
+            "install must leave existing legacy evidence untouched"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -122,33 +122,39 @@ fn try_direnv_export(dir: &Path) -> Option<HashMap<String, String>> {
 fn load_envrc_via_bash(dir: &Path) -> Option<HashMap<String, String>> {
     let envrc_path = dir.join(".envrc");
 
-    // Build a script that:
+    // Build a fixed script that:
     // 1. Includes direnv stubs
-    // 2. Sources the .envrc
+    // 2. Sources the .envrc under the working directory (`current_dir` below
+    //    already enters `dir`, so the sourced name is a fixed relative path)
     // 3. Outputs all env vars as KEY=VALUE pairs (null-separated for safety)
+    // No caller-provided path bytes are interpolated into the script, so
+    // directory names containing `$()`, backticks, quotes, spaces, newlines,
+    // or non-UTF-8 bytes can never be evaluated as shell code.
     let script = format!(
         r#"
 set -e
-cd "{dir}"
 {stubs}
-. "{envrc}"
+. "./.envrc"
 # Output all environment variables, null-separated
 env -0
 "#,
-        dir = dir.display(),
         stubs = DIRENV_STUBS,
-        envrc = envrc_path.display(),
     );
 
     // Capture baseline environment (before running .envrc)
     let baseline: HashMap<String, String> = std::env::vars().collect();
 
-    // Run the script and capture output
+    // Run the script and capture output. Exporting `PWD` keeps `$PWD`-relative
+    // expansion (PATH_add, `$PWD/...`) resolving to the caller-provided `dir`
+    // instead of the physical cwd; bash falls back to `getcwd()` when the
+    // value no longer matches the real working directory, so it never doubles
+    // the path.
     let mut bash_cmd = Command::new("/bin/bash");
     bash_cmd
         .arg("-c")
         .arg(&script)
         .current_dir(dir)
+        .env("PWD", dir)
         .stdin(std::process::Stdio::null());
     tty_utils::detach_std_command(&mut bash_cmd);
     let output = bash_cmd.output();
@@ -281,5 +287,92 @@ fi
 
         let env = load_envrc(dir.path()).unwrap();
         assert_eq!(env.get("EXISTS"), Some(&"yes".to_string()));
+    }
+
+    /// Directory names are data, not code: the bash fallback must load
+    /// `.envrc` from them without ever evaluating the name as shell source.
+    /// The old implementation interpolated `dir.display()` into the script,
+    /// executing `$(...)`/backtick substitutions there and failing to load
+    /// names containing double quotes.
+    #[test]
+    fn test_special_character_dir_names_are_data_not_code() {
+        let base = TempDir::new().unwrap();
+        let cmd_marker = "WS05_CMD_SUBST_MARKER";
+        let backtick_marker = "WS05_BACKTICK_MARKER";
+
+        let cases = [
+            (
+                format!("$(touch {})ws05dir", cmd_marker),
+                "WS05_PROBE_CMD_SUBST",
+                "ok_cmd_subst",
+            ),
+            (
+                format!("`touch {}`ws05dir", backtick_marker),
+                "WS05_PROBE_BACKTICK",
+                "ok_backtick",
+            ),
+            (
+                "ws05 \"quoted\" dir".to_string(),
+                "WS05_PROBE_DQUOTE",
+                "ok_dquote",
+            ),
+            (
+                "ws05 it's dir".to_string(),
+                "WS05_PROBE_SQUOTE",
+                "ok_squote",
+            ),
+            ("ws05 space dir".to_string(), "WS05_PROBE_SPACE", "ok_space"),
+            (
+                "ws05\nnewline dir".to_string(),
+                "WS05_PROBE_NEWLINE",
+                "ok_newline",
+            ),
+        ];
+
+        for (name, var, value) in cases {
+            let dir = base.path().join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(".envrc"), format!("export {}={}\n", var, value)).unwrap();
+
+            let env = load_envrc_via_bash(&dir)
+                .unwrap_or_else(|| panic!("{}: special-character directory must load", var));
+            assert_eq!(env.get(var), Some(&value.to_string()), "{}", var);
+        }
+
+        // The substituted commands must never have run anywhere reachable.
+        let cwd = std::env::current_dir().unwrap();
+        for marker in [cmd_marker, backtick_marker] {
+            assert!(
+                !base.path().join(marker).exists(),
+                "marker {} in base",
+                marker
+            );
+            assert!(!cwd.join(marker).exists(), "marker {} in cwd", marker);
+        }
+    }
+
+    /// Path bytes travel to bash only as an OS string (`current_dir`), never
+    /// through a display/lossy round trip.
+    #[cfg(unix)]
+    #[test]
+    fn test_non_utf8_dir_name_loads() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let base = TempDir::new().unwrap();
+        let dir = base.path().join(OsStr::from_bytes(b"ws05-\xff\xfe-dir"));
+        if let Err(e) = fs::create_dir_all(&dir) {
+            // macOS APFS rejects non-UTF-8 names (EILSEQ), so the fixture
+            // cannot exist there; other failures are real bugs.
+            if e.raw_os_error() == Some(libc::EILSEQ) {
+                eprintln!("filesystem rejected non-UTF-8 name; loader scenario not exercised");
+                return;
+            }
+            panic!("create non-UTF-8 dir failed: {e}");
+        }
+        fs::write(dir.join(".envrc"), "export WS05_PROBE_NONUTF8=ok\n").unwrap();
+
+        let env = load_envrc_via_bash(&dir).expect("non-UTF-8 directory must load");
+        assert_eq!(env.get("WS05_PROBE_NONUTF8"), Some(&"ok".to_string()));
     }
 }

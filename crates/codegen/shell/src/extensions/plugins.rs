@@ -100,7 +100,12 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             // before any session exists) falls back to the shared snapshot.
             let sid = acp::SessionId::new(req.session_id);
             let registry = match agent.session_handle_waiting_for_load(&sid).await {
-                Some(handle) => handle.plugins_list().await,
+                Some(handle) => handle.plugins_list().await.map_err(|error| {
+                    acp::Error::internal_error().data(format!(
+                        "Cannot read plugin snapshot for session {}: {error}",
+                        sid.0
+                    ))
+                })?,
                 None => agent.plugin_registry_snapshot(),
             };
             let response = match registry {

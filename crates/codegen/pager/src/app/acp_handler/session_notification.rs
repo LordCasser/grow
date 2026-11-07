@@ -1652,6 +1652,7 @@ fn handle_session_notification_inner(
             app.pending_effects.push(Effect::FetchSkillsList {
                 agent_id: parent_id,
                 session_id,
+                binding_epoch: agent.session_binding_epoch,
             });
         } else if let Some(agent) = app.agents.get_mut(&parent_id)
             && let Some(ref mut modal) = agent.extensions_modal

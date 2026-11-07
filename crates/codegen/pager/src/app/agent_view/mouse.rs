@@ -221,9 +221,12 @@ impl AgentView {
                         &self.plugin_cta.phase
                 {
                     let plugin_id = name.clone();
-                    if let Err(e) = shell::config::add_dismissed_plugin_cta(&plugin_id) {
-                        tracing::warn!(error = %e, "couldn't persist plugin CTA dismissal");
-                    }
+                    // Disk persistence is deferred to the effect executor; the
+                    // local hide below is intentional so a write failure only
+                    // costs a warning (same semantics as the old inline write).
+                    effects.push(crate::app::actions::Effect::PersistDismissedPluginCta {
+                        plugin_id: plugin_id.clone(),
+                    });
                     self.plugin_cta.dismissed.insert(plugin_id.clone());
                     diagnostics::session_ctx::log_event(diagnostics::events::PluginCtaDismissed {
                         plugin_name: plugin_id,
@@ -915,6 +918,26 @@ impl AgentView {
                                         ),
                                     );
                                 self.last_click = last_click;
+                                // Advisory suggestion card: a DOUBLE-click on
+                                // the card row asks the canonical admission
+                                // state before the editor may open. Single
+                                // clicks still only select, and text-exact
+                                // double-clicks word-select above — the copy /
+                                // selection paths stay untouched.
+                                if !header_row_click
+                                    && let Some((_, click_idx, click_count)) = &self.last_click
+                                    && *click_count >= 2
+                                    && *click_idx == idx
+                                    && let Some((source, tool_call_id)) =
+                                        self.advisory_card_query_target_at(idx)
+                                {
+                                    return InputOutcome::Action(
+                                        Action::QueryAdvisoryReplyAdmission {
+                                            source_session_id: source,
+                                            tool_call_id,
+                                        },
+                                    );
+                                }
                                 if !header_row_click
                                     && self
                                         .scrollback

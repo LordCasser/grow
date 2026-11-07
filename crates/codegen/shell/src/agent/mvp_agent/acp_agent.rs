@@ -265,6 +265,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
         ::mcp::servers::validate_mcp_server_names(&arguments.mcp_servers)
             .map_err(|error| acp::Error::invalid_params().data(error))?;
+        crate::session::acp_mcp::parse_acp_mcp_servers(arguments.meta.as_ref())
+            .map_err(|error| acp::Error::invalid_params().data(error))?;
         let init = self
             .initialize_request
             .get()
@@ -636,6 +638,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         ::mcp::servers::validate_mcp_server_names(&arguments.mcp_servers)
+            .map_err(|error| acp::Error::invalid_params().data(error))?;
+        crate::session::acp_mcp::parse_acp_mcp_servers(arguments.meta.as_ref())
             .map_err(|error| acp::Error::invalid_params().data(error))?;
         let arguments = self.resolve_runtime_load_root(arguments).await?;
         let _load_guard = self.begin_session_load(&arguments.session_id);
@@ -1731,6 +1735,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let (tx, rx) = oneshot::channel();
+        let (persist_ack_tx, persist_ack_rx) = tokio::sync::oneshot::channel();
         let prompt_client_identifier = arguments
             .meta
             .as_ref()
@@ -1766,22 +1771,66 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 verbatim,
                 json_schema,
                 respond_to: tx,
-                persist_ack: None,
+                persist_ack: Some(persist_ack_tx),
             })
             .map_err(|e| {
                 acp::Error::internal_error()
                     .data(format!("failed to dispatch prompt to session: {e}"))
             })?;
         drop(dispatch_guard);
-        self.push_roster_activity_delta(
-            &arguments.session_id,
-            crate::agent::roster::RosterActivity::Working,
-        );
-        let stop_result = rx
-            .await
-            .map_err(|_| {
-                acp::Error::internal_error().data("session failed to respond")
-            })?;
+        // Publish Working only after this request's own user message is
+        // durable. The completion reply has priority (biased): a canonical
+        // replay of an already-recorded immutable request must never publish
+        // Working or Idle for an RPC that only observes prior facts.
+        let mut rx = rx;
+        let mut persist_ack_rx = persist_ack_rx;
+        let mut working_published = false;
+        let stop_result = loop {
+            tokio::select! {
+                biased;
+                stop = &mut rx => {
+                    break stop;
+                }
+                ack = &mut persist_ack_rx => {
+                    if ack.is_ok() {
+                        working_published = true;
+                        self.push_roster_activity_delta(
+                            &arguments.session_id,
+                            crate::agent::roster::RosterActivity::Working,
+                        );
+                    }
+                    // After the persist acknowledgement (or its drop on an
+                    // admission error) the completion reply is the only
+                    // remaining event.
+                    break rx.await;
+                }
+            }
+        };
+        let stop_result = stop_result.map_err(|_| {
+            acp::Error::internal_error().data("session failed to respond")
+        })?;
+        if let Ok(crate::session::commands::PromptTurnOk {
+            completion_kind:
+                crate::session::commands::PromptCompletionKind::AdmissionReplay {
+                    input_id,
+                    state,
+                },
+            ..
+        }) = &stop_result
+        {
+            // Observation of the canonical input lifecycle: this RPC ends
+            // here, before completion/usage/roster/TurnCompleted projections.
+            // The shell already returned the persist acknowledgement after
+            // this reply; drain it silently.
+            let _ = persist_ack_rx.await;
+            let meta = super::build_admission_replay_meta(
+                &arguments.session_id.to_string(),
+                &prompt_id,
+                input_id,
+                state,
+            );
+            return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn).meta(meta));
+        }
         let last_turn_usage_for_meta = handle
             .chat_state_handle
             .get_last_turn_usage()
@@ -1842,7 +1891,10 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 } => ctx.trigger.clone(),
                 _ => None,
             });
-        {
+        if working_published {
+            // Only balance a Working we actually published. An admission
+            // error that never obtained this request's durable commit must
+            // not push a fake Idle while the real turn may still be running.
             let end_activity = if handle
                 .pending_interactions
                 .lock()
@@ -2152,7 +2204,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
             | "grow/internal/reload_announcements" | "grow/internal/reload_subagent_toggle"
             | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute"
-            | "grow/queue/prompt_status" | "grow/queue/control" | "grow/plan/artifact" | "grow/plan/review" | "grow/plan/decision_status" => {
+            | "grow/queue/prompt_status" | "grow/queue/control" | "grow/plan/artifact" | "grow/plan/review" | "grow/plan/decision_status"
+            | "grow/input/admission_status" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             "grow/session/repair" => crate::extensions::repair::handle(self, &args).await,
@@ -2235,12 +2288,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 crate::extensions::code_nav::handle(self, &ops, &args).await
             }
             s if s.starts_with("grow/skills/") || s == "grow/workflows/list" => {
-                crate::extensions::skills::handle(
-                    self,
-                    &args,
-                    self.plugin_registry_handle.snapshot().as_deref(),
-                )
-                    .await
+                crate::extensions::skills::handle(self, &args).await
             }
             s if s.starts_with("grow/review") => {
                 crate::extensions::feedback::handle(self, &args).await
@@ -2441,6 +2489,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                             notification,
                             forward_to_gateway: false,
                             restored: false,
+                            respond_to: None,
                         });
                 } else {
                     tracing::warn!(

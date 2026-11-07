@@ -1,0 +1,17 @@
+# 决策与边界
+
+PB-04同一缺失不变量是Unix cleanup证据强度不足。当前`_terminate_process_tree`按本次Popen的PID＝组ID发送TERM/KILL，wait直接子进程；`_run_phase`再检查reader退役。setsid后代不属于该组，并可关闭继承pipe，因此这三项都成功仍不能证明全树终止。父已核实际脚本、三phase消费者和原审计实跑记录。
+
+采用最小的诚实结算：继续尽力杀本次owned组、wait直接child，Unix中断清理返回未确认；_run_phase保原timeout/cancellation失败并附明确detached-descendant限制，绝不在该路径输出tree confirmed。正常phase未执行强制清理时沿原完成判据，不能因此让全部exact正常通过变失败。可以沿现bool表达，不要求新状态类型、通用processmanager、psutil、Linux subreaper或Windows Job。此项兑现已有“确认或显式未确认”，不承诺能够回收逃离组的任意后代。
+
+实质替代是启动时拥有跨平台的不可逃逸进程容器，或有可证实身份的后代注册/追踪。当前macOS/Windows/Linux跨平台与CI依赖不足以靠一次processgroup/一次ps扫表满足，且引入该框架不是修正错误确认所必需；本项不预建。若后续确要保证强制终止下的所有detached后代回收，再按具体平台owner独立设计，不使用全局进程名、陈旧registryPID或无代际的PPID快照扩权。
+
+# Coder Task Spec
+
+只改`scripts/run_exact_cargo_test.py`的Unix清理确认语义与其必要测试。现有组TERM/KILL、directwait、reader有界收尾仍执行，失败不被Ok吞掉；不要顺带重写Windows或变更超时预算、精确测试选择/产物匹配。全repo只有根AGENTS适用。先读software-engineering及该change、development-workflow现契约。
+
+用实际`_run_phase`触发有效oldred：Unix parent启动setsid+DEVNULL子进程并写本测试私有barrier，parent等待；runner超时或真正取消后必须报告cleanup unconfirmed而不报告treeconfirmed。保普通同组后代被原路径杀掉的对照、setsid持pipe现有未确认控制、exact正常输出行为。测试创建的escape后代必须在finally按本次创建的活句柄/组清理并核退出，不从任意外部PID文件取得权限。允许PID作为本fixture握手中的观测，但不作为全局删除依据。
+
+# Review Plan
+
+父核Unix结果不被后续bool覆盖、所有timeout/KeyboardInterrupt/SIGTERM/finally路径都不误报，且normal成功不受影响。运行非Cargo的现unittest组加实际反例；`RealLibtestSelectionTests`会调用Cargo，在唯一Cargo owner释放前不得运行。无需因为Python报告变化重跑Rust产品构建；已有Rust exact选择控制留到最终整体验证可复用。平台mock是接线证据，不能称Windows现场已验收。新verification记录实际counts/exit/ownedfixturecleanup、限制与本次实现停止点。

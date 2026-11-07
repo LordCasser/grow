@@ -20,6 +20,315 @@
         );
     }
 
+    // ── Advisory suggestion card (Task A) ─────────────────────────────────
+    use crate::scrollback::blocks::tool::{
+        AdvisoryCard, AdvisoryCardStatus, AdvisoryReplyStatus,
+    };
+
+    fn make_advisory_ask_ext(
+        tool_call_id: &str,
+    ) -> (
+        acp_transport::AcpArgs<acp::ExtRequest>,
+        tokio::sync::oneshot::Receiver<acp_transport::AcpResult<acp::ExtResponse>>,
+    ) {
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-1",
+            "toolCallId": tool_call_id,
+            "mode": "default",
+            "blocking": false,
+            "questions": [{
+                "question": "Which cache?",
+                "options": [
+                    {"label": "Redis", "description": "in-memory"},
+                    {"label": "Postgres", "description": "relational"}
+                ],
+                // Nested `Question` is `rename_all = "snake_case"` with
+                // `deny_unknown_fields` — the ext request's camelCase only
+                // covers its own fields. This is the real Shell wire shape.
+                "multi_select": false,
+                "recommended_option": "Redis"
+            }]
+        }))
+        .unwrap();
+        let request = acp::ExtRequest::new("grow/ask_user_question", raw.into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (acp_transport::AcpArgs { request, response_tx: tx }, rx)
+    }
+
+    fn advisory_card_of(agent: &crate::app::agent_view::AgentView, call: &str) -> AdvisoryCard {
+        for idx in 0..agent.scrollback.len() {
+            let Some(entry) = agent.scrollback.get(idx) else { continue };
+            if let crate::scrollback::block::RenderBlock::ToolCall(
+                crate::scrollback::ToolCallBlock::Other(other),
+            ) = &entry.block
+                && let Some(card) = &other.advisory
+                && card.tool_call_id == call
+            {
+                return card.clone();
+            }
+        }
+        panic!("advisory card {call} not found");
+    }
+
+    #[test]
+    fn advisory_ext_presents_renderable_card_before_presented_ack() {
+        use tools::implementations::grow_build::ask_user_question::AskUserQuestionExtResponse;
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().prompt.set_text("draft");
+        let paused_before = app.agents[&AgentId(0)].session.turn_paused_duration;
+        let (ext, mut rx) = make_advisory_ask_ext("call-a");
+        let changed = handle_ask_user_question(ext, &mut app);
+        assert!(changed);
+        let response = rx
+            .try_recv()
+            .expect("Presented ack sent")
+            .expect("ack is a valid response");
+        let typed: AskUserQuestionExtResponse =
+            serde_json::from_str(response.0.get()).expect("typed ack");
+        assert!(matches!(typed, AskUserQuestionExtResponse::Presented));
+        let agent = &app.agents[&AgentId(0)];
+        let card = advisory_card_of(agent, "call-a");
+        assert_eq!(card.questions.len(), 1);
+        assert_eq!(card.questions[0].recommended_option.as_deref(), Some("Redis"));
+        assert_eq!(card.status, AdvisoryCardStatus::Presented);
+        assert_eq!(card.reply_status, AdvisoryReplyStatus::Unobserved);
+        // No composer takeover, no waiting projection, no turn pause.
+        assert_eq!(agent.prompt.text(), "draft");
+        assert!(!agent.session.question_pending);
+        assert!(agent.question_view.is_none());
+        assert_eq!(agent.session.turn_paused_duration, paused_before);
+    }
+
+    #[test]
+    fn advisory_ext_keeps_blocking_overlay_and_merges_duplicate_ext() {
+        use crate::views::question_view::QuestionViewState;
+        // A real blocking question stays; the advisory card never replaces it.
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let stashed = agent.prompt.stash();
+            agent.replace_question_view(Some(QuestionViewState::with_response_tx(
+                Some("sess-1".into()),
+                "call-block".into(),
+                vec![],
+                stashed,
+                None,
+                tools::implementations::grow_build::ask_user_question::AskUserQuestionMode::Default,
+            )));
+            agent.session.question_pending = true;
+        }
+        let (ext, mut rx) = make_advisory_ask_ext("call-b");
+        assert!(handle_ask_user_question(ext, &mut app));
+        assert!(rx.try_recv().is_ok(), "Presented sent under an open overlay");
+        let (ext2, _rx2) = make_advisory_ask_ext("call-b");
+        assert!(handle_ask_user_question(ext2, &mut app));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.question_view.is_some(), "blocking overlay untouched");
+        assert!(agent.session.question_pending);
+        let cards = (0..agent.scrollback.len())
+            .filter_map(|idx| agent.scrollback.get(idx))
+            .filter_map(|entry| match &entry.block {
+                crate::scrollback::block::RenderBlock::ToolCall(
+                    crate::scrollback::ToolCallBlock::Other(other),
+                ) => other.advisory.as_ref(),
+                _ => None,
+            })
+            .filter(|card| card.tool_call_id == "call-b")
+            .count();
+        assert_eq!(cards, 1, "duplicate ext delivery → one card");
+    }
+
+    #[test]
+    fn advisory_reply_projection_helpers_gates_and_identity() {
+        let mut app = make_app_with_agent("sess-1");
+        let (ext, _rx) = make_advisory_ask_ext("call-c");
+        assert!(handle_ask_user_question(ext, &mut app));
+
+        // Fresh card is not openable: only Available opens.
+        assert!(!app.open_advisory_reply_editor("sess-1", "call-c"));
+        assert!(app.set_advisory_reply_status("sess-1", "call-c", AdvisoryReplyStatus::Available));
+        assert!(app.open_advisory_reply_editor("sess-1", "call-c"));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.question_view.as_ref().is_some_and(|qv| qv.is_advisory_reply_edit()));
+        assert!(!agent.session.question_pending, "advisory edit is not NeedsInput");
+
+        // Esc-style dismiss restores the composer draft and adds no pause.
+        let paused = agent.session.turn_paused_duration;
+        let outcome = app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .submit_question_answers_for_test(true);
+        assert!(matches!(outcome, crate::app::root::InputOutcome::Changed));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.question_view.is_none());
+        assert_eq!(agent.session.turn_paused_duration, paused);
+
+        // Terminal projections are absorbing with precise bool semantics.
+        assert!(app.set_advisory_reply_status("sess-1", "call-c", AdvisoryReplyStatus::Accepted));
+        assert!(!app.set_advisory_reply_status("sess-1", "call-c", AdvisoryReplyStatus::Available));
+        assert!(!app.set_advisory_reply_status("sess-1", "call-c", AdvisoryReplyStatus::Checking));
+        assert!(app.set_advisory_reply_status("sess-1", "call-c", AdvisoryReplyStatus::Accepted));
+        assert!(!app.open_advisory_reply_editor("sess-1", "call-c"), "terminal card read-only");
+        assert_eq!(
+            advisory_card_of(&app.agents[&AgentId(0)], "call-c").reply_status,
+            AdvisoryReplyStatus::Accepted
+        );
+
+        // Stable identity: full-format match on the owning primary only.
+        assert_eq!(
+            app.advisory_reply_card_identity(AgentId(0), "question-reply:sess-1:call-c"),
+            Some(("sess-1".to_string(), "call-c".to_string()))
+        );
+        assert_eq!(
+            app.advisory_reply_card_identity(AgentId(0), "question-reply:sess-1:other"),
+            None
+        );
+
+        // A terminal card refuses a fresh check too (terminal absorption).
+        assert!(app.start_advisory_reply_check("sess-1", "call-c").is_none());
+
+        // A FRESH card drives the one-shot open-intent / Checking lifecycle:
+        // Unobserved is queryable exactly once, the intent is consumed once,
+        // and the follow-on Checking state refuses a second query.
+        let (ext_e, _rx_e) = make_advisory_ask_ext("call-e");
+        assert!(handle_ask_user_question(ext_e, &mut app));
+        let (owner, resolved) = app
+            .start_advisory_reply_check("sess-1", "call-e")
+            .expect("fresh Unobserved card is queryable");
+        assert_eq!(owner, AgentId(0));
+        assert_eq!(resolved, "sess-1");
+        assert_eq!(
+            advisory_card_of(&app.agents[&AgentId(0)], "call-e").reply_status,
+            AdvisoryReplyStatus::Checking
+        );
+        assert!(app.take_advisory_reply_open_intent("sess-1", "call-e"));
+        assert!(!app.take_advisory_reply_open_intent("sess-1", "call-e"));
+        // Already Checking: no second query.
+        assert!(app.start_advisory_reply_check("sess-1", "call-e").is_none());
+    }
+
+    #[test]
+    fn advisory_reply_submit_action_retained_with_identity() {
+        let mut app = make_app_with_agent("sess-1");
+        let (ext, _rx) = make_advisory_ask_ext("call-d");
+        assert!(handle_ask_user_question(ext, &mut app));
+        assert!(app.set_advisory_reply_status("sess-1", "call-d", AdvisoryReplyStatus::Available));
+        assert!(app.open_advisory_reply_editor("sess-1", "call-d"));
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        if let Some(qv) = agent.question_view.as_mut() {
+            qv.select_option(0, 0);
+        }
+        let outcome = agent.submit_question_answers_for_test(false);
+        match outcome {
+            crate::app::root::InputOutcome::Action(crate::app::actions::Action::SubmitAdvisoryReply {
+                source_session_id,
+                tool_call_id,
+                text,
+            }) => {
+                assert_eq!(source_session_id, "sess-1");
+                assert_eq!(tool_call_id, "call-d");
+                assert!(text.contains("You continued with your recommendation: Redis"));
+                assert!(text.contains("My answer: Redis"));
+            }
+            other => panic!("expected SubmitAdvisoryReply, got {other:?}"),
+        }
+        assert!(app.agents[&AgentId(0)].question_view.is_none());
+        assert!(!app.agents[&AgentId(0)].session.question_pending);
+    }
+
+    #[test]
+    fn turn_status_projection_excludes_advisory_reply_edit() {
+        use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+        use tools::implementations::grow_build::ask_user_question::AskUserQuestionMode;
+
+        // Own view: a local advisory-reply edit borrows input but never
+        // lights the NeedsInput/waiting diamond.
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let stashed = agent.prompt.stash();
+            agent.replace_question_view(Some(
+                QuestionViewState::new("call-edit".into(), vec![], stashed).with_local_kind(
+                    LocalQuestionKind::AdvisoryReply {
+                        source_session_id: "sess-1".into(),
+                        tool_call_id: "call-edit".into(),
+                    },
+                ),
+            ));
+        }
+        assert!(
+            !app.agents[&AgentId(0)].pending_user_input_for_turn_status(),
+            "advisory edit must not project waiting-on-user"
+        );
+        assert!(!app.agents[&AgentId(0)].session.question_pending);
+
+        // A real blocking question still lights it.
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let stashed = agent.prompt.stash();
+            agent.replace_question_view(Some(QuestionViewState::with_response_tx(
+                Some("sess-1".into()),
+                "call-block".into(),
+                vec![],
+                stashed,
+                None,
+                AskUserQuestionMode::Default,
+            )));
+        }
+        assert!(app.agents[&AgentId(0)].pending_user_input_for_turn_status());
+    }
+
+    #[test]
+    fn turn_status_child_projection_excludes_advisory_edit_keeps_guards() {
+        use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+        use tools::implementations::grow_build::ask_user_question::AskUserQuestionMode;
+
+        let mut app = make_app_with_agent("sess-parent");
+        let install_child_question = |app: &mut AppView,
+                                      advisory: bool,
+                                      finished: bool| {
+            let mut child = make_agent(Some("sess-child"));
+            let stashed = child.prompt.stash();
+            if advisory {
+                child.replace_question_view(Some(
+                    QuestionViewState::new("call-ce".into(), vec![], stashed).with_local_kind(
+                        LocalQuestionKind::AdvisoryReply {
+                            source_session_id: "sess-child".into(),
+                            tool_call_id: "call-ce".into(),
+                        },
+                    ),
+                ));
+            } else {
+                child.replace_question_view(Some(QuestionViewState::with_response_tx(
+                    Some("sess-child".into()),
+                    "call-cb".into(),
+                    vec![],
+                    stashed,
+                    None,
+                    AskUserQuestionMode::Default,
+                )));
+            }
+            let mut info = make_subagent_info("sess-child");
+            info.finished = finished;
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.subagent_views.insert("sess-child".into(), Box::new(child));
+            agent.session.subagent_sessions.insert("sess-child".into(), info);
+        };
+
+        // Child advisory edit: not waiting, even for a live child.
+        install_child_question(&mut app, true, false);
+        assert!(!app.agents[&AgentId(0)].pending_user_input_for_turn_status());
+
+        // Child blocking question on a live child: waiting (original guard).
+        install_child_question(&mut app, false, false);
+        assert!(app.agents[&AgentId(0)].pending_user_input_for_turn_status());
+
+        // Finished child keeps the original guard: never waiting.
+        install_child_question(&mut app, false, true);
+        assert!(!app.agents[&AgentId(0)].pending_user_input_for_turn_status());
+    }
+
+
     #[test]
     fn child_interaction_resolved_dismisses_primary_owned_permission() {
         let mut app = make_app_with_agent("sess-parent");

@@ -222,11 +222,15 @@ pub struct ScrollbackState {
     /// Whether auto-scroll is enabled (follow new content).
     follow_mode: bool,
 
-    /// When true, handle_follow_mode skips the scroll-to-bottom on the first
-    /// call, preserving a scroll position set by scroll_to_entry_top.
-    /// Cleared after one use. This lets dispatch_send_prompt position the
-    /// prompt at the viewport top while still enabling follow for new content.
+    /// Keep the current content at the viewport top until it overflows.
+    /// This lets dispatch_send_prompt place a prompt at the viewport top while
+    /// still enabling follow for new content below it.
     follow_preserve_scroll: bool,
+
+    /// Content identity across estimate/exact changes and cache invalidation.
+    /// The last resolved offset distinguishes a layout shift from an explicit
+    /// reposition (including fold anchoring), which must establish a new anchor.
+    follow_anchor: Option<(ScrollAnchor, usize)>,
 
     // Selection
     /// Currently selected entry index.
@@ -351,6 +355,7 @@ impl ScrollbackState {
             viewport_height: 0,
             follow_mode: true,
             follow_preserve_scroll: false,
+            follow_anchor: None,
             selected: None,
             selection_box: None,
             turns: Vec::new(),
@@ -1417,6 +1422,7 @@ impl ScrollbackState {
         self.turns.clear();
         self.current_turn = None;
         self.scroll_offset = 0;
+        self.follow_anchor = None;
         self.invalidate_layout_cache();
         self.bump_content_generation();
     }
@@ -2002,10 +2008,9 @@ impl ScrollbackState {
             // A width change re-wraps every entry, so the absolute wrapped-row
             // scroll_offset would point at different content after the rebuild
             // (the resize jump). While the old cache is still valid, anchor the
-            // viewport-top content; restore it below. Anchoring is intentionally
-            // limited to the not-following path: follow mode (including the
-            // follow_preserve_scroll page-flip) re-pins each frame, so it needs
-            // no anchor.
+            // viewport-top content; restore it below. Bottom follow re-pins
+            // itself, while follow-preserve resolves its retained content anchor
+            // in follow_scroll_to_bottom after the rebuild.
             let scroll_anchor =
                 if width != self.last_width && !self.follow_mode && self.scroll_offset > 0 {
                     self.capture_scroll_anchor()
@@ -2169,6 +2174,9 @@ impl ScrollbackState {
         self.scroll_offset = snap.scroll_offset;
         self.follow_mode = snap.follow_mode;
         self.follow_preserve_scroll = snap.follow_preserve_scroll;
+        // A guest viewport may have armed a different transient pin. The
+        // restored viewport establishes its own anchor after layout rebuild.
+        self.follow_anchor = None;
         self.viewport_height = snap.viewport_height;
         self.last_width = snap.last_width;
         self.selected = snap.selected;

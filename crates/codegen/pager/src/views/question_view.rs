@@ -119,6 +119,18 @@ pub enum LocalQuestionKind {
         target: crate::app::actions::DoctorFixTarget,
         plan: Box<crate::diagnostics::FixPlan>,
     },
+    /// Local edit opened from an advisory suggestion card in the scrollback
+    /// tool row (a late "reply to change"). Not an ACP interaction: no
+    /// `response_tx`. While open it temporarily takes over input, but it
+    /// never projects `question_pending`, never pauses the turn, and Esc
+    /// only closes the local edit — the Agent keeps running on its
+    /// recommendation the whole time.
+    AdvisoryReply {
+        /// Session that raised the advisory question (root or child view).
+        source_session_id: String,
+        /// Tool call id of the advisory `ask_user_question` call.
+        tool_call_id: String,
+    },
 }
 
 // ── State ──────────────────────────────────────────────────────────────
@@ -396,6 +408,60 @@ impl QuestionViewState {
         } else {
             0
         }
+    }
+
+    /// Whether this view is a local advisory-reply edit rather than a
+    /// blocking question. Consumers that project "waiting for the user"
+    /// (`question_pending`, turn pause, NeedsInput rows) must exclude this
+    /// kind; plain input routing still applies while the edit is open.
+    pub fn is_advisory_reply_edit(&self) -> bool {
+        matches!(
+            self.local_kind,
+            Some(LocalQuestionKind::AdvisoryReply { .. })
+        )
+    }
+
+    /// Serialize this advisory reply into literal human-input text: the
+    /// original questions, the Agent recommendation the turn continued with,
+    /// the user's real selection/notes (or "keeping your recommendation"),
+    /// and the source session/call identity for attribution.
+    ///
+    /// Selection extraction mirrors [`Self::build_accepted_response`].
+    pub fn build_advisory_reply_text(&self, source_session_id: &str, tool_call_id: &str) -> String {
+        let mut out = format!(
+            "Reply to your earlier advisory question (session {source_session_id}, tool call {tool_call_id}):"
+        );
+        for (i, q) in self.questions.iter().enumerate() {
+            let labels = self.selected_labels(i);
+            let freeform_selected = self
+                .per_question_freeform_selected
+                .get(i)
+                .copied()
+                .unwrap_or(false);
+            let notes = self
+                .per_question_freeform
+                .get(i)
+                .cloned()
+                .unwrap_or_default();
+            let has_notes = freeform_selected && !notes.trim().is_empty();
+            out.push_str(&format!("\n\n{}. {}", i + 1, q.question));
+            if let Some(rec) = q.recommended_option.as_deref() {
+                out.push_str(&format!(
+                    "\n   You continued with your recommendation: {rec}"
+                ));
+            }
+            if !labels.is_empty() {
+                out.push_str(&format!("\n   My answer: {}", labels.join(", ")));
+            } else if has_notes {
+                out.push_str("\n   My answer: Other");
+            } else {
+                out.push_str("\n   My answer: keeping your recommendation");
+            }
+            if has_notes {
+                out.push_str(&format!("\n   Notes: {}", notes.trim()));
+            }
+        }
+        out
     }
 }
 
@@ -2148,6 +2214,7 @@ mod tests {
                 },
             ],
             multi_select: None,
+            recommended_option: None,
             id: None,
         }
     }
@@ -2245,6 +2312,7 @@ mod tests {
                 })
                 .collect(),
             multi_select: Some(multi),
+            recommended_option: None,
             id: None,
         }
     }
@@ -3118,6 +3186,7 @@ mod tests {
                 },
             ],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
         let mut state = QuestionViewState::new("tc".into(), vec![q], StashedPrompt::default());
@@ -3168,6 +3237,7 @@ mod tests {
                 },
             ],
             multi_select: Some(true),
+            recommended_option: None,
             id: None,
         };
 
@@ -3400,6 +3470,7 @@ mod tests {
                 },
             ],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
         let content_w = 30;
@@ -3435,6 +3506,7 @@ mod tests {
                 id: None,
             }],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
         let theme = Theme::default();
@@ -3503,6 +3575,7 @@ mod tests {
                 id: None,
             }],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
         let content_w = 40;
@@ -3561,6 +3634,7 @@ mod tests {
                 },
             ],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
         let content_w = 30;

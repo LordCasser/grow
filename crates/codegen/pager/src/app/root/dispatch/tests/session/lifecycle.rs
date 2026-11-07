@@ -1337,6 +1337,7 @@ fn translate_local_submit_always_returns_persist_always_for_new_session() {
             })
             .collect(),
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let mut state = QuestionViewState::new(
@@ -1374,6 +1375,7 @@ fn translate_local_submit_never_returns_persist_never_for_new_session() {
             })
             .collect(),
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let mut state = QuestionViewState::new(

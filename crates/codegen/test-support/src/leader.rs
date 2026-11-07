@@ -211,7 +211,6 @@ impl LeaderFixture {
             "agent",
             "leader",
             "--no-exit-on-disconnect",
-            "--relay-on-demand",
             "--no-auto-update",
         ])
         .current_dir(cwd)

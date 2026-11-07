@@ -404,16 +404,12 @@ pub struct WorkspaceShared {
     /// Resolved `$GROW_WORKSPACE_HOME` — the workspace-owned on-disk state root
     /// (`<grow_home>/workspace` by default).
     pub(crate) workspace_home: std::path::PathBuf,
-    /// `(path, size, mtime_ms) → sha256` memo for the client-facing
-    /// `workspace.client_fs_*` ops, so unchanged files hash once per
-    /// workspace instead of per stat/read.
     /// Test-only seam: runs after the toolset re-resolve returns and before
     /// the post-resolve turn re-check / install in
     /// `resolve_and_swap_session_toolset_locked`, so tests can interleave a
     /// turn start inside the check→install window deterministically.
     #[cfg(test)]
     pub(crate) post_resolve_test_hook: parking_lot::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
-    pub(crate) client_fs_hash_memo: crate::file_system::client_fs::FileHashMemo,
 }
 impl WorkspaceShared {
     /// Workspace root directory.

@@ -1,0 +1,6 @@
+- [x] 核 Session/PTY/server/CLI 与 portable-pty 直接 child 原语，冻结 owner 和共享 control/terminal 接口。
+- [x] Session 增量：旧红、单 owner stop/timeout/exit/I/O 结算及 crate 回归。
+- [x] 父验收 Session 最终接口和失败语义后交接 Service。
+- [x] Service 增量：HTTP/WS/CLI 消费终态、启动失败清理与名称归属。
+- [x] 完成真实 CLI/HTTP/WS 里程碑与独立生命周期 review。
+- [x] 同步开发说明/backlog、strict/archive 后复核 all/archived。

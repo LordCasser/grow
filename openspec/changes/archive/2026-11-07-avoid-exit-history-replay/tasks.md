@@ -1,0 +1,6 @@
+- [x] 追踪5秒共享owner，核全量clone/replay与已验证来源，冻结provider/consumer边界。
+- [x] ChatState provider实现及投影完整性/通信错误单测，父验收。
+- [x] Shell consumer先原路径长history判别，再窄查询替换和树/失败回归。
+- [x] 依据阶段测量处理仍存在的范围内必要瓶颈，不弱化期限或屏障。
+- [x] 独立并发/完整性review，最终默认CLI长history双Ctrl+D退出与恢复里程碑。
+- [x] 同步开发说明、strict/archive及all/archived复核，记录现场和平台限制。

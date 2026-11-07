@@ -1,58 +1,93 @@
 # Backlog
 
-这里只保留已有明确暂缓决定或启动门槛的事项。八项非延期验证债务已完成修复、验证并随 [v2.6.0](https://github.com/LordCasser/grow/releases/tag/v2.6.0) 发布；逐项 owner、证据和剩余边界见[发布阻塞闭合矩阵](changes/archive/2026-11-04-close-v2-6-0-release-blockers/verification.md#八项闭合矩阵)，原始八项快照见[backlog-before.md](changes/archive/2026-11-04-close-v2-6-0-release-blockers/backlog-before.md)。既有历史整理记录见[本轮闭合记录](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/algorithm-inventory.md)及其[清理前快照](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/backlog-before.md)。
+这里只保留已有明确暂缓决定或启动门槛的事项。2026-11-06用户重新授权“完成修复和处理，处理backlog的非延期项目”；本轮按[实施范围与验收](changes/archive/2026-11-07-complete-nondeferred-backlog/proposal.md)推进，下文2026-11-05停止点仅作历史。刚分析的child收尾及SessionEnd顺序在本轮范围，其他明确暂缓事项继续保留。八项非延期验证债务已完成修复、验证并随 [v2.6.0](https://github.com/LordCasser/grow/releases/tag/v2.6.0) 发布；逐项 owner、证据和剩余边界见[发布阻塞闭合矩阵](changes/archive/2026-11-04-close-v2-6-0-release-blockers/verification.md#八项闭合矩阵)，原始八项快照见[backlog-before.md](changes/archive/2026-11-04-close-v2-6-0-release-blockers/backlog-before.md)。既有历史整理记录见[本轮闭合记录](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/algorithm-inventory.md)及其[清理前快照](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/backlog-before.md)。
+
+## 2026-11-07 发布前范围收拢
+
+用户最新要求只完成 P0、必要或已经进行的修复，然后准备 2.6.2。当前实施范围以[收拢记录](changes/archive/2026-11-07-complete-nondeferred-backlog/proposal.md#2026-11-07-范围收拢)为准；长历史双 Ctrl+D 五秒退出超时为发布主线。表中尚未启动的卸载/普通更新保存错误、Markdown 性能、Workflow 测试和 Agent 公共实体整理继续保留，不在本轮追加实施。ACP 容量实验尚未写源码，已停在[准备材料](changes/measure-acp-gateway-backlog/design.md)，没有运行结果，也没有容量政策改动。
 
 ## 本轮全仓审计发现，待独立修复
 
 用户于2026-11-05要求停止新增审查并把当前成果作为发布前里程碑。已接受修复逐项归档；下列未闭合项保留为后续工作，本里程碑不再启动新的调查或实施。状态、验证限制和原停止点见[里程碑记录](changes/archive/2026-11-05-coordinate-audit-backlog-repairs/milestone.md)，发布与验收见[2.6.1发布记录](changes/archive/2026-11-06-prepare-release-v2-6-1/verification.md)。
 
-以下事项来自 [跨版本架构审计](changes/archive/2026-11-05-audit-grow-architecture-across-versions/proposal.md)。用户随后已授权按全局职责与共享契约统筹修复，执行顺序、待核实边界与集成里程碑见[统一修复设计](changes/archive/2026-11-05-coordinate-audit-backlog-repairs/design.md)。各项仍按独立 owner 建 change，验收后移出本表，不并入 model/effort 特性；静态、机制实验和真实入口证据分别保留。WS-01 见[索引最终删除修复与57项回归](changes/archive/2026-11-05-preserve-code-index-removals/verification.md)。已闭合的 WS-06b 见[成功提交修复与验证](changes/archive/2026-11-05-commit-hunk-projections-after-success/verification.md)，WS-03 见[工作树删除归属修复与44项回归](changes/archive/2026-11-05-bind-worktree-registration-cleanup/verification.md)；WS-06a 外部编辑保护见[磁盘冲突与Shell传播验证](changes/archive/2026-11-05-reject-stale-hunk-targets/verification.md)。
+以下事项来自 [跨版本架构审计](changes/archive/2026-11-05-audit-grow-architecture-across-versions/proposal.md)。用户随后已授权按全局职责与共享契约统筹修复，执行顺序、待核实边界与集成里程碑见[统一修复设计](changes/archive/2026-11-05-coordinate-audit-backlog-repairs/design.md)。各项仍按独立 owner 建 change，验收后移出本表，不并入 model/effort 特性；静态、机制实验和真实入口证据分别保留。WS-01 见[索引最终删除修复与57项回归](changes/archive/2026-11-05-preserve-code-index-removals/verification.md)。已闭合的 WS-06b 见[成功提交修复与验证](changes/archive/2026-11-05-commit-hunk-projections-after-success/verification.md)，WS-03 见[工作树删除归属修复与44项回归](changes/archive/2026-11-05-bind-worktree-registration-cleanup/verification.md)；WS-02 见[ClientFS 当前内容摘要修复与18项回归](changes/archive/2026-11-06-read-client-files-with-current-digests/verification.md)。已闭合的 WS-06a 外部编辑保护见[磁盘冲突与Shell传播验证](changes/archive/2026-11-05-reject-stale-hunk-targets/verification.md)。
+
+本轮已闭合的 WS-04 跨主机记忆身份见[修复与321项回归](changes/archive/2026-11-06-qualify-memory-repository-identities/verification.md)，WS-05 envrc 路径求值见[特殊目录名与平台限制](changes/archive/2026-11-06-pass-envrc-paths-as-arguments/verification.md)；Session F4见[恢复前缀屏障与真实failed-completion对照](changes/archive/2026-11-06-confirm-workflow-journal-recovery-barriers/verification.md)，F5见[journal不可变完成与69项回归](changes/archive/2026-11-06-reject-repeated-journal-completions/verification.md)。Responses usage补全保留重复字段冲突见[raw字段保真与70项回归](changes/archive/2026-11-06-preserve-response-normalization-field-conflicts/verification.md)。readiness预算归属见[6项Coordinator与250项子任务回归](changes/archive/2026-11-06-separate-finalization-readiness-budget/verification-shell.md)，未就绪观察不消耗尝试，原绝对期限保持。child SessionEnd/Result顺序见[正常、取消、故障与普通退出验收](changes/archive/2026-11-06-finalize-child-hooks-before-result/verification.md)；该项本轮已关闭，不再列为延期。流错误资格与Responses控制帧顺序见[三reader旧红新绿、42项分类和79项reader回归](changes/archive/2026-11-06-qualify-stream-error-envelopes/verification.md)，HTTP非2xx与合法服务错误分类保持。AC-02 空插件快照撤销见[真实Hook执行与28项回归](changes/archive/2026-11-06-clear-hooks-on-empty-plugin-snapshots/verification.md)，config/Agent来源保留。PB-01见[真实转发与17项CLI回归](changes/archive/2026-11-06-observe-stdio-session-close-before-replay/verification.md)，PB-07见[22项恢复、真实崩溃子进程及CLI启动控制](changes/archive/2026-11-06-preserve-crash-evidence-until-report-commit/verification.md)，AC-05见[目录环/合法别名与58项发现回归](changes/archive/2026-11-06-stop-agent-discovery-directory-cycles/verification.md)。PB-02见[精确RPC身份配对与21项CLI回归](changes/archive/2026-11-06-correlate-stdio-session-creation-responses/verification.md)。MCP-F3见[重复SDK数组拒绝与七项入口/解析回归](changes/archive/2026-11-06-reject-duplicate-sdk-mcp-declarations/verification.md)。AC-04见[物理checkout祖先、linkedworktree与82项Agent回归](changes/archive/2026-11-06-bind-agent-rules-to-physical-checkout/verification.md)。F1见[双进程冷恢复与原Turn单次消费](changes/archive/2026-11-06-restore-steering-to-preserved-turns/verification.md)。F3的canonical查询提供方已独立[验收](changes/archive/2026-11-06-expose-canonical-input-lifecycle/verification.md)，消费方已通过[actor96项与真实ACP重试链](changes/archive/2026-11-06-observe-stable-input-retries/verification.md)；F2见[canonical槽位继承与真实JSONL编辑/冷恢复身份验收](changes/archive/2026-11-07-preserve-edited-fifo-recovery/verification.md)，原行/runtime与immutable编辑输入身份分别保持，手动reorder重启持久化不在该修复范围。
+
+原生子采样控制的自然收尾夹具已按已归档的child退休顺序修正，三个竞态场景保留；完整21个native和10个owner场景及独立actor拒绝控制已通过，见[阶段修正与最终回归](changes/archive/2026-11-07-align-native-control-retirement-fixture/verification.md)。父工具同一行 Dispatching→Queued/Failed、child普通控制反馈及启动发布顺序已验收，见[模块与真实终端链](changes/archive/2026-11-07-show-subagent-sampling-controls/verification.md)：保Queued≠Applied，child先建立control epoch，closed-Step后一次notice和实际目标model/effort请求；freshbuild v10原exact与正常退出均0。模型池仍遵循独立设计批准门槛。
+
+2.6.2候选中的 `rg --hostname-bin` 已按实际helper执行、Ask/Auto/grant和冻结RX投影完成修复，含`--glob --`反例，见[权限修复与21项最终回归](changes/archive/2026-11-06-guard-ripgrep-external-execution/verification.md)。MCP取消派发三秒Grow等待界见[真实受阻传输旧红新绿与16项回归](changes/archive/2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。Goal空闲人类依赖解除唤醒见[真实mailbox判别、Goal/planning回归与原报告限制](changes/archive/2026-11-06-repair-goal-turn-continuation/verification.md)。四项候选的实际采纳和未证边界见[固定来源对照](changes/archive/2026-11-07-complete-nondeferred-backlog/upstream-2-6-2-review.md)。
+
+MCP-F1初始化后调用资格已验收，见[真实握手旧红、16项资格矩阵与197/13项回归](changes/archive/2026-11-07-revalidate-mcp-call-eligibility/verification.md)：model/direct共用当前client/disabled及live上游ceiling复核，保原absolute deadline和no-replay；Shell真实显式endpoint控制保持。父审查发现的direct预算退还及测试received计数已修订；网络中已发请求不承诺回滚，远端生产/Windows未实测。
+
+PB-04 exact runner错误确认已闭合，见[真实setsid＋DEVNULL三类中断旧红新绿和18项回归](changes/archive/2026-11-07-report-detached-runner-cleanup/verification.md)。Unix仍尽力清理本次进程组并回收直接child，对脱组后代明确未确认，不承诺任意树已回收；PB-03 的 ptyctl 生命周期已按本轮独立验证记录闭合。
+
+问答两模式已验收，见[模块、独立review与最终真实产品链](changes/archive/2026-11-07-offer-advisory-user-questions/verification.md)：Settings允许Agent逐次选择、关闭后live/cold强制blocking；建议迟答以稳定普通输入接纳，旧工具单一结算。新CLI同产物mouse1pass、keyboard/Settings2pass，正文无需额外导航即可显示；原阻塞问答卡住报告仍按下方现场证据门槛保留，不因本特性宣称已复现修复。
+
+AC-01 见[共享设置锁、原始字段和 CTA 实际消费方验收](changes/archive/2026-11-06-serialize-plugin-config-mutations/verification.md)。AC-03a会话LSP来源隔离见[真实ACP旧红新绿与三阶段进程验收](changes/archive/2026-11-07-bind-session-lsp-plugin-snapshot/verification.md)：新backend只取本次session插件快照，同cwd不同pluginDirs逐会话归属、不同cwd同名file/inline、sharedlatest污染下None/disabled及合法user/project控制均通过；继承Arc保持、无LSP全量reload，Windows未实测。
 
 Sampler任务归属与取消回合预算见[模块及产品链验收](changes/archive/2026-11-05-bind-sampler-request-task-lifetime/verification.md)和[取消终态修复](changes/archive/2026-11-05-retire-cancelled-turn-sampling-state/verification.md)：64项模块回归已独立验收，新增默认CLI上的原生取消/重试exact通过，五个请求/结算/证据身份一致。
 
 以下表中每一行是独立修复边界；同一报告有多项发现时仍分别派发，不把整个分区打包实施。详细触发、版本/符号证据和可证伪通过标准在所链接报告，优先级以真实影响和证据为准。
 
+AC-06 Skills 配置热更新已闭合：leader真实配置→目录/广告/模型资格及custom roots里程碑1/1；in-process九项及相邻MCP两项11/11；共享watcher22/22。独立review的已完成注册取消析构、None误去重均修正验证。macOS discovery以metadata polling避开已动态确认的FSEvents注册阻塞。见[两入口验证](changes/archive/2026-11-07-deliver-skills-config-reloads/verification-leader.md)与同目录in-process/backend记录。
+
+长历史退出主线已完成：完整真实 owner 的旧复制/重放25,050ms转为窄查询3.916ms；复杂305.7MB实际ACP旧红5,002ms unconfirmed转123ms confirmed，最终2.6.2同产物连续两轮立即双Ctrl+D，实际wait0为236.87/240.73ms，历史prefix/冷恢复/持久引用完整。见[最终CLI验收](changes/archive/2026-11-07-avoid-exit-history-replay/verification-final-cli.md)。通用OS文件监听退役抖动继续以独立P2保留，未隐藏早期慢轮。
+
+PB-05 多进程 crash capture 归属已闭合：live owner/并发同秒恢复/exec 锁不继承等真实 ownership 场景、crate 持久化回归与 CLI 多 capture 排空/首错停止两项均通过，独立数据完整性 review 接受。见[证据](changes/archive/2026-11-07-isolate-crash-capture-owners/verification.md)，保留 Windows 未原生运行限制。
+
+MCP-F2 SDK 注册者路由已闭合：实际 ingress覆盖身份/畸形早拒绝、A注册/Bdriver/同serverId及断线无fallback、真实new/resident/cold与SharedMcpPool Arc继承实际调用均通过。见[生命周期证据](changes/archive/2026-11-07-route-sdk-mcp-to-registration-owner/verification-sdk-lifecycle.md)及同目录leader验证，继承覆盖限SDK Arc/transport，不扩大为任意child启动全流程。
+
+AC-08 普通 Install 子项已闭合：共享 application/真实 ACP 两项有效保存失败旧红转绿，Pager public dispatch 的 save/parse/read/success 控制通过；不继续 post-install 或伪报 reload，已发布 artifact 保留并明确不完整状态。见[安装验证](changes/archive/2026-11-07-report-plugin-install-persistence-failures/verification.md)。卸载和普通更新保存错误继续独立保留。
+
+AC-03b 已完成 Shell 精确 session 插件快照与 Pager session/epoch 回包接线：真实 ACP 六方法入口回归与目录旧红/新绿、owner 3 项和既有 24 项通过，Pager 七项通过且独立 review 无发现。见[Shell](changes/archive/2026-11-07-bind-skill-catalogs-to-session-snapshots/shell-verification.md)与[Pager](changes/archive/2026-11-07-bind-skill-catalogs-to-session-snapshots/pager-verification.md)。全局 disabled 与目录热更新仍依各自契约，不复制额外目录 owner。
+
+PB-06 已以最小 raw-only 策略闭合：旧恢复会误归因当前函数的反例转绿，真实不同 ASLR slide 对照保全部 IP、禁止自动归因；全 crate 31 unit、9 integration、3 ownership、1 doc 通过，见[地址归属验证](changes/archive/2026-11-07-avoid-cross-process-crash-symbols/verification.md)。未新增 module/load mapping，也未声称 Windows 原生运行验证。
+
+PB-03 PTY 生命周期已完成 Session→HTTP/WS→CLI 接线：真实 CLI 10 项、库 30 项和 registry 2 项通过，Windows lib/tests cross-check 通过但未原生运行，见[整合证据](changes/archive/2026-11-07-settle-pty-session-lifecycle/verification-service.md)。直接 child 与 I/O 实际退役、慢连接有界错误、force 名称归属均按同一 owner 验收，未扩展任意进程树控制。
+
+AC-07 ACP 更新采用已通过真实 bare remote 的旧红新绿；checkout 与 registry commit/plugin map 一致，第二次同 tip 不产生更新，见[验证记录](changes/archive/2026-11-07-adopt-acp-plugin-update-results/verification.md)。保存错误的 AC-08 仍按安装、卸载、更新分别验收。
+
 | 项目 | 独立 owner / 修复边界 | 当前证据与启动门槛 |
 | --- | --- | --- |
-| WS-02 · P2 · 内容和摘要错配 | workspace ClientFS memo契约，不以size+mtime_ms证明内容代际 | [存储报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/workspace-storage.md)，静态/函数实验确认；真实stat/read回归需同大小同毫秒不同纳秒与atomic replacement |
-| WS-04 · P2 · 跨host记忆合并 | MemoryStorage仓库身份规范化保留host/port，仍合并同仓库SSH/HTTPS | 同报告，固定同org/repo输入已确认确定性碰撞；真实storage构造验证clone/worktree隔离 |
-| WS-05 · P2 · envrc路径求值 | workspace envrc把路径作为参数传递，独立评估进程取消/期限 | 同报告，受控路径命令替换已执行；trusted wrapper存在，不能称folder-trust绕过 |
-| Session F1 · P1 · 挂起steer冷恢复失败 | shell input restore遵循保留Turn的Timeline route，validator不放宽 | [会话报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/session-runtime.md)，静态完整链；建立带未消费Steer(T)的冷恢复fixture，与无checkpoint中断对照 |
-| Session F2 · P2 · 编辑FIFO恢复位置/身份变化 | durable queue replacement与重建owner保留原位置/行及运行身份 | 同报告，A/B与A′物理顺序和edit身份已核实；多次编辑后各ACK边界冷恢复验证 |
-| Session F3 · P2 · 重试受运行态影响 | admission先查stable canonical lifecycle，移除不完整平行fold | 同报告，idle/running改变同请求intent、supersedes状态漏折叠；覆盖ACK丢失和冷writer重试不重复Hook/执行 |
-| Session F4 · P2 · journal恢复未确认屏障 | workflow JournalStorage及shell Run恢复确认可读前缀后才继续 | 同报告，完整append后注入sync失败时live Pending/cold Completed；需真实storage的file/dir sync故障测试，不声称已证重复child |
-| Session F5 · P3 · 冲突completion覆盖 | workflow journal同一operation的不可变结果，live/loader/projector一致 | 同报告，原源码实验接受pending→completed→异结果completed；正常producer可达性未证，先补完整性验证 |
-| AC-01 · P1 · 插件配置旁路写 | shell config已有raw mutation/SAVE_LOCK/atomic发布覆盖全部plugin/CTA writer | [配置报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/agent-config.md)，硬读错置空与直写已核实；保留未知字段/环境引用，故障与并发保存测试 |
-| AC-02 · P1 · 空插件快照遗留Hook | session plugin adoption在Some→None时撤销旧插件hook贡献 | 同报告，Some-only清除及None生产者已核实；可观察Hook执行对照，不删Agent/config hooks |
-| AC-03a · P1 · LSP跨会话快照 | session bootstrap使用本次per-cwd/session plugin registry | 同报告，构造已独立但LSP另读shared；A/B不同cwd/同名LSP及session pluginDirs进程fixture |
-| AC-03b · P2 · Skills目录作用域混合 | Skills API明确session/cwd身份，再与模型可调用owner对齐 | 同报告；同cwd不同pluginDirs反例先定共享契约，不凭cwd猜唯一会话 |
-| AC-04 · P2 · 规则alias越过checkout | agent rules从一致物理身份构造真实祖先链 | 同报告，路径实验漏repo rule并加入外部祖先；canonical equality不足以补回alias指向内部子目录的根规则 |
-| AC-05 · P2 · Agent扫描链接环 | Agent递归walker祖先身份/预算，保留合法namespace | 同报告，32 lexical/1 physical实验；不依赖OS链接层数限制，非环符号链接策略明确 |
-| AC-06 · P2 · Skills配置事件丢弃 | shell/pager config routing交付既有reload owner并更新custom roots watcher | 同报告，leader仅日志/in-process丢弃已核实；直接写config对照，UI常规toggle另有refresh不能混报 |
-| AC-07 · P2 · ACP插件更新存旧记录 | plugin application采用已有UpdateResult→registry逻辑 | 同报告，CLI正确对照已核实；本地bare remote推进commit/plugin，第二次同tip应no-op |
-| AC-08 · P2 · 插件I/O失败仍成功 | plugin application按安装/卸载分别传播durable失败与部分完成 | 同报告，关键save/removal被warn吞掉；分别建有界修复任务，不把installer重写成框架 |
+| AC-08 · P2 · 卸载/普通更新I/O失败 | plugin application分别传播durable失败与部分完成 | 普通 Install 已独立验收归档；卸载 removal/save 与普通更新 save 的错误传播本轮未实施，继续按独立任务保留，不把installer重写成框架 |
+| macOS 文件监听退役抖动 · P2 · 现场待进一步复现 | 通用 fsnotify watcher 的 native Drop/join 与进程退出尾部 | 2.6.2 长历史 CLI 验证中，一轮 filesystem watcher 退役 4747ms，runtime 4845ms 已确认但进程 6019ms 仍活；其它同负载两轮 actual wait 225ms。慢段未采到动态栈，源码有同步 join，不能凭两轮成功宣称该 OS 抖动已修。保留 `/tmp/grow-complex-cli-acceptance-ready-8cf671e4/` 与 `/tmp/grow-complex-cli-slowwatch-8cf671e4/`，独立定位，不扩大本轮为通用 fsnotify backend 重写。 |
 | ACP-1 · 容量债务 | ACP transport明确queue/handler预算及过载语义 | [客户端报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/client-ui.md)；静态风险，先慢handler/生产者负载实验或证明现有外部上限，不预设正常CLI失效阈值 |
 | MD-1 · 性能债务 | Markdown开放fence输出复用边界 | 同报告，逐帧clone已知residual；先分别测parse和copy成本与帧预算，再决定最小表示变化 |
-| PB-01 · P2 · 已关闭session被重放 | CLI stdio forward→replay cache覆盖close事件 | [构建与产品报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/product-build.md)，真实入口过滤漏掉helper的close分支；验收走forward→断线→replay，不能只测helper |
-| PB-02 · P2 · 并发new响应身份串配 | CLI replay state按RPC id管理pending创建 | 同报告，单Option覆盖与任意sessionId take静态确认；顺/逆序响应、error/load交织与重连对照 |
-| PB-03 · P2 · PTY生命周期未接线 | ptyctl child/session/server统一stop/timeout/linger结算 | 同报告，shutdown receiver丢弃/timeout未消费；真实CLI隔离对照再修，Pager harness独立owner不归本项 |
-| PB-04 · P2 · exact runner错误确认清理 | regression runner已拥有后代树的回收/未确认语义 | 同报告，真实_run_phase超时后setsid+DEVNULL自建后代仍活跃；普通后代/持pipe/不持pipe三组，不能按全局名字杀进程 |
-| PB-05 · P2 · crash共享inode丢证据 | crash capture每进程文件身份与恢复claim | 同报告，显式开启capture才适用；双/三进程隔离序列验证，不能随另一进程启动撤销live owner证据 |
-| PB-06 · P2 · 旧IP跨启动符号化 | crash格式/解析保存module identity和相对地址或明确限制 | 同报告，ASLR静态证据；隔离PIE已知函数跨slide恢复，保留raw离线证据，未声称当前全平台实测 |
-| PB-07 · P2 · crash归档失败删raw | crash恢复提交owner在durable report成功前保留raw | 同报告，写错被忽略后unlink；故障注入报告/history路径，返回可观察错误且原证据可重试 |
-| MCP-F1 · P1 · 初始化后发送到退休服务 | MCP call owner在异步初始化后复核同client/disabled/上游资格 | [工具权限报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/tools-authorization-recovery.md)，静态完整发送链；旁支有未合入修正，不能整支替换当前no-replay；可控握手barrier下旧/新tools/call均0 |
-| MCP-F2 · P2 · SDK reverse缺owner路由 | SDK registration→invoker→leader保留注册连接身份 | 同报告，producer仅serverId/message，leader丢不可路由包；A注册/B驱动及同名serverId实际producer夹具，owner断线不回退driver |
-| MCP-F3 · P2 · SDK重名静默首项 | client-MCP ingress联合校验canonical server name | 同报告，违反整组拒绝契约；new/load/update副作用前拒绝、旧catalog保持，标准array与SDK metadata均验证 |
-| Vendor文档 · 升级债务 | dependency文档同步sqlite-vec maintained语义patch与nix-ohos实际graph | [产品报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/product-build.md)，不能只因上游补齐include就删本地边界修复；独立文档小修，移除前重跑native boundaries |
-| Agent实体/announcements依赖 · 待用途核对 | Agent owner确认ToolExecConfig/Retry与preset public seam消费者；announcements直接使用config根 | [配置报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/agent-config.md)，无仓内消费不足以证明公开API可删；先确认受支持外部产品需求，再做窄删除/依赖收缩，不预建框架 |
+| Workflow测试隔离 · 工具维护 | 复用测试sandbox隔离user discovery，不改产品manifest上限 | [固定产物隔离对照](changes/archive/2026-11-06-diagnose-workflow-manifest-capacity/analysis.md)：同产物非隔离25fail、隔离147pass；本轮集成已用隔离环境验证，用户资源字段的精确字节占比未测，不以假设提高512KiB上限 |
+| Agent公共实体用途核对 · 待用途核对 | Agent owner确认ToolExecConfig/Retry与preset public seam消费者 | [配置报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/agent-config.md)，无仓内消费不足以证明公开API可删；先确认受支持外部产品需求，再做窄删除/依赖收缩，不预建框架；announcements直接依赖config已独立[验收](changes/archive/2026-11-07-depend-on-config-for-announcements/verification.md)，原转发路径和状态语义保持 |
 
 | 交付释放/迟到结果 · 源码已修，现场待新构建恢复 | tool-types LocalPlan历史review绑定与Shell canonical结果提交 | [独立修复与实验](changes/archive/2026-11-05-audit-released-delivery-finalization/verification.md)：原公共API反例已在新生产库转为Ok，planning26/26、独立review和默认CLI check/build通过。只放宽历史Released(None)，其他review/canonical/终态门槛保持。当前旧宿主仍Receipt Unknown、link未terminal，需正常退出后用新项目构建恢复，再核对真实结果与replan；不能将源码验证当作现场闭合 |
+
+## 采样解码后续项（2026-11-06 有界分析）
+
+用户本轮要求分析是否仍有同类问题；以下分别是独立修复边界，本次只登记、不实施，不扩成全仓审计。完整输入、证据强度与候选限制见[分析](changes/archive/2026-11-06-analyze-sampling-decode-residuals/analysis.md)。
+
+流错误资格已在独立change关闭，见本轮闭合记录；不以该项代替下文Anthropic标准错误分类或真实跨协议路由验证。
+
+## 跨协议模型切换的官方契约对照（2026-11-06）
+
+用户明确本题主要是同会话跨协议、跨模型切换；本次完成官方资料和本地表示验证，尚无新first-party推理请求。来源、旧六方向实测限制及22项当前回归见[官方对照](changes/archive/2026-11-06-compare-official-sampling-api-contracts/analysis.md)。以下两项分别是独立边界，不能以关联的单次流解码修复代替：
+
+- **目标Chat对runtime合成工具历史的许可**：DeepSeek官方说明Chat不支持client在历史中段插入非模型生成的工具调用/结果，而Responses/Anthropic格式支持。Grow的AgentMessage和用户SkillLoad会投影为synthetictool往返，portable切换后仍保留；本地wire与该限制的冲突前提已定位，实际target是否拒绝、何种history/版本适用仍待受控目标验证。后续由目标Chat适配与中性runtime事实表达共同确认契约，不把来源升级为DirectUser，不删已接纳内容、不伪造调用执行。对照真实模型工具历史、runtime合成历史及三个目标backend的接纳结果；不扩大为所有Chat或所有foreign真实工具历史都不支持。
+- **reasoning回放的完整性和可迁移保证**：DeepSeek thinking+tools要求所有先前回合完整reasoning_content，当前VisibleReasoningItem只存可见text，Responses/Claude来源可能只给summary或不给正文。route隔离、目标明确400后的ACK学习、空字段补齐已覆盖，但这些不能恢复未取得的full reasoning。后续先验证具体目标接受何种foreign/无reasoning历史，再确定迁移支持及最小provenance需要；不预建全局capability框架，不捏造签名/完整原生思考。既有真实六方向矩阵没有触发reasoning400，不能算该恢复分支的线上成功证据。
+
+关联但独立的分类项：**Anthropic标准api_error/timeout_error**已完成共享owner修复，见[两处映射、真实Messages reader/loopback及53项回归](changes/archive/2026-11-07-classify-standard-messages-stream-errors/verification.md)。合法流内精确类型分别使用逻辑500/504，真实HTTP非2xx状态和显式veto保持，恢复仍受原结算/候选撤回/次数与期限约束；未知lookalike不放行。typed顶层provider request_id仍仅raw保留，本项未新增结构化提取，也不声明真实Anthropic部署现场已复现。
+
+## 原阻塞问答迟答报告的证据门槛
+
+原任务结束后补答导致持续卡住的报告尚未复现。[已归档调查与父裁决](changes/archive/2026-11-07-settle-late-question-replies/verification.md)包含长等待、receiver关闭后迟答和持久ACK扣留判别，三项问答判别与14项worker回归通过；现有InteractionResolved和Pager清理链成立。扣留ACK只证明通用前提，silent send失败也不证明持续busy，因此不新增猜测的取消协议或持久化期限。再次出现时需精确source/call、原Turn结束原因和同期transport/canonical状态，或真实duplex受控复现，再按根因启动修复；新增advisory迟答功能不能替代这个现场结论。
+
+## 子任务正文显示后未收尾（2026-11-06 纯代码分析）
+
+用户无法取得Windows现场，明确改为纯代码分析。主报告见[收尾链路分析](changes/archive/2026-11-06-investigate-windows-subagent-result-stall/investigation.md)。以下为源码边界，均不等于该机器根因已确认，不在本轮实施：
+
+- **已闭合的观察与快照边界**：Shell Outstanding ACK和轮询共用原绝对期限，超时保留incomplete及child责任，见[用量冻结修复与18项回归](changes/archive/2026-11-06-bound-usage-freeze-observation/verification.md)。Workspace after读取采用5秒总观察预算、保留已成功项，未知与确认不存在分开；Shell最新触及点未知时给出snapshot_unavailable，见[after-snapshot与rewind验证](changes/archive/2026-11-06-bound-after-snapshot-capture/verification.md)。这些验证不证明Windows现场根因，也不提供强制中断同步I/O或锁等待的保证。
+- **有限finalization周期的readiness阻塞（需先定是否改政策）**：原I/O或actor/persistence未退役时，推进可在没有新写入的情况下耗掉三次机会；owner随后退出也不单独起新周期，状态/wait只读，新Turn准入才开下一周期。现契约明确有限重试与待修复状态，此行为不能直接称协议错误。若改善自动收敛，应核原周期内readiness检查和mutation/ACK次数是否应分开，保留绝对期限及writerlease，不以无限续期修复。已登记SessionEnd顺序问题仍单独处理，见下项。
 
 ## 明确暂缓
 
 - **Sampler 并发日志捕获测试（待独立复现）**：本次稀疏失败回归首轮并发执行时，既有 `client::tests::sampling_auth_logs_omit_credentials` 失败一次；该项单独重跑与完整串行326项均通过。尚未确认根因，不据此认定生产凭据泄漏或修改日志实现；后续应在并发日志订阅/捕获边界建立受控复现后独立修复。原始失败、exact和串行对照见[验证记录](changes/archive/2026-11-06-decode-sparse-responses-failure/verification.md)。
-
-- **child 结束后的 SessionEnd Hook 因果写入（待独立修复）**：运行时模型控制的隔离真实 child 测试在 canonical Result 关闭 Timeline 后，日志出现 `session-end hook lifecycle was not durable: child Timeline is closed by its subagent result fact`。当前 model/provider/权限/竞态回归通过，未据此放宽封闭 Timeline 或顺带改收尾链路；后续应独立核对 SessionEnd Hook owner 与 Result 的持久顺序，覆盖有无Hook、正常完成/取消与冷恢复。触发和验证限制见[本次验证记录](changes/archive/2026-11-05-control-running-subagent-model-effort/verification.md#shell-verified-candidate)。
 
 - **普通长 prompt 导出文件寿命（待独立链路复现）**：`run_turn_via_sampler` 局部的 PromptBlobExport 在采样返回时删除 TempDir，而模型的 read_file 发生在后续工具阶段；需独立复现普通 prompt 的采样→全文读取，再确定既有 artifact owner 的寿命边界。当前现场走 steer，未使用该导出路径，不并入插话保真修复。证据和范围见[长输入调查](changes/archive/2026-11-03-preserve-long-steering-input/design.md#separate-audit-finding)。
 

@@ -522,6 +522,24 @@ fn is_session_load_request(json: &serde_json::Value) -> bool {
         .and_then(|m| m.as_str())
         .is_some_and(|m| m == "session/load")
 }
+/// Whether a `session/new` or `session/load` request's `params` object carries
+/// a `_meta` value that is present but neither `null` nor an object.
+///
+/// The leader owns the routing identity written inside `_meta`. An opaque
+/// container cannot be rewritten, and the ACP schema's per-field
+/// `DefaultOnError` silently drops the whole metadata object instead of
+/// failing, which would leave the session without its trusted owner. Ingress
+/// therefore rejects these requests (and drops them when they are
+/// notifications) before any session route is recorded.
+fn has_malformed_session_meta(json: &serde_json::Value) -> bool {
+    let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if method != AGENT_METHOD_NAMES.session_new && method != AGENT_METHOD_NAMES.session_load {
+        return false;
+    }
+    json.get("params")
+        .and_then(|params| params.get("_meta"))
+        .is_some_and(|meta| !meta.is_null() && !meta.is_object())
+}
 /// Extract the leader unicast target `ClientId` from a notification's
 /// `params._meta["grow/leaderClientId"]`.
 ///
@@ -647,11 +665,26 @@ fn interaction_inner_params(json: &serde_json::Value) -> Option<&serde_json::Val
 /// reverse-requests (driver-only), these are **shared**: broadcast to every
 /// subscriber so any client can render + answer the modal, first-answer-wins.
 /// See `SHARED_INTERACTIVE_MODALS.md`.
+///
+/// Exception: an `ask_user_question` carrying an explicit effective
+/// `blocking=false` (advisory presentation) is NOT shared. The advisory
+/// worker never emits the `InteractionResolved` broadcast the shared cache's
+/// eviction relies on, so caching it would replay a settled presentation to
+/// later attachers forever; it routes like any other driver-only
+/// reverse-request instead, and other clients rebuild their card from the
+/// normal tool-history updates/replay. Only an explicit boolean `false`
+/// counts (missing = serde default `true`, explicit `true`, and malformed
+/// non-bool values all stay shared); the flag is read from the unwrapped
+/// inner params so direct and gateway-wrapped forms classify identically.
 fn is_interaction_request(json: &serde_json::Value) -> bool {
-    matches!(
-        method_of(json),
-        Some("session/request_permission" | "grow/ask_user_question" | "grow/plan_approval")
-    )
+    match method_of(json) {
+        Some("session/request_permission" | "grow/plan_approval") => true,
+        Some("grow/ask_user_question") => !matches!(
+            interaction_inner_params(json).and_then(|params| params.get("blocking")),
+            Some(serde_json::Value::Bool(false))
+        ),
+        _ => false,
+    }
 }
 /// Extract the `tool_call_id` an interaction reverse-request carries, so the
 /// leader can cache it (keyed by id) for replay-on-attach and evict it on
@@ -807,12 +840,22 @@ fn live_descendant_sessions(
 }
 /// Inject client capabilities into a session/new request, **in place**.
 ///
-/// If the payload is a session/new request:
+/// If the payload is a session/new or session/load request:
 /// - Injects the client's canonical `permissionMode` into `_meta` when absent.
 /// - If the client has default_model set and the request doesn't already have a modelId,
 ///   injects `modelId` into the request's `_meta` object.
 /// - Injects `clientIdentifier` so the agent can track which client owns each session
 ///   (used for client-scoped launch defaults in leader mode).
+/// - Overwrites `grow/leaderClientId` with `client_id`, the accepted connection
+///   that sent this request. That identity is the authoritative routing target
+///   for SDK registrations and `session/load` replay; a caller-supplied value
+///   (even of the wrong type) is never trusted.
+///
+/// `_meta` is optional: absent or `null` becomes a fresh object so the
+/// injections apply. Any other non-object `_meta` is left byte-for-byte
+/// untouched (return `false`); leader ingress rejects such a request before
+/// forwarding, because the ACP schema would otherwise silently discard the
+/// metadata — and with it the trusted routing owner — instead of failing.
 ///
 /// Returns `true` when `json` was mutated.
 fn inject_capabilities_into_session_new(
@@ -829,9 +872,16 @@ fn inject_capabilities_into_session_new(
     }
     let mut mutated = false;
     if let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) {
-        let meta = params
-            .entry("_meta")
-            .or_insert_with(|| serde_json::json!({}));
+        let meta = match params.get_mut("_meta") {
+            Some(meta) if meta.is_null() => {
+                *meta = serde_json::json!({});
+                meta
+            }
+            Some(meta) => meta,
+            None => params
+                .entry("_meta")
+                .or_insert_with(|| serde_json::json!({})),
+        };
         if let Some(meta_obj) = meta.as_object_mut() {
             mutated = true;
             if !meta_obj.contains_key("permissionMode") {
@@ -860,12 +910,14 @@ fn inject_capabilities_into_session_new(
                     serde_json::json!(client_type),
                 );
             }
-            if !meta_obj.contains_key("grow/leaderClientId") {
-                meta_obj.insert(
-                    "grow/leaderClientId".to_string(),
-                    serde_json::json!(client_id.0),
-                );
-            }
+            // The accepted connection is the only authority for the routing
+            // identity. Overwrite whatever the caller supplied (including a
+            // value of the wrong type) so a forged owner can never select
+            // another client's SDK registration or load replay.
+            meta_obj.insert(
+                "grow/leaderClientId".to_string(),
+                serde_json::json!(client_id.0),
+            );
             meta_obj.insert(
                 "codeNavEnabled".to_string(),
                 serde_json::json!(capabilities.code_nav_enabled),
@@ -1712,6 +1764,23 @@ pub async fn run_leader_server(
                                 "Dropped pre-ready notification (leader not yet ready)"
                             );
                         }
+                        continue;
+                    }
+                    if json.as_ref().is_some_and(has_malformed_session_meta) {
+                        if let (Some(request_id), Some(client)) = (
+                            json.as_ref().and_then(|json| json.get("id")),
+                            clients.get(&id),
+                        ) {
+                            let response = serde_json::json!({"jsonrpc":"2.0", "id": request_id,
+                                "error":{"code":-32602,"message":"session metadata must be an object, null, or absent"}});
+                            let _ = client
+                                .tx
+                                .try_send(ClientOutbound::Acp(response.to_string().into()));
+                        }
+                        trace!(
+                            client_id = id.0,
+                            "Rejected malformed session metadata at leader ingress"
+                        );
                         continue;
                     }
                     if let Some(request) = json.as_ref()
@@ -2819,6 +2888,7 @@ pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1 as acp;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -3551,6 +3621,63 @@ mod tests {
         )));
         assert!(!is_interaction_request(&pv(
             r#"{"jsonrpc":"2.0","method":"grow/sessions/changed","params":{}}"#
+        )));
+    }
+    /// An `ask_user_question` carrying an explicit effective `blocking=false`
+    /// (advisory presentation) is NOT a shared blocking interaction: the
+    /// advisory worker never emits the `InteractionResolved` fact the shared
+    /// cache's eviction design requires, so the leader must route it like any
+    /// other driver-only reverse request. Only an explicit boolean `false`
+    /// counts — missing (serde default `true`), explicit `true`, and
+    /// malformed non-bool values all stay shared. Both wire forms (direct and
+    /// gateway-wrapped) must classify identically.
+    #[test]
+    fn is_interaction_request_routes_explicit_advisory_as_driver_only() {
+        // Wrapped, explicit false → driver-only.
+        assert!(!is_interaction_request(&pv(
+            r#"{"jsonrpc":"2.0","id":1,"method":"_grow/ask_user_question","params":{"method":"grow/ask_user_question","params":{"sessionId":"s","toolCallId":"tc-a","blocking":false}}}"#
+        )));
+        // Direct, explicit false → driver-only.
+        assert!(!is_interaction_request(&pv(
+            r#"{"jsonrpc":"2.0","id":1,"method":"grow/ask_user_question","params":{"sessionId":"s","toolCallId":"tc-a","blocking":false}}"#
+        )));
+        // Missing (default blocking=true), explicit true, and malformed
+        // non-bool values stay shared interactions in both wire forms.
+        for params in [
+            r#"{"sessionId":"s","toolCallId":"tc-a"}"#,
+            r#"{"sessionId":"s","toolCallId":"tc-a","blocking":true}"#,
+            r#"{"sessionId":"s","toolCallId":"tc-a","blocking":"false"}"#,
+            r#"{"sessionId":"s","toolCallId":"tc-a","blocking":0}"#,
+        ] {
+            let inner: serde_json::Value =
+                serde_json::from_str(params).expect("inner params fixture must be valid JSON");
+            let wrapped = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "_grow/ask_user_question",
+                "params": {
+                    "method": "grow/ask_user_question",
+                    "params": inner.clone(),
+                },
+            });
+            assert!(
+                is_interaction_request(&wrapped),
+                "wrapped ask with params {params} must stay a shared interaction"
+            );
+            let direct = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "grow/ask_user_question",
+                "params": inner,
+            });
+            assert!(
+                is_interaction_request(&direct),
+                "direct ask with params {params} must stay a shared interaction"
+            );
+        }
+        // Other interaction kinds never flip on a stray `blocking` field.
+        assert!(is_interaction_request(&pv(
+            r#"{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"toolCall":{"toolCallId":"tc-p","blocking":false}}}"#
         )));
     }
     #[test]
@@ -4754,18 +4881,160 @@ mod tests {
         );
     }
     #[test]
-    fn inject_capabilities_does_not_override_existing_leader_client_id() {
-        let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1","_meta":{{"grow/leaderClientId":7}}}}}}"#,
-            AGENT_METHOD_NAMES.session_load
-        );
-        let caps = ClientCapabilities::default();
-        let mut json = pv(&payload);
-        inject_capabilities_into_session_new(&mut json, &caps, "grow-tui", ClientId(42));
-        assert_eq!(
-            json["params"]["_meta"]["grow/leaderClientId"].as_u64(),
-            Some(7)
-        );
+    fn inject_capabilities_overwrites_forged_leader_client_id() {
+        for method in [
+            AGENT_METHOD_NAMES.session_new,
+            AGENT_METHOD_NAMES.session_load,
+        ] {
+            for forged in [serde_json::json!(7), serde_json::json!("7")] {
+                let mut json = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": {
+                        "sessionId": "sess-1",
+                        "_meta": {"grow/leaderClientId": forged},
+                    },
+                });
+                let caps = ClientCapabilities::default();
+                assert!(inject_capabilities_into_session_new(
+                    &mut json,
+                    &caps,
+                    "grow-tui",
+                    ClientId(42)
+                ));
+                assert_eq!(
+                    json["params"]["_meta"]["grow/leaderClientId"].as_u64(),
+                    Some(42),
+                    "{method} must replace a caller-supplied routing identity with the accepted connection id"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inject_capabilities_materializes_absent_or_null_meta_with_leader_client_id() {
+        for method in [
+            AGENT_METHOD_NAMES.session_new,
+            AGENT_METHOD_NAMES.session_load,
+        ] {
+            for meta in [None, Some(serde_json::Value::Null)] {
+                let mut params = serde_json::json!({"sessionId": "sess-optional"});
+                if let Some(meta) = meta {
+                    params["_meta"] = meta;
+                }
+                let mut json = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": params,
+                });
+                let caps = ClientCapabilities::default();
+                assert!(inject_capabilities_into_session_new(
+                    &mut json,
+                    &caps,
+                    "grow-tui",
+                    ClientId(42)
+                ));
+                assert!(
+                    json["params"]["_meta"].is_object(),
+                    "{method}: optional metadata must become the injected object"
+                );
+                assert_eq!(
+                    json["params"]["_meta"]["grow/leaderClientId"].as_u64(),
+                    Some(42)
+                );
+                assert_eq!(json["params"]["_meta"]["permissionMode"], "ask");
+            }
+        }
+    }
+
+    #[test]
+    fn inject_capabilities_leaves_non_object_meta_for_ingress_rejection() {
+        for method in [
+            AGENT_METHOD_NAMES.session_new,
+            AGENT_METHOD_NAMES.session_load,
+        ] {
+            for malformed in [serde_json::json!("not-an-object"), serde_json::json!([1])] {
+                let mut json = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": {
+                        "cwd": "/tmp",
+                        "mcpServers": [],
+                        "sessionId": "sess-malformed",
+                        "_meta": malformed,
+                    },
+                });
+                let before = json.clone();
+                let caps = ClientCapabilities::default();
+                assert!(
+                    has_malformed_session_meta(&json),
+                    "{method}: ingress must classify malformed metadata for rejection"
+                );
+                assert!(
+                    !inject_capabilities_into_session_new(
+                        &mut json,
+                        &caps,
+                        "grow-tui",
+                        ClientId(42)
+                    ),
+                    "{method}: the injection helper must not normalize malformed metadata"
+                );
+                assert_eq!(json, before);
+                // The ACP schema's `DefaultOnError` turns an unusable `_meta`
+                // into `None` instead of failing. That is why ingress must
+                // reject the request before forwarding: a forwarded session
+                // would otherwise silently lose its trusted routing owner.
+                let typed = if method == AGENT_METHOD_NAMES.session_new {
+                    serde_json::from_value::<acp::NewSessionRequest>(json["params"].clone())
+                        .map(|request| request.meta)
+                } else {
+                    serde_json::from_value::<acp::LoadSessionRequest>(json["params"].clone())
+                        .map(|request| request.meta)
+                };
+                assert!(
+                    matches!(typed, Ok(None)),
+                    "{method}: ACP defaults an unusable `_meta` to absent, got {typed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_session_meta_detection_accepts_optional_and_other_shapes() {
+        for method in [
+            AGENT_METHOD_NAMES.session_new,
+            AGENT_METHOD_NAMES.session_load,
+        ] {
+            for meta in [
+                serde_json::json!({}),
+                serde_json::json!({"grow/leaderClientId": 7}),
+                serde_json::Value::Null,
+            ] {
+                let json = serde_json::json!({
+                    "method": method,
+                    "params": {"_meta": meta},
+                });
+                assert!(
+                    !has_malformed_session_meta(&json),
+                    "{method} must accept optional or object metadata"
+                );
+            }
+            let absent = serde_json::json!({"method": method, "params": {}});
+            assert!(!has_malformed_session_meta(&absent));
+        }
+        for other in ["initialize", "session/prompt"] {
+            let json = serde_json::json!({
+                "method": other,
+                "params": {"_meta": "not-an-object"},
+            });
+            assert!(
+                !has_malformed_session_meta(&json),
+                "{other} is not a session setup request"
+            );
+        }
     }
     #[test]
     fn extract_target_client_id_some_when_meta_present() {
@@ -5463,6 +5732,285 @@ mod tests {
             json["params"]["leaderClientId"].as_u64(),
             Some(client_id.0),
             "the server-assigned connection ID must replace a forged client value"
+        );
+        cancel.cancel();
+    }
+
+    /// A real accepted leader connection cannot choose its own routing owner:
+    /// `session/new` and `session/load` are forwarded with the server-assigned
+    /// `ClientId`, and `session/load` replay lines tagged with that id land on
+    /// the loading connection rather than the caller-forged target.
+    #[tokio::test]
+    async fn session_new_and_load_overwrite_forged_leader_client_id_at_ingress() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut forged_reader, _forged_writer, forged_id) =
+            connect_register_get_id(&sock_path, "forged-target").await;
+        let (mut reader, mut writer, actual_id) =
+            connect_register_get_id(&sock_path, "actual-owner").await;
+        assert_ne!(actual_id, forged_id);
+
+        for (method, request_id) in [
+            (AGENT_METHOD_NAMES.session_new, 71),
+            (AGENT_METHOD_NAMES.session_load, 72),
+        ] {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": {
+                    "cwd": "/tmp",
+                    "mcpServers": [],
+                    "sessionId": "sess-ingress",
+                    "_meta": {"grow/leaderClientId": forged_id.0},
+                },
+            });
+            write_message(
+                &mut writer,
+                &ClientMessage::Acp {
+                    payload: request.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+                .await
+                .expect("timed out waiting for forwarded request")
+                .expect("agent channel closed");
+            let forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+            assert_eq!(forwarded["method"], method);
+            assert_eq!(
+                forwarded["params"]["_meta"]["grow/leaderClientId"].as_u64(),
+                Some(actual_id.0),
+                "{method} must carry the accepted connection id, not the forged caller value"
+            );
+            // The forwarded params are a valid ACP request as well as a routed
+            // one: typed parsing must succeed and expose the actual owner, so
+            // the identity assertion cannot be an artifact of missing fields.
+            let typed = if method == AGENT_METHOD_NAMES.session_new {
+                serde_json::from_value::<acp::NewSessionRequest>(forwarded["params"].clone())
+                    .map(|request| request.meta)
+            } else {
+                serde_json::from_value::<acp::LoadSessionRequest>(forwarded["params"].clone())
+                    .map(|request| request.meta)
+            };
+            let typed_meta = typed.unwrap_or_else(|error| {
+                panic!("{method} forwarded params must be a valid ACP request: {error}")
+            });
+            assert_eq!(
+                typed_meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("grow/leaderClientId"))
+                    .and_then(serde_json::Value::as_u64),
+                Some(actual_id.0),
+                "{method} forwarded metadata must parse as ACP and expose the accepted connection id"
+            );
+            let result = if method == AGENT_METHOD_NAMES.session_new {
+                serde_json::json!({"sessionId": "sess-ingress"})
+            } else {
+                serde_json::json!({"models": []})
+            };
+            response_tx
+                .send(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": forwarded["id"].clone(),
+                        "result": result,
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            assert!(
+                next_acp_payload(&mut reader).await.is_some(),
+                "{method} response must return to the requesting connection"
+            );
+        }
+
+        // The agent echoes the injected id onto `session/load` replay lines.
+        response_tx
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "grow/session_notification",
+                    "params": {
+                        "sessionId": "sess-ingress",
+                        "_meta": {"isReplay": true, "grow/leaderClientId": actual_id.0},
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "REPLAY-ACTUAL"},
+                        },
+                    },
+                })
+                .to_string(),
+            )
+            .unwrap();
+        assert!(
+            next_acp_payload_matching(&mut reader, "REPLAY-ACTUAL")
+                .await
+                .is_some(),
+            "load replay must reach the actual loading connection"
+        );
+        assert!(
+            next_acp_payload_matching(&mut forged_reader, "REPLAY-ACTUAL")
+                .await
+                .is_none(),
+            "a caller-forged owner must not receive another connection's replay"
+        );
+        cancel.cancel();
+    }
+
+    /// Malformed metadata on a session setup request is rejected at ingress
+    /// with `invalid_params` before any forwarding or session route is
+    /// recorded; a malformed notification is dropped without a reply.
+    #[tokio::test]
+    async fn malformed_session_meta_is_rejected_at_ingress_without_forwarding() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut reader, mut writer, client_id) =
+            connect_register_get_id(&sock_path, "malformed-meta").await;
+
+        for (method, request_id) in [
+            (AGENT_METHOD_NAMES.session_new, 81),
+            (AGENT_METHOD_NAMES.session_load, 82),
+        ] {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": {
+                    "cwd": "/tmp",
+                    "mcpServers": [],
+                    "sessionId": "sess-rejected",
+                    "_meta": "not-an-object",
+                },
+            });
+            write_message(
+                &mut writer,
+                &ClientMessage::Acp {
+                    payload: request.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            let response = next_acp_payload(&mut reader)
+                .await
+                .expect("the origin connection must receive the ingress rejection");
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["jsonrpc"], "2.0");
+            assert_eq!(response["id"], request_id);
+            assert_eq!(response["error"]["code"], -32602);
+            assert!(
+                acp_rx.try_recv().is_err(),
+                "{method} with malformed metadata must not reach the agent"
+            );
+        }
+
+        // A valid request after the rejected ones still reaches the agent with
+        // the accepted connection id: the rejection paths left no pending
+        // request or load buffer behind.
+        let valid = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 83,
+            "method": AGENT_METHOD_NAMES.session_new,
+            "params": {"cwd": "/tmp", "mcpServers": []},
+        });
+        write_message(
+            &mut writer,
+            &ClientMessage::Acp {
+                payload: valid.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("a valid request after rejections must be forwarded")
+            .expect("agent channel closed");
+        let forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        assert_eq!(forwarded["method"], AGENT_METHOD_NAMES.session_new);
+        assert_eq!(
+            forwarded["params"]["_meta"]["grow/leaderClientId"].as_u64(),
+            Some(client_id.0)
+        );
+
+        // A malformed session/load notification has no id to answer: it is
+        // dropped without a response. The valid request that follows proves
+        // the notification was processed instead of forwarded first.
+        let malformed_notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": AGENT_METHOD_NAMES.session_load,
+            "params": {
+                "cwd": "/tmp",
+                "mcpServers": [],
+                "sessionId": "sess-rejected",
+                "_meta": 7,
+            },
+        });
+        write_message(
+            &mut writer,
+            &ClientMessage::Acp {
+                payload: malformed_notification.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let valid_after_notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 84,
+            "method": AGENT_METHOD_NAMES.session_new,
+            "params": {"cwd": "/tmp", "mcpServers": []},
+        });
+        write_message(
+            &mut writer,
+            &ClientMessage::Acp {
+                payload: valid_after_notification.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("the valid request after the malformed notification must be forwarded")
+            .expect("agent channel closed");
+        let forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        assert_eq!(
+            forwarded["method"], AGENT_METHOD_NAMES.session_new,
+            "a malformed notification must not be forwarded before the valid request"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                read_message::<_, ServerMessage>(&mut reader)
+            )
+            .await
+            .is_err(),
+            "a malformed session/load notification must be dropped without a response"
+        );
+
+        // The rejected load never registered this connection as a session
+        // subscriber or driver: a reverse request for that session has no
+        // route instead of reaching the malformed request's sender.
+        response_tx
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 900,
+                    "method": "grow/session/reverse_probe",
+                    "params": {"sessionId": "sess-rejected"},
+                })
+                .to_string(),
+            )
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                read_message::<_, ServerMessage>(&mut reader)
+            )
+            .await
+            .is_err(),
+            "a rejected malformed load must not leave a session route behind"
         );
         cancel.cancel();
     }
@@ -6251,6 +6799,669 @@ mod tests {
         };
         (reader, writer, ClientId(client_id))
     }
+    /// Agent-side bridge for the real SDK producer. Each actual `ExtRequest`
+    /// emitted by `GatewayAcpInvoker` is serialized the way the ACP agent peer
+    /// puts an extension request on the agent→leader wire (method prefixed with
+    /// `_`). The matching outer response must return from a real client socket
+    /// through the leader before this handler completes.
+    struct SdkProducerBridge {
+        response_tx: mpsc::UnboundedSender<String>,
+        next_id: std::cell::Cell<u64>,
+        pending_responses: std::rc::Rc<
+            std::cell::RefCell<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+        >,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl acp_transport::AcpClientHandler for SdkProducerBridge {
+        async fn request_permission(
+            &self,
+            _: acp::RequestPermissionRequest,
+        ) -> acp::Result<acp::RequestPermissionResponse> {
+            Err(acp::Error::internal_error().data("unexpected permission request"))
+        }
+
+        async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
+            Ok(())
+        }
+
+        async fn ext_method(&self, request: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
+            let wire_id = self.next_id.get() + 1;
+            self.next_id.set(wire_id);
+            let params: serde_json::Value =
+                serde_json::from_str(request.params.get()).expect("producer params are JSON");
+            let wire = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": wire_id,
+                "method": format!("_{}", request.method),
+                "params": params,
+            });
+            let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+            assert!(
+                self.pending_responses
+                    .borrow_mut()
+                    .insert(wire_id, response_sender)
+                    .is_none(),
+                "outer SDK request ids must be unique"
+            );
+            self.response_tx
+                .send(wire.to_string())
+                .expect("leader agent channel is open");
+            let outer_response = response_receiver.await.map_err(|_| {
+                acp::Error::internal_error().data("SDK outer response dispatcher stopped")
+            })?;
+            let response = outer_response.get("result").cloned().ok_or_else(|| {
+                acp::Error::internal_error().data(format!(
+                    "SDK client returned no result for outer request {wire_id}: {outer_response}"
+                ))
+            })?;
+            let raw = serde_json::value::to_raw_value(&response)
+                .expect("socket SDK response result serializes");
+            Ok(acp::ExtResponse::new(raw.into()))
+        }
+    }
+
+    /// Own the fake agent endpoint's receive side. Real client responses are
+    /// correlated to the bridge's pending outer request; all other client→agent
+    /// traffic remains observable by the test.
+    fn dispatch_sdk_agent_responses(
+        mut acp_rx: mpsc::UnboundedReceiver<String>,
+        pending_responses: std::rc::Rc<
+            std::cell::RefCell<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+        >,
+    ) -> mpsc::UnboundedReceiver<String> {
+        let (forwarded_tx, forwarded_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(line) = acp_rx.recv().await {
+                let json: serde_json::Value =
+                    serde_json::from_str(&line).expect("client→agent payload is JSON");
+                if json.get("method").is_none()
+                    && let Some(id) = json.get("id").and_then(serde_json::Value::as_u64)
+                    && let Some(response_sender) = pending_responses.borrow_mut().remove(&id)
+                {
+                    let _ = response_sender.send(json);
+                    continue;
+                }
+                if forwarded_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        forwarded_rx
+    }
+
+    async fn complete_sdk_socket_round_trip(
+        invoker: &crate::session::acp_mcp::GatewayAcpInvoker,
+        reader: &mut tokio::io::ReadHalf<LocalStream>,
+        writer: &mut tokio::io::WriteHalf<LocalStream>,
+        session_id: &str,
+        owner_id: u64,
+        server_id: &str,
+        message: serde_json::Value,
+        result: serde_json::Value,
+    ) -> (serde_json::Value, serde_json::Value) {
+        use ::mcp::acp_transport::AcpReverseInvoker as _;
+
+        let expected_message = message.clone();
+        let invoke = invoker.invoke(server_id, message, Duration::from_secs(2));
+        let answer_from_socket = async {
+            let delivered = next_acp_payload(reader)
+                .await
+                .expect("registration owner receives the SDK request");
+            let delivered: serde_json::Value =
+                serde_json::from_str(&delivered).expect("delivered SDK call JSON");
+            assert_eq!(
+                delivered["method"], "_grow/mcp/sdk_call",
+                "the next owner payload must be the SDK request"
+            );
+            let outer_id = delivered["id"]
+                .as_u64()
+                .expect("SDK outer request uses a numeric fixture id");
+            assert_eq!(delivered["params"]["sessionId"], session_id);
+            assert_eq!(
+                delivered["params"]["_meta"]["grow/leaderClientId"].as_u64(),
+                Some(owner_id)
+            );
+            assert_eq!(delivered["params"]["serverId"], server_id);
+            assert_eq!(
+                delivered["params"]["message"], expected_message,
+                "SDK message value must remain unchanged"
+            );
+            let inner_id = delivered["params"]["message"]["id"].clone();
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": inner_id,
+                "result": result,
+            });
+            write_message(
+                writer,
+                &ClientMessage::Acp {
+                    payload: serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": outer_id,
+                        "result": response,
+                    })
+                    .to_string(),
+                },
+            )
+            .await
+            .expect("SDK owner socket sends its response");
+            (delivered, response)
+        };
+        let (actual_response, (delivered, expected_response)) =
+            tokio::join!(invoke, answer_from_socket);
+        let actual_response = actual_response.expect("real producer reverse request completes");
+        assert_eq!(
+            actual_response, expected_response,
+            "invoker must receive the inner MCP response from the owner socket"
+        );
+        (delivered, actual_response)
+    }
+
+    /// Read forwarded agent requests until `method` appears; client responses
+    /// also travel on this channel, so unrelated lines are skipped.
+    async fn next_forwarded_method(
+        acp_rx: &mut mpsc::UnboundedReceiver<String>,
+        method: &str,
+    ) -> serde_json::Value {
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
+                .await
+                .expect("timed out waiting for a forwarded agent request")
+                .expect("agent channel closed");
+            let json: serde_json::Value = serde_json::from_str(&line).expect("forwarded JSON");
+            if json.get("method").and_then(|m| m.as_str()) == Some(method) {
+                return json;
+            }
+        }
+    }
+
+    fn sdk_registration_notification(session_id: &str, text: &str) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "grow/session_notification",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": text },
+                },
+            },
+        })
+        .to_string()
+    }
+
+    /// MCP-F2 increment 2: the real SDK producer's reverse request must follow
+    /// the connection that registered the SDK servers, not the session's current
+    /// driver. Owner ids come from the actual `session/new` payloads the leader
+    /// forwarded (after replacing a forged value), never from the test.
+    #[tokio::test]
+    async fn sdk_producer_reverse_targets_registration_owner_not_driver() {
+        use crate::session::acp_mcp::GatewayAcpInvoker;
+        use ::mcp::acp_transport::AcpReverseInvoker as _;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let temp = TempDir::new().unwrap();
+                let (sock_path, cancel, response_tx, acp_rx) =
+                    setup_persistent_server_with_agent(&temp).await;
+                let pending_responses = Rc::new(std::cell::RefCell::new(HashMap::new()));
+                let mut observed_rx =
+                    dispatch_sdk_agent_responses(acp_rx, pending_responses.clone());
+                let (mut reader_a, mut writer_a, a_id) =
+                    connect_register_get_id(&sock_path, "sdk-owner").await;
+                let (mut reader_b, mut writer_b, b_id) =
+                    connect_register_get_id(&sock_path, "sdk-driver").await;
+
+                // Establish B as sess-a's real driver first. The load request
+                // itself inserts the driver; its response completes the socket
+                // round trip and leaves B attached.
+                let b_load = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "session/load",
+                    "params": {
+                        "sessionId": "sess-a",
+                        "cwd": "/tmp/sdk-driver",
+                        "mcpServers": [],
+                    }
+                });
+                write_message(
+                    &mut writer_b,
+                    &ClientMessage::Acp {
+                        payload: b_load.to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+                let forwarded_load = next_forwarded_method(&mut observed_rx, "session/load").await;
+                response_tx
+                    .send(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": forwarded_load["id"],
+                            "result": { "models": [] },
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                let load_response = next_acp_payload(&mut reader_b)
+                    .await
+                    .expect("B receives its load response");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&load_response).unwrap()["id"],
+                    12
+                );
+
+                // A then creates the SDK registration for sess-a. The real
+                // forwarded metadata supplies A's accepted connection id, and
+                // the new response attaches A without stealing B's driver role.
+                const FORGED_OWNER: u64 = 999_999;
+                let a_new = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": "/tmp/sdk-owner",
+                        "mcpServers": [],
+                        "_meta": {
+                            "sessionId": "sess-a",
+                            "grow/mcp/servers": [
+                                { "name": "sdk-tools", "serverId": "srv-shared" }
+                            ],
+                            "grow/leaderClientId": FORGED_OWNER,
+                        }
+                    }
+                });
+                write_message(
+                    &mut writer_a,
+                    &ClientMessage::Acp {
+                        payload: a_new.to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+                let forwarded_a = next_forwarded_method(&mut observed_rx, "session/new").await;
+                let owner_a = forwarded_a["params"]["_meta"]["grow/leaderClientId"]
+                    .as_u64()
+                    .expect("leader assigned A's owner");
+                assert_eq!(owner_a, a_id.0);
+                assert_ne!(owner_a, FORGED_OWNER);
+                response_tx
+                    .send(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": forwarded_a["id"],
+                            "result": { "sessionId": "sess-a", "models": [] },
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                let new_response = next_acp_payload(&mut reader_a)
+                    .await
+                    .expect("A receives its new response");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&new_response).unwrap()["id"],
+                    11
+                );
+
+                let (gateway_a, receiver_a) = acp_transport::acp_gateway::<
+                    acp_transport::protocol::AgentSide,
+                    _,
+                >(SdkProducerBridge {
+                    response_tx: response_tx.clone(),
+                    next_id: Cell::new(100),
+                    pending_responses: pending_responses.clone(),
+                });
+                tokio::task::spawn_local(receiver_a.run());
+                let invoker_a =
+                    GatewayAcpInvoker::new(gateway_a, acp::SessionId::new("sess-a"), Some(owner_a));
+                let initialize = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": { "name": "leader-sdk-fixture", "version": "0" }
+                    }
+                });
+                complete_sdk_socket_round_trip(
+                    &invoker_a,
+                    &mut reader_a,
+                    &mut writer_a,
+                    "sess-a",
+                    owner_a,
+                    "srv-shared",
+                    initialize,
+                    serde_json::json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "serverInfo": { "name": "sdk-a", "version": "0" },
+                    }),
+                )
+                .await;
+
+                // A real generic reverse request proves B retained sess-a's
+                // driver role even though A's later new response attached A.
+                response_tx
+                    .send(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 900,
+                            "method": "grow/generic_probe",
+                            "params": { "sessionId": "sess-a" },
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                let generic_probe = next_acp_payload(&mut reader_b)
+                    .await
+                    .expect("B driver receives the generic reverse probe");
+                let generic_probe: serde_json::Value =
+                    serde_json::from_str(&generic_probe).unwrap();
+                assert_eq!(
+                    generic_probe["method"], "grow/generic_probe",
+                    "B's next payload must be the generic driver probe"
+                );
+                assert_eq!(generic_probe["id"], 900);
+                write_message(
+                    &mut writer_b,
+                    &ClientMessage::Acp {
+                        payload: serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 900,
+                            "result": { "driver": b_id.0 },
+                        })
+                        .to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+                let generic_response = tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        let line = observed_rx.recv().await.expect("agent channel open");
+                        let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+                        if json.get("id") == Some(&serde_json::json!(900)) {
+                            break json;
+                        }
+                    }
+                })
+                .await
+                .expect("B's generic probe response returns to the agent");
+                assert_eq!(generic_response["result"]["driver"], b_id.0);
+
+                // B also registers an SDK server with the SAME serverId in its
+                // own session; routing must separate the two by owner.
+                let b_new = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 13,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": "/tmp/sdk-driver",
+                        "mcpServers": [],
+                        "_meta": {
+                            "sessionId": "sess-b",
+                            "grow/mcp/servers": [
+                                { "name": "sdk-tools", "serverId": "srv-shared" }
+                            ],
+                        }
+                    }
+                });
+                write_message(
+                    &mut writer_b,
+                    &ClientMessage::Acp {
+                        payload: b_new.to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+                let forwarded_b = next_forwarded_method(&mut observed_rx, "session/new").await;
+                let owner_b = forwarded_b["params"]["_meta"]["grow/leaderClientId"]
+                    .as_u64()
+                    .expect("leader assigned B's owner");
+                assert_eq!(owner_b, b_id.0);
+                assert_ne!(owner_a, owner_b);
+                response_tx
+                    .send(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": forwarded_b["id"],
+                            "result": { "sessionId": "sess-b", "models": [] },
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                let b_new_response = next_acp_payload(&mut reader_b)
+                    .await
+                    .expect("B receives its new response");
+                let b_new_response: serde_json::Value =
+                    serde_json::from_str(&b_new_response).unwrap();
+                assert_eq!(
+                    b_new_response["id"], 13,
+                    "leader restores B's original new request id"
+                );
+
+                let tools_list_a = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {},
+                });
+                complete_sdk_socket_round_trip(
+                    &invoker_a,
+                    &mut reader_a,
+                    &mut writer_a,
+                    "sess-a",
+                    owner_a,
+                    "srv-shared",
+                    tools_list_a,
+                    serde_json::json!({
+                        "tools": [{
+                            "name": "echo",
+                            "description": "fixture echo",
+                            "inputSchema": { "type": "object" },
+                        }],
+                    }),
+                )
+                .await;
+                let tools_call_a = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": { "name": "echo", "arguments": { "text": "from-a" } },
+                });
+                complete_sdk_socket_round_trip(
+                    &invoker_a,
+                    &mut reader_a,
+                    &mut writer_a,
+                    "sess-a",
+                    owner_a,
+                    "srv-shared",
+                    tools_call_a,
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": "reply-from-a" }],
+                        "isError": false,
+                    }),
+                )
+                .await;
+
+                // This broadcast follows all A-owned SDK requests on the same
+                // agent→leader channel. Directly observing it as B's next
+                // payload proves none of those requests fell back to B.
+                response_tx
+                    .send(sdk_registration_notification(
+                        "sess-a",
+                        "barrier-after-a-sdk",
+                    ))
+                    .unwrap();
+                let b_next = next_acp_payload(&mut reader_b)
+                    .await
+                    .expect("B receives the causal barrier after A SDK calls");
+                assert!(
+                    b_next.contains("barrier-after-a-sdk"),
+                    "B must not receive A's SDK calls before the barrier: {b_next}"
+                );
+
+                let (gateway_b, receiver_b) = acp_transport::acp_gateway::<
+                    acp_transport::protocol::AgentSide,
+                    _,
+                >(SdkProducerBridge {
+                    response_tx: response_tx.clone(),
+                    next_id: Cell::new(200),
+                    pending_responses: pending_responses.clone(),
+                });
+                tokio::task::spawn_local(receiver_b.run());
+                let invoker_b =
+                    GatewayAcpInvoker::new(gateway_b, acp::SessionId::new("sess-b"), Some(owner_b));
+                let initialize_b = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": { "name": "leader-sdk-fixture-b", "version": "0" }
+                    }
+                });
+                complete_sdk_socket_round_trip(
+                    &invoker_b,
+                    &mut reader_b,
+                    &mut writer_b,
+                    "sess-b",
+                    owner_b,
+                    "srv-shared",
+                    initialize_b,
+                    serde_json::json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "serverInfo": { "name": "sdk-b", "version": "0" },
+                    }),
+                )
+                .await;
+                let tools_list_b = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/list",
+                    "params": {},
+                });
+                complete_sdk_socket_round_trip(
+                    &invoker_b,
+                    &mut reader_b,
+                    &mut writer_b,
+                    "sess-b",
+                    owner_b,
+                    "srv-shared",
+                    tools_list_b,
+                    serde_json::json!({
+                        "tools": [{
+                            "name": "echo",
+                            "description": "fixture echo B",
+                            "inputSchema": { "type": "object" },
+                        }],
+                    }),
+                )
+                .await;
+                let tools_call_b = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 13,
+                    "method": "tools/call",
+                    "params": { "name": "echo", "arguments": { "text": "from-b" } },
+                });
+                complete_sdk_socket_round_trip(
+                    &invoker_b,
+                    &mut reader_b,
+                    &mut writer_b,
+                    "sess-b",
+                    owner_b,
+                    "srv-shared",
+                    tools_call_b,
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": "reply-from-b" }],
+                        "isError": false,
+                    }),
+                )
+                .await;
+
+                // Same-serverId registrations stay separate: a targeted barrier
+                // proves A did not receive B's call.
+                let barrier_a = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "grow/session_notification",
+                    "params": {
+                        "sessionId": "sess-b",
+                        "_meta": { "grow/leaderClientId": a_id.0 },
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": "barrier-a" },
+                        },
+                    },
+                });
+                response_tx.send(barrier_a.to_string()).unwrap();
+                let a_next = next_acp_payload(&mut reader_a).await.expect("A barrier");
+                assert!(
+                    a_next.contains("barrier-a"),
+                    "A must not receive B's same-serverId SDK call: {a_next}"
+                );
+
+                // Owner A disconnects while B stays the driver. Observe the
+                // leader's internal disconnect event before issuing the next SDK
+                // request, then let the real invoker deadline end the no-reply
+                // exchange. There is no synthetic hold in the bridge.
+                drop(reader_a);
+                drop(writer_a);
+                let disconnected = next_forwarded_method(
+                    &mut observed_rx,
+                    "grow/internal/queue_client_disconnected",
+                )
+                .await;
+                assert_eq!(
+                    disconnected["params"]["leaderClientId"].as_u64(),
+                    Some(owner_a),
+                    "leader processed A's disconnect before the negative request"
+                );
+                let disconnected_call = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": { "name": "echo", "arguments": { "text": "after-disconnect" } },
+                });
+                let started = Instant::now();
+                let err = invoker_a
+                    .invoke("srv-shared", disconnected_call, Duration::from_millis(250))
+                    .await
+                    .expect_err("disconnected owner must not be replaced by the driver");
+                assert!(
+                    err.contains("timed out"),
+                    "expected the existing producer timeout, got: {err}"
+                );
+                assert!(started.elapsed() >= Duration::from_millis(250));
+
+                // The barrier follows the disconnected-owner SDK request on the
+                // same response channel. Directly reading it as B's next payload
+                // proves the request did not fall back to the driver.
+                response_tx
+                    .send(sdk_registration_notification(
+                        "sess-a",
+                        "barrier-after-disconnect",
+                    ))
+                    .unwrap();
+                let b_next = next_acp_payload(&mut reader_b)
+                    .await
+                    .expect("B barrier after disconnect");
+                assert!(
+                    b_next.contains("barrier-after-disconnect"),
+                    "driver B must not receive the disconnected owner's SDK call: {b_next}"
+                );
+                cancel.cancel();
+                drop(reader_b);
+                drop(writer_b);
+            })
+            .await;
+    }
     /// A client that reattaches AFTER a subagent spawned is backfilled into
     /// the child route when its parent `session/load` response lands: the
     /// parent→child index survives the disconnect eviction (which only
@@ -6878,6 +8089,103 @@ mod tests {
         assert!(
             replayed.is_none(),
             "a resolved interaction must NOT be replayed to a late-joiner (evicted)"
+        );
+        cancel.cancel();
+    }
+    /// U4: an advisory ask (effective `blocking=false`) is a presentation
+    /// round-trip, not a human-blocking interaction. The leader must route it
+    /// like any other driver-only reverse request: only the session driver
+    /// receives it (an attached subscriber must NOT act as a shared answerer),
+    /// the driver's `Presented` reply flows back to the agent, nothing is
+    /// cached for replay (a late joiner must not see the already-settled
+    /// presentation), and a subsequent default-blocking ask still broadcasts
+    /// shared and is evicted by `InteractionResolved` as before.
+    #[tokio::test]
+    async fn advisory_ask_routes_driver_only_and_is_not_cached_for_replay() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        // Driver A attaches first, then subscriber B to the same session.
+        let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+        load_session(&mut writer_a, "sess-adv").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let _ = next_acp_payload(&mut reader_a).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+        load_session(&mut writer_b, "sess-adv").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let _ = next_acp_payload(&mut reader_b).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Explicit advisory ask (wrapped, effective blocking=false).
+        let req = r#"{"jsonrpc":"2.0","id":801,"method":"_grow/ask_user_question","params":{"method":"grow/ask_user_question","params":{"sessionId":"sess-adv","toolCallId":"tc-adv","questions":[],"blocking":false}}}"#;
+        response_tx.send(req.to_string()).unwrap();
+        let got_driver = next_acp_payload_matching(&mut reader_a, "tc-adv").await;
+        assert!(
+            got_driver.is_some(),
+            "the session driver must receive the advisory presentation request"
+        );
+        // Bounded negative window: the attached subscriber must never act as a
+        // shared answerer for an advisory presentation.
+        let got_subscriber = next_acp_payload_matching(&mut reader_b, "tc-adv").await;
+        assert!(
+            got_subscriber.is_none(),
+            "an advisory ask must NOT be broadcast to other subscribers"
+        );
+
+        // The driver answers Presented; the reply must flow back to the agent.
+        write_message(
+            &mut writer_a,
+            &ClientMessage::Acp {
+                payload: r#"{"jsonrpc":"2.0","id":801,"result":{"outcome":"presented"}}"#
+                    .to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("driver response must be forwarded to the agent")
+            .expect("agent channel open");
+        assert!(
+            forwarded.contains("801") && forwarded.contains("presented"),
+            "agent must receive the driver's Presented reply: {forwarded}"
+        );
+
+        // A late joiner completing load must NOT get the settled advisory
+        // replayed (bounded negative window — no cache entry may exist).
+        let (mut reader_c, mut writer_c) = connect_and_register(&sock_path, "client-c").await;
+        load_session(&mut writer_c, "sess-adv").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let replayed = next_acp_payload_matching(&mut reader_c, "tc-adv").await;
+        assert!(
+            replayed.is_none(),
+            "a settled advisory presentation must not be replayed to a late joiner"
+        );
+
+        // Shared semantics are unchanged: a default-blocking ask (no
+        // `blocking` field) still broadcasts to driver AND subscriber, and
+        // `InteractionResolved` still evicts it from the replay cache.
+        let req = r#"{"jsonrpc":"2.0","id":802,"method":"_grow/ask_user_question","params":{"method":"grow/ask_user_question","params":{"sessionId":"sess-adv","toolCallId":"tc-blk","questions":[]}}}"#;
+        response_tx.send(req.to_string()).unwrap();
+        let got_a = next_acp_payload_matching(&mut reader_a, "tc-blk").await;
+        let got_b = next_acp_payload_matching(&mut reader_b, "tc-blk").await;
+        assert!(got_a.is_some(), "driver must receive the blocking ask");
+        assert!(
+            got_b.is_some(),
+            "subscriber must receive the blocking ask (shared interaction preserved)"
+        );
+        let resolved = r#"{"method":"_grow/session_notification","params":{"method":"grow/session_notification","params":{"sessionId":"sess-adv","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"tc-blk"}}}}"#;
+        response_tx.send(resolved.to_string()).unwrap();
+        let _ = next_acp_payload_matching(&mut reader_a, "interaction_resolved").await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let (mut reader_d, mut writer_d) = connect_and_register(&sock_path, "client-d").await;
+        load_session(&mut writer_d, "sess-adv").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let replayed_blk = next_acp_payload_matching(&mut reader_d, "tc-blk").await;
+        assert!(
+            replayed_blk.is_none(),
+            "a resolved blocking interaction must still be evicted from replay"
         );
         cancel.cancel();
     }

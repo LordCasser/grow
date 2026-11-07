@@ -1,0 +1,11 @@
+# ACP-1 bounded experiment preparation
+
+本记录只保存父核的现状与下一步实验边界，不表示容量政策已选定、已实现或正常CLI阈值已复现。
+
+父已读acp-transport/channel.rs、common.rs与gateway.rs：AcpChannel/rx/tx、两侧aliases、GatewaySender.tx/new和GatewayReceiver均直接使用tokio mpsc Unbounded；acp_send先send后等oneshot。GatewayReceiver两侧每消息均调用spawn_fn默认spawn_local，无active handler cap。8MiB wire pipe不覆盖此message/task数量。每类message都带response_tx，包括notifications/Cancel的内部ack；因此过载可以有明确内部错误，但不能把丢消息伪装为成功。实际API跨crate直接暴露UnboundedSender，若只在acp_send加semaphore仍可被tx.send旁路，不能宣称全路径有界。
+
+下一实验限定该transport：慢handler由显式barrier扣住，受控有限producer分别推动channel backlog和已派handler；记录生产/接收/active/returned counts、payload尺寸和进程内存，释放barrier后全部已接纳oneshot结算、后续正常request成功。并发量逐级有限增长，不做无限flood。现有with_spawn_fn可计数，无需生产registry或外部网络。原实现若跟随生产数增长即确证局部无界，不把一次负载量说成用户正常CLI失败阈值。
+
+根据结果再冻结queue/handler容量与过载错误。设计必须考虑双向ACP等待、长prompt占slot、permission/reverse callback以及Cancel/退出控制：简单在所有handler前await semaphore可能让控制与回复被活跃request堵住，引入deadlock；简单拒绝所有饱和消息又可能使取消失效。需要从实际message调用和临界控制路径决定预算/留位，不能先猜一个数字关表。channel本体与handler是同transport owner，但跨crate类型适配应在接口冻结后列清。用户没有要求新配置项，优先固定有依据的默认边界，不建通用QoS框架。
+
+独立实验结果只交facts和可证伪边界；行为实施前另change/delta。最终真实CLI及既有gateway/connection/permission/cancel产品链是容量修复里程碑，单helper通过不够。Cargo窗口与Shell定向门禁串行。

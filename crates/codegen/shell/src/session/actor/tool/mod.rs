@@ -1476,6 +1476,89 @@ mod rwx_projection_tests {
         );
     }
 
+    /// `rg --pre`/`--hostname-bin` execute a caller-selected helper, so the
+    /// shared observational projection must demand `All`, not `ReadExecute`.
+    /// This is the restricted-subagent freeze-call ceiling for such commands.
+    #[test]
+    fn shell_projection_demands_all_for_rg_external_programs() {
+        assert_eq!(
+            shell_required_access("rg --hostname-bin ./h.sh pattern ."),
+            ToolAccess::All
+        );
+        assert_eq!(
+            shell_required_access("rg --hostname-bin=./h.sh pattern ."),
+            ToolAccess::All
+        );
+        assert_eq!(
+            shell_required_access("rg --pre ./pre.sh pattern ."),
+            ToolAccess::All
+        );
+        // Option-value `--`: the following --hostname-bin is still a real
+        // flag (verified executing on ripgrep 15.2).
+        assert_eq!(
+            shell_required_access("rg --glob -- --hostname-bin ./h.sh needle file.txt"),
+            ToolAccess::All
+        );
+        assert_eq!(
+            shell_required_access("rg --regexp -- --hostname-bin=./h.sh needle file.txt"),
+            ToolAccess::All
+        );
+        // Conservative: a flag-shaped word after a plain `--` also loses the
+        // observational projection.
+        assert_eq!(
+            shell_required_access("rg -- --pre pattern ."),
+            ToolAccess::All
+        );
+        // Ordinary search and filter-only `--pre-glob` stay ReadExecute.
+        assert_eq!(
+            shell_required_access("rg pattern ."),
+            ToolAccess::ReadExecute
+        );
+        assert_eq!(
+            shell_required_access("rg -- pattern -- file"),
+            ToolAccess::ReadExecute
+        );
+        assert_eq!(
+            shell_required_access("rg --pre-glob '*.pdf' pattern ."),
+            ToolAccess::ReadExecute
+        );
+    }
+
+    /// The frozen-argument Bash tool projection uses the same shared
+    /// classification: an external-program rg command requires `All`, so a
+    /// ReadExecute-capped restricted subagent call is refused.
+    #[test]
+    fn bash_projection_requires_all_for_rg_external_programs() {
+        let external = ToolInput::Bash(BashToolInput {
+            command: "rg --hostname-bin ./h.sh pattern .".into(),
+            timeout: None,
+            description: "search".into(),
+            is_background: false,
+        });
+        let required = project_call_access(&external, ToolAccess::All, None);
+        assert_eq!(required, ToolAccess::All);
+        assert!(!ToolAccess::ReadExecute.covers(required));
+        let glob_value = ToolInput::Bash(BashToolInput {
+            command: "rg --glob -- --hostname-bin ./h.sh needle file.txt".into(),
+            timeout: None,
+            description: "search".into(),
+            is_background: false,
+        });
+        let glob_required = project_call_access(&glob_value, ToolAccess::All, None);
+        assert_eq!(glob_required, ToolAccess::All);
+        assert!(!ToolAccess::ReadExecute.covers(glob_required));
+        let ordinary = ToolInput::Bash(BashToolInput {
+            command: "rg pattern .".into(),
+            timeout: None,
+            description: "search".into(),
+            is_background: false,
+        });
+        assert_eq!(
+            project_call_access(&ordinary, ToolAccess::All, None),
+            ToolAccess::ReadExecute
+        );
+    }
+
     #[test]
     fn workflow_projection_narrows_the_all_descriptor_by_action() {
         let id = WorkflowDefinitionId::new("project:review");

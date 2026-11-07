@@ -890,6 +890,66 @@ async fn mcp_snapshot_rejects_a_superseded_publication_generation() {
         .await;
 }
 
+/// A stale app request carries the endpoint it was issued against. Once that
+/// endpoint is no longer configured, the direct entry must refuse rather than
+/// silently dispatch to whatever service now answers to the same name — and the
+/// refusal has to come from the real `call_mcp_tool` entry, not a helper below it.
+#[tokio::test(flavor = "current_thread")]
+async fn direct_call_rejects_a_stale_server_url_without_dispatching() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = fixture().await;
+            let server = Arc::new(CatalogServer::default());
+            *server.tools.lock().unwrap() = vec!["echo".into()];
+            let (_, episode) = install(&actor, &server).await;
+            actor.refresh_mcp_server_tools("demo", episode).await;
+
+            // The configured endpoint, then the stale one the app still names. Assigning
+            // `configs` keeps the live client in place: this is a stale *request*,
+            // not a config reload, so the server itself is still serving.
+            let configured = "http://127.0.0.1:1/configured";
+            actor.mcp_state.lock().await.configs = vec![acp::McpServer::Http(
+                acp::McpServerHttp::new("demo", configured),
+            )];
+
+            let error = crate::extensions::mcp::call_mcp_tool(
+                &actor.mcp_state,
+                "demo",
+                Some("http://127.0.0.1:2/stale"),
+                "echo",
+                json!({"value": "stale"}),
+            )
+            .await
+            .expect_err("a stale endpoint must be refused");
+            assert!(
+                error.contains("endpoint no longer configured"),
+                "expected the endpoint rejection, got: {error}"
+            );
+            assert_eq!(
+                server.calls.load(Ordering::SeqCst),
+                0,
+                "the configured service must not receive the stale request"
+            );
+
+            // Only the exact configured endpoint is admitted.
+            crate::extensions::mcp::call_mcp_tool(
+                &actor.mcp_state,
+                "demo",
+                Some(configured),
+                "echo",
+                json!({"value": "current"}),
+            )
+            .await
+            .expect("the current endpoint is still callable");
+            assert_eq!(
+                server.calls.load(Ordering::SeqCst),
+                1,
+                "the configured endpoint receives exactly one dispatch"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn mcp_snapshot_refresh_waits_for_publication_boundary() {
     tokio::task::LocalSet::new()

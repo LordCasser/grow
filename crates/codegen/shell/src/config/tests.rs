@@ -1843,22 +1843,311 @@ fn remove_hooks_path_succeeds_when_absent() {
     let result = remove_hooks_path_from_file("/missing", &paths_file);
     assert!(result.is_ok());
 }
-#[test]
-fn add_dismissed_plugin_cta_creates_table() {
+/// AC-01: plugin/CTA edits must fail — not publish a default config — when the
+/// existing config.toml cannot be parsed, leaving the original bytes intact.
+#[tokio::test]
+async fn plugin_edits_reject_unparseable_config_without_replacing_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
-    add_dismissed_plugin_cta_to_file("figma", &config_path).unwrap();
+    let invalid_utf8: Vec<u8> = b"[plugins]\npaths = ".to_vec().into_iter().chain([0xff]).collect();
+    for original in [
+        b"[plugins\npaths = [".to_vec(),
+        invalid_utf8,
+    ] {
+        std::fs::write(&config_path, &original).unwrap();
+        assert!(
+            add_plugin_path_at("/p", &config_path).await.is_err(),
+            "hard parse failure must fail the add"
+        );
+        assert!(
+            add_disabled_plugin_at("x", &config_path).await.is_err(),
+            "hard parse failure must fail the disable"
+        );
+        assert!(
+            remove_enabled_plugin_at("x", &config_path).await.is_err(),
+            "hard parse failure must fail the remove"
+        );
+        assert!(
+            add_dismissed_plugin_cta_to_file("x", &config_path)
+                .await
+                .is_err(),
+            "hard parse failure must fail the CTA dismissal"
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), original);
+    }
+}
+
+/// AC-01: `plugins = 1` is valid TOML with a wrongly-typed `[plugins]` value —
+/// not a parse failure. Adds that must write `[plugins]` reject it, removes
+/// keep their no-op policy, and the CTA helper writes a different legal section
+/// and must succeed. This is a type policy, not the hard parse-error contract
+/// covered above, so the production add/remove semantics stay unchanged.
+#[tokio::test]
+async fn plugin_edits_reject_wrongly_typed_plugins_section_only_where_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let original: &[u8] = b"plugins = 1";
+    std::fs::write(&config_path, original).unwrap();
+    assert!(
+        add_plugin_path_at("/p", &config_path).await.is_err(),
+        "add writing [plugins].paths must reject a non-table [plugins]"
+    );
+    assert!(
+        add_disabled_plugin_at("x", &config_path).await.is_err(),
+        "add writing [plugins].disabled must reject a non-table [plugins]"
+    );
+    assert_eq!(std::fs::read(&config_path).unwrap(), original);
+    // Removes keep the documented no-op policy for absent/ill-typed sections.
+    // (The remove still re-serializes, e.g. normalizing the trailing newline,
+    // so the check is semantic: the wrongly-typed value must survive.)
+    remove_enabled_plugin_at("x", &config_path)
+        .await
+        .unwrap();
+    let after_remove: toml::Value =
+        toml::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(
+        after_remove["plugins"].as_integer(),
+        Some(1),
+        "remove no-op must not rewrite the ill-typed [plugins] value"
+    );
+    // The CTA helper only writes [plugin_cta] and must not be blocked by an
+    // unrelated ill-typed [plugins] value.
+    add_dismissed_plugin_cta_to_file("demo", &config_path)
+        .await
+        .unwrap();
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(
+        saved["plugin_cta"]["dismissed"][0].as_str(),
+        Some("demo"),
+        "CTA write targets [plugin_cta], not the ill-typed [plugins]"
+    );
+    assert_eq!(saved["plugins"].as_integer(), Some(1));
+}
+
+/// AC-01: a hard read error (not NotFound) must fail the edit before any
+/// publication instead of clobbering the file with an empty config.
+#[tokio::test]
+async fn plugin_edits_fail_on_unreadable_config_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    // A directory at the config path: metadata succeeds, the read itself fails.
+    std::fs::create_dir(&config_path).unwrap();
+    assert!(add_disabled_plugin_at("x", &config_path).await.is_err());
+    assert!(
+        add_dismissed_plugin_cta_to_file("x", &config_path)
+            .await
+            .is_err()
+    );
+    assert!(config_path.is_dir(), "target must be untouched");
+}
+
+/// AC-01: removes keep the existing missing-file no-op semantics.
+#[tokio::test]
+async fn plugin_removes_are_no_ops_when_config_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    remove_plugin_path_at("/p", &config_path).await.unwrap();
+    remove_disabled_plugin_at("x", &config_path).await.unwrap();
+    remove_enabled_plugin_at("x", &config_path).await.unwrap();
+    assert!(!config_path.exists(), "removes must not create the file");
+}
+
+/// AC-01: raw edits preserve unrelated unknown fields and authored
+/// environment references, and stay idempotent.
+#[tokio::test]
+async fn plugin_edits_preserve_unknown_fields_and_env_references() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let original = "[plugins]\npaths = ['${HOME}/plugins']\n[future]\nkeep = 'me'\n";
+    std::fs::write(&config_path, original).unwrap();
+    add_disabled_plugin_at("demo", &config_path).await.unwrap();
+    add_disabled_plugin_at("demo", &config_path).await.unwrap();
+    remove_enabled_plugin_at("demo", &config_path).await.unwrap();
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(
+        saved["plugins"]["paths"][0].as_str(),
+        Some("${HOME}/plugins"),
+        "authored env reference must survive the raw edit"
+    );
+    assert_eq!(saved["future"]["keep"].as_str(), Some("me"));
+    let disabled: Vec<_> = saved["plugins"]["disabled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(disabled, ["demo"], "add must be idempotent");
+    assert!(saved["plugins"].get("enabled").is_none());
+}
+
+/// AC-01: successful publication retains existing Unix permissions.
+#[tokio::test]
+#[cfg(unix)]
+async fn plugin_edits_preserve_existing_config_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, "[plugins]\ndisabled = []\n").unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    add_enabled_plugin_at("demo", &config_path).await.unwrap();
+    assert_eq!(
+        std::fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+/// AC-01: plugin edits share the settings write lock. A plugin edit admitted
+/// while the lock is held must not read or publish until the holder finishes,
+/// so concurrent unrelated writes can't clobber each other.
+#[tokio::test]
+async fn plugin_edits_serialize_with_settings_save_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, "[plugins]\ndisabled = ['first']\n[ui]\nkeep = 'me'\n")
+        .unwrap();
+
+    let guard = crate::util::config::lock_config_writes().await;
+    let path = config_path.clone();
+    let edit = tokio::spawn(async move { add_disabled_plugin_at("second", &path).await });
+    // Give the edit a chance to (incorrectly) proceed while the lock is held.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    // The lock holder publishes a settings write that must not be lost.
+    std::fs::write(
+        &config_path,
+        "[plugins]\ndisabled = ['first']\n[ui]\nkeep = 'me'\nadded_by_settings = 1\n",
+    )
+    .unwrap();
+    assert!(
+        !edit.is_finished(),
+        "plugin edit must wait for the settings write lock"
+    );
+    drop(guard);
+    edit.await.unwrap().unwrap();
+
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    let disabled: Vec<_> = saved["plugins"]["disabled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(disabled, ["first", "second"]);
+    assert_eq!(
+        saved["ui"]["added_by_settings"].as_integer(),
+        Some(1),
+        "concurrent settings write must not be lost"
+    );
+    assert_eq!(saved["ui"]["keep"].as_str(), Some("me"));
+}
+
+/// AC-01: the shared SAVE_LOCK is proven against the real public write paths,
+/// not just a simulated `std::fs::write`. This scenario runs inside an
+/// isolated child (`--exact` self-invocation, tempdir `GROW_HOME`) so the
+/// process-cached home and env are never mutated in the main test process.
+/// In the child: the lock is held, then a real `crate::util::config::update_config`
+/// settings write and a real public `add_plugin_path` are spawned. Both must
+/// wait for the holder; after release both land and the file keeps every
+/// distinct field, the unknown section, and the literal `${HOME}` reference.
+#[tokio::test]
+async fn plugin_edits_serialize_with_real_settings_and_public_plugin_calls() {
+    const MARKER: &str = "GROW_PLUGIN_LOCK_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let full = concat!(
+            module_path!(),
+            "::plugin_edits_serialize_with_real_settings_and_public_plugin_calls"
+        );
+        let name = full.strip_prefix("shell::").unwrap_or(full);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("GROW_HOME", home.path())
+            .env(MARKER, "1")
+            .output()
+            .expect("run isolated plugin lock child");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(
+            output.status.success(),
+            "isolated child failed\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("update_config landed"), "{stdout}");
+        assert!(stdout.contains("add_plugin_path landed"), "{stdout}");
+        // Verify the child's merged file directly, not only via child asserts.
+        let config_path = home.path().join("config.toml");
+        let saved: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            saved["plugins"]["disabled"][0].as_str(),
+            Some("first"),
+            "pre-existing plugin field must survive both writes"
+        );
+        assert_eq!(saved["plugins"]["paths"][0].as_str(), Some("/child/plugin"));
+        assert!(saved["ui"]["compact_mode"].as_bool().unwrap());
+        assert_eq!(saved["ui"]["keep"].as_str(), Some("me"));
+        assert_eq!(saved["future"]["keep"].as_str(), Some("me"));
+        assert_eq!(
+            saved["plugins"]["env"][0].as_str(),
+            Some("${HOME}/plugins"),
+            "authored env reference must survive real settings + plugin writes"
+        );
+        return;
+    }
+    let config_path = crate::util::config::user_config_path();
+    std::fs::write(
+        &config_path,
+        "[plugins]\ndisabled = ['first']\nenv = ['${HOME}/plugins']\n\
+         [ui]\nkeep = 'me'\n[future]\nkeep = 'me'\n",
+    )
+    .unwrap();
+
+    let guard = crate::util::config::lock_config_writes().await;
+    let settings = tokio::spawn(async move {
+        crate::util::config::update_config(|cfg| cfg.ui.compact_mode = true)
+            .await
+            .unwrap();
+        println!("update_config landed");
+    });
+    let plugin = tokio::spawn(async move {
+        add_plugin_path("/child/plugin").await.unwrap();
+        println!("add_plugin_path landed");
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !settings.is_finished(),
+        "real update_config must wait for the shared SAVE_LOCK"
+    );
+    assert!(
+        !plugin.is_finished(),
+        "real public plugin edit must wait for the shared SAVE_LOCK"
+    );
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        settings.await.unwrap();
+        plugin.await.unwrap();
+    })
+    .await
+    .expect("both writes must complete after the lock is released");
+}
+
+#[tokio::test]
+async fn add_dismissed_plugin_cta_creates_table() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    add_dismissed_plugin_cta_to_file("figma", &config_path).await.unwrap();
     let content = std::fs::read_to_string(&config_path).unwrap();
     assert!(content.contains("[plugin_cta]"));
     assert!(content.contains("figma"));
     assert!(dismissed_plugin_ctas_in_file(&config_path).contains("figma"));
 }
-#[test]
-fn add_dismissed_plugin_cta_is_idempotent() {
+#[tokio::test]
+async fn add_dismissed_plugin_cta_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
-    add_dismissed_plugin_cta_to_file("notion", &config_path).unwrap();
-    add_dismissed_plugin_cta_to_file("notion", &config_path).unwrap();
+    add_dismissed_plugin_cta_to_file("notion", &config_path).await.unwrap();
+    add_dismissed_plugin_cta_to_file("notion", &config_path).await.unwrap();
     let config: toml::Value = toml::from_str(
             &std::fs::read_to_string(&config_path).unwrap(),
         )
@@ -1871,22 +2160,22 @@ fn add_dismissed_plugin_cta_is_idempotent() {
     let count = dismissed.iter().filter(|v| v.as_str() == Some("notion")).count();
     assert_eq!(count, 1);
 }
-#[test]
-fn dismissed_plugin_ctas_reflects_added_entries() {
+#[tokio::test]
+async fn dismissed_plugin_ctas_reflects_added_entries() {
     let tmp = tempfile::tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
     assert!(!dismissed_plugin_ctas_in_file(&config_path).contains("figma"));
-    add_dismissed_plugin_cta_to_file("figma", &config_path).unwrap();
+    add_dismissed_plugin_cta_to_file("figma", &config_path).await.unwrap();
     let dismissed = dismissed_plugin_ctas_in_file(&config_path);
     assert!(dismissed.contains("figma"));
     assert!(!dismissed.contains("notion"));
 }
-#[test]
-fn add_dismissed_plugin_cta_preserves_other_config() {
+#[tokio::test]
+async fn add_dismissed_plugin_cta_preserves_other_config() {
     let tmp = tempfile::tempdir().unwrap();
     let config_path = tmp.path().join("config.toml");
     std::fs::write(&config_path, "[plugins]\ndisabled = [\"keep-me\"]\n").unwrap();
-    add_dismissed_plugin_cta_to_file("figma", &config_path).unwrap();
+    add_dismissed_plugin_cta_to_file("figma", &config_path).await.unwrap();
     let config: toml::Value = toml::from_str(
             &std::fs::read_to_string(&config_path).unwrap(),
         )
@@ -1902,6 +2191,75 @@ fn add_dismissed_plugin_cta_preserves_other_config() {
         );
     assert!(dismissed_plugin_ctas_in_file(&config_path).contains("figma"));
 }
+/// AC-01: a real blocked atomic publish on Unix. The config stays readable but
+/// the parent directory is chmod'd to forbid temp-file creation / rename, so
+/// the edit must fail before replacing anything: original bytes and mode are
+/// intact and no temp file is left behind. Restores the parent permissions
+/// (RAII) so tempdir cleanup works; if the process is effectively privileged
+/// (e.g. running as root) the restriction cannot be induced and the test
+/// reports the skip explicitly instead of claiming a pass.
+#[tokio::test]
+#[cfg(unix)]
+async fn plugin_edits_fail_cleanly_when_atomic_publish_is_blocked() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Restore<'a>(&'a std::path::Path, u32);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(
+                self.0,
+                std::fs::Permissions::from_mode(self.1),
+            );
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let original = b"[plugins]\ndisabled = ['keep']\n";
+    std::fs::write(&config_path, original).unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let prior_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
+    let _restore = Restore(tmp.path(), prior_mode);
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    // If temp creation still succeeds we are privileged (e.g. root): the
+    // restriction this test exercises cannot be induced, so skip explicitly.
+    let probe = tmp.path().join(".grow-probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        std::fs::remove_file(&probe).unwrap();
+        eprintln!("skipping: running privileged, publish cannot be blocked via directory mode");
+        return;
+    }
+
+    let error = add_disabled_plugin_at("demo", &config_path)
+        .await
+        .expect_err("blocked temp creation must fail the edit");
+    assert!(
+        !error.to_string().contains("parse"),
+        "failure must come from publishing, not parsing: {error}"
+    );
+    assert!(
+        add_dismissed_plugin_cta_to_file("demo", &config_path)
+            .await
+            .is_err(),
+        "CTA edit must also fail when publishing is blocked"
+    );
+
+    assert_eq!(std::fs::read(&config_path).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let entries: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        [std::ffi::OsStr::new("config.toml")],
+        "no temp residue may remain after a failed publish"
+    );
+}
+
 /// A provider in a trusted disk layer resolves through the real
 /// `ConfigLayers` → `effective_config_disk_only` → parse seam that the
 /// direct-TOML parse tests bypass. (`ConfigLayers` has no project slot, so

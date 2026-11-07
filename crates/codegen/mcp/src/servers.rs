@@ -1212,6 +1212,70 @@ impl McpState {
             .or_else(|| self.shared_clients.get(name))
     }
 
+    /// Decide, at dispatch time, whether `expected` may still receive a
+    /// `tools/call` for `tool` on `server`.
+    ///
+    /// Both tool entries capture their client *before* an asynchronous
+    /// initialization and then send once it returns. Neither a config change nor
+    /// a revocation during that wait invalidates the captured `Arc`, so the
+    /// decision has to be re-taken against live session state immediately before
+    /// the single send — a name match alone would silently redirect the call to a
+    /// same-name replacement at a different endpoint.
+    ///
+    /// An owned client is this session's own transport: it is not subject to the
+    /// inherited ceiling, and it deliberately has no "catalog already published"
+    /// gate so the first direct call still works. An inherited client is usable
+    /// only while the live ancestor chain still binds this exact incarnation and
+    /// still authorizes the tool; the child's own `shared_clients` map may not
+    /// have reconciled yet, so that map cannot be the authority here.
+    fn validate_tool_client(
+        &self,
+        server: &str,
+        tool: &str,
+        expected: &McpClient,
+    ) -> Result<(), McpError> {
+        let qualified_name = format!("{server}{MCP_TOOL_NAME_DELIMITER}{tool}");
+        if self.is_tool_disabled(server, tool) {
+            return Err(McpError::ClientError(format!(
+                "MCP tool '{qualified_name}' is disabled"
+            )));
+        }
+        let current = self.get_client(server).ok_or_else(|| {
+            McpError::ClientError(format!("MCP server '{server}' is no longer configured"))
+        })?;
+        // A replacement is a different client instance. `client_id` is
+        // process-global and never reused, so it identifies the incarnation.
+        if current.client_id() != expected.client_id() {
+            return Err(McpError::ClientError(format!(
+                "MCP server '{server}' was replaced during tool call preparation"
+            )));
+        }
+        if self.owned_clients.contains_key(server) {
+            return Ok(());
+        }
+        let inherited = self.inherited_eligibility.as_deref().ok_or_else(|| {
+            McpError::ClientError(format!(
+                "MCP server '{server}' has no live inherited authority"
+            ))
+        })?;
+        let bound = inherited.current_client(server).ok_or_else(|| {
+            McpError::ClientError(format!(
+                "MCP server '{server}' is no longer inherited from its authority"
+            ))
+        })?;
+        if bound.client_id() != expected.client_id() {
+            return Err(McpError::ClientError(format!(
+                "MCP server '{server}' was rebound by its authority during tool call preparation"
+            )));
+        }
+        if !inherited.contains_tool(&qualified_name) {
+            return Err(McpError::ClientError(format!(
+                "MCP tool '{qualified_name}' is no longer eligible under its inherited authority"
+            )));
+        }
+        Ok(())
+    }
+
     /// Iterate over all clients (owned first, then shared — skipping shared
     /// entries whose name is overridden by an owned client).
     pub fn all_clients(&self) -> impl Iterator<Item = (&McpServerName, &Arc<McpClient>)> {
@@ -2056,6 +2120,30 @@ impl McpErasedTool {
                 ),
             ));
         }
+        // Preparation is over, so the client captured at admission may no longer
+        // be this session's current client for the tool. Decide under the state
+        // lock, then release it before the single send: the lock never spans the
+        // handshake, the response, or the network. Waiting for it is bounded by
+        // the same admitted deadline, never a fresh full timeout.
+        {
+            let state = match tokio::time::timeout_at(deadline, self.tool.mcp_state.lock()).await {
+                Ok(state) => state,
+                Err(_) => {
+                    *is_timeout = true;
+                    return Err(tool_runtime::ToolError::custom(
+                        "process_manager",
+                        format!(
+                            "MCP eligibility check exceeded the admitted tool timeout of {tool_timeout:?}"
+                        ),
+                    ));
+                }
+            };
+            state
+                .validate_tool_client(&self.tool.server_name, &self.tool.name, client)
+                .map_err(|error| {
+                    tool_runtime::ToolError::custom("process_manager", error.to_string())
+                })?;
+        }
         let mut params = CallToolRequestParams::new(self.tool.name.clone());
         params.arguments = raw.as_object().cloned();
 
@@ -2106,6 +2194,11 @@ impl McpErasedTool {
 
 /// A single `tools/call` round. Grow owns both the deadline and cancellation:
 /// rmcp's own timeout notifier must not race the drop guard and send twice.
+///
+/// Production callers hold an already-admitted deadline and call
+/// [`call_tool_cancel_aware_until`] directly; this relative-time wrapper exists
+/// for tests that start a round with a fresh budget.
+#[cfg(test)]
 async fn call_tool_cancel_aware(
     service: &McpService,
     params: CallToolRequestParams,
@@ -2168,15 +2261,46 @@ impl Drop for CancelMcpCallOnDrop {
             return;
         };
         let service = Arc::clone(&self.service);
-        runtime.spawn(async move {
-            let params = rmcp::model::CancelledNotificationParam::new(
-                Some(request_id.clone()),
-                Some("client cancelled".to_owned()),
+        runtime.spawn(send_cancel_notification(
+            service,
+            request_id,
+            MCP_CANCEL_NOTIFY_BUDGET,
+        ));
+    }
+}
+
+/// Grow-side wait budget for one queued cancellation notification. When the
+/// peer stops draining its transport, rmcp's `send_notification` blocks on a
+/// bounded channel (`rmcp` 3.5.1 `service.rs:835`); without this budget the
+/// spawned dispatch task — and the `McpService` Arc it holds — would wait
+/// forever. This bounds only Grow's wait: rmcp may still complete its SDK-side
+/// send task (`service.rs:1537`) afterwards, so expiry is recorded as
+/// "unconfirmed", never as "recalled" or "delivered".
+const MCP_CANCEL_NOTIFY_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Send the cancellation for `request_id` over the originating service, waiting
+/// at most `budget`. Shared by the drop guard (production) and mechanism tests.
+async fn send_cancel_notification(
+    service: McpService,
+    request_id: rmcp::model::RequestId,
+    budget: std::time::Duration,
+) {
+    let params = rmcp::model::CancelledNotificationParam::new(
+        Some(request_id.clone()),
+        Some("client cancelled".to_owned()),
+    );
+    match tokio::time::timeout(budget, service.peer().notify_cancelled(params)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::debug!(?request_id, %error, "MCP cancellation notification not delivered");
+        }
+        Err(_) => {
+            tracing::debug!(
+                ?request_id,
+                ?budget,
+                "MCP cancellation notification unconfirmed within budget; SDK send may still be pending"
             );
-            if let Err(error) = service.peer().notify_cancelled(params).await {
-                tracing::debug!(?request_id, %error, "MCP cancellation notification not delivered");
-            }
-        });
+        }
     }
 }
 
@@ -4088,8 +4212,15 @@ impl McpClient {
     }
 
     /// Call a tool directly on the MCP server (for testing/debugging).
+    ///
+    /// `mcp_state` is the session state that owns this client. The caller
+    /// resolves the client before preparation, so this method revalidates that
+    /// same client (and the tool's eligibility) against live state once
+    /// `ensure_initialized` returns, and refuses instead of sending when a
+    /// removal, replacement or disablement happened while it waited.
     pub async fn call_tool(
         &self,
+        mcp_state: &Arc<Mutex<McpState>>,
         tool_name: &str,
         arguments: serde_json::Value,
         timeout: std::time::Duration,
@@ -4102,9 +4233,20 @@ impl McpClient {
         if remaining.is_zero() {
             return Err(McpError::timeout(&self.server_name, timeout));
         }
+        // Same dispatch-time decision as the model path, under the same state the
+        // caller already holds. The lock is released before sending, and waiting
+        // for it is charged to the admitted deadline.
+        {
+            let state = tokio::time::timeout_at(deadline, mcp_state.lock())
+                .await
+                .map_err(|_| McpError::timeout(&self.server_name, timeout))?;
+            state.validate_tool_client(&self.server_name, tool_name, self)?;
+        }
         let mut params = CallToolRequestParams::new(tool_name.to_string());
         params.arguments = arguments.as_object().cloned();
-        let result = call_tool_cancel_aware(&mcp_service, params, remaining)
+        // Carry the absolute deadline: the eligibility wait above must not be
+        // refunded as a fresh full timeout for the send.
+        let result = call_tool_cancel_aware_until(&mcp_service, params, deadline, timeout)
             .await
             .map_err(|error| match error {
                 ServiceError::Timeout { .. } => McpError::timeout(&self.server_name, timeout),
@@ -6926,6 +7068,151 @@ mod tests {
         }
     }
 
+    /// Like [`cancellation_test_service`], but the fake server stops reading
+    /// (without closing) right after the first `tools/call` arrives on a small
+    /// duplex buffer. The client's subsequent writes — including rmcp's queued
+    /// cancellation notification — cannot drain, so `notify_cancelled` stays
+    /// genuinely pending: real bounded-transport backpressure, not a stub.
+    async fn stuck_cancellation_test_service() -> (
+        McpService,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // 32-byte duplex: the cancellation notification (~110 bytes serialized)
+        // can never fit once the server stops reading, so rmcp's queued send is
+        // genuinely blocked on transport backpressure — not merely assumed.
+        let (client_read, server_write) = tokio::io::duplex(32);
+        let (server_read, client_write) = tokio::io::duplex(32);
+        let (wire_tx, wire_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(server_read);
+            let mut writer = server_write;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let message: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                let method = message["method"].as_str().unwrap_or_default();
+                let is_tools_call = method == "tools/call";
+                let response = match method {
+                    "initialize" => Some(serde_json::json!({
+                        "jsonrpc": "2.0", "id": message["id"], "result": {
+                            "protocolVersion": message["params"]["protocolVersion"],
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "cancel-stuck", "version": "0.0.0"}
+                        }
+                    })),
+                    _ => None,
+                };
+                let _ = wire_tx.send(message);
+                if let Some(response) = response {
+                    let mut encoded = serde_json::to_vec(&response).unwrap();
+                    encoded.push(b'\n');
+                    if writer.write_all(&encoded).await.is_err() {
+                        break;
+                    }
+                }
+                if is_tools_call {
+                    // Causal barrier passed: the tool call reached the wire.
+                    // Stop reading but keep the halves alive so client writes
+                    // block on the full duplex buffer instead of erroring.
+                    std::future::pending::<()>().await;
+                }
+            }
+        });
+        let handler = GrowClientHandler {
+            info: McpClient::make_client_info("cancel-stuck"),
+            server_name: "cancel-stuck".to_owned(),
+            transport_revision: 0,
+            notify_tx: Arc::new(parking_lot::Mutex::new(None)),
+        };
+        let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleClient, _, _>::new(
+            client_read,
+            client_write,
+        );
+        let service = Arc::new(handler.serve(transport).await.unwrap());
+        (service, wire_rx)
+    }
+
+    #[tokio::test]
+    async fn blocked_cancel_notification_is_pending_until_budget_expires() {
+        let (service, mut wire) = stuck_cancellation_test_service().await;
+        // The spawned call owns a clone; `service` stays with this test so the
+        // helper probe below keeps a strong reference of its own.
+        let call_service = service.clone();
+        let call = tokio::spawn(async move {
+            call_tool_cancel_aware(
+                &call_service,
+                CallToolRequestParams::new("slow"),
+                std::time::Duration::from_millis(100),
+            )
+            .await
+        });
+        let request = next_tool_wire(&mut wire).await;
+        assert!(matches!(
+            call.await.unwrap(),
+            Err(ServiceError::Timeout { .. })
+        ));
+
+        // Direct helper-level evidence with a short budget: before expiry the
+        // helper future does not complete (pending, not error/fast-return)…
+        let request_id: rmcp::model::RequestId =
+            serde_json::from_value(request["id"].clone()).unwrap();
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            send_cancel_notification(service, request_id, std::time::Duration::from_millis(400)),
+        )
+        .await;
+        assert!(
+            pending.is_err(),
+            "cancellation send completed without a drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_cancel_dispatch_exits_after_budget_and_releases_service() {
+        let (service, mut wire) = stuck_cancellation_test_service().await;
+        let weak = Arc::downgrade(&service);
+        let started = std::time::Instant::now();
+        let call = tokio::spawn(async move {
+            call_tool_cancel_aware(
+                &service,
+                CallToolRequestParams::new("slow"),
+                std::time::Duration::from_millis(100),
+            )
+            .await
+        });
+        // Causal barrier: the original request reached the wire before the
+        // cancellation dispatch can be observed.
+        let request = next_tool_wire(&mut wire).await;
+        assert_eq!(request["method"], "tools/call");
+        assert!(
+            matches!(call.await.unwrap(), Err(ServiceError::Timeout { .. })),
+            "original call deadline must not be extended by the dispatch budget"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "caller waited far beyond its own deadline"
+        );
+
+        // Only the spawned dispatch task still holds a strong reference; it
+        // must drop it once the fixed budget expires (~3s), not hang forever.
+        while weak.upgrade().is_some() {
+            assert!(
+                started.elapsed() < MCP_CANCEL_NOTIFY_BUDGET + std::time::Duration::from_secs(2),
+                "cancellation dispatch outlived its budget; service Arc never released"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            started.elapsed() >= MCP_CANCEL_NOTIFY_BUDGET,
+            "dispatch exited before the budget; the wait was not actually blocked"
+        );
+    }
+
     #[tokio::test]
     async fn completed_mcp_tool_call_sends_no_cancel() {
         let (service, mut wire) = cancellation_test_service(true).await;
@@ -7123,11 +7410,20 @@ mod tests {
     #[tokio::test]
     async fn direct_mcp_call_uses_same_deadline_and_cancellation() {
         let (service, mut wire) = cancellation_test_service(false).await;
-        let client = McpClient::stub("cancel-test");
+        let client = Arc::new(McpClient::stub("cancel-test"));
         *client.state.lock() = ClientState::Ready(service);
+        // The direct entry revalidates the captured client against the session
+        // state that owns it, so the fixture registers that same client rather
+        // than bypassing the check.
+        let mut state = McpState::new(vec![]);
+        state
+            .owned_clients
+            .insert("cancel-test".to_string(), Arc::clone(&client));
+        let mcp_state = Arc::new(Mutex::new(state));
         let call = tokio::spawn(async move {
             client
                 .call_tool(
+                    &mcp_state,
                     "slow",
                     serde_json::json!({}),
                     std::time::Duration::from_millis(200),
@@ -8701,6 +8997,10 @@ mod tests {
         assert_eq!(ev.server_name(), Some("srv"));
     }
 }
+
+#[cfg(test)]
+#[path = "servers/eligibility_tests.rs"]
+mod eligibility_tests;
 
 #[cfg(test)]
 #[path = "servers/policy_tests.rs"]

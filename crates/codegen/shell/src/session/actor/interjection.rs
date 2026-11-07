@@ -100,17 +100,19 @@ impl SessionActor {
                 (input_id, decision)
             }
             super::input_admission::InputAdmissionAttempt::Existing { input_id, state } => {
+                // Direct steer keeps its existing response shape; it only
+                // consumes the canonical lifecycle state.
                 return match state {
-                    super::input_admission::ExistingInputState::Allowed => Ok(()),
-                    super::input_admission::ExistingInputState::Blocked(reason) => {
+                    chat_state::InputState::Allowed { .. } => Ok(()),
+                    chat_state::InputState::Blocked { reason } => {
                         Err(super::input_admission::input_block_reason_message(reason))
                     }
-                    super::input_admission::ExistingInputState::Submitted => Err(format!(
+                    chat_state::InputState::Submitted => Err(format!(
                         "input admission remains unresolved for prompt {prompt_id} (input {input_id})"
                     )),
-                    super::input_admission::ExistingInputState::Consumed
-                    | super::input_admission::ExistingInputState::Handled
-                    | super::input_admission::ExistingInputState::Dismissed => Err(format!(
+                    chat_state::InputState::Consumed { .. }
+                    | chat_state::InputState::Handled { .. }
+                    | chat_state::InputState::Dismissed { .. } => Err(format!(
                         "input is already terminal for prompt {prompt_id} (input {input_id})"
                     )),
                 };

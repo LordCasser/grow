@@ -646,6 +646,7 @@ mod tests {
                 id: None,
             }],
             multi_select: Some(false),
+            recommended_option: None,
             id: None,
         };
 

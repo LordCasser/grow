@@ -1,0 +1,5 @@
+- [x] 核对当前 workspace/latest tag，确定候选 2.6.2 及用户本轮发布准备范围。
+- [x] 完成非延期修复与长历史退出修复的逐项验收、所需 review 和真实入口里程碑。
+- [x] 维护 workspace/local lock 版本与仅含已验收行为的 2.6.2 发布说明。
+- [x] 完成最终源码对应的格式、default CLI、all-targets、构建、分发 profile 和隔离 smoke 门禁，记录警告与失败。
+- [x] 完成主规范归档、全量 strict/archive 和文档引用校对，交付候选身份、证据及正式发布剩余步骤。

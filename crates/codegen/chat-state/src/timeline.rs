@@ -1581,6 +1581,7 @@ pub enum InputState {
     Allowed { route: InputRoute },
     Blocked { reason: InputBlockReason },
     Consumed { route: InputRoute },
+    Handled { route: InputRoute },
     Dismissed { reason: InputDismissReason },
 }
 
@@ -1783,14 +1784,25 @@ struct HookFold {
     decision: Option<HookAggregateDecision>,
 }
 
+/// Terminal consumption fact owned by the input fold. `Conversation` is a
+/// `Consumed` event that published the input into the model-visible Surface;
+/// `Handled` settled the input terminally without publishing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputConsumption {
+    Conversation,
+    Handled,
+}
+
 #[derive(Debug, Clone)]
 struct InputFold {
+    /// Submitted ordinal, inherited from the earliest superseded input on admission.
+    canonical_position: usize,
     intent: InputIntent,
     payload_ref: InputPayloadRef,
     admission: Option<InputAdmissionDecision>,
     route: Option<InputRoute>,
     reserved_turn: Option<TurnId>,
-    consumed: bool,
+    consumption: Option<InputConsumption>,
     dismissed: Option<InputDismissReason>,
 }
 
@@ -2363,6 +2375,36 @@ impl Timeline {
         hashes
     }
 
+    /// Raw image references belong to physical committed User messages even
+    /// after compaction or rewind removes them from the model-visible Surface.
+    pub(crate) fn committed_user_image_paths(&self) -> BTreeSet<String> {
+        let mut paths = BTreeSet::new();
+        for event in &self.events {
+            let items: &[ConversationItem] = match &event.kind {
+                TimelineEventKind::Messages(message) => &message.items,
+                TimelineEventKind::Input(InputEvent::Consumed { item, .. })
+                | TimelineEventKind::Notification(NotificationEvent::Consumed {
+                    input: Some(item),
+                    ..
+                }) => std::slice::from_ref(item),
+                _ => continue,
+            };
+            for item in items {
+                let ConversationItem::User(user) = item else {
+                    continue;
+                };
+                for part in &user.content {
+                    if let ContentPart::Text { text } = part {
+                        paths.extend(sampling_types::conversation::image_files_envelope_paths(
+                            text,
+                        ));
+                    }
+                }
+            }
+        }
+        paths
+    }
+
     /// Find the immutable receipt for an at-least-once source delivery.
     pub fn received_notification_id(
         &self,
@@ -2904,19 +2946,29 @@ impl Timeline {
 
     pub fn input_state(&self, input_id: &str) -> Option<InputLifecycle> {
         let input = self.lifecycle.inputs.get(input_id)?;
-        let state = match (&input.admission, input.dismissed) {
-            (_, Some(reason)) => InputState::Dismissed { reason },
-            (None, None) => InputState::Submitted,
-            (Some(InputAdmissionDecision::Block { reason }), None) => InputState::Blocked {
+        let state = match (&input.admission, input.dismissed, input.consumption) {
+            (_, Some(reason), _) => InputState::Dismissed { reason },
+            (None, None, _) => InputState::Submitted,
+            (Some(InputAdmissionDecision::Block { reason }), None, _) => InputState::Blocked {
                 reason: reason.clone(),
             },
-            (Some(InputAdmissionDecision::Allow), None) if input.consumed => InputState::Consumed {
-                route: input
-                    .route
-                    .clone()
-                    .expect("a consumed input must have a durable route"),
-            },
-            (Some(InputAdmissionDecision::Allow), None) => InputState::Allowed {
+            (Some(InputAdmissionDecision::Allow), None, Some(InputConsumption::Conversation)) => {
+                InputState::Consumed {
+                    route: input
+                        .route
+                        .clone()
+                        .expect("a consumed input must have a durable route"),
+                }
+            }
+            (Some(InputAdmissionDecision::Allow), None, Some(InputConsumption::Handled)) => {
+                InputState::Handled {
+                    route: input
+                        .route
+                        .clone()
+                        .expect("a handled input must have a durable route"),
+                }
+            }
+            (Some(InputAdmissionDecision::Allow), None, None) => InputState::Allowed {
                 route: input
                     .route
                     .clone()
@@ -2932,27 +2984,28 @@ impl Timeline {
     }
 
     pub fn pending_allowed_inputs(&self) -> Vec<PendingAllowedInput> {
-        self.events
+        let mut pending: Vec<_> = self
+            .lifecycle
+            .inputs
             .iter()
-            .filter_map(|event| match &event.kind {
-                TimelineEventKind::Input(InputEvent::Submitted { input_id, .. }) => Some(input_id),
-                _ => None,
+            .filter(|(_, input)| {
+                matches!(input.admission, Some(InputAdmissionDecision::Allow))
+                    && input.consumption.is_none()
+                    && input.dismissed.is_none()
+                    && input.reserved_turn.is_none()
             })
-            .filter_map(|input_id| {
-                let input = self.lifecycle.inputs.get(input_id)?;
-                let InputAdmissionDecision::Allow = input.admission.as_ref()? else {
-                    return None;
-                };
-                (!input.consumed && input.dismissed.is_none() && input.reserved_turn.is_none())
-                    .then(|| PendingAllowedInput {
-                        input_id: input_id.clone(),
-                        intent: input.intent,
-                        payload_ref: input.payload_ref.clone(),
-                        route: input
-                            .route
-                            .clone()
-                            .expect("an allowed input must have an atomic initial route"),
-                    })
+            .collect();
+        pending.sort_unstable_by_key(|(_, input)| input.canonical_position);
+        pending
+            .into_iter()
+            .map(|(input_id, input)| PendingAllowedInput {
+                input_id: input_id.clone(),
+                intent: input.intent,
+                payload_ref: input.payload_ref.clone(),
+                route: input
+                    .route
+                    .clone()
+                    .expect("an allowed input must have an atomic initial route"),
             })
             .collect()
     }
@@ -5662,7 +5715,7 @@ impl LifecycleFold {
                         input.admission.is_none()
                             && input.route.is_none()
                             && input.reserved_turn.is_none()
-                            && !input.consumed
+                            && input.consumption.is_none()
                             && input.dismissed.is_none()
                     })
             }
@@ -5772,12 +5825,13 @@ impl LifecycleFold {
                 self.inputs.insert(
                     input_id.clone(),
                     InputFold {
+                        canonical_position: self.inputs.len(),
                         intent: *intent,
                         payload_ref: payload_ref.clone(),
                         admission: None,
                         route: None,
                         reserved_turn: None,
-                        consumed: false,
+                        consumption: None,
                         dismissed: None,
                     },
                 );
@@ -5824,7 +5878,7 @@ impl LifecycleFold {
                         .inputs
                         .get(superseded)
                         .ok_or_else(|| TimelineError::InputNotFound(superseded.clone()))?;
-                    if input.consumed
+                    if input.consumption.is_some()
                         || input.dismissed.is_some()
                         || input.reserved_turn.is_some()
                         || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
@@ -5833,12 +5887,19 @@ impl LifecycleFold {
                         return Err(TimelineError::InvalidInput);
                     }
                 }
+                let replacement_position = supersedes
+                    .iter()
+                    .map(|input_id| self.inputs[input_id].canonical_position)
+                    .min();
                 let input = self
                     .inputs
                     .get_mut(input_id)
                     .expect("validated input must remain present");
                 input.admission = Some(decision.clone());
                 input.route = route.clone();
+                if let Some(position) = replacement_position {
+                    input.canonical_position = position;
+                }
                 for superseded in supersedes {
                     self.inputs
                         .get_mut(superseded)
@@ -5865,7 +5926,7 @@ impl LifecycleFold {
                             &self.seen_turns,
                         ),
                     };
-                    if input.consumed
+                    if input.consumption.is_some()
                         || input.dismissed.is_some()
                         || input.reserved_turn.is_some()
                         || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
@@ -5916,7 +5977,7 @@ impl LifecycleFold {
                         }
                         None => false,
                     };
-                    if input.consumed || input.dismissed.is_some() || !valid {
+                    if input.consumption.is_some() || input.dismissed.is_some() || !valid {
                         return Err(TimelineError::InvalidInput);
                     }
                 }
@@ -5924,7 +5985,7 @@ impl LifecycleFold {
                     self.inputs
                         .get_mut(input_id)
                         .expect("validated input must remain present")
-                        .consumed = true;
+                        .consumption = Some(InputConsumption::Conversation);
                     self.inputs
                         .get_mut(input_id)
                         .expect("validated input must remain present")
@@ -5947,7 +6008,7 @@ impl LifecycleFold {
                         }
                         None => false,
                     };
-                    if input.consumed
+                    if input.consumption.is_some()
                         || input.dismissed.is_some()
                         || !route_matches
                         || self.active_turn != Some(*turn)
@@ -5961,7 +6022,7 @@ impl LifecycleFold {
                         .inputs
                         .get_mut(input_id)
                         .expect("validated input must remain present");
-                    input.consumed = true;
+                    input.consumption = Some(InputConsumption::Handled);
                     input.reserved_turn = None;
                 }
             }
@@ -5974,7 +6035,7 @@ impl LifecycleFold {
                         .inputs
                         .get(input_id)
                         .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
-                    if input.consumed
+                    if input.consumption.is_some()
                         || input.dismissed.is_some()
                         || input.reserved_turn.is_some()
                         || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
@@ -6195,7 +6256,7 @@ impl LifecycleFold {
                     let Some(InputAdmissionDecision::Allow) = &input.admission else {
                         return Err(TimelineError::InvalidInput);
                     };
-                    if input.consumed
+                    if input.consumption.is_some()
                         || input.dismissed.is_some()
                         || input.reserved_turn.is_some()
                         || !matches!(input.route, Some(InputRoute::Fifo))
@@ -9957,6 +10018,7 @@ mod tests {
         let turn = TurnId(7);
         let step = StepId { turn, index: 0 };
         let fresh_input = InputFold {
+            canonical_position: 0,
             intent: InputIntent::Prompt,
             payload_ref: InputPayloadRef {
                 blake3: blake3::hash(b"input").to_hex().to_string(),
@@ -9965,7 +10027,7 @@ mod tests {
             admission: None,
             route: None,
             reserved_turn: None,
-            consumed: false,
+            consumption: None,
             dismissed: None,
         };
         let mut active = LifecycleFold {
@@ -10780,14 +10842,21 @@ mod tests {
                 },
             }))
             .unwrap();
-        timeline
-            .record(TimelineEventKind::Input(InputEvent::AdmissionResolved {
+        let before = timeline.clone();
+        let prepared = timeline
+            .prepare(TimelineEventKind::Input(InputEvent::AdmissionResolved {
                 input_id: "input-new".into(),
                 decision: InputAdmissionDecision::Allow,
                 route: Some(InputRoute::Fifo),
                 supersedes: vec!["input-old".into()],
             }))
             .unwrap();
+        assert_same_fold(&timeline, &before);
+        assert_eq!(
+            timeline.pending_allowed_inputs(),
+            before.pending_allowed_inputs()
+        );
+        timeline.accept(prepared).unwrap();
 
         assert!(matches!(
             timeline.input_state("input-old").unwrap().state,
@@ -10803,6 +10872,186 @@ mod tests {
         ));
         assert_eq!(timeline.pending_allowed_inputs().len(), 1);
         assert_eq!(timeline.pending_allowed_inputs()[0].input_id, "input-new");
+    }
+
+    #[test]
+    fn unreplaced_inputs_keep_submission_order_when_admissions_and_routes_change() {
+        let mut timeline = Timeline::default();
+        let input_ids = ["input-z", "input-a", "input-m"];
+        for input_id in input_ids {
+            submit_human_input(&mut timeline, input_id, InputIntent::Prompt);
+        }
+        for input_id in input_ids.into_iter().rev() {
+            allow_input(&mut timeline, input_id);
+        }
+        let turn = start_internal_turn(&mut timeline, 77);
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-a".into()],
+                route: InputRoute::Steer { target_turn: turn },
+            }))
+            .unwrap();
+        let pending = timeline.pending_allowed_inputs();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|input| input.input_id.as_str())
+                .collect::<Vec<_>>(),
+            input_ids
+        );
+        assert_eq!(pending[1].route, InputRoute::Steer { target_turn: turn });
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(replayed.pending_allowed_inputs(), pending);
+
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-a".into()],
+                route: InputRoute::Fifo,
+            }))
+            .unwrap();
+        let pending = timeline.pending_allowed_inputs();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|input| input.input_id.as_str())
+                .collect::<Vec<_>>(),
+            input_ids
+        );
+        assert!(pending.iter().all(|input| input.route == InputRoute::Fifo));
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(replayed.pending_allowed_inputs(), pending);
+    }
+
+    #[test]
+    fn rejected_replacements_preserve_fold_and_pending_positions() {
+        for case in [
+            "self",
+            "duplicate",
+            "missing",
+            "superseded",
+            "reserved",
+            "consumed",
+            "handled",
+            "dismissed",
+            "steer",
+        ] {
+            let mut timeline = Timeline::default();
+            for input_id in ["input-a", "input-b", "input-c"] {
+                submit_human_input(&mut timeline, input_id, InputIntent::Prompt);
+                allow_input(&mut timeline, input_id);
+            }
+            match case {
+                "superseded" => {
+                    submit_human_input(&mut timeline, "input-b-edit", InputIntent::Prompt);
+                    allow_input_with(
+                        &mut timeline,
+                        "input-b-edit",
+                        InputRoute::Fifo,
+                        vec!["input-b".into()],
+                    );
+                }
+                "reserved" | "consumed" | "handled" => {
+                    let turn = start_input_turn(&mut timeline, vec!["input-b".into()]);
+                    match case {
+                        "consumed" => {
+                            timeline
+                                .record(TimelineEventKind::Input(InputEvent::Consumed {
+                                    input_ids: vec!["input-b".into()],
+                                    turn,
+                                    item: ConversationItem::user("input-b"),
+                                    display_echo: None,
+                                    skill_loads: Vec::new(),
+                                }))
+                                .unwrap();
+                        }
+                        "handled" => {
+                            timeline
+                                .record(TimelineEventKind::Input(InputEvent::Handled {
+                                    input_ids: vec!["input-b".into()],
+                                    turn,
+                                }))
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+                "dismissed" => {
+                    timeline
+                        .record(TimelineEventKind::Input(InputEvent::Dismissed {
+                            input_ids: vec!["input-b".into()],
+                            reason: InputDismissReason::UserRemoved,
+                        }))
+                        .unwrap();
+                }
+                "steer" => {
+                    let turn = start_internal_turn(&mut timeline, 77);
+                    timeline
+                        .record(TimelineEventKind::Input(InputEvent::Rerouted {
+                            input_ids: vec!["input-b".into()],
+                            route: InputRoute::Steer { target_turn: turn },
+                        }))
+                        .unwrap();
+                }
+                _ => {}
+            }
+            submit_human_input(&mut timeline, "input-new", InputIntent::Prompt);
+            let occurrence_id = trigger_user_prompt(&mut timeline, "input-new", Vec::new());
+            timeline
+                .record(TimelineEventKind::Hook(HookEvent::Completed {
+                    occurrence_id,
+                    decision: HookAggregateDecision::Prompt {
+                        decision: HookGateDecision::Allow,
+                    },
+                }))
+                .unwrap();
+            let invalid_id = match case {
+                "self" => "input-new",
+                "duplicate" => "input-a",
+                "missing" => "input-missing",
+                _ => "input-b",
+            };
+            let kind = TimelineEventKind::Input(InputEvent::AdmissionResolved {
+                input_id: "input-new".into(),
+                decision: InputAdmissionDecision::Allow,
+                route: Some(InputRoute::Fifo),
+                // The first target is valid, so a bad later target must not
+                // mutate either its canonical slot or its dismissal state.
+                supersedes: vec!["input-a".into(), invalid_id.into()],
+            });
+            let before = timeline.clone();
+            assert!(timeline.prepare(kind.clone()).is_err(), "{case}");
+            assert!(timeline.record(kind.clone()).is_err(), "{case}");
+            let event = TimelineEvent {
+                version: TIMELINE_SCHEMA_VERSION,
+                seq: timeline.next_seq(),
+                at_ms: 1,
+                kind,
+            };
+            assert!(timeline.accept(event.clone()).is_err(), "{case}");
+            assert_same_fold(&timeline, &before);
+            assert_eq!(
+                timeline.pending_allowed_inputs(),
+                before.pending_allowed_inputs()
+            );
+            assert_eq!(
+                serde_json::to_value(timeline.events()).unwrap(),
+                serde_json::to_value(before.events()).unwrap()
+            );
+            let mut events = timeline.events().to_vec();
+            events.push(event);
+            assert!(Timeline::from_events(events).is_err(), "{case}");
+        }
     }
 
     #[test]
@@ -10935,12 +11184,19 @@ mod tests {
             .unwrap();
         assert!(matches!(
             steer_timeline.input_state("input-steer-failed").unwrap().state,
-            InputState::Consumed {
+            InputState::Handled {
                 route: InputRoute::Steer { target_turn }
             } if target_turn == turn
         ));
         assert!(steer_timeline.surface().is_empty());
         assert_eq!(steer_timeline.lifecycle.active_turn, Some(turn));
+        let replayed = Timeline::from_events(steer_timeline.events().to_vec()).unwrap();
+        assert!(matches!(
+            replayed.input_state("input-steer-failed").unwrap().state,
+            InputState::Handled {
+                route: InputRoute::Steer { target_turn }
+            } if target_turn == turn
+        ));
 
         let mut fifo_timeline = Timeline::default();
         submit_human_input(&mut fifo_timeline, "input-fifo", InputIntent::Prompt);

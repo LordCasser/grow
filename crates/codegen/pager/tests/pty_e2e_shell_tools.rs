@@ -11,6 +11,8 @@ mod common;
 #[path = "pty_e2e/scroll.rs"]
 mod scroll;
 
+#[path = "pty_e2e/advisory_questions.rs"]
+mod advisory_questions;
 #[path = "pty_e2e/bash_mode_file_completion_shell_like.rs"]
 mod bash_mode_file_completion_shell_like;
 #[path = "pty_e2e/bash_mode_strips_redundant_session_cd_from_chrome.rs"]
@@ -43,3 +45,5 @@ mod mcp_menu_loads_servers_in_non_project_dir;
 mod mcp_menu_loads_servers_in_project_dir;
 #[path = "pty_e2e/mid_text_skill_token_echo_styled_pty.rs"]
 mod mid_text_skill_token_echo_styled_pty;
+#[path = "pty_e2e/subagent_model_control.rs"]
+mod subagent_model_control;

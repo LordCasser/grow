@@ -1,0 +1,4 @@
+- [x] 核对现runner、真实_run_phase反例和development-workflow既有契约，冻结最小诚实确认边界。
+- [x] 有效oldred：真实setsid＋DEVNULL后代在timeout/cancel后仍存活时必须显式未确认。证据见 [verification.md](verification.md)：旧 runner 上 1 test / 3 subtest failures，actual exit 1。
+- [x] 保留有界组清理和direct child回收，修正Unix完整树确认并运行相关非Cargo回归。证据见 [verification.md](verification.md)：18 tests exit 0；最终私有连接清理夹具 1 test / 3 subtests exit 0。
+- [x] 父核实际diff/进程退役/错误语义，补开发说明并通过全量strict归档前校验；归档与归档后验证结果见verification。

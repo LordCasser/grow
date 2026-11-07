@@ -158,6 +158,12 @@ pub enum ChatStateCommand {
     GetRuntimeState {
         reply: oneshot::Sender<crate::session_runtime::RuntimeLifecycle>,
     },
+    GetRuntimeTreeSnapshot {
+        reply: oneshot::Sender<(
+            crate::session_runtime::RuntimeLifecycle,
+            Vec<crate::TimelineEvent>,
+        )>,
+    },
     // ═══ Mutations (fire-and-forget) ═══
     /// Push a user message into the conversation.
     PushUserMessage { item: ConversationItem },
@@ -542,6 +548,17 @@ pub enum ChatStateCommand {
 
     GetRetainedNotificationPayloadHashes {
         reply: oneshot::Sender<BTreeSet<String>>,
+    },
+
+    GetCommittedUserImagePaths {
+        reply: oneshot::Sender<BTreeSet<String>>,
+    },
+
+    /// Canonical lifecycle projection of one recorded input identity from the
+    /// Timeline fold. `None` means the identity has no committed submission.
+    GetInputState {
+        input_id: String,
+        reply: oneshot::Sender<Option<crate::InputLifecycle>>,
     },
 
     GetPendingAllowedInputs {

@@ -261,6 +261,8 @@ impl SamplingError {
             || (normalized.contains("service") && normalized.contains("unavailable"))
         {
             StatusCode::from_u16(529).expect("529 is a valid status")
+        } else if normalized == "timeout_error" {
+            StatusCode::GATEWAY_TIMEOUT
         } else if normalized.contains("invalid")
             || normalized.contains("unsupported")
             || normalized.contains("bad_request")
@@ -278,7 +280,7 @@ impl SamplingError {
         // failure. Preserve the upstream error identity without resampling.
         let known_server_error = matches!(
             normalized.as_str(),
-            "server_error" | "internal_server_error" | "network_error" | "transient"
+            "api_error" | "server_error" | "internal_server_error" | "network_error" | "transient"
         );
         let should_retry =
             (status == StatusCode::INTERNAL_SERVER_ERROR && !known_server_error).then_some(false);
@@ -819,7 +821,113 @@ pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String
     structured_error_message(bytes).unwrap_or_else(|| status_user_message(status))
 }
 
+/// Presence of an object member, independent of its value: a `null` member
+/// is still a present member. Key absence is handled by serde's field
+/// default, so any deserialized value (including null) counts as present.
+/// Values are ignored entirely — no `Value` re-encoding, no manual scanner.
+#[derive(Debug, Default, PartialEq)]
+enum MemberPresence {
+    #[default]
+    Absent,
+    Present,
+}
+
+impl<'de> Deserialize<'de> for MemberPresence {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| MemberPresence::Present)
+    }
+}
+
+/// First-stage probe: presence of the top-level `error` member only. Frames
+/// without an `error` member are handed straight back to the existing typed
+/// decoders — unknown-extension payloads (e.g. a non-string `object` with no
+/// error attached) keep their decoder verdict instead of being ruled out by
+/// this gate.
+#[derive(Debug, Deserialize)]
+struct ErrorPresenceProbe {
+    #[serde(default)]
+    error: MemberPresence,
+}
+
+/// Narrow probe for mixed-error qualification. Only the members that decide
+/// ordinary-event identity are declared; serde derive rejects duplicate
+/// declared keys (e.g. duplicated `type`), so a failed full probe stays a
+/// `Serialization` failure. `choices` is a presence marker only — its content
+/// is never re-encoded or stripped to accept the frame.
+#[derive(Debug, Deserialize)]
+struct StreamEnvelopeProbe {
+    #[serde(default, rename = "type")]
+    event_type: Option<String>,
+    #[serde(default)]
+    object: Option<String>,
+    #[serde(default)]
+    choices: MemberPresence,
+}
+
+/// Local malformed-ordinary contract: a frame that carries ordinary-event
+/// identity (non-`error` nonempty top-level `type`, a Chat `choices` member,
+/// or `object: "chat.completion.chunk"`) together with a top-level `error`
+/// member is a local protocol failure, not a provider service error — even
+/// when the ordinary typed part is complete or the SSE event name is `error`.
+///
+/// Qualification only applies while an `error` member exists: frames without
+/// one are handed straight back to the existing typed decoders, so their
+/// verdict on ordinary and unknown-extension payloads is unchanged. Once an
+/// `error` member is present, the mixed-envelope probe is fail-closed: a
+/// decode failure (invalid JSON, duplicated or malformed declared members)
+/// is also a `Serialization` protocol failure — the legacy classification,
+/// whose `ErrorResponse` ignores unknown top-level members, would otherwise
+/// let a malformed mixed envelope through as a retryable server `Api` error.
+fn ordinary_event_with_error(data: &str) -> Option<SamplingError> {
+    // Stage 1: only the `error` member decides whether this gate rules at
+    // all. Frames without an `error` member (ordinary or unknown-extension
+    // payloads, even with unknown non-string members) go straight back to
+    // the existing typed decoders.
+    let has_error = match serde_json::from_str::<ErrorPresenceProbe>(data) {
+        Ok(probe) => probe.error == MemberPresence::Present,
+        Err(_) => {
+            return Some(SamplingError::serialization_message(
+                "malformed SSE error envelope",
+            ));
+        }
+    };
+    if !has_error {
+        return None;
+    }
+    // Stage 2: an error member exists — full fail-closed qualification of the
+    // mixed envelope. Malformed or duplicated `type`/`choices` members here
+    // are local protocol failures, never a legacy server-error fallback.
+    let probe = match serde_json::from_str::<StreamEnvelopeProbe>(data) {
+        Ok(probe) => probe,
+        Err(_) => {
+            return Some(SamplingError::serialization_message(
+                "malformed SSE error envelope",
+            ));
+        }
+    };
+    let ordinary = probe.choices == MemberPresence::Present
+        || probe.object.as_deref() == Some("chat.completion.chunk")
+        || probe
+            .event_type
+            .as_deref()
+            .is_some_and(|ty| !ty.trim().is_empty() && ty.trim() != "error");
+    ordinary.then(|| {
+        SamplingError::serialization_message(
+            "ordinary SSE event carries a top-level error envelope",
+        )
+    })
+}
+
 pub fn try_parse_stream_error(event_name: &str, data: &str) -> Option<SamplingError> {
+    if let Some(error) = ordinary_event_with_error(data) {
+        tracing::warn!(
+            event_name,
+            "Ordinary SSE event carries a top-level error envelope; rejecting as local protocol error"
+        );
+        return Some(error);
+    }
     let mut request_id = None;
     let parsed = parse_structured_error(data).or_else(|| {
         if event_name != "error" {
@@ -1278,6 +1386,109 @@ mod tests {
     }
 
     #[test]
+    fn standard_messages_stream_errors_use_exact_known_service_classifications() {
+        for (code, status) in [
+            ("api_error", StatusCode::INTERNAL_SERVER_ERROR),
+            ("API-ERROR", StatusCode::INTERNAL_SERVER_ERROR),
+            ("timeout_error", StatusCode::GATEWAY_TIMEOUT),
+            ("Timeout Error", StatusCode::GATEWAY_TIMEOUT),
+        ] {
+            let error = SamplingError::from_stream_error(code, "  original failure  ");
+            assert!(
+                matches!(
+                    &error,
+                    SamplingError::Api { status: actual, message, should_retry: None, .. }
+                        if *actual == status && message == &format!("{code}:   original failure  ")
+                ),
+                "{code}: {error:?}"
+            );
+            assert!(error.is_retryable(), "{code}: {error:?}");
+            assert!(!error.is_retry_vetoed(), "{code}: {error:?}");
+
+            let named = try_parse_stream_error("error", &format!(
+                r#"{{"request_id":"req-standard","code":"{code}","message":"  original failure  "}}"#
+            )).unwrap();
+            assert!(
+                matches!(
+                    &named,
+                    SamplingError::Api { status: actual, message, should_retry: None, .. }
+                        if *actual == status && message == &format!("{code}:   original failure   (request_id: req-standard)")
+                ),
+                "{code}: {named:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_messages_stream_error_lookalikes_keep_unknown_veto() {
+        for code in [
+            "api_error_suffix",
+            "timeout_error_custom",
+            "prefix_api_error",
+            "timeout",
+        ] {
+            let error = SamplingError::from_stream_error(code, "api_error timeout_error");
+            assert!(
+                matches!(
+                    &error,
+                    SamplingError::Api {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        should_retry: Some(false),
+                        ..
+                    }
+                ),
+                "{code}: {error:?}"
+            );
+            assert!(!error.is_retryable());
+            assert!(error.is_retry_vetoed());
+        }
+    }
+
+    #[test]
+    fn standard_messages_stream_error_types_cannot_bypass_envelope_gate() {
+        for code in ["api_error", "timeout_error"] {
+            for data in [
+                format!(
+                    r#"{{"type":"message_start","message":{{}},"error":{{"type":"{code}","message":"failed"}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"error","type":"error","error":{{"type":"{code}","message":"failed"}}}}"#
+                ),
+                format!(r#"{{"type":7,"error":{{"type":"{code}","message":"failed"}}}}"#),
+                format!(r#"{{"code":"{code}"}}"#),
+            ] {
+                let error = try_parse_stream_error("error", &data).unwrap();
+                assert!(
+                    matches!(error, SamplingError::Serialization(_)),
+                    "{data}: {error:?}"
+                );
+                assert!(!error.is_retryable());
+            }
+        }
+    }
+
+    #[test]
+    fn standard_messages_timeout_body_preserves_real_http_status_and_veto() {
+        let body = br#"{"type":"error","error":{"type":"timeout_error","message":"processing timed out"}}"#;
+        for should_retry in [None, Some(false)] {
+            let error = SamplingError::from_api_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                body,
+                None,
+                None,
+                should_retry,
+            );
+            assert!(matches!(
+                &error,
+                SamplingError::Api { status: StatusCode::INTERNAL_SERVER_ERROR, message, .. }
+                    if message == "timeout_error: processing timed out"
+            ));
+            assert_eq!(error.should_retry_header(), should_retry);
+            assert_eq!(error.is_retryable(), should_retry != Some(false));
+        }
+    }
+
+    #[test]
     fn typed_stream_errors_preserve_non_retryable_auth_and_request_semantics() {
         let auth = SamplingError::from_stream_error("authentication_error", "bad key");
         assert!(matches!(auth, SamplingError::Auth { .. }));
@@ -1321,6 +1532,171 @@ mod tests {
         let data = r#"{"error":{"message":"Incorrect API key","type":"invalid_request_error","code":"invalid_api_key"}}"#;
         let err = try_parse_stream_error("error", data).expect("should parse nested error");
         assert!(matches!(err, SamplingError::Auth { .. }));
+    }
+
+    #[test]
+    fn ordinary_event_with_top_level_error_is_local_serialization() {
+        // Real HTTP-style top-level server error body.
+        let server_error = r#"{"code":"server_error","message":"Internal server error"}"#;
+        // Ordinary identity via a non-error top-level type; the typed ordinary
+        // part is complete here, yet the frame must not become a service error.
+        let typed = format!(r#"{{"type":"message_start","message":{{}},"error":{server_error}}}"#);
+        // Ordinary identity via Chat choices / chat.completion.chunk.
+        let choices = format!(
+            r#"{{"id":"c","object":"chat.completion.chunk","choices":[],"error":{server_error}}}"#
+        );
+        let typed_incomplete =
+            r#"{"type":"response.output_text.delta","error":{"message":"boom"}}"#;
+        // Explicit-null members still count as present: the mixed-envelope
+        // contract keys on member presence, not on a usable error value.
+        let null_members = r#"{"type":"response.created","choices":null,"error":null}"#;
+        for (label, data) in [
+            ("typed_complete", typed.as_str()),
+            ("chat_chunk", choices.as_str()),
+            ("typed_incomplete", typed_incomplete),
+            ("null_members", null_members),
+        ] {
+            // The SSE event name — including `error` — must not override the
+            // body's ordinary-event identity.
+            for event_name in ["message", "", "error", "ping"] {
+                let error = try_parse_stream_error(event_name, data)
+                    .unwrap_or_else(|| panic!("{label}/{event_name}: expected an error"));
+                assert!(
+                    matches!(error, SamplingError::Serialization(_)),
+                    "{label}/{event_name}: expected Serialization, got {error:?}"
+                );
+                assert!(!error.is_retryable(), "{label}/{event_name}");
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_events_without_error_keep_legacy_classification() {
+        // No top-level error member → the qualification gate stays silent.
+        let chunk = r#"{"id":"abc","object":"chat.completion.chunk","created":0,"model":"test","choices":[]}"#;
+        let typed = r#"{"type":"message_start","message":{}}"#;
+        let extension = r#"{"type":"vendor.extension","payload":1}"#;
+        for data in [chunk, typed, extension] {
+            assert!(
+                try_parse_stream_error("message", data).is_none(),
+                "no error member must stay a non-error: {data}"
+            );
+        }
+        // Unknown extension frames with an attached error carry ordinary
+        // identity (non-error nonempty `type`) — per the fixed policy they
+        // are local Serialization protocol failures, never server Api
+        // errors, so they cannot gain retry eligibility.
+        let unknown = try_parse_stream_error(
+            "message",
+            r#"{"type":"vendor.extension","error":{"code":"VendorUnmappedCode","message":"failed"}}"#,
+        )
+        .expect("extension frame with error is a protocol failure");
+        assert!(matches!(unknown, SamplingError::Serialization(_)));
+        assert!(!unknown.is_retryable());
+    }
+
+    #[test]
+    fn unknown_extension_payloads_without_error_stay_with_the_decoder() {
+        // Stage-1 presence probe: no `error` member means the gate does not
+        // rule at all — unknown-extension payloads (even with non-string or
+        // duplicated unknown members that would break the full probe) are
+        // handed back to the existing typed decoders, which skip them.
+        let object_payload = r#"{"type":"vendor.extension","object":{"x":1}}"#;
+        let duplicated_object = r#"{"type":"vendor.extension","object":{"x":1},"object":{"y":2}}"#;
+        let malformed_with_error_absent = r#"{"type":"vendor.extension","choices":{"deep":[1,2]}}"#;
+        for data in [
+            object_payload,
+            duplicated_object,
+            malformed_with_error_absent,
+        ] {
+            assert!(
+                try_parse_stream_error("message", data).is_none(),
+                "no error member must stay with the decoder: {data}"
+            );
+        }
+        // The same shapes gain ordinary identity (non-error nonempty `type`)
+        // as soon as an `error` member exists: local Serialization protocol
+        // failures, never retryable server Api errors.
+        for extra in [
+            r#""error":{"code":"server_error","message":"boom"}"#,
+            r#""error":null"#,
+        ] {
+            let mixed = format!(r#"{{"type":"vendor.extension","object":{{"x":1}},{extra}}}"#);
+            let error = try_parse_stream_error("message", &mixed)
+                .expect("extension frame with error is a protocol failure");
+            assert!(
+                matches!(error, SamplingError::Serialization(_)),
+                "expected Serialization for {mixed}, got {error:?}"
+            );
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[test]
+    fn duplicated_envelope_keys_do_not_gain_error_eligibility() {
+        // Duplicate `type`/`error` keys make the probe fail; the fail-closed
+        // gate returns Serialization instead of falling back to the legacy
+        // classification, which would treat this as a retryable server error.
+        let duplicated_error = concat!(
+            r#"{"type":"message_start","error":{"code":"server_error","message":"a"},"#,
+            r#""error":{"code":"server_error","message":"b"}}"#
+        );
+        let duplicated_type = concat!(
+            r#"{"type":"response.created","type":"message_start","#,
+            r#""error":{"code":"server_error","message":"boom"}}"#
+        );
+        let duplicated_null_then_valid_type = concat!(
+            r#"{"type":null,"type":"message_start","#,
+            r#""error":{"code":"server_error","message":"boom"}}"#
+        );
+        for data in [
+            duplicated_error,
+            duplicated_type,
+            duplicated_null_then_valid_type,
+        ] {
+            let error = try_parse_stream_error("message", data)
+                .expect("duplicate keys must not silently pass as ordinary frames");
+            assert!(
+                matches!(error, SamplingError::Serialization(_)),
+                "expected Serialization for {data}, got {error:?}"
+            );
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[test]
+    fn legitimate_stream_error_envelopes_keep_classification() {
+        // Bare legacy flat error (no ordinary identity).
+        let flat = try_parse_stream_error(
+            "message",
+            r#"{"code":"The service is currently unavailable","error":"Service temporarily unavailable."}"#,
+        )
+        .expect("bare legacy error keeps parsing");
+        assert!(matches!(
+            &flat,
+            SamplingError::Api { status, should_retry: None, .. }
+                if status.as_u16() == 529
+        ));
+
+        // Complete named error on an `event:error` frame without a body type.
+        let named = try_parse_stream_error(
+            "error",
+            r#"{"request_id":"req-9","code":"InvalidParameter","message":"rejected"}"#,
+        )
+        .expect("named error keeps parsing");
+        assert!(matches!(
+            &named,
+            SamplingError::Api { status, .. } if status.as_u16() == 400
+        ));
+        assert!(!named.is_retryable());
+
+        // Legal typed error: top-level `type` is exactly `error`.
+        let typed = try_parse_stream_error(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#,
+        )
+        .expect("typed error keeps parsing");
+        assert!(typed.is_overloaded());
     }
 
     #[test]

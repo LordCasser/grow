@@ -1,0 +1,5 @@
+- [x] 核两条ConfigUpdate消费者、既有reload owner与watcher注册/取消边界，冻结一致契约。
+- [x] leader增量：配置reload投递、paths替换及真实文件事件回归。
+- [x] in-process增量：同等入口交付及注册/取消回归。
+- [x] 父审查并完成两入口实际Session catalog/slash与custom path里程碑。
+- [x] 同步开发说明/backlog，strict/archive及all/archived复核。

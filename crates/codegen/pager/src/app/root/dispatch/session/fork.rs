@@ -143,6 +143,7 @@ fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effec
     let question = Question {
         question: "Run this fork in an isolated git worktree?".into(),
         id: None,
+        recommended_option: None,
         options,
         multi_select: Some(false),
     };

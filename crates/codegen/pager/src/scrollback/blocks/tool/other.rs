@@ -2,6 +2,8 @@
 
 use ratatui::text::{Line, Span};
 
+use tools::implementations::grow_build::ask_user_question::Question;
+
 use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
@@ -27,6 +29,63 @@ pub struct CoordinationRow {
     pub phase: CoordinationPhase,
 }
 
+/// Lifecycle of an advisory suggestion card on an `ask_user_question` row.
+///
+/// `Presented`/`Confirmed` record that the questions were SHOWN — never a
+/// user answer. `Failed` means the terminal tool result never confirmed the
+/// presentation, so the card must not claim the user saw anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisoryCardStatus {
+    /// Ext request presented; awaiting the tool result.
+    Presented,
+    /// Successful tool result confirmed the presentation.
+    Confirmed,
+    /// The tool failed; presentation was never confirmed.
+    Failed,
+}
+
+/// Human-reply projection for an advisory card — deliberately separate from
+/// [`AdvisoryCardStatus`]: `Confirmed` only confirms presentation and never
+/// implies the user answered. The reply text lives only in the existing
+/// `QueuedPrompt`/uncertain-draft chain; the card copies no payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisoryReplyStatus {
+    /// Fresh cold/replay card: no admission query observed yet.
+    Unobserved,
+    /// A `QueryInputAdmissionStatus` for this card is in flight.
+    Checking,
+    /// Canonical admission is Absent: the editor may open.
+    Available,
+    /// Admission unknown/errored or a frozen unconfirmed submission: re-query.
+    Unconfirmed,
+    /// Canonical Allowed/Consumed/Handled: answered, read-only.
+    Accepted,
+    /// Canonical Blocked/Dismissed: rejected, read-only.
+    Rejected,
+}
+
+/// Structured advisory-question card attached to the `ask_user_question`
+/// tool row. Storage IS this tool row (no separate pending registry): the
+/// ext handler writes it before acknowledging `Presented`, and the
+/// successful result / replay restores it idempotently. (No `PartialEq`:
+/// `tools::Question` is not equatable and field-level comparison is the
+/// contract; do not derive trait requirements onto the shared type.)
+#[derive(Debug, Clone)]
+pub struct AdvisoryCard {
+    /// Session that raised the advisory question (root or child view).
+    pub source_session_id: String,
+    /// Tool call id of the advisory `ask_user_question` call.
+    pub tool_call_id: String,
+    /// Questions as presented, each carrying the Agent recommendation.
+    pub questions: Vec<Question>,
+    pub status: AdvisoryCardStatus,
+    /// Human-reply projection (six states, see [`AdvisoryReplyStatus`]).
+    pub reply_status: AdvisoryReplyStatus,
+    /// One-shot local open intent set by a reply click/keypress. Consumed
+    /// exactly once by the admission callback; grants no send or approval.
+    pub reply_open_intent: bool,
+}
+
 /// Other/unknown tool call.
 #[derive(Debug, Clone)]
 pub struct OtherToolCallBlock {
@@ -44,6 +103,11 @@ pub struct OtherToolCallBlock {
     pub elapsed_ms: Option<i64>,
     /// Present only on the receiving side's passive inquiry presentation.
     pub coordination: Option<CoordinationRow>,
+    /// Advisory suggestion card on an `ask_user_question` row: questions
+    /// shown with Agent recommendations, awaiting an optional late user
+    /// reply. Written pre-ACK by the ext handler; confirmed/restored from
+    /// the successful result and replay.
+    pub advisory: Option<AdvisoryCard>,
     /// Stable identity for an immutable communication receipt projected with
     /// tool-row chrome rather than as a notice.
     immutable_event_id: Option<String>,
@@ -111,6 +175,7 @@ impl OtherToolCallBlock {
             started_at: None,
             elapsed_ms: None,
             coordination: None,
+            advisory: None,
             immutable_event_id: None,
             communication_preview: None,
             communication_body: None,
@@ -160,6 +225,12 @@ impl OtherToolCallBlock {
 
     pub(crate) fn with_immutable_event_id(mut self, event_id: impl Into<String>) -> Self {
         self.immutable_event_id = Some(event_id.into());
+        self
+    }
+
+    /// Attach (or replace) the advisory suggestion card.
+    pub fn with_advisory_card(mut self, card: AdvisoryCard) -> Self {
+        self.advisory = Some(card);
         self
     }
 
@@ -215,6 +286,7 @@ impl OtherToolCallBlock {
     fn is_communication(&self) -> bool {
         self.communication_body.is_some()
             || self.communication_preview.is_some()
+            || self.name.starts_with("set_subagent_model → ")
             || self.name.starts_with("ask_session → ")
             || self.name.starts_with("get_inquiry → ")
             || self.name.starts_with("ask_parent → ")
@@ -447,6 +519,18 @@ impl BlockContent for OtherToolCallBlock {
                             .into(),
                     ]
                 };
+                if let Some(card) = &self.advisory {
+                    // Collapsed advisory card keeps exactly one summary line:
+                    // the recommendation continues and a reply stays possible.
+                    let text = match card.status {
+                        AdvisoryCardStatus::Failed => {
+                            "advisory question — presentation not confirmed".to_string()
+                        }
+                        _ => "advisory — agent continues on its recommendation · reply to change"
+                            .to_string(),
+                    };
+                    lines.push(Line::from(Span::styled(format!("  {text}"), theme.muted())).into());
+                }
                 if let Some(preview) = &self.communication_preview
                     && self.communication_body.is_none()
                 {
@@ -465,6 +549,95 @@ impl BlockContent for OtherToolCallBlock {
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let mut lines: Vec<BlockLine> =
                     vec![self.collapsed_line(&theme, false, None).into()];
+
+                if let Some(card) = &self.advisory {
+                    // Advisory card: the agent's provisional recommendation,
+                    // explicitly NOT a user answer. Renders instead of the
+                    // plain output text so the affordance is unambiguous.
+                    // `Confirmed` only confirms presentation — the reply
+                    // projection line below is the sole answered/rejected
+                    // signal, so no line here may claim one.
+                    let status_line = match card.status {
+                        AdvisoryCardStatus::Failed => Line::from(Span::styled(
+                            "  Presentation not confirmed — the question tool failed.",
+                            ratatui::style::Style::default().fg(theme.accent_error),
+                        )),
+                        AdvisoryCardStatus::Confirmed => Line::from(Span::styled(
+                            "  Agent continued on its recommendation · reply to change:",
+                            theme.primary(),
+                        )),
+                        // Not yet confirmed by the tool result: the card is
+                        // on screen, but the agent's continuation is not yet
+                        // a confirmed fact.
+                        AdvisoryCardStatus::Presented => Line::from(Span::styled(
+                            "  Advisory question presented — awaiting confirmation · reply to change:",
+                            theme.primary(),
+                        )),
+                    };
+                    lines.push(status_line.into());
+                    for (i, q) in card.questions.iter().enumerate() {
+                        lines.push(
+                            Line::from(Span::raw(format!("  {}. {}", i + 1, q.question))).into(),
+                        );
+                        if let Some(rec) = q.recommended_option.as_deref() {
+                            lines.push(
+                                Line::from(Span::styled(
+                                    format!("     ★ agent recommendation: {rec}"),
+                                    ratatui::style::Style::default().fg(theme.md_code),
+                                ))
+                                .into(),
+                            );
+                        }
+                    }
+                    // A failed presentation is read-only: it never claimed
+                    // the agent continued, so it may not invite a reply as
+                    // if it had. Terminal reply projections still show their
+                    // durable fact.
+                    let unavailable = Span::styled(
+                        "  Reply unavailable — the question tool failed.",
+                        ratatui::style::Style::default().fg(theme.gray_dim),
+                    );
+                    let answered = Span::styled(
+                        "  Answered — read-only. Send a normal prompt to change it.",
+                        ratatui::style::Style::default().fg(theme.gray_dim),
+                    );
+                    let rejected = Span::styled(
+                        "  Reply rejected — send a normal prompt instead.",
+                        ratatui::style::Style::default().fg(theme.gray_dim),
+                    );
+                    let unobserved = Span::styled(
+                        "  Reply with your own answer — double-click this card or press r",
+                        theme.muted(),
+                    );
+                    let checking = Span::styled(
+                        "  Checking whether this question was already answered…",
+                        theme.muted(),
+                    );
+                    let available =
+                        Span::styled("  Click to reply with your own answer", theme.primary());
+                    let unconfirmed = Span::styled(
+                        "  Reply status unknown — double-click or press r to check or retry the original answer",
+                        theme.muted(),
+                    );
+                    let reply_line = if card.status == AdvisoryCardStatus::Failed {
+                        match card.reply_status {
+                            AdvisoryReplyStatus::Accepted => answered,
+                            AdvisoryReplyStatus::Rejected => rejected,
+                            _ => unavailable,
+                        }
+                    } else {
+                        match card.reply_status {
+                            AdvisoryReplyStatus::Unobserved => unobserved,
+                            AdvisoryReplyStatus::Checking => checking,
+                            AdvisoryReplyStatus::Available => available,
+                            AdvisoryReplyStatus::Unconfirmed => unconfirmed,
+                            AdvisoryReplyStatus::Accepted => answered,
+                            AdvisoryReplyStatus::Rejected => rejected,
+                        }
+                    };
+                    lines.push(Line::from(reply_line).into());
+                    return BlockOutput { lines };
+                }
 
                 if let Some(body) = &self.communication_body {
                     lines.extend(body.expanded(width).lines);

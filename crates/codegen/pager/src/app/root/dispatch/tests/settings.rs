@@ -25,6 +25,80 @@ fn complete_setting_request(app: &mut AppView, effect: &Effect, success: bool) -
     dispatch(Action::TaskComplete(result), app)
 }
 
+fn non_blocking_preference_key() -> crate::settings::SettingKey {
+    "toolset.ask_user_question.allow_non_blocking"
+}
+
+#[test]
+fn non_blocking_preference_action_persists_and_failure_restores_modal() {
+    use crate::settings::SettingValue;
+    let key = non_blocking_preference_key();
+    let mut app = test_app_with_agent();
+    dispatch(Action::OpenSettings, &mut app);
+    assert_eq!(setting_value(&app, key), Some(SettingValue::Bool(true)));
+    let effects = dispatch(Action::SetAskUserQuestionAllowNonBlocking(false), &mut app);
+    let write = setting_write(&effects, key);
+    assert!(matches!(
+        write,
+        Effect::PersistSetting {
+            value: SettingValue::Bool(false),
+            rollback_value: SettingValue::Bool(true),
+            ..
+        }
+    ));
+    assert_eq!(setting_value(&app, key), Some(SettingValue::Bool(false)));
+    assert!(read_toast(&app).contains("Saving"));
+    assert!(!read_toast(&app).contains('✓'));
+    complete_setting_request(&mut app, write, false);
+    assert_eq!(setting_value(&app, key), Some(SettingValue::Bool(true)));
+    let Some(crate::views::modal::ActiveModal::Settings { state }) =
+        app.agents[&AgentId(0)].active_modal.as_ref()
+    else {
+        panic!("settings must remain open")
+    };
+    assert_eq!(
+        state.pager_snapshot.ask_user_question_allow_non_blocking,
+        None
+    );
+    let toast = read_toast(&app);
+    assert!(toast.contains("Could not save"));
+    assert!(toast.contains("test failure"));
+}
+
+#[test]
+fn non_blocking_preference_success_confirms_only_saved_preference() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetAskUserQuestionAllowNonBlocking(false), &mut app);
+    complete_setting_request(
+        &mut app,
+        setting_write(&effects, non_blocking_preference_key()),
+        true,
+    );
+    assert_eq!(
+        read_toast(&app),
+        "Saved non-blocking question preference (environment may override)"
+    );
+    assert_eq!(app.ask_user_question_allow_non_blocking, Some(false));
+}
+
+#[test]
+fn non_blocking_preference_failure_keeps_previous_disabled_choice() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    app.ask_user_question_allow_non_blocking = Some(false);
+    let effects = dispatch(Action::SetAskUserQuestionAllowNonBlocking(true), &mut app);
+    complete_setting_request(
+        &mut app,
+        setting_write(&effects, non_blocking_preference_key()),
+        false,
+    );
+    assert_eq!(app.ask_user_question_allow_non_blocking, Some(false));
+    assert_eq!(
+        setting_value(&app, non_blocking_preference_key()),
+        Some(SettingValue::Bool(false))
+    );
+}
+
 fn setting_value(
     app: &AppView,
     key: crate::settings::SettingKey,
@@ -164,7 +238,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
         let registry = SettingsRegistry::defaults();
         assert_eq!(
             registry.all().len(),
-            42,
+            43,
             "settings catalog coverage changed"
         );
         for meta in registry.all() {
@@ -1934,6 +2008,9 @@ fn move_setting_away_from_default(
             app,
         ),
         "remember_tool_approvals" => dispatch(Action::SetRememberToolApprovals(true), app),
+        "toolset.ask_user_question.allow_non_blocking" => {
+            dispatch(Action::SetAskUserQuestionAllowNonBlocking(false), app)
+        }
         "toolset.ask_user_question.timeout_enabled" => {
             dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app)
         }

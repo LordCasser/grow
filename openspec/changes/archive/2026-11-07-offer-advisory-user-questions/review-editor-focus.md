@@ -1,0 +1,19 @@
+# U6 · 显式打开答复编辑后键盘仍归历史区
+
+## 已确认触发和证据
+
+最终CLI首轮PTY已越过真实Reply查询并显示QuestionView的`/quit`选项，但后续Down/Enter没有进入题目导航，反而打开历史消息的block viewer；贴入Other正文后等待notes失败。证据为 `/tmp/grow-ask-final-pty-product.log` 的第一个失败。Settings在同产物再次通过，不能因此把主链失败归于通用启动。
+
+父亲核实际消费链：`r`在Scrollback派发QueryAdvisoryReplyAdmission；durableUnknown无冻结正文时，reconcile调用AppView→目标AgentView::open_advisory_reply，创建本地QuestionView并stash composer，未转移active_pane。`agent_view/input.rs`只有active_pane!=Scrollback才将事件送给handle_question_key。实际编辑可见不等于它已拥有键盘，旧测试只验证QuestionView/dispatcher，没有覆盖这条进入后的键盘路由。Tab可切到编辑区，是当前继续验证余下迟答数据链的临时操作，不是此缺口的最终验收。
+
+## 所有者与最小决策
+
+显式打开本地答复编辑由AgentView交互owner负责；只有open_advisory_reply成功创建该editor时，沿已有pane focus约定使目标view的键盘归编辑区。用户主动r/鼠标要求编辑，方向键、Enter和Other必须立即编辑这次答复。无需改generic输入路由、普通blocking问答或全局focus策略，也不为所有replace_question_view加自动focus。
+
+未主动编辑的advisory展示继续不抢composer/焦点；查询已答、失败、冻结重试不开放editor也不转焦点。目标是原source view（child来源仍通过owning primary接纳），不切active tab；晚callback不能将焦点写入无关view。关闭/提交继续恢复原普通composer，不增加question_pending、NeedsInput或Turn暂停计时。
+
+## 独立Coder Task Spec与Review Plan
+
+只修此编辑入口，预期生产落点`pager/src/app/agent_view/interactions.rs::open_advisory_reply`，必要沿同owner已有私有focushelper。真实旧红从scrollback卡片r入口→Query→合格durableUnknown→显示editor，再送真实Down/Enter/Other键，断言题目导航/改选发生且不打开history viewer；不能仅断言active_pane常量。修后保两题选择和Other正文、stash恢复、非阻塞状态与其他tab不变。已有卡片/QuestionView/admission回归按实际影响跑，不重写或删现PTY失败场景。
+
+最终产品验证必须移除临时Tab，在新build的同一visibleReply流程直接选择和提交；原工具单一结果、稳定新输入、自动Answered、coldreadonly都要保留。当前PTY执行者不得同时改production；先拿到其实际commands退役与Cargo/write释放，再由Card owner实施oldred→minimalfix→green。父核最终diff、失败的键盘路由和真正产品复验，独立于尚未解释的鼠标doubleclick折叠观察。

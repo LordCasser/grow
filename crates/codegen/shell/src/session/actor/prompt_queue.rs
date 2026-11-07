@@ -270,11 +270,25 @@ impl SessionActor {
                     return;
                 }
             };
-            if admitted.replayed {
+            if let Some(state) = admitted.replay_state {
+                // A retry of the same immutable request observes the canonical
+                // lifecycle: answer the RPC first, then return the original
+                // persist acknowledgement. No queue entry, Hook, or turn is
+                // repeated, and no fake RemovedFromQueue completion is sent.
+                let _ = respond_to.send(Ok(PromptTurnOk {
+                    stop_reason: acp::StopReason::EndTurn,
+                    total_tokens: 0,
+                    turn_snapshot: None,
+                    completion_kind: PromptCompletionKind::AdmissionReplay {
+                        input_id: admitted.input_id,
+                        state,
+                    },
+                    structured_output: None,
+                    usage: None,
+                }));
                 if let Some(ack) = persist_ack {
                     let _ = ack.send(());
                 }
-                Self::respond_removed_prompt(respond_to);
                 return;
             }
             vec![admitted.input_id]
@@ -934,6 +948,27 @@ impl SessionActor {
                 return Err("admission_failed");
             }
         };
+        if admitted.replay_state.is_some() {
+            // The identical replacement was already admitted durably (e.g. an
+            // ACK-lost retry). It is an observation: do not reinsert or
+            // renumber the row, and do not treat a blocked replay as a fresh
+            // edit failure. Only report success when the queued row already
+            // carries this admission's input_id — i.e. the durable
+            // replacement was applied to the in-memory row. A replay that was
+            // admitted durably but never applied (row still original, row
+            // gone, or superseded by a later edit whose admission replaced
+            // the input_ids) must not masquerade as success.
+            let state = self.state.lock().await;
+            let applied = state
+                .pending_inputs
+                .iter()
+                .find(|item| item.queue_meta.as_ref().is_some_and(|meta| meta.id == id))
+                .filter(|item| item.input_ids.contains(&admitted.input_id))
+                .and_then(|item| item.queue_meta.as_ref())
+                .map(|meta| meta.version);
+            drop(state);
+            return applied.ok_or("queue_changed_after_admission");
+        }
         let mut state = self.state.lock().await;
         let Some(item) = state
             .pending_inputs
@@ -1635,6 +1670,174 @@ mod follow_up_admission_tests {
                 );
                 assert_eq!(state.pending_inputs[0].input_ids, vec![original_input]);
                 assert!(state.queue_edit_holds.contains_key("queued-denied"));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admitted_replay_succeeds_only_when_row_carries_the_admitted_input() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .queue_input(
+                        text_blocks("original"),
+                        "queued-replay".into(),
+                        crate::session::PromptOrigin::User,
+                        crate::session::TurnKind::User,
+                        None,
+                        None,
+                        false,
+                        None,
+                        tokio::sync::oneshot::channel().0,
+                        None,
+                    )
+                    .await;
+                let (original_input, original_meta) = {
+                    let state = actor.state.lock().await;
+                    let item = &state.pending_inputs[0];
+                    (
+                        item.input_ids[0].clone(),
+                        item.queue_meta
+                            .clone()
+                            .expect("queued user input has metadata"),
+                    )
+                };
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Hold,
+                            "queued-replay",
+                            0,
+                            Some("edit-1"),
+                            None,
+                            Some(1),
+                        ))
+                        .await
+                        .applied
+                );
+
+                // Admit the identical replacement durably through the real
+                // admission entry (payload freeze, Hook, Timeline), but
+                // deliberately skip the in-memory row apply — the state an
+                // ACK-lost retry can observe when admission was durable but
+                // the row update never landed.
+                let mut replacement = InputItem {
+                    input_ids: Vec::new(),
+                    prompt_id: "queued-replay".into(),
+                    prompt_blocks: text_blocks("original"),
+                    client_identifier: None,
+                    screen_mode: None,
+                    verbatim: false,
+                    json_schema: None,
+                    origin: crate::session::PromptOrigin::User,
+                    turn_kind: crate::session::TurnKind::User,
+                    host_command: None,
+                    notification_ids: Vec::new(),
+                    respond_to: tokio::sync::oneshot::channel().0,
+                    persist_ack: None,
+                    queue_meta: Some(original_meta),
+                };
+                SessionActor::apply_queued_prompt_edit(
+                    &mut replacement,
+                    "replacement".into(),
+                    None,
+                );
+                let queue = replacement
+                    .queue_meta
+                    .as_ref()
+                    .expect("edited input remains queued");
+                assert_eq!(queue.version, 1);
+                // Match the production save identity exactly: the edit was
+                // applied to a version-0 row, so the stable edit id is
+                // `:edit:{version + 1}` = `:edit:2`.
+                let input_prompt_id =
+                    format!("{}:edit:{}", replacement.prompt_id, queue.version + 1);
+                let admitted = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        crate::session::input_inbox::InputPayload::Prompt {
+                            prompt_id: input_prompt_id.clone(),
+                            requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
+                            prompt_blocks: replacement.prompt_blocks.clone(),
+                            skill_invocations: Vec::new(),
+                            client_identifier: replacement.client_identifier.clone(),
+                            screen_mode: replacement.screen_mode.clone(),
+                            verbatim: replacement.verbatim,
+                            json_schema: replacement.json_schema.clone(),
+                            origin: replacement.origin.clone(),
+                            turn_kind: replacement.turn_kind,
+                            queue: Some(queue.into()),
+                        },
+                        Some(input_prompt_id.clone()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("replacement admission is durably accepted");
+                assert!(!admitted.replayed);
+
+                // The same durable identity replays as an Existing
+                // observation: no new Hook run or Submitted event, and the
+                // recorded input id is the one the save path would carry.
+                let replay_observation = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        crate::session::input_inbox::InputPayload::Prompt {
+                            prompt_id: input_prompt_id.clone(),
+                            requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
+                            prompt_blocks: replacement.prompt_blocks.clone(),
+                            skill_invocations: Vec::new(),
+                            client_identifier: replacement.client_identifier.clone(),
+                            screen_mode: replacement.screen_mode.clone(),
+                            verbatim: replacement.verbatim,
+                            json_schema: replacement.json_schema.clone(),
+                            origin: replacement.origin.clone(),
+                            turn_kind: replacement.turn_kind,
+                            queue: Some(replacement.queue_meta.as_ref().unwrap().into()),
+                        },
+                        Some(input_prompt_id),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("identical replacement request replays");
+                assert!(replay_observation.replayed);
+                assert_eq!(replay_observation.input_id, admitted.input_id);
+
+                // Retrying the same save must not report success: the queued
+                // row is still the original one and does not carry the
+                // admitted replacement input, so the replay observation must
+                // be reported as `queue_changed_after_admission`, not as an
+                // applied edit.
+                let retried = actor
+                    .handle_queue_control(control(
+                        QueueControlOperation::Save,
+                        "queued-replay",
+                        0,
+                        Some("edit-1"),
+                        Some("replacement"),
+                        Some(1),
+                    ))
+                    .await;
+                assert!(!retried.applied);
+                assert_eq!(retried.reason, Some("queue_changed_after_admission"));
+                {
+                    let state = actor.state.lock().await;
+                    let item = &state.pending_inputs[0];
+                    assert_eq!(item.queue_meta.as_ref().unwrap().text, "original");
+                    assert_eq!(item.queue_meta.as_ref().unwrap().version, 0);
+                    assert_eq!(item.input_ids, vec![original_input.clone()]);
+                    assert!(state.queue_edit_holds.contains_key("queued-replay"));
+                }
+                // Positive replay success is observed through the real
+                // admission entry above and the existing queue_input replay
+                // test. An already-applied row cannot be reached by resending
+                // the same Save request: once the row moved to version 1, the
+                // old request's `expected_version = 0` is rejected as
+                // `stale_version` before the replay check — the version gate,
+                // not the replay branch, is the correct contract there.
             })
             .await;
     }

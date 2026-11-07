@@ -6,6 +6,7 @@ import json
 import _thread
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,22 @@ def phase_output(
                 ["/tmp/fixture-test-binary"] if test_executables is None else test_executables
             )
         },
+    )
+
+
+def phase_main_wrapper(parent: str, timeout: float) -> str:
+    module_path = str(Path(run_exact_cargo_test.__file__).resolve())
+    return textwrap.dedent(
+        f"""
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location('exact_runner', {module_path!r})
+        runner = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = runner
+        spec.loader.exec_module(runner)
+        runner.execute = lambda *args, **kwargs: runner._run_phase(
+            [sys.executable, '-u', '-c', {parent!r}], 'execute', {timeout!r})
+        raise SystemExit(runner.main(['--package', 'fixture', '--lib', 'selected']))
+        """
     )
 
 
@@ -351,19 +368,7 @@ class RealCommandTests(unittest.TestCase):
                 f"p=subprocess.Popen([sys.executable, '-c', {child!r}]); "
                 f"pathlib.Path({str(pid_path)!r}).write_text(str(p.pid)); time.sleep(10)"
             )
-            module_path = str(Path(run_exact_cargo_test.__file__).resolve())
-            wrapper = textwrap.dedent(
-                f"""
-                import importlib.util, sys
-                spec = importlib.util.spec_from_file_location('exact_runner', {module_path!r})
-                runner = importlib.util.module_from_spec(spec)
-                sys.modules[spec.name] = runner
-                spec.loader.exec_module(runner)
-                runner.execute = lambda *args, **kwargs: runner._run_phase(
-                    [sys.executable, '-u', '-c', {parent!r}], 'execute', 10)
-                raise SystemExit(runner.main(['--package', 'fixture', '--lib', 'selected']))
-                """
-            )
+            wrapper = phase_main_wrapper(parent, 10)
             process = subprocess.Popen(
                 [sys.executable, "-u", "-c", wrapper], stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
@@ -389,6 +394,106 @@ class RealCommandTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
+
+    @contextlib.contextmanager
+    def detached_phase(self, timeout: float):
+        # Only this fixture's live connection grants cleanup authority. Its
+        # handshake PIDs describe this launch, never an external PID registry.
+        with (
+            tempfile.TemporaryDirectory(prefix="grow-detach-", dir="/tmp") as directory,
+            socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
+        ):
+            address = str(Path(directory) / "control.sock")
+            listener.bind(address)
+            listener.listen(1)
+            listener.settimeout(5)
+            child = textwrap.dedent(
+                f"""
+                import os, socket
+                connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                connection.connect({address!r})
+                control = connection.makefile('rwb', buffering=0)
+                control.write(f'{{os.getpid()}} {{os.getpgrp()}} {{os.getppid()}}\\n'.encode())
+                for command in control:
+                    if command == b'ping\\n':
+                        control.write(b'alive\\n')
+                os._exit(0)
+                """
+            )
+            parent = (
+                "import subprocess, sys; "
+                f"p=subprocess.Popen([sys.executable, '-c', {child!r}], "
+                "start_new_session=True, stdin=subprocess.DEVNULL, "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); p.wait()"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-c", phase_main_wrapper(parent, timeout)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            connection = None
+            control = None
+            try:
+                connection, _ = listener.accept()
+                connection.settimeout(3)
+                control = connection.makefile("rwb", buffering=0)
+                pid, group, phase_pid = map(int, control.readline(80).split())
+                self.assertEqual(pid, group, "fixture did not start a new session")
+                self.assertIsNone(process.poll(), "runner exited before the private barrier")
+                yield process, control, phase_pid
+            finally:
+                try:
+                    if control is not None:
+                        connection.shutdown(socket.SHUT_WR)
+                        # The child calls os._exit on this private socket's
+                        # EOF. Its return EOF proves retirement, regardless of
+                        # orphan reaping, without using a PID to signal it.
+                        self.assertEqual(
+                            control.read(), b"", "detached fixture did not exit"
+                        )
+                finally:
+                    if control is not None:
+                        control.close()
+                    if connection is not None:
+                        connection.close()
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=5)
+                        self.fail("fixture runner did not retire within cleanup bound")
+
+    @unittest.skipIf(os.name == "nt", "Unix session escape uses a private Unix socket")
+    def test_detached_devnull_descendant_cleanup_is_unconfirmed(self) -> None:
+        for interruption, expected_exit in ((None, 1), (signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(interruption=interruption), self.detached_phase(
+                2 if interruption is None else 10
+            ) as (process, control, phase_pid):
+                control.write(b"ping\n")
+                self.assertEqual(control.readline(), b"alive\n")
+                started = time.monotonic()
+                if interruption is not None:
+                    process.send_signal(interruption)
+                stdout, stderr = process.communicate(timeout=5)
+                diagnostic = stderr.decode(errors="replace")
+                self.assertEqual(process.returncode, expected_exit, (stdout, stderr))
+                self.assertLess(time.monotonic() - started, 5)
+                # EOF on the phase pipe and a reaped direct child do not show
+                # that this detached, DEVNULL descendant has stopped.
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(phase_pid, 0)
+                control.write(b"ping\n")
+                self.assertEqual(control.readline(), b"alive\n")
+                if interruption is None:
+                    self.assertIn("execute timed out", diagnostic)
+                else:
+                    self.assertIn("cancelled", diagnostic)
+                    self.assertIn("Cancelled exact Cargo test run", diagnostic)
+                self.assertIn("cleanup unconfirmed", diagnostic)
+                self.assertIn("detached", diagnostic)
+                self.assertNotIn("termination confirmed", diagnostic)
 
     def test_windows_tree_cleanup_uses_builtin_taskkill(self) -> None:
         class FakeProcess:

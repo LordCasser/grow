@@ -1,7 +1,8 @@
 //! Settings UI: command palette, settings modal, toggles, resets, and rollback.
 
 use super::setters::{
-    pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
+    pr13_effective_default, set_ask_user_question_allow_non_blocking_inner,
+    set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_combine_queued_prompts_inner,
     set_compact_mode, set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
@@ -47,6 +48,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let ask_user_question_allow_non_blocking_from_app = app.ask_user_question_allow_non_blocking;
     let default_model_id = app.models.current_model_id_str().map(str::to_owned);
     let default_model_catalog: Vec<_> = app
         .models
@@ -86,6 +88,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 respect_manual_folds: respect_manual_folds_from_app,
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+                ask_user_question_allow_non_blocking: ask_user_question_allow_non_blocking_from_app,
             };
         }
     }
@@ -187,6 +190,7 @@ pub(in crate::app::root::dispatch) fn dispatch_open_settings(
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let ask_user_question_allow_non_blocking_from_app = app.ask_user_question_allow_non_blocking;
     let default_model_id = app.models.current_model_id_str().map(str::to_owned);
     let default_model_catalog: Vec<_> = app
         .models
@@ -233,6 +237,7 @@ pub(in crate::app::root::dispatch) fn dispatch_open_settings(
         respect_manual_folds: respect_manual_folds_from_app,
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+        ask_user_question_allow_non_blocking: ask_user_question_allow_non_blocking_from_app,
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -685,6 +690,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         respect_manual_folds: app.appearance.scrollback.scroll.respect_manual_folds,
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
+        ask_user_question_allow_non_blocking: app.ask_user_question_allow_non_blocking,
     }
 }
 
@@ -734,6 +740,9 @@ pub(in crate::app::root::dispatch) fn action_for_reset(
         ("vim_mode", SettingValue::Bool(b)) => Some(Action::SetVimMode(*b)),
         ("remember_tool_approvals", SettingValue::Bool(b)) => {
             Some(Action::SetRememberToolApprovals(*b))
+        }
+        ("toolset.ask_user_question.allow_non_blocking", SettingValue::Bool(b)) => {
+            Some(Action::SetAskUserQuestionAllowNonBlocking(*b))
         }
         ("toolset.ask_user_question.timeout_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(*b))
@@ -1012,8 +1021,14 @@ pub(in crate::app::root::dispatch) fn apply_setting_rollback(
         ("remember_tool_approvals", SettingValue::Bool(b)) => {
             set_remember_tool_approvals_inner(app, *b)
         }
-        // ask_user_question timeout: if rollback equals the effective
-        // default, restore to None (keeps mirror in sync with disk).
+        // Restore the saved preference; Shell owns effective mode resolution.
+        ("toolset.ask_user_question.allow_non_blocking", SettingValue::Bool(b)) => {
+            if Some(*b) == pr13_effective_default("toolset.ask_user_question.allow_non_blocking") {
+                app.ask_user_question_allow_non_blocking = None;
+            } else {
+                set_ask_user_question_allow_non_blocking_inner(app, *b);
+            }
+        }
         ("toolset.ask_user_question.timeout_enabled", SettingValue::Bool(b)) => {
             if Some(*b) == pr13_effective_default("toolset.ask_user_question.timeout_enabled") {
                 app.ask_user_question_timeout_enabled = None;

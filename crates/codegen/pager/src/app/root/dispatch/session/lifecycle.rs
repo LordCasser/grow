@@ -191,6 +191,7 @@ pub(in crate::app::root::dispatch) fn open_new_session_question(app: &mut AppVie
     let question = Question {
         question: "Start the new session in an isolated git worktree?".into(),
         id: None,
+        recommended_option: None,
         options,
         multi_select: Some(false),
     };
@@ -763,6 +764,7 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
                 modal,
                 agent_id,
                 session_id_clone.clone(),
+                agent.session_binding_epoch,
             ));
         }
         effects.push(Effect::RegisterActiveSession {
@@ -868,6 +870,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
                 modal,
                 agent_id,
                 session_id_clone.clone(),
+                agent.session_binding_epoch,
             ));
         }
         effects.push(Effect::RegisterActiveSession {

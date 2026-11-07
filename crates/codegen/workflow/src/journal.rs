@@ -59,6 +59,18 @@ pub enum JournalError {
 /// owns an ambient filesystem path; the session layer decides how the bytes
 /// are contained and synchronized.
 pub trait JournalStorage: Send + Sync {
+    /// Read the durable journal prefix bounded by `max_bytes`.
+    ///
+    /// A successful return certifies durability, not mere readability: the
+    /// returned bytes must come from the same opened file handle, and the
+    /// file barrier (platform-required sync) plus the barrier for the
+    /// containing directory must both succeed before any byte is returned.
+    /// A prefix that is readable but not yet synchronized must yield an
+    /// error — never empty content, a completed projection, or recoverable
+    /// execution — so restore paths (`Journal::load_storage`, suspended-run
+    /// validation) cannot advance a Run before durability is confirmed.
+    /// A missing file keeps `io::ErrorKind::NotFound` semantics and must not
+    /// be created by this read.
     fn read_bounded(&self, max_bytes: u64) -> std::io::Result<Vec<u8>>;
     fn append(&self, bytes: &[u8]) -> std::io::Result<()>;
     fn truncate(&self, len: u64) -> std::io::Result<()>;
@@ -454,9 +466,15 @@ fn fold_physical_entry(
         return Ok(());
     }
 
+    // A replacement row is a legal completion only while the folded entry
+    // still carries the pending marker of the same recorded operation. Once
+    // the entry has been completed, any further completion row must be
+    // rejected exactly like the live `complete_operation` path instead of
+    // silently overwriting the recorded result.
     if let Some(index) = usize::try_from(entry.seq).ok()
         && let Some(existing) = entries.get_mut(index)
-        && operation_ids.get(index).and_then(Option::as_ref).is_some()
+        && let Some(operation_id) = operation_ids.get(index).and_then(Option::as_ref)
+        && pending_operation_id(&existing.result).as_deref() == Some(operation_id.as_str())
         && pending_operation_id(&entry.result).is_none()
         && existing.kind == entry.kind
         && existing.req_hash == entry.req_hash
@@ -701,6 +719,125 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_a_second_completion_for_a_completed_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let hash = request_hash("spawn_agent", &serde_json::json!({"prompt": "hi"}));
+        let operation_id = "018f0000-0000-7000-8000-000000000001";
+        let row = |result| {
+            serde_json::to_string(&JournalEntry {
+                seq: 0,
+                kind: "spawn_agent".into(),
+                req_hash: hash.clone(),
+                result,
+                at_ms: 1,
+            })
+            .unwrap()
+        };
+        let body = format!(
+            "{}\n{}\n{}\n",
+            row(serde_json::json!({ HOST_OPERATION_KEY: operation_id })),
+            row(serde_json::json!({ "agent_id": "first" })),
+            row(serde_json::json!({ "agent_id": "second" })),
+        );
+        std::fs::write(&path, &body).unwrap();
+
+        let error = Journal::load(path.clone()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                JournalError::Sequence {
+                    expected: 1,
+                    actual: 0,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    }
+
+    #[test]
+    fn load_storage_rejects_a_second_completion_for_a_completed_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let hash = request_hash("spawn_agent", &serde_json::json!({"prompt": "hi"}));
+        let operation_id = "018f0000-0000-7000-8000-000000000001";
+        let entry = |result| JournalEntry {
+            seq: 0,
+            kind: "spawn_agent".into(),
+            req_hash: hash.clone(),
+            result,
+            at_ms: 1,
+        };
+        let mut body = String::new();
+        for result in [
+            serde_json::json!({ HOST_OPERATION_KEY: operation_id }),
+            serde_json::json!({ "agent_id": "first" }),
+            serde_json::json!({ "agent_id": "first" }),
+        ] {
+            body.push_str(&serde_json::to_string(&entry(result)).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(&path, &body).unwrap();
+        let storage = Arc::new(FileJournalStorage { path: path.clone() });
+
+        let error = Journal::load_storage(storage).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                JournalError::Sequence {
+                    expected: 1,
+                    actual: 0,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    }
+
+    #[test]
+    fn live_complete_operation_rejects_a_second_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let hash = request_hash("spawn_agent", &serde_json::json!({"prompt": "hi"}));
+        let completed = serde_json::json!({ "agent_id": "first" });
+        let mut journal = Journal::new(Some(path.clone()));
+        journal
+            .begin_operation(0, "spawn_agent", hash.clone(), "op".into())
+            .unwrap();
+        journal
+            .complete_operation(0, "spawn_agent", hash.clone(), completed.clone())
+            .unwrap();
+
+        for second in [
+            serde_json::json!({ "agent_id": "second" }),
+            completed.clone(),
+        ] {
+            assert!(matches!(
+                journal.complete_operation(0, "spawn_agent", hash.clone(), second),
+                Err(JournalError::Divergence { seq: 0, .. })
+            ));
+            assert_eq!(
+                journal.replay_operation(0, "spawn_agent", &hash).unwrap(),
+                Some(OperationReplay::Completed(completed.clone()))
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            2,
+            "rejected completions must not append physical rows"
+        );
+        let reloaded = Journal::load(path).unwrap();
+        assert_eq!(
+            reloaded.replay_operation(0, "spawn_agent", &hash).unwrap(),
+            Some(OperationReplay::Completed(completed))
+        );
+    }
+
+    #[test]
     fn projector_folds_pending_row_into_completed_replacement() {
         let operation_id = "018f0000-0000-7000-8000-000000000001";
         let hash = request_hash("spawn_agent", &serde_json::json!({"prompt": "hi"}));
@@ -752,6 +889,45 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn projector_rejects_a_second_completion_and_keeps_the_first_result() {
+        let hash = request_hash("spawn_agent", &serde_json::json!({"prompt": "hi"}));
+        let operation_id = "018f0000-0000-7000-8000-000000000001";
+        let completed = serde_json::json!({ "agent_id": "first" });
+        let entry = |result| JournalEntry {
+            seq: 0,
+            kind: "spawn_agent".into(),
+            req_hash: hash.clone(),
+            result,
+            at_ms: 1,
+        };
+        let mut journal = Journal::memory();
+        let pending = serde_json::json!({ HOST_OPERATION_KEY: operation_id });
+        journal.project_physical_entry(entry(pending)).unwrap();
+        journal
+            .project_physical_entry(entry(completed.clone()))
+            .unwrap();
+
+        for second in [
+            serde_json::json!({ "agent_id": "second" }),
+            completed.clone(),
+        ] {
+            assert!(matches!(
+                journal.project_physical_entry(entry(second)),
+                Err(JournalError::Sequence {
+                    expected: 1,
+                    actual: 0,
+                    ..
+                })
+            ));
+            assert_eq!(
+                journal.replay_operation(0, "spawn_agent", &hash).unwrap(),
+                Some(OperationReplay::Completed(completed.clone()))
+            );
+        }
+        assert_eq!(journal.entries().len(), 1);
     }
 
     #[test]

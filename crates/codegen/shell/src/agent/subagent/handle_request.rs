@@ -1648,6 +1648,7 @@ async fn run_shell_child_inner(
         Default::default(),
         parent_mcp_pool,
         Vec::new(),
+        None,
         true,
         None,
         persistence,
@@ -1923,8 +1924,9 @@ async fn run_shell_child_inner(
     if let Some(delegator) = &ctx.completion_cmd_tx {
         let _ = delegator.send(SessionCommand::ReconcilePlanning);
     }
+    let mut launch_error = None;
     if restore.is_none() {
-        emit_subagent_notification(
+        let publication = publish_subagent_spawned(
             gateway,
             &ctx.parent_session_id,
             SessionUpdate::SubagentSpawned {
@@ -1948,8 +1950,23 @@ async fn run_shell_child_inner(
                 goal_id,
             },
             ctx.parent_cmd_tx.as_ref(),
-            false,
         );
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {}
+            published = tokio::time::timeout(std::time::Duration::from_secs(30), publication) => {
+                let error = match published {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(_) => Some("parent Spawned publication timed out after 30 seconds".to_owned()),
+                };
+                if let Some(error) = error {
+                    launch_error = Some(format!(
+                        "Derived child launch failed before first-prompt admission: {error}"
+                    ));
+                }
+            }
+        }
     }
     completion_data.spawned_notification_emitted = true;
     let progress_cancellation = cancel_token.child_token();
@@ -1964,25 +1981,26 @@ async fn run_shell_child_inner(
         start,
         progress_cancellation,
     );
-    let mut launch_error = None;
-    // SubagentSpawned creates the Pager child view. Publish the child's
-    // authoritative control snapshot before admitting its first prompt so
-    // subsequent step-boundary controls cannot race an unseeded view.
-    let (control_ack_tx, control_ack_rx) = oneshot::channel();
-    if child_handle
-        .cmd_tx
-        .send(SessionCommand::PublishControlState {
-            respond_to: control_ack_tx,
-        })
-        .is_err()
-        || control_ack_rx.await.is_err()
-    {
-        launch_error = Some(
-            "Derived child launch failed before first-prompt admission: initial control state was not published"
-                .to_owned(),
-        );
+    // SubagentSpawned publication establishes the Pager child view before
+    // either the initial control authority or first prompt can cross actors.
+    if launch_error.is_none() && (restore.is_some() || !cancel_token.is_cancelled()) {
+        let (control_ack_tx, control_ack_rx) = oneshot::channel();
+        if child_handle
+            .cmd_tx
+            .send(SessionCommand::PublishControlState {
+                respond_to: control_ack_tx,
+            })
+            .is_err()
+            || control_ack_rx.await.is_err()
+        {
+            launch_error = Some(
+                "Derived child launch failed before first-prompt admission: initial control state was not published"
+                    .to_owned(),
+            );
+        }
     }
     if launch_error.is_none()
+        && (restore.is_some() || !cancel_token.is_cancelled())
         && let Some(snapshot) = request.goal_context.clone()
         && child_handle
             .cmd_tx
@@ -2423,6 +2441,9 @@ async fn run_shell_child_inner(
     let finalization_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     completion_data.finalization_deadline = Some(finalization_deadline);
     completion_data.receipt_required = request.surface_completion && !result.cancelled;
+    // Whether the child's terminal commit command reached its actor; the
+    // actor then owns the child's shutdown and no plain `Shutdown` is sent.
+    let mut child_result_handed_off = false;
     let finalization = async {
         let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
         let diagnostics_tokens = if result.tool_calls > 0 || result.success {
@@ -2506,27 +2527,31 @@ async fn run_shell_child_inner(
                 .as_ref()
                 .map(|artifact| artifact.timeline_ref.clone()),
         );
-        let child_result_ref = if output_ready {
-            record_child_result_before(
-                &child_handle.chat_state_handle,
+        let child_result_handoff = if output_ready {
+            let handoff = hand_off_child_result_to_actor(
+                &child_handle,
                 &mut result,
                 persisted_output_ref.map(|artifact| artifact.timeline_ref),
                 finalization_deadline,
+                // Records handoff at send time so the deadline branch below
+                // cannot wrongly send a plain `Shutdown` for a child whose
+                // actor already owns its shutdown.
+                &mut child_result_handed_off,
             )
-            .await
-            .map_err(|error| {
+            .await;
+            if let Some(error) = &handoff.error {
                 completion_data.finalization_error = Some(FinalizationFailure::timeline(
                     FinalizationStage::ChildResult,
-                    &error,
+                    error,
                     child_handle.chat_state_handle.pending_timeline_commit(),
                 ));
                 tracing::error!(subagent_id = %request.id, %error, "canonical child result failed");
-                error
-            })
-            .ok()
+            }
+            handoff
         } else {
-            None
+            ChildResultHandoff::not_dispatched()
         };
+        let child_result_ref = child_result_handoff.result_ref.clone();
         completion_data.child_result_ref = child_result_ref.clone();
         completion_data.usage_by_model = subagent_usage_by_model.clone();
         completion_data.usage_incomplete = subagent_usage_incomplete;
@@ -2669,7 +2694,13 @@ async fn run_shell_child_inner(
             }
             (None, None) => {}
         }
-        let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        // A delivered terminal commit command owns the child's shutdown
+        // (it latches Graceful and drains the SessionEnd lifecycle itself);
+        // drain the child directly only when the handoff never reached its
+        // actor.
+        if !child_result_handoff.actor_owns_shutdown {
+            let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        }
         if let Some(permission_handle) = &ctx.permission_handle {
             permission_handle
                 .release_child(child_session_id.0.to_string())
@@ -2805,7 +2836,10 @@ async fn run_shell_child_inner(
         }
         // Drain the execution owner even when an earlier finalization await
         // never answered. Publication workers retain their own in-flight flag.
-        let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        // A delivered terminal commit already owns the child's shutdown.
+        if !child_result_handed_off {
+            let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        }
     }
     child_run_output(result, completion_data)
 }

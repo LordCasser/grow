@@ -702,189 +702,175 @@ pub fn resolve_effective_plugins_config(
     plugins_cfg
 }
 pub use config::{deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml};
+/// Acquire the process-wide config write lock, hard-read the current bytes,
+/// parse raw TOML, apply `mutate` to the root table, and publish atomically.
+///
+/// Raw `toml::Value` is used (not the effective Config loader) so unknown
+/// fields and authored `${ENV}` references survive the edit. Only a missing
+/// file may be treated as an empty table; hard read errors and invalid TOML
+/// return before any publication, leaving the original bytes untouched.
+///
+/// `no_op_when_missing` selects remove semantics: a missing file is an
+/// idempotent success with no write, while a hard metadata error still
+/// propagates.
+async fn edit_plugin_config_at<R>(
+    config_path: &std::path::Path,
+    no_op_when_missing: bool,
+    mutate: impl FnOnce(&mut toml::map::Map<String, toml::Value>) -> anyhow::Result<R>,
+) -> anyhow::Result<R> {
+    use crate::util::config::{atomic_write_string, lock_config_writes, read_to_string_or_empty};
+    let _guard = lock_config_writes().await;
+    if no_op_when_missing {
+        match std::fs::metadata(config_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return mutate(&mut Default::default());
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let content = read_to_string_or_empty(config_path)?;
+    let mut root: toml::Value = if content.is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&content).map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?
+    };
+    let table = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("config.toml root is not a table"))?;
+    let result = mutate(table)?;
+    atomic_write_string(config_path, &toml::to_string_pretty(&root)?)?;
+    Ok(result)
+}
+
+/// Append `value` to `table[section_key][field_key]`, creating the section and
+/// array as needed and deduplicating (append is idempotent).
+fn push_unique_string(
+    table: &mut toml::map::Map<String, toml::Value>,
+    section_key: &str,
+    field_key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let field_label = format!("[{section_key}].{field_key}");
+    let section = table
+        .entry(section_key.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let section = section
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[{section_key}] is not a table"))?;
+    let field = section
+        .entry(field_key.to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+    let array = field
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("{field_label} is not an array"))?;
+    if !array.iter().any(|v| v.as_str() == Some(value)) {
+        array.push(toml::Value::String(value.to_string()));
+    }
+    Ok(())
+}
+
+/// Remove `value` from `table[section_key][field_key]` if present; missing
+/// sections or arrays leave the config otherwise untouched.
+fn retain_excluding_string(
+    table: &mut toml::map::Map<String, toml::Value>,
+    section_key: &str,
+    field_key: &str,
+    value: &str,
+) {
+    if let Some(array) = table
+        .get_mut(section_key)
+        .and_then(|v| v.as_table_mut())
+        .and_then(|t| t.get_mut(field_key))
+        .and_then(|v| v.as_array_mut())
+    {
+        array.retain(|v| v.as_str().is_none_or(|s| s != value));
+    }
+}
+
+fn user_config_file() -> std::path::PathBuf {
+    crate::util::grow_home::grow_home().join("config.toml")
+}
+
 /// Add a plugin path to `[plugins].paths` in `~/.grow/config.toml`.
 ///
 /// Creates the `[plugins]` section and `paths` array if they don't exist.
 /// Deduplicates: if the path is already present, this is a no-op.
-pub fn add_plugin_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::grow_home::grow_home().join("config.toml");
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugins") {
-        table.insert(
-            "plugins".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugins = table
-        .get_mut("plugins")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugins] is not a table")?;
-    if !plugins.contains_key("paths") {
-        plugins.insert("paths".to_string(), toml::Value::Array(vec![]));
-    }
-    let paths = plugins
-        .get_mut("paths")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugins].paths is not an array")?;
-    let already_present = paths.iter().any(|v| v.as_str().is_some_and(|s| s == path));
-    if !already_present {
-        paths.push(toml::Value::String(path.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+pub async fn add_plugin_path(path: &str) -> anyhow::Result<()> {
+    add_plugin_path_at(path, &user_config_file()).await
+}
+
+async fn add_plugin_path_at(path: &str, config_path: &std::path::Path) -> anyhow::Result<()> {
+    edit_plugin_config_at(config_path, false, |table| {
+        push_unique_string(table, "plugins", "paths", path)
+    })
+    .await
 }
 /// Remove a plugin path from `[plugins].paths` in `~/.grow/config.toml`.
 ///
-/// If the path is not found, this is a no-op (returns Ok).
-pub fn remove_plugin_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::grow_home::grow_home().join("config.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?;
-    if let Some(plugins) = config
-        .as_table_mut()
-        .and_then(|t| t.get_mut("plugins"))
-        .and_then(|v| v.as_table_mut())
-        && let Some(paths) = plugins.get_mut("paths").and_then(|v| v.as_array_mut())
-    {
-        paths.retain(|v| v.as_str().is_none_or(|s| s != path));
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+/// If the path is not found (or the file is missing), this is a no-op.
+pub async fn remove_plugin_path(path: &str) -> anyhow::Result<()> {
+    remove_plugin_path_at(path, &user_config_file()).await
+}
+
+async fn remove_plugin_path_at(path: &str, config_path: &std::path::Path) -> anyhow::Result<()> {
+    edit_plugin_config_at(config_path, true, |table| {
+        retain_excluding_string(table, "plugins", "paths", path);
+        Ok(())
+    })
+    .await
 }
 /// Add a plugin to `[plugins].disabled` in `~/.grow/config.toml`.
 ///
 /// Creates the `[plugins]` section and `disabled` array if they don't exist.
 /// Deduplicates: if already present, this is a no-op.
-pub fn add_disabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::grow_home::grow_home().join("config.toml");
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugins") {
-        table.insert(
-            "plugins".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugins = table
-        .get_mut("plugins")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugins] is not a table")?;
-    if !plugins.contains_key("disabled") {
-        plugins.insert("disabled".to_string(), toml::Value::Array(vec![]));
-    }
-    let disabled = plugins
-        .get_mut("disabled")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugins].disabled is not an array")?;
-    let already = disabled
-        .iter()
-        .any(|v| v.as_str().is_some_and(|s| s == plugin_id));
-    if !already {
-        disabled.push(toml::Value::String(plugin_id.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+pub async fn add_disabled_plugin(plugin_id: &str) -> anyhow::Result<()> {
+    add_disabled_plugin_at(plugin_id, &user_config_file()).await
+}
+
+async fn add_disabled_plugin_at(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    edit_plugin_config_at(config_path, false, |table| {
+        push_unique_string(table, "plugins", "disabled", plugin_id)
+    })
+    .await
 }
 /// Remove a plugin from `[plugins].disabled` in `~/.grow/config.toml`.
 ///
 /// If the plugin is not in the disabled list, this is a no-op.
-pub fn remove_disabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::grow_home::grow_home().join("config.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?;
-    if let Some(plugins) = config
-        .as_table_mut()
-        .and_then(|t| t.get_mut("plugins"))
-        .and_then(|v| v.as_table_mut())
-        && let Some(disabled) = plugins.get_mut("disabled").and_then(|v| v.as_array_mut())
-    {
-        disabled.retain(|v| v.as_str().is_none_or(|s| s != plugin_id));
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+pub async fn remove_disabled_plugin(plugin_id: &str) -> anyhow::Result<()> {
+    remove_disabled_plugin_at(plugin_id, &user_config_file()).await
 }
-/// Add a plugin to `[plugin_cta].dismissed` in `~/.grow/config.toml`.
+
+async fn remove_disabled_plugin_at(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    edit_plugin_config_at(config_path, true, |table| {
+        retain_excluding_string(table, "plugins", "disabled", plugin_id);
+        Ok(())
+    })
+    .await
+}
+/// Add a plugin id to `[plugin_cta].dismissed` in `~/.grow/config.toml`.
 ///
 /// Creates the `[plugin_cta]` section and `dismissed` array if they don't exist.
 /// Deduplicates: if already present, this is a no-op.
-pub fn add_dismissed_plugin_cta(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::grow_home::grow_home().join("config.toml");
-    add_dismissed_plugin_cta_to_file(plugin_id, &config_path)
+pub async fn add_dismissed_plugin_cta(plugin_id: &str) -> anyhow::Result<()> {
+    add_dismissed_plugin_cta_to_file(plugin_id, &user_config_file()).await
 }
 /// Add a dismissed plugin CTA to a specific config file (path-parameterized for tests).
 #[doc(hidden)]
-pub fn add_dismissed_plugin_cta_to_file(
+pub async fn add_dismissed_plugin_cta_to_file(
     plugin_id: &str,
     config_path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugin_cta") {
-        table.insert(
-            "plugin_cta".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugin_cta = table
-        .get_mut("plugin_cta")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugin_cta] is not a table")?;
-    if !plugin_cta.contains_key("dismissed") {
-        plugin_cta.insert("dismissed".to_string(), toml::Value::Array(vec![]));
-    }
-    let dismissed = plugin_cta
-        .get_mut("dismissed")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugin_cta].dismissed is not an array")?;
-    let already = dismissed
-        .iter()
-        .any(|v| v.as_str().is_some_and(|s| s == plugin_id));
-    if !already {
-        dismissed.push(toml::Value::String(plugin_id.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+) -> anyhow::Result<()> {
+    edit_plugin_config_at(config_path, false, |table| {
+        push_unique_string(table, "plugin_cta", "dismissed", plugin_id)
+    })
+    .await
 }
 /// All plugin ids listed in `[plugin_cta].dismissed` in `~/.grow/config.toml`.
 ///
@@ -963,7 +949,7 @@ pub fn validate_hooks_path(path: &str) -> Result<(), Box<dyn std::error::Error>>
 ///
 /// Auto-enables all plugins in the repo so they are active after the next reload.
 /// Returns `(plugin_names, warnings)` for status messaging.
-pub fn post_install_plugin(repo_key: &str) -> (Vec<String>, Vec<String>) {
+pub async fn post_install_plugin(repo_key: &str) -> (Vec<String>, Vec<String>) {
     let registry = agent::plugins::InstallRegistry::load();
     let Some(repo) = registry.get_repo(repo_key) else {
         return (
@@ -974,7 +960,7 @@ pub fn post_install_plugin(repo_key: &str) -> (Vec<String>, Vec<String>) {
     let names: Vec<String> = repo.plugins.keys().cloned().collect();
     let mut warnings = Vec::new();
     for name in &names {
-        if let Err(e) = add_enabled_plugin(name) {
+        if let Err(e) = add_enabled_plugin(name).await {
             warnings.push(format!("auto-enable {name}: {e}"));
         }
     }
@@ -984,66 +970,33 @@ pub fn post_install_plugin(repo_key: &str) -> (Vec<String>, Vec<String>) {
 ///
 /// Used for project-scope plugins that are disabled by default.
 /// Deduplicates: if already present, this is a no-op.
-pub fn add_enabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::grow_home::grow_home().join("config.toml");
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugins") {
-        table.insert(
-            "plugins".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugins = table
-        .get_mut("plugins")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugins] is not a table")?;
-    if !plugins.contains_key("enabled") {
-        plugins.insert("enabled".to_string(), toml::Value::Array(Vec::new()));
-    }
-    let enabled = plugins
-        .get_mut("enabled")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugins].enabled is not an array")?;
-    let already = enabled
-        .iter()
-        .any(|v| v.as_str().is_some_and(|s| s == plugin_id));
-    if !already {
-        enabled.push(toml::Value::String(plugin_id.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+pub async fn add_enabled_plugin(plugin_id: &str) -> anyhow::Result<()> {
+    add_enabled_plugin_at(plugin_id, &user_config_file()).await
+}
+
+async fn add_enabled_plugin_at(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    edit_plugin_config_at(config_path, false, |table| {
+        push_unique_string(table, "plugins", "enabled", plugin_id)
+    })
+    .await
 }
 /// Remove a plugin from `[plugins].enabled` in `~/.grow/config.toml`.
-pub fn remove_enabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::grow_home::grow_home().join("config.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?;
-    if let Some(plugins) = config
-        .as_table_mut()
-        .and_then(|t| t.get_mut("plugins"))
-        .and_then(|v| v.as_table_mut())
-        && let Some(enabled) = plugins.get_mut("enabled").and_then(|v| v.as_array_mut())
-    {
-        enabled.retain(|v| v.as_str().is_none_or(|s| s != plugin_id));
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+pub async fn remove_enabled_plugin(plugin_id: &str) -> anyhow::Result<()> {
+    remove_enabled_plugin_at(plugin_id, &user_config_file()).await
+}
+
+async fn remove_enabled_plugin_at(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    edit_plugin_config_at(config_path, true, |table| {
+        retain_excluding_string(table, "plugins", "enabled", plugin_id);
+        Ok(())
+    })
+    .await
 }
 /// Add a hook path to `~/.grow/hooks-paths` (one path per line).
 ///

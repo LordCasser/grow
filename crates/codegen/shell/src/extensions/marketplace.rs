@@ -318,7 +318,7 @@ async fn handle_update(
 
     match update_result {
         Ok(result) => {
-            let (_, post_warnings) = crate::config::post_install_plugin(&result.repo_key);
+            let (_, post_warnings) = crate::config::post_install_plugin(&result.repo_key).await;
             for w in &post_warnings {
                 tracing::warn!("{w}");
             }
@@ -431,7 +431,7 @@ async fn handle_install(
         ) {
             Ok(installer::MarketplaceInstallResult::Installed { repo_key }) => {
                 // Auto-enable installed plugin so it's active after reload.
-                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key);
+                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key).await;
                 for w in &post_warnings {
                     tracing::warn!("{w}");
                 }
@@ -548,7 +548,7 @@ async fn handle_install(
         match install_result {
             Ok(installer::MarketplaceInstallResult::Installed { repo_key }) => {
                 // Auto-enable installed plugin so it's active after reload.
-                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key);
+                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key).await;
                 for w in &post_warnings {
                     tracing::warn!("{w}");
                 }

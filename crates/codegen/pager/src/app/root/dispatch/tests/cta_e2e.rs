@@ -1572,8 +1572,8 @@ mod cta_e2e {
         assert!(app.agents[&id].extensions_modal.is_none());
     }
 
-    #[test]
-    fn dismissed_plugin_suppressed_on_next_recompute() {
+    #[tokio::test]
+    async fn dismissed_plugin_suppressed_on_next_recompute() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.toml");
         let candidates = vec![figma_candidate()];
@@ -1590,6 +1590,7 @@ mod cta_e2e {
         );
 
         shell::config::add_dismissed_plugin_cta_to_file("figma", &config_path)
+            .await
             .expect("persist dismissal");
         let dismissed = shell::config::dismissed_plugin_ctas_in_file(&config_path);
         assert!(dismissed.contains("figma"));
@@ -1597,6 +1598,44 @@ mod cta_e2e {
         let hidden =
             plugin_cta_phase_for(true, true, &candidates, PROMPT, |id| dismissed.contains(id));
         assert_eq!(hidden, CtaPhase::Hidden);
+    }
+
+    /// A real mouse click on the dismiss hit rect must hide the CTA locally
+    /// and queue the disk persistence as an effect (not perform it inline).
+    #[test]
+    fn cta_dismiss_click_queues_persist_effect_and_hides_locally() {
+        use crate::app::agent_view::CtaPhase;
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
+            cta.phase = CtaPhase::Matched {
+                plugin_relative_path: "plugins/figma".into(),
+                name: "figma".into(),
+            };
+            cta.hit_connect.rect = Some(ratatui::layout::Rect::new(0, 0, 9, 1));
+            cta.hit_dismiss.rect = Some(ratatui::layout::Rect::new(10, 0, 3, 1));
+        }
+        let outcome = app.handle_input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(matches!(outcome, crate::app::root::InputOutcome::Changed));
+        let effects = std::mem::take(&mut app.pending_effects);
+        match effects.as_slice() {
+            [crate::app::actions::Effect::PersistDismissedPluginCta { plugin_id }] => {
+                assert_eq!(plugin_id, "figma");
+            }
+            other => panic!("expected PersistDismissedPluginCta, got {other:?}"),
+        }
+        let cta = &app.agents[&id].plugin_cta;
+        assert!(cta.dismissed.contains("figma"));
+        assert_eq!(cta.phase, CtaPhase::Hidden);
+        assert!(cta.hit_connect.rect.is_none());
+        assert!(cta.hit_dismiss.rect.is_none());
     }
 
     #[test]

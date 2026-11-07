@@ -266,6 +266,10 @@ async fn test_extract_total_tokens_from_mixed_updates() {
                 .as_ref()
                 .and_then(|m| m.get("totalTokens"))
                 .and_then(|v| v.as_u64()),
+            // Storage-only replay cache variant: cfg(any(test, feature =
+            // "test-support")) in session::storage. Integration targets build
+            // the library without cfg(test), so gate on the feature alone.
+            #[cfg(feature = "test-support")]
             SessionUpdate::ResponseReplayProjection(_) => None,
         })
         .unwrap_or(0);

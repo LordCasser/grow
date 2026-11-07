@@ -757,6 +757,24 @@ impl PendingStepControls {
         sequence
     }
 
+    /// Host-owned identity for a Sampling selection submitted by a native tool.
+    ///
+    /// One client namespace per actor incarnation keeps the long-lived receipt
+    /// registry bounded to one entry per incarnation instead of one per call.
+    /// Every operation still consumes the shared ordered sequence, including
+    /// attempts rejected before application, so the next attempt can never be
+    /// mistaken for a replay of an older terminal receipt.
+    fn next_native_sampling_intent(
+        &mut self,
+        control_epoch: &str,
+    ) -> crate::session::ControlIntent {
+        crate::session::ControlIntent {
+            client_id: format!("native-sampling:{control_epoch}"),
+            generation: 0,
+            sequence: self.next_sequence(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.sampling.is_none() && self.agent.is_none() && self.ordered.is_empty()
     }

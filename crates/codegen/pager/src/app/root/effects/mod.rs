@@ -2175,6 +2175,14 @@ pub(crate) fn execute(
                 TaskResult::CancelComplete
             });
         }
+        Effect::PersistDismissedPluginCta { plugin_id } => {
+            tasks.spawn(async move {
+                if let Err(e) = shell::config::add_dismissed_plugin_cta(&plugin_id).await {
+                    tracing::warn!(error = %e, "couldn't persist plugin CTA dismissal");
+                }
+                TaskResult::CancelComplete
+            });
+        }
         Effect::PersistSetting { key, value, rollback_value } => {
             tasks
                 .spawn(async move {
@@ -2515,12 +2523,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSkillsList { agent_id, session_id: _ } => {
+        Effect::FetchSkillsList { agent_id, session_id, binding_epoch } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
-                    "cwd": "."
+                    "sessionId": session_id.0.to_string()
                 });
                     let req = acp::ExtRequest::new(
                         "grow/skills/list",
@@ -2550,6 +2558,8 @@ pub(crate) fn execute(
                     };
                     TaskResult::SkillsListLoaded {
                         agent_id,
+                        session_id,
+                        binding_epoch,
                         result,
                     }
                 });
@@ -2596,14 +2606,14 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
+        Effect::ToggleSkill { agent_id, session_id, binding_epoch, skill_name, enabled } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
                     "name": skill_name,
                     "enabled": enabled,
-                    "cwd": ".",
+                    "sessionId": session_id.0.to_string(),
                 });
                     let req = acp::ExtRequest::new(
                         "grow/skills/toggle",
@@ -2643,6 +2653,8 @@ pub(crate) fn execute(
                     };
                     TaskResult::SkillsToggleDone {
                         agent_id,
+                        session_id,
+                        binding_epoch,
                         result,
                     }
                 });
@@ -4577,3 +4589,5 @@ fn decode_deep_search_response(raw: &str) -> Result<(Vec<shell::extensions::sess
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod skills_binding_tests;

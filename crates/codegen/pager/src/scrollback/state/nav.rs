@@ -387,7 +387,7 @@ impl ScrollbackState {
             && self.scroll_offset >= max_offset
             && self.appearance.scrollback.scroll.follow_by_overscroll
         {
-            self.follow_mode = true;
+            self.enable_follow();
         }
         self.bump_generation();
     }
@@ -528,6 +528,7 @@ impl ScrollbackState {
         // heights — leaving End/PageDown stuck above (or wedged past) the
         // measured bottom.
         self.follow_preserve_scroll = false;
+        self.follow_anchor = None;
 
         let range = self.visible_entry_range();
         if !range.is_empty() {
@@ -561,17 +562,29 @@ impl ScrollbackState {
     /// `scroll_to_entry_top`) but want new content to auto-scroll.
     pub fn enable_follow(&mut self) {
         self.follow_mode = true;
+        self.follow_anchor = if self.follow_preserve_scroll {
+            self.capture_follow_anchor()
+        } else {
+            None
+        };
     }
 
-    /// Enable follow mode, preserving the current scroll position for one frame.
+    fn capture_follow_anchor(&self) -> Option<(ScrollAnchor, usize)> {
+        let anchor = self.capture_scroll_anchor()?;
+        // Manual resize anchors clamp gap rows onto the preceding content.
+        // Prompt-less preserve may start in a gap; retain its existing absolute
+        // offset policy when the content anchor cannot represent that row.
+        (self.scroll_anchor_offset(anchor)? == self.scroll_offset)
+            .then_some((anchor, self.scroll_offset))
+    }
+
+    /// Enable follow mode, preserving the current content position until overflow.
     ///
-    /// Like `enable_follow`, but also sets `follow_preserve_scroll` so the
-    /// first `handle_follow_mode` call doesn't override the scroll position.
     /// Use after `scroll_to_entry_top` to keep the entry at the viewport top
-    /// until new content arrives.
+    /// while new content fills the space below it.
     pub fn enable_follow_with_preserve(&mut self) {
-        self.follow_mode = true;
         self.follow_preserve_scroll = true;
+        self.enable_follow();
     }
 
     /// Viewport policy for a turn this client just started.
@@ -1126,6 +1139,7 @@ impl ScrollbackState {
     /// - In AllTurns mode, only follow if at the bottom viewing running content
     pub fn handle_follow_mode(&mut self) {
         if !self.follow_mode {
+            self.follow_anchor = None;
             return;
         }
 
@@ -1165,40 +1179,36 @@ impl ScrollbackState {
             self.follow_mode,
             "follow_scroll_to_bottom called outside follow mode"
         );
-        // When follow_preserve_scroll is set, keep the current scroll position
-        // (e.g., prompt at top after dispatch_send_prompt) until new content
-        // pushes past what fits on screen. This creates a "page flip" effect
-        // where the prompt stays at the top and content fills in below.
-        //
-        // The flag is consumed when max_offset grows past scroll_offset,
-        // meaning there's more content below than fits in the viewport.
-        // No explicit invalidation needed — any user interaction (scroll,
-        // fold, turn nav) sets follow_mode=false, making this unreachable.
+        // Preserve the old past-end retirement rule before resolving the
+        // anchor: a shrink that stranded the pin must still resume tail follow.
         if self.follow_preserve_scroll {
+            let past_end = self.scroll_offset >= self.total_height;
+            if !past_end {
+                if let Some((anchor, _)) = self
+                    .follow_anchor
+                    .filter(|&(_, offset)| offset == self.scroll_offset)
+                    && let Some(offset) = self.scroll_anchor_offset(anchor)
+                {
+                    // Prefix estimates, exact measurements and structural
+                    // rebuilds all use the same content's CURRENT coordinates.
+                    self.scroll_offset = offset;
+                    self.follow_anchor = Some((anchor, offset));
+                } else {
+                    // Explicit scroll/fold positioning (or no usable layout
+                    // when preserve was armed) establishes the current pin.
+                    self.follow_anchor = self.capture_follow_anchor();
+                }
+            }
             let max_offset = self.max_scroll_offset();
-            if max_offset > self.scroll_offset {
-                // Content overflowed past the viewport. Start following.
+            if past_end || max_offset > self.scroll_offset {
                 self.follow_preserve_scroll = false;
-                self.scroll_offset = max_offset;
-            } else if self.scroll_offset >= self.total_height {
-                // Content SHRANK under the pin (e.g. a tall running tool
-                // demoted to a collapsed background task), stranding the
-                // pinned offset past the END of the transcript: the paint
-                // window contains no content, appended rows land ABOVE the
-                // window top, and max_offset may never grow past the stale
-                // pin — the live transcript freezes until a
-                // geometry-perturbing keypress. A legit page-flip pin always
-                // sits on the pinned entry's own top row (scroll_offset <
-                // total_height), so it is never clamped here; this pin's
-                // referent is gone — consume it and re-pin to the bottom.
-                self.follow_preserve_scroll = false;
+                self.follow_anchor = None;
                 self.scroll_offset = max_offset;
             }
-            // Otherwise: all new content still fits below the prompt. Stay put.
+            // Otherwise all content still fits below the anchored position.
         } else {
-            // Normal follow: scroll to bottom. Unconditionally —
-            // max_scroll_offset() is 0 when the content fits, which also
-            // heals an offset left wedged past the end by a shrink.
+            self.follow_anchor = None;
+            // Normal follow also heals an offset left past the end by a shrink.
             self.scroll_offset = self.max_scroll_offset();
         }
     }
@@ -1265,6 +1275,22 @@ mod tests {
         assert!(state.is_follow_mode());
         assert!(state.is_follow_preserve_scroll());
         assert_eq!(state.scroll_offset(), reading);
+    }
+
+    #[test]
+    fn follow_without_prompt_preserves_a_gap_row() {
+        let mut h = ScrollTestHarness::new(80, 9);
+        for i in 0..12 {
+            h.push_agent(&format!("history {i}"));
+        }
+        assert_eq!(h.state.get_cached_entry_height(0), Some(1));
+        let offset = h.max_offset();
+        assert_eq!(offset % 2, 1, "fixture: bottom starts on a spacer row");
+        h.state.set_scroll_offset(offset);
+        h.state.follow_new_turn(None, false);
+        h.frame();
+        assert_eq!(h.state.scroll_offset(), offset);
+        assert!(h.is_follow() && h.is_preserve());
     }
 
     #[test]

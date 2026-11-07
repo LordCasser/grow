@@ -1,0 +1,13 @@
+# Implementation handoff — 2026-11-06
+
+父已核：普通 Goal 自动接续静态链闭合；F1 failed ACK 导致永久 drive 占位的原假设不成立。`ensure_prefix_ready` 只给后台 join 10秒，sync fallback 无总deadline，不据此排除通用I/O停塞。late ask worker 三判别及14回归均通过，尚未复现用户原始stall。
+
+本次只修一个可定位状态转换：既有 resident actor 支持 idle+durable whole-work wait；pending human registry 有变化 watch，turn内等待已消费，idle run_session没有消费。外部 Peer跨cwdinquiry的审批guard可以独立于本sessionforeground存在；解除它时只有watch信号，可能使已有idlewait就绪。普通同sessionask未答时foreground仍busy，不用来捏造idle前提。
+
+所有者为Session run loop，不是GoalTracker或每个交互producer。在run_session初始化订阅 `pending_interactions.subscribe_changes()`；select观察变化后调用既有 `arbitrate_idle_wake`。沿已有顺序处理step controls、compaction、FIFO、notifications再Goal；不新增周期轮询、后台task、registry或多处notify。忙时不夺取foreground，终止fence和StoppedGoal保持。watch订阅需要在开始处理命令/状态检查前建立，避免漏掉检查与订阅间的变化。
+
+证据边界：既有truncation_recovery_tests对idle持久wait状态已有modulefixture；以此准备窄回归可接受，但不可标为实际用户整条FIFO链复现。新test优先使用run_session和真实inquiry审批入口，不能靠调用测试自己的watch→arbiter来证明runloop已经订阅。可在loop启动前seed合法durableplan，禁止把运行中的RegularTurn强置Idle。若完整real-event前提不成立，报告并停止prod实施，不把测试便利当真实入口。
+
+incoming inquiry UiNotice是UI投影；只有completedanswer且有answer_context才经reconcile生成InquiryAnswered模型通知。不能把goal_notification_evidence当作审批期间自然暴露inquiryid的证明。可用已知id的合法wait测试运行时承诺，而不宣称Agent会自行生成此等待。
+
+Coder Task Spec：一个模块的一项wake行为及其相关regression；write run_loop.rs、one new testfile+mod注册和本change记录。编译窗口由父明确转移后才运行，先真实old-red（保留合法前提）再最小fix及green。Review Plan：父亲查subscribe/first-observe排序、busy/terminating/closedwatch行为、actualrunloop及StoppedGoal/FIFO控制；按比例运行受影响Goal/planning回归，记录count与limits。用户原报告仅在证据闭合时标已修，不因这个模块bug闭合自动推导。

@@ -220,6 +220,16 @@ pub enum PromptCompletionKind {
     /// the real turn is still in flight) must be skipped. See
     /// `MvpAgent::prompt`'s short-circuit and `respond_removed_prompt`.
     RemovedFromQueue,
+    /// A session/prompt retry hit the canonical lifecycle of an already
+    /// recorded immutable input request. This is an observation of the
+    /// original identity and its current durable admission state, not a turn
+    /// terminal: the ACP layer must short-circuit before completion/usage/
+    /// roster/TurnCompleted side effects. `StopReason::EndTurn` only ends this
+    /// observation RPC.
+    AdmissionReplay {
+        input_id: String,
+        state: chat_state::InputState,
+    },
 }
 /// Successful prompt/turn payload returned to the ACP layer and local persistence.
 #[derive(Debug, Clone)]
@@ -622,6 +632,9 @@ pub enum SessionCommand {
         forward_to_gateway: bool,
         /// True when reconciliation restores a missing presentation projection.
         restored: bool,
+        /// Confirms the original Hook/persistence path and successful gateway
+        /// completion. Failure or a dropped receipt means publication is unconfirmed.
+        respond_to: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Apply subagent usage into parent ledgers. Acks `()` once chat-state
     /// applied (prompt-attributed or session-only). Drop the oneshot on failure
@@ -847,6 +860,19 @@ pub enum SessionCommand {
         trigger: Option<String>,
     },
     Shutdown,
+    /// Hand a subagent child's fully prepared terminal `SubagentResultEvent`
+    /// to its own session actor. The actor owns the final canonical append:
+    /// exactly like `Shutdown` it closes admission and drains the SessionEnd
+    /// lifecycle, then commits this event as the child Timeline's last normal
+    /// fact before the final persistence frontier. The ACK returns the precise
+    /// `TimelineRangeRef` or the typed Timeline write failure. Internal: issued
+    /// only by the subagent runner, never a public tool surface.
+    CommitSubagentResult {
+        result: chat_state::SubagentResultEvent,
+        deadline: tokio::time::Instant,
+        respond_to:
+            oneshot::Sender<Result<chat_state::TimelineRangeRef, chat_state::TimelineWriteError>>,
+    },
     AdvertiseCommands,
     GetWorkflowCatalogState {
         respond_to: oneshot::Sender<(bool, bool)>,

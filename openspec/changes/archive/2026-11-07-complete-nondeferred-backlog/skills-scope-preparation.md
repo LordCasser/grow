@@ -1,0 +1,22 @@
+# AC-03b：Skills作用域的待冻结接口
+
+本记录是初步实施准备，Skills行为尚未修改。父后续结合独立调用链调查和已归档cwd默认契约，已在[独立change设计](../2026-11-07-bind-skill-catalogs-to-session-snapshots/design.md)冻结接口：保各方法已有cwd规则，sessionId限定当前primary modal的精确owner，快照有效时点为owner确认时；Pager以sessionId/epoch隔离回包。下文候选中的“无session必须显式cwd”和child支持不再是待实现假设。
+
+## 当前事实
+
+- bootstrap的sessionregistry含session pluginDirs，runtime SkillManager基于它合成baseline；global latest不含那些roots。
+- `MvpAgent::ext_method` 对所有grow/skills/*另传sharedlatest；Skills各方法按请求cwd（不少缺省"."）做有界diskdiscovery，因而原生cwd与plugin快照可分属两个session。
+- Pager的FetchSkillsList和ToggleSkill effect已携带sessionId，却都在执行时丢弃它、发cwd:"."。结果TaskResult又只带agentId，回包可能越过同一view的换绑；WorkflowsList已有sessionId作为相邻正确对照。
+- SkillManager仍是模型/运行时slash的唯一owner；UI当前返回的是fresh磁盘候选（可含disabled/conditional），不应在本修复中改成只展示模型已激活条目。disabled配置目前是全局dedupkey政策，不应暗改成每session偏好。
+
+## 候选契约及需要确认的实施细节
+
+建议给现有Skills请求明确两种上下文：指定sessionId时从精确live handle取实际cwd及当前sessionpluginregistry（不接受另一个cwd覆盖）；显式cwd用于无session的磁盘检查，按该cwd与trust建立只读registry，不含任意sessionpluginDirs、不读取sharedlatest作回退。缺session/退休owner应明确失败，不能按同cwd任选另一个handle。globalconfig写入政策保留，sessionId只限定校验/结果发现上下文。
+
+原`SessionHandle::plugins_list()->Option<Arc<PluginRegistry>>`把空快照与cmd/rx失败混在一起。采用session上下文前需决定如何保留Result<Option<...>>：可以窄改现有accessor及plugins/list调用方，或用既有命令one-shot在resolver内部明确失败；不能把actor消失解释为native-only成功。由下次Shell任务核调用方后定稿，不在准备阶段新增公开类型。
+
+Pager只发送现有effect中的exactsessionId；回包保同sessionId与bindingepoch资格，避免换绑后把旧A目录列表写入B view。这是同一个catalog归属行为的调用方适配，但如两侧各需新逻辑则分别交付。toggle成功后原baseline刷新采用现session快照的既有owner，不把返回磁盘catalog塞成第二runtimeAvailableSkills。还需核直接ACPconfig操作的refresh交付是否属于AC-06，保持两项边界。
+
+## 后续可证伪验收
+
+真实MvpAgent/ACP建立A/B不同cwd与samecwd/differentpluginDirs，列表、toggle验证源和模型精确load身份分别来自对应snapshot；给sharedlatest污染值作反控。session不存在/退休不fallback；cwd-only freshdiscovery不含sessionroots且不写latest。samequalifiedname全局disabled生效范围按现政策验证，不能把B同步禁用误报串会话发现。Pager异步返回后换绑丢弃旧response。该准备不等于方案已实施；正式change须在共享接口定稿后建立delta，所列未知按实际消费链收窄。

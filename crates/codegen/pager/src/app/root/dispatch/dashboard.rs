@@ -1160,6 +1160,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let ask_user_question_allow_non_blocking_from_app = app.ask_user_question_allow_non_blocking;
     // Build the execution context from app-wide state. The dashboard
     // is session-less, so `session_id` is `None`. Offered session-less
     // opt-ins (`/model`, `/effort`, `/behavior`, `/permission`) and
@@ -1262,6 +1263,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 respect_manual_folds: respect_manual_folds_from_app,
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+                ask_user_question_allow_non_blocking: ask_user_question_allow_non_blocking_from_app,
             },
         };
         command.run(&mut ctx, invocation.args)

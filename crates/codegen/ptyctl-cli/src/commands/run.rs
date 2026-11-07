@@ -65,55 +65,81 @@ pub async fn run(
         linger,
     };
 
-    // Start the session.
+    // Retain the actual owner before moving the Session into the service.
     let session = PtySession::start(config).await?;
     let pid = session.status_basic().1;
+    let control = session.control_handle();
+    let server = server::build_router(session);
+    let mut registration = None;
 
-    // Build the HTTP server.
-    let router = server::build_router(session);
+    let result = async {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let listener = TcpListener::bind(addr)
+            .await
+            .context("failed to bind TCP listener")?;
+        let actual_port = listener
+            .local_addr()
+            .context("failed to get TCP listener address")?
+            .port();
 
-    // Bind to the requested port.
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = TcpListener::bind(addr)
-        .await
-        .context("failed to bind TCP listener")?;
-    let actual_addr = listener.local_addr()?;
-    let actual_port = actual_addr.port();
-
-    // Register named session.
-    if let Some(ref session_name) = name {
-        let info = registry::SessionInfo {
-            port: actual_port,
-            pid,
-            command: command.clone(),
-            cwd: cwd_str,
-            started_at: chrono::Utc::now().to_rfc3339(),
-        };
-        registry::register_session(session_name, &info)?;
-    }
-
-    if !quiet {
-        eprintln!("Command: {}", command.join(" "));
-        if let Some(p) = pid {
-            eprintln!("PID: {p}");
+        if let Some(session_name) = name {
+            let info = registry::SessionInfo {
+                port: actual_port,
+                pid,
+                command: command.clone(),
+                cwd: cwd_str,
+                started_at: chrono::Utc::now().to_rfc3339(),
+            };
+            let registered = (session_name, info);
+            let to_write = registered.clone();
+            // A competing registry transaction may block on the process lock.
+            tokio::task::spawn_blocking(move || {
+                registry::register_session(&to_write.0, &to_write.1)
+            })
+            .await
+            .context("session registration worker failed")??;
+            registration = Some(registered);
         }
-        eprintln!("Server listening on port: {actual_port}");
-    } else {
-        println!("{actual_port}");
-    }
 
-    // Serve until shutdown.
-    let shutdown_result = axum::serve(listener, router)
+        if !quiet {
+            eprintln!("Command: {}", command.join(" "));
+            if let Some(p) = pid {
+                eprintln!("PID: {p}");
+            }
+            eprintln!("Server listening on port: {actual_port}");
+        } else {
+            println!("{actual_port}");
+        }
+        server.serve(listener, &control).await
+    }
+    .await;
+
+    // Every post-spawn failure keeps its primary cause and settles this owner.
+    // SessionControl retains responsibility if settlement itself reports Err.
+    let result = match result {
+        Ok(()) => Ok(()),
+        Err(primary) => match control.stop().await {
+            Ok(()) => Err(primary),
+            Err(cleanup) => {
+                Err(primary.context(format!("owned-child cleanup also failed: {cleanup:#}")))
+            }
+        },
+    };
+
+    let cleanup = match registration {
+        Some((name, info)) => tokio::task::spawn_blocking(move || {
+            registry::unregister_session_if_current(&name, &info)
+        })
         .await
-        .context("HTTP server error");
-
-    // Clean up only a registration that still points at this server; a --force takeover may have replaced it.
-    if let Some(ref session_name) = name
-        && let Ok(info) = registry::lookup_session(session_name)
-        && info.port == actual_port
-    {
-        let _ = registry::unregister_session(session_name);
+        .context("session cleanup worker failed")
+        .and_then(|result| result),
+        None => Ok(()),
+    };
+    match (result, cleanup) {
+        (Ok(()), cleanup) => cleanup,
+        (Err(primary), Ok(())) => Err(primary),
+        (Err(primary), Err(cleanup)) => {
+            Err(primary.context(format!("registration cleanup also failed: {cleanup:#}")))
+        }
     }
-
-    shutdown_result
 }

@@ -1096,7 +1096,7 @@ impl SessionActor {
                         }
                     };
                     let path_str = resolved.to_string_lossy().to_string();
-                    match crate::config::add_plugin_path(&path_str) {
+                    match crate::config::add_plugin_path(&path_str).await {
                         Ok(()) => {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::PluginAdded {
@@ -1143,7 +1143,7 @@ impl SessionActor {
                         }
                     };
                     let path_str = resolved.to_string_lossy().to_string();
-                    match crate::config::remove_plugin_path(&path_str) {
+                    match crate::config::remove_plugin_path(&path_str).await {
                         Ok(()) => {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::PluginRemoved { success: true },
@@ -1205,7 +1205,7 @@ impl SessionActor {
                         ))
                         .await;
                     } else {
-                        match crate::plugin::install_plugin(&source, cwd) {
+                        match crate::plugin::install_plugin(&source, cwd).await {
                             Ok(outcome) => {
                                 for w in &outcome.warnings {
                                     tracing::warn!("{w}");

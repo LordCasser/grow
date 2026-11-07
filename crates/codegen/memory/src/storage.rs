@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 static MEMORY_GC_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use tools::util::grow_home::grow_home;
+use url::Url;
 
 /// Scope for a memory write operation.
 /// Write-operation scope. Distinct from `agent::config::MemoryScope` (agent memory dir).
@@ -661,11 +662,12 @@ fn is_ephemeral_cwd(cwd: &Path) -> bool {
 /// - `slug` is the repo or directory name, slugified (max 40 chars)
 /// - `hash8` is 8 hex chars from blake3 for uniqueness
 ///
-/// **Identity strategy:** Prefers git remote `org/repo` as the identity
-/// source — all clones, worktrees, and copies of the same repository
-/// resolve to the same memory directory regardless of filesystem path.
-/// Falls back to filesystem path when not inside a git repo or when
-/// no `origin` remote is configured.
+/// **Identity strategy:** Prefers the git remote's host-qualified canonical
+/// identity (see [`normalize_remote_url`]) — all clones, worktrees, and
+/// copies of the same repository resolve to the same memory directory
+/// regardless of filesystem path or transport spelling. Falls back to
+/// filesystem path when not inside a git repo or when no safely
+/// recognizable `origin` remote is configured.
 fn compute_workspace_hash(cwd: &Path) -> String {
     let identity = extract_repo_identity(cwd);
 
@@ -701,7 +703,7 @@ fn compute_workspace_hash(cwd: &Path) -> String {
     format!("{slug}-{hash8}")
 }
 
-/// Extract a normalized `org/repo` identifier from the git remote URL.
+/// Extract a host-qualified canonical identity from the git remote URL.
 ///
 /// Uses `git2` (already a dependency) to discover the repository from
 /// `cwd` and read the `origin` remote URL. Returns `None` if not a git
@@ -713,38 +715,89 @@ pub(crate) fn extract_repo_identity(cwd: &Path) -> Option<String> {
     normalize_remote_url(url)
 }
 
-/// Normalize a git remote URL to `org/repo` form.
+/// Normalize a git remote URL to a host-qualified canonical identity.
 ///
-/// Strips protocol prefix, host, and trailing `.git`:
-/// - `git@github.com:acme/widgets.git`       → `"acme/widgets"`
-/// - `https://github.com/acme/widgets.git`   → `"acme/widgets"`
-/// - `ssh://git@github.com/acme/widgets`     → `"acme/widgets"`
+/// Identity shape: `host[:port]/org/repo…` — a lowercase host (domains and
+/// IP literals alike), the port only when it differs from the scheme
+/// default, and the URL path with its case preserved. Transport scheme and
+/// credentials are excluded, so the usual spellings of one repository
+/// (`git@host:org/repo.git`, `ssh://git@host/org/repo`,
+/// `https://host/org/repo.git`) share one identity, while different hosts
+/// or non-default ports stay isolated.
+///
+/// Default ports (http 80, https 443, ssh 22, git 9418) are equivalent to
+/// no port. The path drops insignificant trailing slashes and then exactly
+/// one trailing `.git` (`repo.git.git` keeps its inner suffix).
+///
+/// Returns `None` for anything that cannot be safely identified — no scheme
+/// and not SCP-like, a scheme outside ssh/git/http/https, an empty host, a
+/// query or fragment, or a path without the `org/repo` shape — so callers
+/// fall back to the workspace-path identity instead of guessing a host.
+/// Local `file://` remotes therefore never merge with network ones.
 fn normalize_remote_url(url: &str) -> Option<String> {
-    let path = if let Some(colon_pos) = url.find(':') {
-        // SSH format: git@github.com:org/repo.git
-        if url[..colon_pos].contains('@') && !url[..colon_pos].contains('/') {
-            &url[colon_pos + 1..]
-        } else {
-            // HTTPS/SSH-with-scheme: https://github.com/org/repo.git
-            url.split("//")
-                .nth(1)
-                .and_then(|after_scheme| after_scheme.split_once('/'))
-                .map(|(_, path)| path)?
-        }
-    } else {
-        return None;
+    let parsed = match Url::parse(url) {
+        Ok(url) => url,
+        // SCP-like remotes (`git@host:org/repo.git`) carry no scheme;
+        // rewrite just enough for the same parser to accept them.
+        Err(_) => Url::parse(&scp_like_to_ssh_url(url)?).ok()?,
     };
 
-    let cleaned = path
-        .trim_end_matches(".git")
-        .trim_end_matches('/')
-        .trim_start_matches('/');
+    // Accept only schemes that unambiguously name a network git transport;
+    // local (`file`) and unknown transports fall back to the workspace-path
+    // identity instead of being merged into a network identity by guesswork.
+    let default_port = match parsed.scheme() {
+        "ssh" => 22,
+        "git" => 9418,
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
 
-    if cleaned.is_empty() || !cleaned.contains('/') {
+    // A query or fragment is not part of a recognizable git remote; treat
+    // the origin as unidentifiable rather than silently dropping it.
+    if parsed.query().is_some() || parsed.fragment().is_some() {
         return None;
     }
 
-    Some(cleaned.to_string())
+    // `ssh` and `git` are non-special schemes: hosts stay opaque (not
+    // case-folded) and explicit default ports are kept, while `http`/`https`
+    // already drop both during parsing. Folding here makes every spelling of
+    // one origin converge on the same identity.
+    let host = parsed.host_str()?.to_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let port = parsed.port().filter(|&p| p != default_port);
+
+    let path = parsed.path();
+    let trimmed = path.trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    // Strip exactly one leading slash: a path starting with an empty segment
+    // (`ssh://host//org/repo`, from `git@host:/org/repo`) is a different
+    // server path and must not merge with `git@host:org/repo`.
+    let repo_path = trimmed.strip_prefix('/')?;
+    if repo_path.is_empty() || !repo_path.contains('/') {
+        return None;
+    }
+
+    match port {
+        Some(port) => Some(format!("{host}:{port}/{repo_path}")),
+        None => Some(format!("{host}/{repo_path}")),
+    }
+}
+
+/// Rewrite the SCP-like remote syntax `user@host:path` as an SSH URL.
+///
+/// Git's SCP form carries no scheme and no port; only that minimal rewrite
+/// is done here so [`Url::parse`] can validate the authority and path.
+/// Anything else (bare paths, URLs that already carry a scheme) returns
+/// `None`.
+fn scp_like_to_ssh_url(remote: &str) -> Option<String> {
+    let (authority, path) = remote.split_once(':')?;
+    if !authority.contains('@') || authority.contains('/') {
+        return None;
+    }
+    Some(format!("ssh://{authority}/{path}"))
 }
 
 /// Generate a URL-safe slug from a string (e.g., first user message).
@@ -1421,10 +1474,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_normalize_ssh_url() {
+    fn test_normalize_scp_url() {
         assert_eq!(
             normalize_remote_url("git@github.com:acme/widgets.git"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1432,7 +1485,7 @@ mod tests {
     fn test_normalize_https_url() {
         assert_eq!(
             normalize_remote_url("https://github.com/acme/widgets.git"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1440,7 +1493,7 @@ mod tests {
     fn test_normalize_https_no_dot_git() {
         assert_eq!(
             normalize_remote_url("https://github.com/acme/widgets"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1448,7 +1501,7 @@ mod tests {
     fn test_normalize_ssh_with_scheme() {
         assert_eq!(
             normalize_remote_url("ssh://git@github.com/acme/widgets"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1456,7 +1509,7 @@ mod tests {
     fn test_normalize_self_hosted() {
         assert_eq!(
             normalize_remote_url("git@gitlab.example.com:team/project.git"),
-            Some("team/project".to_string())
+            Some("gitlab.example.com/team/project".to_string())
         );
     }
 
@@ -1479,7 +1532,7 @@ mod tests {
     fn test_normalize_deep_path() {
         assert_eq!(
             normalize_remote_url("https://github.com/acme/tools/sub.git"),
-            Some("acme/tools/sub".to_string())
+            Some("github.com/acme/tools/sub".to_string())
         );
     }
 
@@ -1490,6 +1543,156 @@ mod tests {
         let ssh_scheme = normalize_remote_url("ssh://git@github.com/acme/widgets.git");
         assert_eq!(ssh, https);
         assert_eq!(https, ssh_scheme);
+    }
+
+    #[test]
+    fn test_normalize_host_case_folded_for_non_special_schemes() {
+        // `ssh` and SCP forms are non-special: rust-url keeps their host
+        // opaque, so folding to the identity norm is this function's job.
+        assert_eq!(
+            normalize_remote_url("ssh://git@GitHub.COM/acme/widgets.git"),
+            Some("github.com/acme/widgets".to_string())
+        );
+        assert_eq!(
+            normalize_remote_url("git@GitHub.COM:acme/widgets.git"),
+            Some("github.com/acme/widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_different_hosts_stay_isolated() {
+        // WS-04: same org/repo on two hosts must not share one identity.
+        assert_eq!(
+            normalize_remote_url("https://github.com/acme/widgets.git"),
+            Some("github.com/acme/widgets".to_string())
+        );
+        assert_eq!(
+            normalize_remote_url("https://gitlab.internal/acme/widgets.git"),
+            Some("gitlab.internal/acme/widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_default_ports_equivalent_to_no_port() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@host:22/acme/widgets.git"),
+            normalize_remote_url("git@host:acme/widgets.git")
+        );
+        assert_eq!(
+            normalize_remote_url("https://host:443/acme/widgets.git"),
+            normalize_remote_url("https://host/acme/widgets.git")
+        );
+        assert_eq!(
+            normalize_remote_url("http://host:80/acme/widgets.git"),
+            normalize_remote_url("https://host/acme/widgets.git")
+        );
+        assert_eq!(
+            normalize_remote_url("git://host:9418/acme/widgets.git"),
+            normalize_remote_url("git://host/acme/widgets.git")
+        );
+    }
+
+    #[test]
+    fn test_normalize_nondefault_port_isolated() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@host:2222/acme/widgets.git"),
+            Some("host:2222/acme/widgets".to_string())
+        );
+        assert_eq!(
+            normalize_remote_url("https://host:8443/acme/widgets.git"),
+            Some("host:8443/acme/widgets".to_string())
+        );
+        assert_ne!(
+            normalize_remote_url("ssh://git@host:2222/acme/widgets.git"),
+            normalize_remote_url("git@host:acme/widgets.git"),
+            "a non-default port must never merge with the default-port spelling"
+        );
+    }
+
+    #[test]
+    fn test_normalize_credentials_excluded() {
+        assert_eq!(
+            normalize_remote_url("https://alice:secret@host/acme/widgets.git"),
+            normalize_remote_url("https://host/acme/widgets.git")
+        );
+        assert_eq!(
+            normalize_remote_url("ssh://deploy@host/acme/widgets.git"),
+            normalize_remote_url("ssh://git@host/acme/widgets.git")
+        );
+    }
+
+    #[test]
+    fn test_normalize_ipv6_hosts() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@[2001:db8::1]:2222/acme/widgets.git"),
+            Some("[2001:db8::1]:2222/acme/widgets".to_string())
+        );
+        assert_eq!(
+            normalize_remote_url("https://[2001:db8::1]/acme/widgets.git"),
+            Some("[2001:db8::1]/acme/widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_case_preserved() {
+        assert_eq!(
+            normalize_remote_url("https://host/Acme/Widgets.git"),
+            Some("host/Acme/Widgets".to_string())
+        );
+        assert_ne!(
+            normalize_remote_url("https://host/Acme/Widgets.git"),
+            normalize_remote_url("https://host/acme/widgets.git"),
+            "repository path case is significant"
+        );
+    }
+
+    #[test]
+    fn test_normalize_strips_exactly_one_trailing_git() {
+        // `trim_end_matches` used to strip repeatedly, folding `.git.git`.
+        assert_eq!(
+            normalize_remote_url("https://host/acme/widgets.git.git"),
+            Some("host/acme/widgets.git".to_string())
+        );
+        // Trailing slashes are insignificant; `.git` still strips once.
+        assert_eq!(
+            normalize_remote_url("https://host/acme/widgets.git/"),
+            Some("host/acme/widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_query_or_fragment_returns_none() {
+        assert_eq!(
+            normalize_remote_url("https://host/acme/widgets.git?token=1"),
+            None
+        );
+        assert_eq!(
+            normalize_remote_url("https://host/acme/widgets.git#frag"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_normalize_local_and_unknown_transports_return_none() {
+        assert_eq!(normalize_remote_url("file:///srv/git/widgets.git"), None);
+        assert_eq!(normalize_remote_url("ftp://host/acme/widgets.git"), None);
+        assert_eq!(normalize_remote_url("rsync://host/acme/widgets.git"), None);
+        // A `host:path` spelling without a user part is not SCP-like.
+        assert_eq!(normalize_remote_url("github.com:acme/widgets.git"), None);
+    }
+
+    #[test]
+    fn test_normalize_absolute_scp_path_stays_distinct() {
+        // `git@host:/org/repo` is a different server path from
+        // `git@host:org/repo` and must not silently merge with it.
+        assert_eq!(
+            normalize_remote_url("git@host:/acme/widgets.git"),
+            Some("host//acme/widgets".to_string())
+        );
+        assert_ne!(
+            normalize_remote_url("git@host:/acme/widgets.git"),
+            normalize_remote_url("git@host:acme/widgets.git")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1510,7 +1713,7 @@ mod tests {
             "should detect repo identity from git directory with origin remote"
         );
         let id = identity.unwrap();
-        assert_eq!(id, "example/demo");
+        assert_eq!(id, "github.com/example/demo");
     }
 
     #[test]
@@ -1518,6 +1721,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let identity = extract_repo_identity(tmp.path());
         assert_eq!(identity, None, "non-git directory should return None");
+    }
+
+    #[test]
+    fn test_extract_repo_identity_no_origin_returns_none() {
+        ensure_hermetic_git_on_path();
+        let tmp = TempDir::new().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        drop(repo);
+        assert_eq!(
+            extract_repo_identity(tmp.path()),
+            None,
+            "a git repo without an origin remote has no repo identity"
+        );
     }
 
     #[test]
@@ -1548,6 +1764,207 @@ mod tests {
         assert!(hash.contains('-'), "should have slug-hash format: {hash}");
         let parts: Vec<&str> = hash.rsplitn(2, '-').collect();
         assert_eq!(parts[0].len(), 8, "hash suffix should be 8 hex chars");
+    }
+
+    // -----------------------------------------------------------------------
+    // workspace directory selection via real git repos (Tier 2)
+    // -----------------------------------------------------------------------
+
+    /// Initialize a real repository with one commit and an `origin` remote.
+    fn repo_with_origin(path: &Path, origin: &str) -> git2::Repository {
+        ensure_hermetic_git_on_path();
+        let repo = git2::Repository::init(path).unwrap();
+        repo.remote("origin", origin).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        let blob = repo.blob(b"init\n").unwrap();
+        let tree_id = {
+            let mut builder = repo.treebuilder(None).unwrap();
+            builder.insert("README", blob, 0o100644).unwrap();
+            builder.write().unwrap()
+        };
+        {
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+        repo
+    }
+
+    #[test]
+    fn test_workspace_dir_shared_across_transports_clones_and_worktrees() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("memory");
+
+        let scp_repo = repo_with_origin(
+            &tmp.path().join("scp-clone"),
+            "git@github.com:acme/widgets.git",
+        );
+        repo_with_origin(
+            &tmp.path().join("https-clone"),
+            "https://github.com/acme/widgets.git",
+        );
+
+        // A linked worktree shares the main repository's origin config.
+        let worktree_path = tmp.path().join("linked-worktree");
+        scp_repo.worktree("wt", &worktree_path, None).unwrap();
+
+        let scp = MemoryStorage::new(&tmp.path().join("scp-clone"), Some(&root));
+        let https = MemoryStorage::new(&tmp.path().join("https-clone"), Some(&root));
+        let worktree = MemoryStorage::new(&worktree_path, Some(&root));
+
+        assert_eq!(scp.workspace_dir(), https.workspace_dir());
+        assert_eq!(scp.workspace_dir(), worktree.workspace_dir());
+        // Construction stays lazy: no directory is created here.
+        assert!(!scp.workspace_dir().exists());
+    }
+
+    #[test]
+    fn test_workspace_dir_isolated_across_hosts_and_nondefault_ports() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("memory");
+
+        repo_with_origin(
+            &tmp.path().join("github"),
+            "https://github.com/acme/widgets.git",
+        );
+        repo_with_origin(
+            &tmp.path().join("gitlab"),
+            "https://gitlab.internal/acme/widgets.git",
+        );
+        repo_with_origin(
+            &tmp.path().join("port"),
+            "ssh://git@gitlab.internal:2222/acme/widgets.git",
+        );
+
+        let github = MemoryStorage::new(&tmp.path().join("github"), Some(&root));
+        let gitlab = MemoryStorage::new(&tmp.path().join("gitlab"), Some(&root));
+        let port = MemoryStorage::new(&tmp.path().join("port"), Some(&root));
+
+        assert_ne!(github.workspace_dir(), gitlab.workspace_dir());
+        assert_ne!(gitlab.workspace_dir(), port.workspace_dir());
+        assert_ne!(github.workspace_dir(), port.workspace_dir());
+    }
+
+    #[test]
+    fn test_workspace_dir_explicit_default_port_matches_portless_origin() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("memory");
+        repo_with_origin(
+            &tmp.path().join("portless"),
+            "git@github.com:acme/widgets.git",
+        );
+        repo_with_origin(
+            &tmp.path().join("default-port"),
+            "ssh://git@github.com:22/acme/widgets.git",
+        );
+
+        assert_eq!(
+            MemoryStorage::new(&tmp.path().join("portless"), Some(&root)).workspace_dir(),
+            MemoryStorage::new(&tmp.path().join("default-port"), Some(&root)).workspace_dir()
+        );
+    }
+
+    #[test]
+    fn test_workspace_dir_credentials_do_not_select_directories() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("memory");
+        repo_with_origin(
+            &tmp.path().join("cred"),
+            "https://alice:secret@github.com/acme/widgets.git",
+        );
+        repo_with_origin(
+            &tmp.path().join("plain"),
+            "https://github.com/acme/widgets.git",
+        );
+
+        assert_eq!(
+            MemoryStorage::new(&tmp.path().join("cred"), Some(&root)).workspace_dir(),
+            MemoryStorage::new(&tmp.path().join("plain"), Some(&root)).workspace_dir()
+        );
+    }
+
+    #[test]
+    fn test_unrecognizable_origin_falls_back_to_workspace_path() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("memory");
+        let cwd = tmp.path().join("query-origin");
+        repo_with_origin(&cwd, "https://github.com/acme/widgets.git?token=1");
+
+        assert_eq!(
+            extract_repo_identity(&cwd),
+            None,
+            "an origin with a query is not safely identifiable"
+        );
+
+        // Falls back to the cwd-path identity: stable for the same path and
+        // distinct from any network identity computed above.
+        let storage = MemoryStorage::new(&cwd, Some(&root));
+        assert_eq!(
+            storage.workspace_dir(),
+            MemoryStorage::new(&cwd, Some(&root)).workspace_dir()
+        );
+        let name = storage
+            .workspace_dir()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let suffix = name.rsplitn(2, '-').next().unwrap();
+        assert_eq!(suffix.len(), 8, "hash suffix should be 8 hex chars: {name}");
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_old_hostless_directory_is_not_adopted_or_migrated() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("memory");
+
+        // A directory in the old hostless form holding durable content.
+        let legacy = root.join("widgets-1a2b3c4d");
+        std::fs::create_dir_all(legacy.join("sessions")).unwrap();
+        std::fs::write(legacy.join("MEMORY.md"), "# legacy sentinel").unwrap();
+        std::fs::write(
+            legacy.join("sessions").join("2026-01-01-old-sess1234.md"),
+            "legacy",
+        )
+        .unwrap();
+
+        let cwd = tmp.path().join("repo");
+        repo_with_origin(&cwd, "git@github.com:acme/widgets.git");
+        let storage = MemoryStorage::new(&cwd, Some(&root));
+        assert_ne!(
+            storage.workspace_dir(),
+            legacy,
+            "host-qualified identity must select a new directory"
+        );
+
+        // The temp-dir cwd is ephemeral by policy, so workspace writes are
+        // skipped here; `clear_workspace` is the destructive probe proving the
+        // legacy directory is not adopted as this workspace's directory.
+        assert!(storage.is_ephemeral());
+        assert!(!storage.clear_workspace().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("MEMORY.md")).unwrap(),
+            "# legacy sentinel"
+        );
+        assert!(
+            legacy
+                .join("sessions")
+                .join("2026-01-01-old-sess1234.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn test_new_flat_root_is_unchanged_by_repo_identity() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("flat-memory");
+        repo_with_origin(&tmp.path().join("repo"), "git@github.com:acme/widgets.git");
+        let storage = MemoryStorage::new_flat(&tmp.path().join("repo"), &root);
+        assert_eq!(storage.workspace_dir(), root);
+        assert_eq!(storage.global_dir(), root);
+        assert!(!storage.is_ephemeral());
     }
 
     // -----------------------------------------------------------------------

@@ -165,41 +165,58 @@ async fn read_agents_config_with_roots(
     grow_home: PathBuf,
 ) -> Vec<AgentConfigFile> {
     let cwd = PathBuf::from(working_directory);
-    let git_root = crate::repo::discover_worktree_root(&cwd).ok();
-    let gitignore = build_gitignore(git_root.as_deref());
     let mut home_roots = Vec::new();
     add_discovery_root(&mut home_roots, grow_home, true, HOME_RULES_DIRS);
 
     let mut project_roots = Vec::new();
-    if let Some(ref root) = git_root {
-        let mut current = Some(cwd.as_path());
-        let mut chain = Vec::new();
-        while let Some(dir) = current {
-            if !chain.iter().any(|existing| existing == dir) {
-                chain.push(dir.to_path_buf());
-            }
-            if dir == root.as_path() {
-                break;
-            }
-            current = dir.parent();
-        }
-        chain.reverse();
+    let mut gitignore = None;
+    let mut git_root: Option<PathBuf> = None;
+    // Bind rule discovery to the physical checkout: a cwd reached through an
+    // alias (symlink/case-insensitive path) must walk physical ancestors up to
+    // the root git discovery returns for that same physical path. Walking the
+    // alias's lexical parents can stop before the repo root and read config
+    // files from unrelated directories outside the checkout.
+    match dunce::canonicalize(&cwd) {
+        Ok(physical_cwd) => {
+            git_root = crate::repo::discover_worktree_root(&physical_cwd).ok();
+            gitignore = build_gitignore(git_root.as_deref());
+            if let Some(ref root) = git_root {
+                let mut current = Some(physical_cwd.as_path());
+                let mut chain = Vec::new();
+                while let Some(dir) = current {
+                    if !chain.iter().any(|existing| existing == dir) {
+                        chain.push(dir.to_path_buf());
+                    }
+                    if dir == root.as_path() {
+                        break;
+                    }
+                    current = dir.parent();
+                }
+                chain.reverse();
 
-        if let Some(user_dir) = workspace_user_dir {
-            let user_dir_canonical = canonical_for_dedup(user_dir);
-            if !chain
-                .iter()
-                .any(|dir| canonical_for_dedup(dir) == user_dir_canonical)
-            {
-                chain.insert(1.min(chain.len()), user_dir.to_path_buf());
+                if let Some(user_dir) = workspace_user_dir {
+                    let user_dir_canonical = canonical_for_dedup(user_dir);
+                    if !chain
+                        .iter()
+                        .any(|dir| canonical_for_dedup(dir) == user_dir_canonical)
+                    {
+                        chain.insert(1.min(chain.len()), user_dir.to_path_buf());
+                    }
+                }
+
+                for dir in chain {
+                    add_discovery_root(&mut project_roots, dir, true, PROJECT_RULES_DIRS);
+                }
+            } else {
+                add_discovery_root(&mut project_roots, physical_cwd, true, PROJECT_RULES_DIRS);
             }
         }
-
-        for dir in chain {
-            add_discovery_root(&mut project_roots, dir, true, PROJECT_RULES_DIRS);
+        Err(_) => {
+            // Canonicalization failed (e.g. cwd no longer exists): keep the
+            // no-repo single-cwd probe and never walk lexical parents, which
+            // could escape the checkout.
+            add_discovery_root(&mut project_roots, cwd, true, PROJECT_RULES_DIRS);
         }
-    } else {
-        add_discovery_root(&mut project_roots, cwd, true, PROJECT_RULES_DIRS);
     }
 
     let roots = home_roots
@@ -701,6 +718,129 @@ mod tests {
                 .map(|c| (&c.file_path, &c.content))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// External ancestor of an alias cwd must not contribute config files:
+    /// only the physical chain root→cwd appears, in that order. The alias
+    /// points directly at an internal repo subdir, so its lexical parent
+    /// chain contains no repo directory at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn alias_cwd_walks_physical_ancestors_to_repo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("sub")).unwrap();
+        init_git_repo(&repo);
+        fs::write(repo.join("AGENTS.md"), "# root instructions").unwrap();
+        fs::write(repo.join("sub/AGENTS.md"), "# sub instructions").unwrap();
+        // Config files OUTSIDE the checkout that a lexical parent walk would hit.
+        fs::write(tmp.path().join("AGENTS.md"), "# outside root AGENTS").unwrap();
+        fs::create_dir_all(tmp.path().join(".grow/rules")).unwrap();
+        fs::write(tmp.path().join(".grow/rules/outside.md"), "outside-rule").unwrap();
+
+        // External alias pointing at an internal subdir of the repo.
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(repo.join("sub"), &alias).unwrap();
+
+        let configs = read_agents_config_with_roots(
+            alias.to_str().unwrap(),
+            None,
+            tmp.path().join("unused-grow-home"),
+        )
+        .await;
+        let contents: Vec<&str> = configs.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(contents, vec!["# root instructions", "# sub instructions"]);
+        assert!(
+            configs.iter().all(|c| !c.content.contains("outside")),
+            "outside-repo config must not leak: {contents:?}"
+        );
+        // Displayed paths are physical (under the real repo path), not the alias.
+        assert!(
+            configs.iter().all(|c| c.file_path.contains("/repo/")),
+            "file_path must be physical: {:?}",
+            configs.iter().map(|c| &c.file_path).collect::<Vec<_>>()
+        );
+    }
+
+    /// Alias cwd must resolve through git2 discovery, not a std parent loop:
+    /// a plain directory (no .git) above the alias target is not a root, and
+    /// files outside the discovered root must never be picked up.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn alias_cwd_to_root_finds_root_config_only_from_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        fs::write(repo.join("AGENTS.md"), "# alias root marker").unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "# outside alias AGENTS").unwrap();
+
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&repo, &alias).unwrap();
+
+        let configs = read_agents_config_with_roots(
+            alias.to_str().unwrap(),
+            None,
+            tmp.path().join("unused-grow-home"),
+        )
+        .await;
+        let contents: Vec<&str> = configs.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(contents, vec!["# alias root marker"]);
+    }
+
+    /// A cwd inside a linked worktree reached via alias must use the worktree
+    /// root, not the main checkout root. `git worktree add` needs a valid HEAD,
+    /// so seed an empty-tree initial commit locally (test fixture only, not a
+    /// project git commit) without touching the shared `init_git_repo` helper.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn alias_cwd_in_linked_worktree_excludes_main_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        let repo = git2::Repository::init(&main).unwrap();
+        {
+            let sig = git2::Signature::now("ac04", "ac04@test").unwrap();
+            let tree_id = repo.treebuilder(None).unwrap().write().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+        fs::write(main.join("AGENTS.md"), "# main root AGENTS").unwrap();
+
+        let worktree = tmp.path().join("wt");
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["-c", "user.email=ac04@test", "-c", "user.name=ac04"])
+            .args(["worktree", "add"])
+            .arg(&worktree)
+            .args(["-b", "ac04-wt"])
+            .output()
+            .expect("git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::write(worktree.join("AGENTS.md"), "# worktree AGENTS").unwrap();
+
+        let alias = tmp.path().join("alias-wt");
+        std::os::unix::fs::symlink(&worktree, &alias).unwrap();
+
+        let configs = read_agents_config_with_roots(
+            alias.to_str().unwrap(),
+            None,
+            tmp.path().join("unused-grow-home"),
+        )
+        .await;
+        let contents: Vec<&str> = configs.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(contents, vec!["# worktree AGENTS"]);
     }
 
     /// CI pin: pattern must compile, and must hit the tag shapes we neutralize (not bare words).

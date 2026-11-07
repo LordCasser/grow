@@ -411,17 +411,17 @@ impl SessionHandle {
         }
         rx.await.ok()
     }
-    /// This session's plugin registry, including plugins loaded via `_meta.pluginDirs`.
-    pub async fn plugins_list(&self) -> Option<std::sync::Arc<agent::plugins::PluginRegistry>> {
+    /// This session's acknowledged plugin registry, including `_meta.pluginDirs`.
+    /// A successful `None` means no plugins; a closed owner/reply is an error.
+    pub async fn plugins_list(
+        &self,
+    ) -> anyhow::Result<Option<std::sync::Arc<agent::plugins::PluginRegistry>>> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
+        self.cmd_tx
             .send(SessionCommand::PluginsList { respond_to: tx })
-            .is_err()
-        {
-            return None;
-        }
-        rx.await.ok().flatten()
+            .map_err(|_| anyhow::anyhow!("session plugin snapshot command channel closed"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("session plugin snapshot reply channel closed"))
     }
     /// Snapshot the session's live MCP client pool for subagent inheritance.
     pub async fn snapshot_mcp_pool(&self) -> Option<crate::session::mcp_servers::SharedMcpPool> {

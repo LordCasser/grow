@@ -1083,6 +1083,7 @@ struct TestRunner {
     reconcile_mode: Arc<AtomicUsize>,
     reconcile_calls: Arc<AtomicUsize>,
     reconcile_release: Arc<tokio::sync::Notify>,
+    finalization_ready: Arc<AtomicBool>,
     panic_notified: Arc<AtomicBool>,
     panic_observations: Arc<parking_lot::Mutex<Vec<PanicObservation>>>,
     retirement_ready: Arc<AtomicBool>,
@@ -1341,6 +1342,14 @@ impl ChildRunner for TestRunner {
         completion_data
     }
 
+    fn finalization_ready(
+        &self,
+        _request: &SubagentRequest,
+        _completion_data: &Self::CompletionData,
+    ) -> bool {
+        self.finalization_ready.load(Ordering::SeqCst)
+    }
+
     fn reconcile(
         &self,
         _request: SubagentRequest,
@@ -1481,6 +1490,7 @@ struct Harness {
     reconcile_mode: Arc<AtomicUsize>,
     reconcile_calls: Arc<AtomicUsize>,
     reconcile_release: Arc<tokio::sync::Notify>,
+    finalization_ready: Arc<AtomicBool>,
     panic_notified: Arc<AtomicBool>,
     panic_observations: Arc<parking_lot::Mutex<Vec<PanicObservation>>>,
     retirement_ready: Arc<AtomicBool>,
@@ -1515,6 +1525,7 @@ fn harness_with_options(
     let reconcile_mode = Arc::new(AtomicUsize::new(0));
     let reconcile_calls = Arc::new(AtomicUsize::new(0));
     let reconcile_release = Arc::new(tokio::sync::Notify::new());
+    let finalization_ready = Arc::new(AtomicBool::new(true));
     let panic_notified = Arc::new(AtomicBool::new(false));
     let panic_observations = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let retirement_ready = Arc::new(AtomicBool::new(false));
@@ -1539,6 +1550,7 @@ fn harness_with_options(
                 reconcile_mode: reconcile_mode.clone(),
                 reconcile_calls: reconcile_calls.clone(),
                 reconcile_release: reconcile_release.clone(),
+                finalization_ready: finalization_ready.clone(),
                 panic_notified: panic_notified.clone(),
                 panic_observations: panic_observations.clone(),
                 retirement_ready: retirement_ready.clone(),
@@ -1568,6 +1580,7 @@ fn harness_with_options(
         reconcile_mode,
         reconcile_calls,
         reconcile_release,
+        finalization_ready,
         panic_notified,
         panic_observations,
         retirement_ready,
@@ -2097,6 +2110,172 @@ async fn public_wait_subagent_receives_terminal_result_after_finalization() {
         .expect("completion callback after successful waiter delivery");
     assert!(disposition.waiter_delivered);
     assert!(!disposition.should_surface);
+    harness.actor.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn not_ready_observations_skip_ticks_then_converge_within_original_period() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    harness.terminal_commit_ready.store(false, Ordering::SeqCst);
+    harness.reconcile_mode.store(1, Ordering::SeqCst);
+    harness.finalization_ready.store(false, Ordering::SeqCst);
+    let initial = complete_background_child(&mut harness, "readiness-gate").await;
+    assert!(initial.success && initial.finalization_pending);
+
+    // More than three not-ready observations: no attempt is admitted, so no
+    // reconcile is dispatched and no budget is spent.
+    for _ in 0..6 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        harness.reconcile_calls.load(Ordering::SeqCst),
+        0,
+        "not-ready observations never dispatch reconciliation"
+    );
+    let snapshot = harness
+        .backend
+        .query("readiness-gate", false, None)
+        .await
+        .expect("query is authorized")
+        .expect("pending finalization remains queryable");
+    assert!(matches!(
+        snapshot.status,
+        SubagentSnapshotStatus::FinalizationPending { .. }
+    ));
+
+    // Readiness observed within the original 30s period admits exactly one
+    // attempt (12s already elapsed above).
+    harness.finalization_ready.store(true, Ordering::SeqCst);
+    for _ in 0..8 {
+        if harness.reconcile_calls.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(harness.reconcile_calls.load(Ordering::SeqCst), 1);
+
+    harness.terminal_commit_ready.store(true, Ordering::SeqCst);
+    harness.reconcile_release.notify_one();
+    for _ in 0..20 {
+        let snapshot = harness
+            .backend
+            .query("readiness-gate", false, None)
+            .await
+            .expect("query is authorized");
+        if let Some(snapshot) = snapshot {
+            if matches!(
+                snapshot.status,
+                SubagentSnapshotStatus::Completed { ref output, .. } if output == "work"
+            ) {
+                harness.actor.abort();
+                return;
+            }
+        }
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    }
+    harness.actor.abort();
+    panic!("single admitted attempt commits the canonical completion");
+}
+
+#[tokio::test(start_paused = true)]
+async fn readiness_after_original_deadline_does_not_dispatch_until_new_turn() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    harness.terminal_commit_ready.store(false, Ordering::SeqCst);
+    harness.reconcile_mode.store(1, Ordering::SeqCst);
+    harness.finalization_ready.store(false, Ordering::SeqCst);
+    let initial = complete_background_child(&mut harness, "late-ready").await;
+    assert!(initial.success && initial.finalization_pending);
+
+    // Not-ready observations cross the original 30s deadline. The budget is
+    // untouched, so only the deadline can explain a later no-dispatch here.
+    for _ in 0..20 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        harness.reconcile_calls.load(Ordering::SeqCst),
+        0,
+        "not-ready observations dispatch nothing"
+    );
+
+    // Readiness arrives only after the original deadline: recovery ticks and
+    // read-only queries must not reopen the expired period.
+    harness.finalization_ready.store(true, Ordering::SeqCst);
+    for _ in 0..6 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+    let snapshot = harness
+        .backend
+        .query("late-ready", false, None)
+        .await
+        .expect("query is authorized")
+        .expect("expired finalization remains queryable");
+    assert!(matches!(
+        snapshot.status,
+        SubagentSnapshotStatus::FinalizationPending { .. }
+    ));
+    assert_eq!(
+        harness.reconcile_calls.load(Ordering::SeqCst),
+        0,
+        "readiness after the original deadline dispatches nothing; queries do not renew"
+    );
+
+    // The existing new-admission test proves an explicit next turn reopens a
+    // fresh recovery cycle; this test pins only the expired-period gate.
+    harness.actor.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_admitted_attempts_exhaust_budget_without_fourth_dispatch() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    harness.terminal_commit_ready.store(false, Ordering::SeqCst);
+    harness.reconcile_mode.store(1, Ordering::SeqCst);
+    let initial = complete_background_child(&mut harness, "budget-cap").await;
+    assert!(initial.success && initial.finalization_pending);
+
+    for attempt in 1..=3usize {
+        for _ in 0..20 {
+            if harness.reconcile_calls.load(Ordering::SeqCst) >= attempt {
+                break;
+            }
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            harness.reconcile_calls.load(Ordering::SeqCst),
+            attempt,
+            "attempt {attempt} is admitted"
+        );
+        harness.reconcile_release.notify_one();
+        // Let the uncommitted owner return before the next tick.
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+
+    // All three attempts failed their commit; recovery ticks keep observing
+    // readiness as ready but the exhausted budget admits no fourth dispatch.
+    for _ in 0..6 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        harness.reconcile_calls.load(Ordering::SeqCst),
+        3,
+        "no fourth attempt after three admitted failures"
+    );
+    let snapshot = harness
+        .backend
+        .query("budget-cap", false, None)
+        .await
+        .expect("query is authorized")
+        .expect("pending responsibility is preserved");
+    assert!(matches!(
+        snapshot.status,
+        SubagentSnapshotStatus::FinalizationPending { .. }
+    ));
     harness.actor.abort();
 }
 

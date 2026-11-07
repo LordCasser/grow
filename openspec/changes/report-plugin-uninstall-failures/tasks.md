@@ -1,0 +1,5 @@
+- [x] 核共享/ACP/CLI卸载路径，冻结副作用、确认与失败语义。
+- [ ] 隔离旧红，实施共享application与ACP/CLI错误消费。
+- [ ] 完成删除失败、坏registry、save部分完成及正常/确认/keep-data回归。
+- [ ] 父及独立数据完整性review、最终插件产品链验收。
+- [ ] 同步开发说明/backlog，strict/archive及all/archived复核。

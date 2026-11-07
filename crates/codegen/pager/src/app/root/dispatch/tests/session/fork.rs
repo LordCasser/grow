@@ -402,6 +402,7 @@ fn open_fork_question_refuses_when_existing_question_is_open() {
             id: None,
         }],
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let stashed = app.agents.get_mut(&AgentId(0)).unwrap().prompt.stash();
@@ -1015,6 +1016,7 @@ fn translate_local_submit_yes_returns_worktree_true_action() {
             })
             .collect(),
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let mut state = QuestionViewState::new(
@@ -1058,6 +1060,7 @@ fn translate_local_submit_no_returns_worktree_false_action() {
             })
             .collect(),
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let mut state = QuestionViewState::new(
@@ -1099,6 +1102,7 @@ fn translate_local_submit_always_returns_persist_always_for_fork() {
             })
             .collect(),
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let mut state = QuestionViewState::new(
@@ -1138,6 +1142,7 @@ fn translate_local_submit_never_returns_persist_never_for_fork() {
             })
             .collect(),
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     let mut state = QuestionViewState::new(
@@ -1181,6 +1186,7 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
             id: None,
         }],
         multi_select: Some(false),
+        recommended_option: None,
         id: None,
     };
     app.agents.get_mut(&id).unwrap().replace_question_view(Some(

@@ -370,6 +370,7 @@ pub(super) fn extensions_modal_tab_fetches(
     modal: &mut crate::views::extensions_modal::ExtensionsModalState,
     agent_id: AgentId,
     session_id: acp::SessionId,
+    binding_epoch: u32,
 ) -> Vec<Effect> {
     let mut effects = vec![
         Effect::FetchHooksList {
@@ -387,6 +388,7 @@ pub(super) fn extensions_modal_tab_fetches(
         Effect::FetchSkillsList {
             agent_id,
             session_id: session_id.clone(),
+            binding_epoch,
         },
         Effect::FetchWorkflowsList {
             agent_id,
@@ -453,7 +455,7 @@ pub(super) fn dispatch_open_extensions_modal(
     let Some(modal) = agent.extensions_modal.as_mut() else {
         return vec![];
     };
-    extensions_modal_tab_fetches(modal, id, session_id)
+    extensions_modal_tab_fetches(modal, id, session_id, agent.session_binding_epoch)
 }
 
 /// Open the agents modal, showing all agent definitions.
@@ -772,10 +774,14 @@ pub(super) fn handle_marketplace_list_loaded(
 pub(super) fn handle_skills_toggle_done(
     app: &mut AppView,
     agent_id: AgentId,
+    session_id: acp::SessionId,
+    binding_epoch: u32,
     result: Result<Vec<tools::implementations::skills::types::SkillInfo>, String>,
 ) -> Vec<Effect> {
     use crate::views::extensions_modal::TabDataState;
     if let Some(agent) = app.agents.get_mut(&agent_id)
+        && agent.session.session_id.as_ref() == Some(&session_id)
+        && agent.session_binding_epoch == binding_epoch
         && let Some(ref mut modal) = agent.extensions_modal
     {
         modal.pending_action = None;

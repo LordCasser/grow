@@ -10,10 +10,11 @@ pub(super) static DISCOVERY_SLOTS: std::sync::LazyLock<std::sync::Arc<tokio::syn
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
 pub(super) const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Generic params for methods that only need an optional `cwd`.
+/// Context params for methods with the existing default cwd of `.`.
 #[derive(Debug)]
 struct CwdParams {
     cwd: Option<String>,
+    session_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for CwdParams {
@@ -25,7 +26,13 @@ impl<'de> Deserialize<'de> for CwdParams {
             fields.remove("cwd").unwrap_or(serde_json::Value::Null),
         )
         .map_err(serde::de::Error::custom)?;
-        Ok(Self { cwd })
+        let session_id = serde_json::from_value::<Option<String>>(
+            fields
+                .remove("sessionId")
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self { cwd, session_id })
     }
 }
 
@@ -37,6 +44,9 @@ pub struct SkillsAddRequest {
     /// Working directory for skill discovery context.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Exact resident primary owning this discovery context.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +72,9 @@ pub struct SkillsRemoveRequest {
     /// Working directory for skill discovery context.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Exact resident primary owning this discovery context.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,13 +107,17 @@ pub struct SkillsToggleRequest {
     /// Working directory for skill discovery context.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Exact resident primary owning this discovery context.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsListRequest {
-    /// Working directory for skill discovery context.
-    pub cwd: String,
+    /// Required for disk discovery when sessionId is absent.
+    pub cwd: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,23 +148,96 @@ pub struct SkillsConfigResponse {
     pub skills: Vec<SkillInfo>,
 }
 
-/// Reload skills without running filesystem scans on the async request thread.
-#[tracing::instrument(skip_all, fields(cwd))]
-async fn reload_skills(
-    cwd: &str,
-    plugin_registry: Option<&agent::plugins::PluginRegistry>,
-) -> Result<Vec<SkillInfo>, acp::Error> {
-    let cwd = cwd.to_owned();
-    let registry = plugin_registry.cloned();
+#[derive(Clone)]
+enum SkillPlugins {
+    Owner(Option<std::sync::Arc<agent::plugins::PluginRegistry>>),
+    Disk(agent::plugins::SharedPluginRegistryHandle),
+}
+
+struct SkillContext {
+    cwd: String,
+    plugins: SkillPlugins,
+}
+
+/// Resolve the exact owner before any global configuration mutation. Its
+/// acknowledged snapshot is frozen for this request; scanning needs no lease.
+async fn resolve_skill_context(
+    agent: &crate::agent::MvpAgent,
+    cwd: Option<&str>,
+    session_id: Option<&str>,
+    require_cwd: bool,
+) -> Result<SkillContext, acp::Error> {
+    if let Some(session_id) = session_id {
+        if session_id.is_empty() {
+            return Err(acp::Error::invalid_params().data("sessionId must not be empty"));
+        }
+        if cwd.is_some() {
+            return Err(
+                acp::Error::invalid_params().data("sessionId and cwd are mutually exclusive")
+            );
+        }
+        let id = acp::SessionId::new(session_id.to_owned());
+        let handle = agent
+            .session_handle_waiting_for_load(&id)
+            .await
+            .ok_or_else(|| {
+                acp::Error::internal_error()
+                    .data(format!("unknown primary session id: {session_id}"))
+            })?;
+        let registry = handle.plugins_list().await.map_err(|error| {
+            acp::Error::internal_error().data(format!(
+                "Cannot read skill plugin snapshot for session {session_id}: {error}"
+            ))
+        })?;
+        return Ok(SkillContext {
+            cwd: handle
+                .tool_context
+                .cwd
+                .as_path()
+                .to_string_lossy()
+                .into_owned(),
+            plugins: SkillPlugins::Owner(registry),
+        });
+    }
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None if require_cwd => {
+            return Err(acp::Error::invalid_params().data("cwd is required without sessionId"));
+        }
+        None => ".",
+    };
+    Ok(SkillContext {
+        cwd: cwd.to_owned(),
+        plugins: SkillPlugins::Disk(agent.plugin_registry_handle.clone()),
+    })
+}
+
+/// Registry construction and filesystem scans share the bounded worker.
+#[tracing::instrument(skip_all)]
+async fn reload_skills(context: &SkillContext) -> Result<Vec<SkillInfo>, acp::Error> {
+    let cwd = context.cwd.clone();
+    let plugins = context.plugins.clone();
     let runtime = tokio::runtime::Handle::current();
     run_bounded_discovery(
         DISCOVERY_SLOTS.clone(),
         DISCOVERY_TIMEOUT,
         "skill discovery",
         move || {
+            let registry = match plugins {
+                SkillPlugins::Owner(registry) => registry,
+                SkillPlugins::Disk(handle) => {
+                    let cwd = std::path::Path::new(&cwd);
+                    let config =
+                        crate::config::resolve_effective_plugins_config(cwd).to_discovery_config();
+                    let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
+                    // Pure construction retains process CLI dirs, excludes all
+                    // session roots and never publishes a shared latest value.
+                    handle.build_for_cwd(cwd, &config, &[], project_trusted)
+                }
+            };
             runtime.block_on(async {
                 let config = cli_config::load_config().await.skills;
-                list_skills_with_plugins(Some(&cwd), &config, registry.as_ref()).await
+                list_skills_with_plugins(Some(&cwd), &config, registry.as_deref()).await
             })
         },
     )
@@ -369,12 +459,14 @@ fn extra_skill_dirs_from_config() -> Vec<String> {
 pub async fn handle(
     agent: &crate::agent::mvp_agent::MvpAgent,
     args: &acp::ExtRequest,
-    plugin_registry: Option<&agent::plugins::PluginRegistry>,
 ) -> ExtResult {
     match args.method.as_ref() {
         "grow/skills/add" => {
-            let req: SkillsAddRequest = serde_json::from_str(args.params.get())?;
-            let cwd = req.cwd.as_deref().unwrap_or(".");
+            let req: SkillsAddRequest = super::parse_params(args)?;
+            let context =
+                resolve_skill_context(agent, req.cwd.as_deref(), req.session_id.as_deref(), false)
+                    .await?;
+            let cwd = context.cwd.as_str();
             validate_skill_request_cwd(cwd).await?;
 
             // Resolve to absolute path so config entries work from any cwd.
@@ -396,7 +488,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry)
+            let skills = reload_skills(&context)
                 .await
                 .map_err(saved_skill_reload_error)?;
             let added_count = count_skills_from(&skills, std::path::Path::new(&resolved));
@@ -424,8 +516,11 @@ pub async fn handle(
         }
 
         "grow/skills/remove" => {
-            let req: SkillsRemoveRequest = serde_json::from_str(args.params.get())?;
-            let cwd = req.cwd.as_deref().unwrap_or(".");
+            let req: SkillsRemoveRequest = super::parse_params(args)?;
+            let context =
+                resolve_skill_context(agent, req.cwd.as_deref(), req.session_id.as_deref(), false)
+                    .await?;
+            let cwd = context.cwd.as_str();
             validate_skill_request_cwd(cwd).await?;
 
             // Resolve so relative/tilde paths match what was saved by add.
@@ -446,7 +541,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry)
+            let skills = reload_skills(&context)
                 .await
                 .map_err(saved_skill_reload_error)?;
             let total = skills.len();
@@ -478,7 +573,13 @@ pub async fn handle(
 
         "grow/skills/reset" => {
             let params: CwdParams = super::parse_params(args)?;
-            let cwd = params.cwd.as_deref().unwrap_or(".");
+            let context = resolve_skill_context(
+                agent,
+                params.cwd.as_deref(),
+                params.session_id.as_deref(),
+                false,
+            )
+            .await?;
 
             if let Err(e) = cli_config::update_config(|cfg| {
                 cfg.skills = SkillsConfig::default();
@@ -490,7 +591,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry)
+            let skills = reload_skills(&context)
                 .await
                 .map_err(saved_skill_reload_error)?;
             let message = "Custom skills config reset".to_string();
@@ -499,8 +600,11 @@ pub async fn handle(
         }
 
         "grow/skills/list" => {
-            let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
-            let skills = reload_skills(&req.cwd, plugin_registry).await?;
+            let req: SkillsListRequest = super::parse_params(args)?;
+            let context =
+                resolve_skill_context(agent, req.cwd.as_deref(), req.session_id.as_deref(), true)
+                    .await?;
+            let skills = reload_skills(&context).await?;
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 
@@ -528,13 +632,20 @@ pub async fn handle(
 
         "grow/skills/config" => {
             let params: CwdParams = super::parse_params(args)?;
-            let cwd = params.cwd.as_deref().unwrap_or(".");
+            let context = resolve_skill_context(
+                agent,
+                params.cwd.as_deref(),
+                params.session_id.as_deref(),
+                false,
+            )
+            .await?;
+            let cwd = context.cwd.as_str();
 
             let config = cli_config::load_config().await.skills;
             let paths = config.paths.clone();
             let ignore = config.ignore.clone();
 
-            let skills = reload_skills(cwd, plugin_registry).await?;
+            let skills = reload_skills(&context).await?;
             let total_skills = skills.len();
 
             let source_cwd = cwd.to_owned();
@@ -599,11 +710,13 @@ pub async fn handle(
         }
 
         "grow/skills/toggle" => {
-            let req: SkillsToggleRequest = serde_json::from_str(args.params.get())?;
-            let cwd = req.cwd.as_deref().unwrap_or(".");
+            let req: SkillsToggleRequest = super::parse_params(args)?;
+            let context =
+                resolve_skill_context(agent, req.cwd.as_deref(), req.session_id.as_deref(), false)
+                    .await?;
 
             // Validate the skill name exists before modifying config.
-            let current_skills = reload_skills(cwd, plugin_registry).await?;
+            let current_skills = reload_skills(&context).await?;
             if !current_skills.iter().any(|s| s.dedup_key() == req.name) {
                 return super::to_ext_response(Err::<SkillsListResponse, _>(anyhow::anyhow!(
                     "Skill '{}' not found",
@@ -678,7 +791,7 @@ mod tests {
     fn test_list_request() {
         let json = r#"{"cwd": "/project"}"#;
         let req: SkillsListRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.cwd, "/project");
+        assert_eq!(req.cwd.as_deref(), Some("/project"));
     }
 
     #[test]
@@ -950,6 +1063,9 @@ mod tests {
             r#"["/project"]"#,
             r#"{"cwd":1}"#,
             r#"{"cwd":false}"#,
+            r#"{"sessionId":1}"#,
+            r#"{"sessionId":false}"#,
+            r#"{"sessionId":[]}"#,
         ] {
             let error = super::super::parse_params_str::<CwdParams>(raw).unwrap_err();
             assert_eq!(error.code, acp::Error::invalid_params().code, "{raw}");

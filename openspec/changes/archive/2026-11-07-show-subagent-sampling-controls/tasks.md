@@ -1,0 +1,6 @@
+- [x] 核对工具准入、closed-Step应用、通信工具行与child控制反馈的当前路径，明确queued与applied边界。
+- [x] Shell为宿主发起的子Sampling请求接入既有控制身份/回执，验证busy应用、effort、no-op、supersede、失败与hydration（有界模块验收见verification-child-control.md；原生自然收尾三场景由独立夹具change补验）。
+- [x] Pager为set_subagent_model提供原行Dispatching→Queued/Failed紧凑投影，验证身份、完整参数与replay（父实际7项及tracker180项通过，见verification-parent-row.md）。
+- [x] 修复真实PTY发现的child启动顺序：父Spawned发布回执先于child控制snapshot/首prompt，保未知epoch过滤并完成阻塞/失败控制（publication回执4项及原顺序18项；bootstrap新5场景、原native21和Subagent模块252项均通过，父已审查；真实CLI链另验）。
+- [x] 父核最终diff与实际跨模块链路、原模型控制回归，更新开发说明和验证记录（freshbuild v10 原exact PTY 1pass，正常退出0；父亲读三帧、canonical/replay和next-wire/effort证据，源码/产物冻结相同）。
+- [x] 严格规范校验、归档并执行全量/archived校验（归档前21/0、归档后全量20/0；首次archived仅本最终任务未勾选，完成任务状态后复查，结果见verification.md）。

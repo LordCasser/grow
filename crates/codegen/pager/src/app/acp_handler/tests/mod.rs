@@ -1809,6 +1809,7 @@ mod turn_completion;
 mod interjection;
 mod session_routing;
 mod plugins;
+mod skills_binding;
 mod subagents;
 mod subagent_reclamation;
 mod subagent_reclamation_background;

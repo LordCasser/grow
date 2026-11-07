@@ -206,7 +206,7 @@ fn write_hidden_state_with(
 }
 
 fn announcements_state_path() -> PathBuf {
-    tools::util::grow_home::grow_home().join("announcements.json")
+    config::grow_home().join("announcements.json")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,4 @@
+- [x] Gate the `SessionUpdate::ResponseReplayProjection` match arm in `test_grow_session_update.rs` with `#[cfg(feature = "test-support")]`; keep Acp/Grow `totalTokens` assertions unchanged.
+- [x] Run `rustfmt --check` on the test file, `git diff --check`, and strict OpenSpec validation for this change; record results in verification.md.
+- [x] Run `cargo +1.93.1 test --locked --offline -p shell --test test_grow_session_update` on default features and record the outcome in verification.md.
+- [x] Run the same target with `--features test-support` and record the outcome in verification.md.

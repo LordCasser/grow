@@ -870,6 +870,16 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "toolset.ask_user_question.allow_non_blocking" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "toolset.ask_user_question.allow_non_blocking", "Bool", &value,
+                ));
+            };
+            shell::util::config::set_ask_user_question_allow_non_blocking(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "toolset.ask_user_question.timeout_enabled" => {
             let SettingValue::Bool(b) = value else {
                 return Err(

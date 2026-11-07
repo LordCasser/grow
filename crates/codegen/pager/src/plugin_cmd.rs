@@ -236,15 +236,15 @@ fn trust_prompt(subject: &str, source_arg: &str) -> String {
 pub async fn run(args: PluginArgs) -> Result<()> {
     match args.command {
         PluginCommand::List { json, available } => cmd_list(json, available),
-        PluginCommand::Install { source, trust } => cmd_install(&source, trust),
+        PluginCommand::Install { source, trust } => cmd_install(&source, trust).await,
         PluginCommand::Uninstall {
             name,
             confirm,
             keep_data,
         } => cmd_uninstall(&name, confirm, keep_data),
         PluginCommand::Update { name } => cmd_update(name.as_deref()),
-        PluginCommand::Enable { name } => cmd_enable(&name),
-        PluginCommand::Disable { name } => cmd_disable(&name),
+        PluginCommand::Enable { name } => cmd_enable(&name).await,
+        PluginCommand::Disable { name } => cmd_disable(&name).await,
         PluginCommand::Details { name } => cmd_details(&name),
         PluginCommand::Validate { path } => cmd_validate(&path),
         PluginCommand::Tag {
@@ -406,9 +406,9 @@ fn log_plugin_installed(
     });
 }
 
-fn cmd_install(source: &str, trust: bool) -> Result<()> {
+async fn cmd_install(source: &str, trust: bool) -> Result<()> {
     if let Some(mref) = plugin_marketplace::install_resolve::parse_marketplace_ref(source) {
-        return cmd_install_marketplace(source, &mref, trust);
+        return cmd_install_marketplace(source, &mref, trust).await;
     }
 
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -423,7 +423,7 @@ fn cmd_install(source: &str, trust: bool) -> Result<()> {
         std::process::exit(1);
     }
 
-    match plugin::install_plugin(source, &cwd) {
+    match plugin::install_plugin(source, &cwd).await {
         Ok(outcome) => {
             for w in &outcome.warnings {
                 tracing::warn!("{w}");
@@ -445,7 +445,7 @@ fn cmd_install(source: &str, trust: bool) -> Result<()> {
     }
 }
 
-fn cmd_install_marketplace(
+async fn cmd_install_marketplace(
     source: &str,
     mref: &plugin_marketplace::install_resolve::MarketplaceRef,
     trust: bool,
@@ -466,7 +466,7 @@ fn cmd_install_marketplace(
         std::process::exit(1);
     }
 
-    match plugin::install_marketplace_plugin(&mref.name, mref.qualifier.as_deref()) {
+    match plugin::install_marketplace_plugin(&mref.name, mref.qualifier.as_deref()).await {
         Ok(outcome) => {
             for w in &outcome.warnings {
                 tracing::warn!("{w}");
@@ -586,7 +586,7 @@ fn cmd_update(name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_enable(name: &str) -> Result<()> {
+async fn cmd_enable(name: &str) -> Result<()> {
     let registry = InstallRegistry::load();
     if registry.find_plugin(name).is_none() {
         bail!(
@@ -594,16 +594,17 @@ fn cmd_enable(name: &str) -> Result<()> {
                Run `grow plugin list` to see installed plugins."
         );
     }
-    if let Err(e) = shell::config::remove_disabled_plugin(name) {
+    if let Err(e) = shell::config::remove_disabled_plugin(name).await {
         tracing::warn!("failed to remove from disabled list: {e}");
     }
     shell::config::add_enabled_plugin(name)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {e}"))?;
     println!("Enabled plugin: {name}");
     Ok(())
 }
 
-fn cmd_disable(name: &str) -> Result<()> {
+async fn cmd_disable(name: &str) -> Result<()> {
     let registry = InstallRegistry::load();
     if registry.find_plugin(name).is_none() {
         bail!(
@@ -611,10 +612,11 @@ fn cmd_disable(name: &str) -> Result<()> {
                Run `grow plugin list` to see installed plugins."
         );
     }
-    if let Err(e) = shell::config::remove_enabled_plugin(name) {
+    if let Err(e) = shell::config::remove_enabled_plugin(name).await {
         tracing::warn!("failed to remove from enabled list: {e}");
     }
     shell::config::add_disabled_plugin(name)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {e}"))?;
     println!("Disabled plugin: {name}");
     Ok(())
@@ -1086,6 +1088,167 @@ fn marketplace_update_with_cache_root(
 mod tests {
     use super::*;
     use plugin_marketplace::MarketplaceSource;
+
+    #[derive(Clone)]
+    struct InstallDiagnosticWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for InstallDiagnosticWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn public_install_dispatch_propagates_persistence_failure() {
+        const TEST: &str =
+            "plugin_cmd::tests::public_install_dispatch_propagates_persistence_failure";
+        const PHASE: &str = "GROW_TEST_CLI_INSTALL_PHASE";
+        let Ok(phase) = std::env::var(PHASE) else {
+            for phase in ["save", "parse", "read", "success"] {
+                let temp = tempfile::tempdir().unwrap();
+                let home = dunce::canonicalize(temp.path()).unwrap();
+                std::fs::create_dir_all(home.join(".grow")).unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+                    .env(PHASE, phase)
+                    .env("HOME", &home)
+                    .env("GROW_HOME", home.join(".grow"))
+                    .env("GROW_MARKETPLACE_REQUIRE_SHA", "1")
+                    .env_remove("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE")
+                    .current_dir(&home)
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success(),
+                    "{phase}:\n{stdout}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(stdout.contains("1 passed"), "{phase}: {stdout}");
+                assert_eq!(
+                    stdout.contains("Installed 1 plugin(s)"),
+                    phase == "success",
+                    "{phase}: {stdout}"
+                );
+            }
+            return;
+        };
+        let home = std::env::current_dir().unwrap();
+        let grow_home = home.join(".grow");
+        let install_dir = grow_home.join("installed-plugins");
+        let make_source = |name: &str| {
+            let path = home.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("plugin.json"),
+                serde_json::json!({"name": name, "version": "1.0.0"}).to_string(),
+            )
+            .unwrap();
+            path
+        };
+        let old_source = agent::plugins::git_install::InstallSource::Local {
+            path: make_source("cli-existing"),
+            subdir: None,
+        };
+        let mut registry = InstallRegistry::empty(install_dir.clone());
+        let old =
+            agent::plugins::git_install::install_from_source(&old_source, &registry, true).unwrap();
+        registry.insert(
+            old.repo_key.clone(),
+            agent::plugins::git_install::build_installed_repo(&old, &old_source),
+        );
+        registry.save().unwrap();
+        let registry_path = install_dir.join("registry.json");
+        let config_path = grow_home.join("config.toml");
+        let config_bytes = b"[plugins]\nenabled = [\"cli-existing\"]\n";
+        std::fs::write(&config_path, config_bytes).unwrap();
+        match phase.as_str() {
+            "save" => unsafe {
+                std::env::set_var("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE", "1")
+            },
+            "parse" => std::fs::write(&registry_path, "{ broken registry").unwrap(),
+            "read" => {
+                std::fs::remove_file(&registry_path).unwrap();
+                std::fs::create_dir(&registry_path).unwrap();
+            }
+            "success" => {}
+            other => panic!("unknown CLI install phase {other}"),
+        }
+        let registry_bytes = std::fs::read(&registry_path).ok();
+        let source = make_source("cli-new-plugin");
+        let repo_key = InstallRegistry::repo_key(source.to_str().unwrap());
+        let artifact = install_dir.join(&repo_key);
+        let diagnostic_bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let diagnostic_writer = InstallDiagnosticWriter(diagnostic_bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || diagnostic_writer.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(run(PluginArgs {
+            command: PluginCommand::Install {
+                source: source.to_string_lossy().into_owned(),
+                trust: true,
+            },
+        }));
+        unsafe { std::env::remove_var("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE") };
+        let diagnostics = String::from_utf8(diagnostic_bytes.lock().unwrap().clone()).unwrap();
+        let events: Vec<_> = diagnostics
+            .lines()
+            .filter(|line| line.contains("plugin_installed"))
+            .collect();
+        assert_eq!(events.len(), 1, "{diagnostics}");
+        if phase == "success" {
+            result.unwrap();
+            assert!(events[0].contains("\"success\":true"), "{diagnostics}");
+            let durable = InstallRegistry::try_load_from(install_dir).unwrap();
+            assert_eq!(durable.get_repo(&repo_key).unwrap().path, artifact);
+            assert!(artifact.join("plugin.json").is_file());
+            assert!(
+                std::fs::read_to_string(config_path)
+                    .unwrap()
+                    .contains("cli-new-plugin")
+            );
+        } else {
+            assert_eq!(std::fs::read(&config_path).unwrap(), config_bytes);
+            assert!(old.repo_path.join("plugin.json").is_file());
+            if phase == "read" {
+                assert!(registry_path.is_dir());
+            } else {
+                assert_eq!(
+                    std::fs::read(&registry_path).unwrap(),
+                    registry_bytes.unwrap()
+                );
+            }
+            assert_eq!(artifact.exists(), phase == "save", "{phase}");
+            let error = result
+                .expect_err(&format!(
+                    "public CLI dispatch must return Err on registry failure: phase={phase}, artifact={}, prior registry/config preserved, diagnostics={diagnostics}",
+                    artifact.display()
+                ))
+                .to_string();
+            assert!(events[0].contains("\"success\":false"), "{diagnostics}");
+            assert!(!diagnostics.contains("\"success\":true"), "{diagnostics}");
+            if phase == "save" {
+                assert!(
+                    error.contains("test-injected registry save failure"),
+                    "{error}"
+                );
+                assert!(error.contains(artifact.to_str().unwrap()), "{error}");
+                assert!(error.contains("incomplete"), "{error}");
+            }
+        }
+    }
 
     fn removal_fixture() -> Vec<MarketplaceSource> {
         vec![

@@ -393,6 +393,41 @@ impl AgentRebuildSpec {
                 .update_resource(UserQuestionSender(user_question_tx.clone()))
                 .await;
         }
+        // Live ask policy: re-resolve `allow_non_blocking` from env > effective
+        // TOML > default on every admission, while timeout fields stay frozen
+        // at this build's snapshot (no restart-required knobs go live here).
+        // The base is the `Params<AskUserQuestionParams>` resource this Agent
+        // actually finalized (tool defaults merged with any shell-injected
+        // params), read back from the built agent rather than re-derived from
+        // the raw JSON map; the closure only replaces `allow_non_blocking`,
+        // so the snapshot the tool would otherwise consume survives. Agents
+        // without the ask tool (no params resource) use the shared defaults.
+        // A disk read/parse failure surfaces as an error to that call instead
+        // of defaulting the gate open.
+        {
+            use tools::implementations::grow_build::ask_user_question::{
+                AskUserQuestionParams, UserQuestionPolicyResolver,
+            };
+            use tools::types::resources::Params;
+            let base_params = agent
+                .tool_bridge()
+                .read_resource::<Params<AskUserQuestionParams>>()
+                .await
+                .map(|Params(params)| params)
+                .unwrap_or_default();
+            agent
+                .tool_bridge()
+                .update_resource(UserQuestionPolicyResolver(std::sync::Arc::new(
+                    move || {
+                        let allow_non_blocking = crate::util::config::resolve_ask_user_question_allow_non_blocking_from_disk()?;
+                        Ok(AskUserQuestionParams {
+                            allow_non_blocking,
+                            ..base_params
+                        })
+                    },
+                )))
+                .await;
+        }
         Ok(agent)
     }
 }
@@ -651,6 +686,164 @@ mod tests {
                     .expect("Workflow Agent has a rendered role");
                 assert!(role.contains("ORIGINAL REBUILD SKILL"), "{role}");
                 assert!(!role.contains("MUTATED REBUILD SKILL"), "{role}");
+            })
+            .await;
+    }
+
+    /// The Factory injects a live `UserQuestionPolicyResolver` next to
+    /// `UserQuestionSender`: `allow_non_blocking` is re-resolved from disk on
+    /// every call (a settings write takes effect on the next admission without
+    /// a rebuild), while the timeout fields stay frozen at the build-time
+    /// snapshot. Runs in an isolated child with a tempdir `GROW_HOME` so the
+    /// main test process never touches the real user config.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ask_policy_resolver_reads_live_allow_flag_with_frozen_timeouts() {
+        const MARKER: &str = "GROW_ASK_RESOLVER_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let full = concat!(
+                module_path!(),
+                "::ask_policy_resolver_reads_live_allow_flag_with_frozen_timeouts"
+            );
+            let name = full.strip_prefix("shell::").unwrap_or(full);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("GROW_HOME", home.path())
+                .env(MARKER, "1")
+                .env_remove("GROW_ASK_USER_QUESTION_ALLOW_NON_BLOCKING")
+                .output()
+                .expect("run isolated ask resolver child");
+            assert!(
+                output.status.success(),
+                "isolated child failed\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::implementations::grow_build::ask_user_question::{
+                    UserQuestionPolicyResolver,
+                };
+                let mut spec = test_rebuild_spec_default();
+                Arc::get_mut(&mut spec)
+                    .expect("test rebuild spec should be uniquely owned")
+                    .tool_params_json
+                    .ask_user_question = Some(
+                    serde_json::json!({
+                        "timeout_enabled": true,
+                        "timeout_secs": 77,
+                        "allow_non_blocking": false,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                );
+                let agent = spec
+                    .build_agent_with_initial_overrides(
+                        AgentDefinition::default_grow_build(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("agent build should succeed");
+                let resolver = agent
+                    .tool_bridge()
+                    .toolset()
+                    .get_resource_cloned::<UserQuestionPolicyResolver>()
+                    .await
+                    .expect("Factory must inject the live ask policy resolver");
+
+                // Disk default (true) wins over the base snapshot's flag; the
+                // timeout snapshot from the finalized Params resource is
+                // preserved.
+                let params = (resolver.0)().expect("resolver must succeed on empty disk");
+                assert!(params.allow_non_blocking);
+                assert_eq!(params.timeout_secs.get(), 77);
+                assert!(params.timeout_enabled);
+                // Injection must not alter the finalized snapshot: the
+                // resolver's timeout fields equal the resource the Agent
+                // actually finalized, exactly.
+                let finalized = agent
+                    .tool_bridge()
+                    .read_resource::<tools::types::resources::Params<
+                        tools::implementations::grow_build::ask_user_question::AskUserQuestionParams,
+                    >>()
+                    .await
+                    .map(|tools::types::resources::Params(params)| params)
+                    .expect("built agent must carry finalized ask params");
+                assert_eq!(params.timeout_secs, finalized.timeout_secs);
+                assert_eq!(params.timeout_enabled, finalized.timeout_enabled);
+
+                // A settings write on disk changes the next call without any
+                // rebuild.
+                let config_path = crate::util::config::user_config_path();
+                if let Some(parent) = config_path.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(
+                    &config_path,
+                    "[toolset.ask_user_question]\nallow_non_blocking = false\n",
+                )
+                .unwrap();
+                let params = (resolver.0)().unwrap();
+                assert!(!params.allow_non_blocking);
+                assert_eq!(params.timeout_secs.get(), 77);
+
+                // Timeout changes on disk must NOT go live through the
+                // resolver (restart-required semantics preserved).
+                std::fs::write(
+                    &config_path,
+                    "[toolset.ask_user_question]\ntimeout_secs = 5\n",
+                )
+                .unwrap();
+                let params = (resolver.0)().unwrap();
+                assert_eq!(params.timeout_secs.get(), 77);
+
+                // Legacy-shaped shell map (complete timeouts, no
+                // `allow_non_blocking` key): the resolver must mirror whatever
+                // the Factory finalized for that build — not a re-parse of
+                // the raw map. (A truly partial timeout map cannot finalize:
+                // the registry rejects it at build with
+                // `params_missing_field`, which itself pins that a partial
+                // map can never silently reset a timeout.)
+                let mut partial_spec = test_rebuild_spec_default();
+                Arc::get_mut(&mut partial_spec)
+                    .expect("legacy-map spec should be uniquely owned")
+                    .tool_params_json
+                    .ask_user_question = Some(
+                    serde_json::json!({"timeout_enabled": false, "timeout_secs": 77})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                );
+                let partial_agent = partial_spec
+                    .build_agent_with_initial_overrides(
+                        AgentDefinition::default_grow_build(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("partial-map agent build should succeed");
+                let partial_finalized = partial_agent
+                    .tool_bridge()
+                    .read_resource::<tools::types::resources::Params<
+                        tools::implementations::grow_build::ask_user_question::AskUserQuestionParams,
+                    >>()
+                    .await
+                    .map(|tools::types::resources::Params(params)| params);
+                let partial_resolver = partial_agent
+                    .tool_bridge()
+                    .toolset()
+                    .get_resource_cloned::<UserQuestionPolicyResolver>()
+                    .await
+                    .expect("partial-map agent must also carry the resolver");
+                let partial_params = (partial_resolver.0)().unwrap();
+                if let Some(finalized) = partial_finalized {
+                    assert_eq!(partial_params.timeout_secs, finalized.timeout_secs);
+                    assert_eq!(partial_params.timeout_enabled, finalized.timeout_enabled);
+                }
             })
             .await;
     }

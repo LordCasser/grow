@@ -179,8 +179,19 @@ pub(super) async fn refresh_subagent_mcp_auxiliary_policy(
     session.refresh_mcp_auxiliary_policy().await;
 }
 
+/// A child's final canonical result handed to its own session actor: the
+/// actor appends it as the last normal Timeline fact after the SessionEnd
+/// lifecycle has drained, and ACKs the precise range or the typed failure.
+struct SubagentTerminalCommit {
+    result: chat_state::SubagentResultEvent,
+    deadline: tokio::time::Instant,
+    respond_to:
+        oneshot::Sender<Result<chat_state::TimelineRangeRef, chat_state::TimelineWriteError>>,
+}
+
 struct GracefulShutdown {
     reason: &'static str,
+    terminal_commit: Option<SubagentTerminalCommit>,
 }
 
 pub(super) async fn latch_termination_and_cancel_controls(
@@ -721,6 +732,47 @@ async fn finish_graceful_shutdown(
         cleanup_session_scratch(session);
         return;
     }
+    // The child's canonical result is the last normal Timeline fact. Every
+    // producer above (SessionEnd hooks, memory/dream, auxiliary owners, Goal
+    // settlement and checkpoint, permission audit) has drained, and the
+    // append-owner retirement below gates the final persistence frontier.
+    // Nothing after this point appends to the Timeline, so the
+    // closed-Timeline protection can never reject a later normal write.
+    if let Some(commit) = shutdown.terminal_commit {
+        if !drain_final_persistence_owners(session).await {
+            // An owner could still append behind the result: withhold the
+            // commit (the final flush below reports the same drain failure)
+            // and leave the canonical append to recovery.
+            tracing::error!(
+                "subagent terminal commit withheld because session writers did not retire"
+            );
+            let _ = commit
+                .respond_to
+                .send(Err(chat_state::TimelineWriteError::Cancelled));
+        } else {
+            match session
+                .chat_state_handle
+                .record_timeline_event_durably_before(
+                    chat_state::TimelineEventKind::SubagentResult(commit.result),
+                    commit.deadline,
+                )
+                .await
+            {
+                Ok(event) => {
+                    let seq = event.seq.get();
+                    let _ = commit.respond_to.send(Ok(chat_state::TimelineRangeRef {
+                        timeline_id: session.session_id_string(),
+                        first_seq: seq,
+                        last_seq: seq,
+                    }));
+                }
+                Err(error) => {
+                    tracing::error!(%error, "canonical child result was not durable at session end");
+                    let _ = commit.respond_to.send(Err(error));
+                }
+            }
+        }
+    }
     final_session_persistence_flush(session).await;
     session.signals_handle.shutdown();
     cleanup_session_scratch(session);
@@ -1063,6 +1115,11 @@ pub(super) async fn run_session(
     }
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
+    // Subscribe before any command handling begins so a human-interaction
+    // resolution that races the first readiness check still wakes idle
+    // arbitration. The in-turn waiter keeps its own subscription; this one
+    // covers the idle path, whose single readiness poll has no other wake.
+    let mut pending_interactions_changed = session.pending_interactions.subscribe_changes();
     let idle_flush_timeout = session
         .idle_flush_timeout
         .filter(|timeout| !timeout.is_zero());
@@ -1385,6 +1442,7 @@ pub(super) async fn run_session(
                     }
                     pending_shutdown = Some(GracefulShutdown {
                         reason: "completion_channel_closed",
+                        terminal_commit: None,
                     });
                     continue;
                 };
@@ -1514,6 +1572,7 @@ pub(super) async fn run_session(
                     }
                     pending_shutdown = Some(GracefulShutdown {
                         reason: "channel_closed",
+                        terminal_commit: None,
                     });
                     continue;
                 };
@@ -2367,12 +2426,14 @@ pub(super) async fn run_session(
                         notification,
                         forward_to_gateway,
                         restored,
+                        respond_to,
                     } => {
                         if let Err(error) = session
                             .handle_grow_session_notification(
                                 notification,
                                 forward_to_gateway,
                                 restored,
+                                respond_to,
                             )
                             .await
                         {
@@ -3065,6 +3126,64 @@ pub(super) async fn run_session(
                             PersistenceMsg::GitHead { commit, branch },
                         );
                     }
+                    SessionCommand::CommitSubagentResult {
+                        result,
+                        deadline,
+                        respond_to,
+                    } => {
+                        if runtime_suspend.load(std::sync::atomic::Ordering::Acquire) {
+                            // A physical handoff owns its exact resource drain;
+                            // its continuation, not this session, records the
+                            // child result.
+                            let _ = respond_to.send(Err(
+                                chat_state::TimelineWriteError::Cancelled,
+                            ));
+                            continue;
+                        }
+                        // The terminal commit owns this session's shutdown: it
+                        // latches Graceful and drains the SessionEnd lifecycle
+                        // exactly like `Shutdown`, then appends the prepared
+                        // result as the last normal Timeline fact. The command
+                        // must carry the commit itself because ordinary
+                        // commands are no longer dispatched once
+                        // `pending_shutdown` is latched.
+                        if let Err(error) = latch_termination_and_cancel_controls(
+                            &session,
+                            TerminationState::Graceful,
+                        )
+                        .await
+                        {
+                            tracing::error!(%error, "failed to accept graceful shutdown for subagent result commit");
+                            let _ = respond_to.send(Err(
+                                chat_state::TimelineWriteError::Cancelled,
+                            ));
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
+                        }
+                        if let Err(error) = begin_graceful_shutdown(
+                            &session,
+                            &mut replay_buffer,
+                            &mut cmd_rx,
+                        )
+                        .await
+                        {
+                            tracing::error!(%error, "failed to begin graceful shutdown for subagent result commit");
+                            let _ = respond_to.send(Err(
+                                chat_state::TimelineWriteError::Cancelled,
+                            ));
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
+                        }
+                        pending_shutdown = Some(GracefulShutdown {
+                            reason: "shutdown",
+                            terminal_commit: Some(SubagentTerminalCommit {
+                                result,
+                                deadline,
+                                respond_to,
+                            }),
+                        });
+                        continue;
+                    }
                     command @ (SessionCommand::Shutdown
                     | SessionCommand::UnloadIfIdle { .. }) => {
                         if runtime_suspend.load(std::sync::atomic::Ordering::Acquire) {
@@ -3125,6 +3244,7 @@ pub(super) async fn run_session(
                         }
                         pending_shutdown = Some(GracefulShutdown {
                             reason: if is_shutdown { "shutdown" } else { "idle_unload" },
+                            terminal_commit: None,
                         });
                         continue;
                     }
@@ -3138,6 +3258,29 @@ pub(super) async fn run_session(
                 }
             }
             _ = session.idle_arbiter.notified() => {
+                if session.chat_state_handle.is_closed() {
+                    tracing::error!(
+                        "closing session because the Timeline writer mailbox is unavailable"
+                    );
+                    terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                    return;
+                }
+                if pending_shutdown.is_none()
+                    && let Some(timeout) = idle_flush_timeout
+                {
+                    idle_flush_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + timeout);
+                }
+                arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
+            }
+            // A pending human interaction (question/permission, including a
+            // cross-workspace coordination approval guard) may resolve while
+            // the foreground is idle. That resolution can be the only fact
+            // that makes a durable whole-work wait ready, so it re-enters the
+            // same idle arbitration order as any other wake: controls,
+            // compaction, FIFO, notifications, then Goal continuation.
+            _ = pending_interactions_changed.changed() => {
                 if session.chat_state_handle.is_closed() {
                     tracing::error!(
                         "closing session because the Timeline writer mailbox is unavailable"

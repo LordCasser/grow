@@ -314,6 +314,31 @@ pub(in crate::app::root::dispatch) fn set_ask_user_question_timeout_enabled(
     }]
 }
 
+pub(super) fn set_ask_user_question_allow_non_blocking_inner(app: &mut AppView, new: bool) {
+    app.ask_user_question_allow_non_blocking = Some(new);
+}
+
+pub(in crate::app::root::dispatch) fn set_ask_user_question_allow_non_blocking(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    use tools::implementations::grow_build::ask_user_question;
+    let prev_state = app.ask_user_question_allow_non_blocking;
+    let prev =
+        prev_state.unwrap_or(ask_user_question::DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING);
+    if prev == new && prev_state.is_some() {
+        return vec![];
+    }
+    set_ask_user_question_allow_non_blocking_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast("Saving non-blocking question preference…");
+    vec![Effect::PersistSetting {
+        key: "toolset.ask_user_question.allow_non_blocking",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 pub(super) fn set_show_thinking_blocks_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_show_thinking_blocks(new);
     // Thought visibility never changes activity membership. Only the dense
@@ -1794,6 +1819,9 @@ pub(super) fn pr13_effective_default(key: &str) -> Option<bool> {
     match key {
         "show_tips" => Some(false),
         "auto_update" => Some(true),
+        "toolset.ask_user_question.allow_non_blocking" => {
+            Some(ask_user_question::DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING)
+        }
         "toolset.ask_user_question.timeout_enabled" => {
             Some(ask_user_question::DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED)
         }

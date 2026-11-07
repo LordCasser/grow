@@ -611,15 +611,40 @@ Subagent cancellation SHALL stop new provider admission, cancel active provider 
 
 Chat Completions, Responses, and Messages SHALL recognize a complete `event:error` SSE frame with nonempty `code` and `message` as a provider error, even when its JSON body lacks a `type` or nested `error` field. Grow SHALL retain the provider code, message, and supplied request ID for diagnosis. Error classification SHALL distinguish confirmed content rejection, throttling, and overload, while unknown codes and malformed ordinary events SHALL NOT gain automatic retry eligibility. Existing attempt settlement, output retraction, admission, tool execution, and shared retry budgets SHALL remain authoritative.
 
+SSE 错误资格 SHALL 按正文普通事件身份判定，且 SHALL 只在顶层 `error` 成员存在时做资格校验：无 `error` 成员的帧（普通或 unknown extension payload，含非字符串未知成员）SHALL 交回既有 typed decoder 维持其原裁决，不被资格 gate 代替。帧携带普通事件身份（非 `error` 的非空顶层 `type`、Chat `choices` 成员或 `object:"chat.completion.chunk"`）且同时存在顶层 `error` 成员（含显式 `null`，按成员存在性判定）时，无论普通 typed 部分是否完整、也无论 `event:` 名是否为 `error`，该帧 SHALL 归为本地 `Serialization` 协议错误，SHALL NOT 作为 Api 服务错误取得重试资格或完成事件。`error` 成员存在时资格 probe SHALL fail-closed：已声明成员（`type`/`object`/`choices`/`error`）重复键或形状非法时 SHALL 同样返回 `Serialization`，SHALL NOT 落回会忽略未知顶层成员的既有错误分类；合法 bare legacy、完整 named error 与合法 typed error SHALL 保持既有分类、状态与 request ID 保留；未知扩展帧附加 error SHALL 归为 `Serialization` 而非取得自动重试资格。
+
+#### Scenario: 普通事件身份与顶层 error 并存
+
+- **WHEN** 任一 reader 的普通 SSE 帧（如 `type:"message_start"`、含 `choices` 的 chunk 或 `object:"chat.completion.chunk"`）同时携带 HTTP 风格顶层 `error`，即使普通 typed 部分完整或 `event:` 名为 `error`
+- **THEN** 最终错误为不可重试的 `Serialization` 协议错误，不按 error 包分类为 Api/5xx，也不作为完成事件结算。
+
+#### Scenario: doom-loop check 命名/typed 帧与顶层 error 并存
+
+- **WHEN** Responses reader 收到 SSE `event:` 名或正文 `type` 标记为 `response.doom_loop_check` 的帧，但正文为合法 JSON 且同时携带顶层 `error` 成员（普通身份 + error 混合帧）
+- **THEN** 该帧 SHALL 先经错误资格判定归为不可重试的 `Serialization`，SHALL NOT 被 check 吞掉路径吸收，也 SHALL NOT 先由 doom-loop collector 记录 signals；无 `error` 的合法 check 帧与 check 名下未构成完整 JSON 对象的正文（非法 JSON、标量、null 或数组）SHALL 保持既有吞掉/忽略语义，且不阻塞后续合法 terminal 事件完成。
+
+#### Scenario: 合法错误包保持原分类
+
+- **WHEN** SSE 帧为 bare legacy（`{"code":..,"error":".."}`，无普通身份）、完整 named error（非空 `code`/`message`）或合法 typed error（`type:"error"` + `error` 对象）
+- **THEN** 沿既有共享分类产出原 Api/status/message/request ID；未知 code 保持不重试与 veto。
+
+#### Scenario: 已有初始工具候选后混合帧
+
+- **WHEN** 流先建立合法工具候选，随后出现普通身份 + 顶层 error 混合帧
+- **THEN** 整次尝试按 `Serialization` 拒收，不产出 Completed 工具候选，不执行工具。
+
 #### Scenario: Content rejection after provisional tool output
+
 - **WHEN** a provider emits a partial tool candidate followed by `event:error` with `InvalidParameter`, a content rejection message, and a request ID
 - **THEN** Grow reports the provider facts, settles usage as known or unknown according to actual evidence, rejects the entire candidate, executes no tool, and does not retry that rejection.
 
 #### Scenario: Known transient stream error
+
 - **WHEN** an `event:error` frame carries a confirmed throttling or service overload code
 - **THEN** Grow uses the existing 429 or overload classification, and any retry remains bounded by attempt safety and the shared budget.
 
 #### Scenario: Missing fields or unknown code
+
 - **WHEN** a non-error SSE frame lacks a required event type, a named error lacks required fields, or a named error has an unknown provider code
 - **THEN** missing-field frames remain protocol failures and unknown provider errors preserve their code/message without being assumed transient.
 
@@ -1649,3 +1674,61 @@ When SDK decoding fails, the Responses client SHALL recognize the exact sparse f
 
 - **WHEN** the sparse envelope has missing, null, wrong-type, empty, duplicate or additional fields, has inconsistent object/status values or another known event type, or a completed/incomplete response lacks required fields
 - **THEN** the sparse-failure exception does not repair it and existing known-event validation continues to reject it.
+
+### Requirement: Responses terminal usage completion preserves original field conflicts
+
+Responses terminal 事件（`response.completed` / `response.incomplete` / `response.failed`）缺 `input_tokens_details` / `output_tokens_details` 或其中 `cached_tokens` / `reasoning_tokens` 时，sampler SHALL 只在 typed-decode 副本中补齐这些明细默认值，且补全副本除插入的明细外逐字节保留原始 JSON 文本。原始已知字段（包括 `response.id`、function `name`/`call_id`、`status`、`output`、顶层 `type`/`sequence_number` 及 usage 已知字段）的类型、唯一性与身份冲突 SHALL 保持 SDK 原有拒收：同一原始字段错误在明细完整与缺失两种输入下 SHALL 得到一致拒收，不得因补全而变为可接纳的 Completed 候选。未知扩展键（含重复）的既有 SDK 容许习惯 SHALL 保持不变。补全 SHALL NOT 修改 raw evidence、usage 字段可用性（未报告与明确 0 的区分）、候选身份/终态/args 校验或既有恢复与结算归属，也 SHALL NOT 扩展到 summary/status/timestamps 等其它缺失字段。
+
+#### Scenario: 合法缺明细的 terminal 仍完成
+
+- **WHEN** 一条无其它冲突的 terminal 事件省略 usage 明细，后续无更多输入
+- **THEN** decode 副本补零后正常解码完成，已知总量照常结算，未报告的 cache 读取/写入保持未知而非已知 0，raw evidence 保留原始字节。
+
+#### Scenario: 重复已知字段不因缺明细被放行
+
+- **WHEN** 同一 terminal 事件携带重复 `response.id`、function `name` 或 `call_id`、重复 usage 已知字段或 null-first `id`，且同时省略 usage 明细
+- **THEN** 补全副本保留全部重复字节并被既有 typed 校验拒收；真实 HTTP/SSE → client → L2 链路不产出 Completed 工具候选，与明细完整时的拒收一致。
+
+#### Scenario: 初始候选之后的 terminal 冲突仍拒收
+
+- **WHEN** 流先给出合法初始 function_call/text part 事件（可使用既有初始例外），terminal 事件再携带重复已知字段且缺 usage 明细
+- **THEN** 整个候选仍按原始冲突拒收，既有初始例外不放大为对 terminal 冲突的接纳。
+
+#### Scenario: 补全资格限定对象形状
+
+- **WHEN** usage 或已存在的明细容器不是 JSON 对象——包括 serde 派生 struct 直接可解码的序列形式（如 `[0]`）——或对象容器内的计数字段为非法类型
+- **THEN** usage 补全只认对象形状并在此不触发：SDK 可直接解码的完整序列形式保持原状不改写；序列形式与另一明细缺失并存时保持该缺失的原有拒收，不因补全另一容器而放行；`null` 容器与非法计数保持既有解码失败。
+
+#### Scenario: 未知扩展重复键保持既有容许
+
+- **WHEN** 事件携带 SDK 未知的扩展键且重复出现，usage 明细缺失
+- **THEN** 补全后的事件仍按既有 unknown-field 容许规则解码，其接纳结果不因本补全边界改变。
+
+### Requirement: Standard Messages stream errors use known service classifications
+
+A qualified provider stream error whose normalized exact type is `api_error` SHALL use the existing internal-server-error classification. A qualified stream error whose normalized exact type is `timeout_error` SHALL use the existing gateway-timeout classification. Grow SHALL retain the original provider type, message and supplied request identity, and SHALL NOT attach the unknown-code retry veto to either known type. These logical stream classifications SHALL NOT overwrite a real non-success HTTP status. Retry SHALL remain conditional on existing caller vetoes, attempt settlement, replay safety, shared attempt limits and absolute deadlines.
+
+#### Scenario: Standard internal error after stream admission
+
+- **WHEN** a valid Messages SSE error carries `api_error` after HTTP 200 stream admission
+- **THEN** Grow exposes the original facts with logical status 500 and permits only retry eligibility under the existing bounded recovery policy.
+
+#### Scenario: Standard processing timeout in a stream
+
+- **WHEN** a valid Messages SSE error carries `timeout_error` without a non-success HTTP response status
+- **THEN** Grow exposes the original facts with logical status 504 and applies the existing conditional service-error recovery policy.
+
+#### Scenario: Real HTTP status is available
+
+- **WHEN** a non-success HTTP response carries `timeout_error` with status 500
+- **THEN** Grow preserves actual status 500 rather than replacing it with the stream-only logical status.
+
+#### Scenario: Unknown or mixed ordinary error remains ineligible
+
+- **WHEN** a stream carries an unknown lookalike code or an ordinary-event identity combined with an error envelope
+- **THEN** unknown-code veto and ordinary-frame Serialization rules remain authoritative, even if the text resembles a standard error.
+
+#### Scenario: Recovery is unsafe or exhausted
+
+- **WHEN** a known service stream error occurs after replay is prohibited or after the shared attempt or time budget is exhausted
+- **THEN** no further provider attempt is admitted, no failed tool candidate executes, and applicable usage remains settled according to available evidence.

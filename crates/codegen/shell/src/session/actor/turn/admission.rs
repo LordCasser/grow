@@ -1116,6 +1116,7 @@ impl SessionActor {
                         })),
                     ),
                     PromptCompletionKind::Rewound
+                    | PromptCompletionKind::AdmissionReplay { .. }
                     | PromptCompletionKind::RemovedFromQueue
                     | PromptCompletionKind::Suspended { .. } => (
                         crate::session::events::TurnOutcomeLabel::Error,

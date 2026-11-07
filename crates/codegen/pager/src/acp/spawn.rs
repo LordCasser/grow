@@ -216,6 +216,7 @@ fn config_reload_request(update: shell::config::reloader::ConfigUpdate) -> Optio
             serde_json::json!({}),
         ),
         ConfigUpdate::ModelsChanged => ("grow/internal/reload_models", serde_json::json!({})),
+        ConfigUpdate::Skills(_) => ("grow/internal/reload_skills", serde_json::json!({})),
         ConfigUpdate::McpCatalogChanged { project_root } => (
             "grow/internal/reload_mcp_catalog",
             serde_json::json!({"projectRoot": project_root.map(|root| root.to_string_lossy().into_owned())}),
@@ -240,6 +241,121 @@ async fn apply_config_update(
     shell::extensions::session_admin::handle(agent, &request)
         .await
         .map(|_| ())
+}
+
+// Watcher destruction joins its native event thread. Keep that work off the
+// LocalSet, including when its owning task is aborted during runtime teardown.
+struct SkillsWatcherOwner {
+    watcher: Option<(
+        shell::config::watcher::SkillsFileWatcher,
+        tokio::sync::mpsc::UnboundedReceiver<shell::config::watcher::DiscoveryChange>,
+    )>,
+    #[cfg(test)]
+    paths: Vec<String>,
+}
+
+impl Drop for SkillsWatcherOwner {
+    fn drop(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            // The test retirement marker follows the native owner in the
+            // tuple, so it also observes Drop if shutdown discards a queued job.
+            #[cfg(test)]
+            let watcher = (watcher, SkillsWatcherRetirement(self.paths.clone()));
+            tokio::task::spawn_blocking(move || drop(watcher));
+        }
+    }
+}
+
+fn register_skills_watcher(
+    paths: Vec<String>,
+) -> tokio::task::JoinHandle<Option<SkillsWatcherOwner>> {
+    #[cfg(test)]
+    let home = shell::util::grow_home::grow_home();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        record_skills_watcher_event(SkillsWatcherEvent::Started(paths.clone()));
+        #[cfg(test)]
+        if block_watcher_registration_for_test(&home, WatcherRegistrationKind::Skills) {
+            return None;
+        }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let workspace_user_dir = agent::prompt::workspace_user::optional_workspace_user_dir();
+        shell::config::watcher::SkillsFileWatcher::start(
+            Some(cwd.as_path()),
+            workspace_user_dir.as_deref(),
+            &paths,
+        )
+        .map(|watcher| {
+            #[cfg(test)]
+            record_skills_watcher_event(SkillsWatcherEvent::Active(paths.clone()));
+            SkillsWatcherOwner {
+                watcher: Some(watcher),
+                #[cfg(test)]
+                paths,
+            }
+        })
+    })
+}
+
+async fn run_skills_watcher(
+    agent: Rc<MvpAgent>,
+    mut watcher: Option<SkillsWatcherOwner>,
+    mut active_paths: Vec<String>,
+    mut paths_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            changed = paths_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let paths = paths_rx.borrow_and_update().clone();
+                if watcher.is_some() && paths == active_paths {
+                    continue;
+                }
+                let registration = register_skills_watcher(paths.clone());
+                match shell::agent::app::finish_blocking_registration(registration, &cancel).await {
+                    Ok(Some(Some(replacement))) => {
+                        // The old owner retires in the blocking pool even if this
+                        // task is cancelled immediately after adopting the new one.
+                        watcher = Some(replacement);
+                        active_paths = paths;
+                    }
+                    Ok(Some(None)) => {
+                        tracing::warn!(?paths, "failed to replace in-process skills watcher; retaining prior watcher");
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, ?paths, "failed to register in-process skills watcher; retaining prior watcher");
+                    }
+                }
+            }
+            change = async {
+                match watcher.as_mut().and_then(|owner| owner.watcher.as_mut()) {
+                    Some((_, events)) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(change) = change else { break };
+                if let Some((watcher, _)) = watcher.as_mut().and_then(|owner| owner.watcher.as_mut()) {
+                    watcher.refresh_new_discovery_dirs();
+                }
+                match change {
+                    shell::config::watcher::DiscoveryChange::Skills => {
+                        tracing::info!("skill directory changed on disk; reloading skills for all sessions");
+                        agent.reload_skills_all_sessions();
+                    }
+                    shell::config::watcher::DiscoveryChange::Workflows => {
+                        tracing::info!("workflow directory changed on disk; re-advertising commands for all sessions");
+                        agent.advertise_commands_all_sessions();
+                    }
+                }
+            }
+        }
+    }
 }
 
 enum GatewayRegistrationRace<R> {
@@ -291,11 +407,39 @@ enum WatcherRegistrationKind {
 }
 
 #[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SkillsWatcherEvent {
+    Started(Vec<String>),
+    Active(Vec<String>),
+    Retired(Vec<String>),
+}
+
+#[cfg(test)]
+static SKILLS_WATCHER_EVENTS: std::sync::Mutex<Vec<SkillsWatcherEvent>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn record_skills_watcher_event(event: SkillsWatcherEvent) {
+    SKILLS_WATCHER_EVENTS.lock().unwrap().push(event);
+}
+
+#[cfg(test)]
+struct SkillsWatcherRetirement(Vec<String>);
+
+#[cfg(test)]
+impl Drop for SkillsWatcherRetirement {
+    fn drop(&mut self) {
+        record_skills_watcher_event(SkillsWatcherEvent::Retired(std::mem::take(&mut self.0)));
+    }
+}
+
+#[cfg(test)]
 struct ConfigWatcherRegistrationGate {
     home: std::path::PathBuf,
     kind: WatcherRegistrationKind,
     started: tokio::sync::oneshot::Sender<()>,
     release: std::sync::mpsc::Receiver<()>,
+    fail: bool,
 }
 
 #[cfg(test)]
@@ -336,12 +480,16 @@ fn arm_config_watcher_registration_gate(
         kind,
         started: started_tx,
         release: release_rx,
+        fail: false,
     });
     (started_rx, release_tx, ConfigWatcherRegistrationGateGuard)
 }
 
 #[cfg(test)]
-fn block_watcher_registration_for_test(home: &std::path::Path, kind: WatcherRegistrationKind) {
+fn block_watcher_registration_for_test(
+    home: &std::path::Path,
+    kind: WatcherRegistrationKind,
+) -> bool {
     let gate = {
         let mut slot = CONFIG_WATCHER_REGISTRATION_GATE
             .get_or_init(|| std::sync::Mutex::new(None))
@@ -359,7 +507,9 @@ fn block_watcher_registration_for_test(home: &std::path::Path, kind: WatcherRegi
     if let Some(gate) = gate {
         let _ = gate.started.send(());
         let _ = gate.release.recv();
+        return gate.fail;
     }
+    false
 }
 
 /// Spawn an agent in a dedicated thread with direct RPC dispatch.
@@ -390,6 +540,10 @@ fn spawn_agent_thread_direct(
                 // completes and the LocalSet starts its consumer.
                 let (config_update_tx, mut config_update_rx) =
                     tokio::sync::mpsc::unbounded_channel();
+                // Subscribe before registration: updates received while the first
+                // native watcher is being constructed remain pending for its owner.
+                let (skills_paths_tx, skills_paths_rx) =
+                    tokio::sync::watch::channel(skills_paths.clone());
                 let project_watch_enabled = shell::util::config::resolve_mcp_recursive_config_watch(
                     shell::config::load_from_disk().ok().as_ref(),
                 );
@@ -481,6 +635,15 @@ fn spawn_agent_thread_direct(
                                 None => break,
                             },
                         };
+                        if let shell::config::reloader::ConfigUpdate::Skills(config) = &update {
+                            skills_paths_tx.send_if_modified(|paths| {
+                                if *paths == config.paths {
+                                    return false;
+                                }
+                                *paths = config.paths.clone();
+                                true
+                            });
+                        }
                         if let Err(error) = apply_config_update(&agent_for_updates, update).await {
                             tracing::warn!(error = ?error, "failed to apply in-process config reload");
                         }
@@ -503,23 +666,7 @@ fn spawn_agent_thread_direct(
                     );
                 }));
 
-                #[cfg(test)]
-                let skills_home = shell::util::grow_home::grow_home();
-                let skills_registration = tokio::task::spawn_blocking(move || {
-                    #[cfg(test)]
-                    block_watcher_registration_for_test(
-                        &skills_home,
-                        WatcherRegistrationKind::Skills,
-                    );
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let workspace_user_dir =
-                        agent::prompt::workspace_user::optional_workspace_user_dir();
-                    shell::config::watcher::SkillsFileWatcher::start(
-                        Some(cwd.as_path()),
-                        workspace_user_dir.as_deref(),
-                        &skills_paths,
-                    )
-                });
+                let skills_registration = register_skills_watcher(skills_paths.clone());
                 let skills_result = race_gateway_with_registration(
                     &mut gateway_task,
                     shell::agent::app::finish_blocking_registration(skills_registration, &cancel),
@@ -553,37 +700,16 @@ fn spawn_agent_thread_direct(
                         return Err(error.into());
                     }
                 };
-                if let Some((mut watcher, mut skills_rx)) = skills_watcher {
-                    let agent = agent_rc.clone();
-                    let cancel_skills = cancel.clone();
-                    watcher_tasks.push(tokio::task::spawn_local(async move {
-                        loop {
-                            let change = tokio::select! {
-                                biased;
-                                _ = cancel_skills.cancelled() => break,
-                                change = skills_rx.recv() => match change {
-                                    Some(change) => change,
-                                    None => break,
-                                },
-                            };
-                            watcher.refresh_new_discovery_dirs();
-                            match change {
-                                shell::config::watcher::DiscoveryChange::Skills => {
-                                    tracing::info!(
-                                        "skill directory changed on disk; reloading skills for all sessions"
-                                    );
-                                    agent.reload_skills_all_sessions();
-                                }
-                                shell::config::watcher::DiscoveryChange::Workflows => {
-                                    tracing::info!(
-                                        "workflow directory changed on disk; re-advertising commands for all sessions"
-                                    );
-                                    agent.advertise_commands_all_sessions();
-                                }
-                            }
-                        }
-                    }));
+                if skills_watcher.is_none() {
+                    tracing::warn!("in-process skills watcher did not start; awaiting path updates");
                 }
+                watcher_tasks.push(tokio::task::spawn_local(run_skills_watcher(
+                    agent_rc.clone(),
+                    skills_watcher,
+                    skills_paths,
+                    skills_paths_rx,
+                    cancel.clone(),
+                )));
 
                 // Keep running until cancelled, then flush every live session
                 // actor (SessionEnd hooks + memory save) before the LocalSet /
@@ -613,6 +739,7 @@ fn spawn_agent_thread_direct(
 #[cfg(test)]
 mod tests {
     mod mcp_hot_reload;
+    mod skills_hot_reload;
 
     #[test]
     fn subagent_toggle_reload_uses_shared_internal_route() {

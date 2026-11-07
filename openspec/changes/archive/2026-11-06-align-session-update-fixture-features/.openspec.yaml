@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-06
+skip_specs: true
+reason: Test-fixture-only cfg gating in an existing integration test; no runtime behavior, interface, or persisted contract changes, so there are no delta specs to declare.

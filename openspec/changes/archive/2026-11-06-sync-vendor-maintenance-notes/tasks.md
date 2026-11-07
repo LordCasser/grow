@@ -1,0 +1,3 @@
+- [x] 1. 核对当前manifest、lock、vendor维护头、许可证与Core验证命令。
+- [x] 2. 更新third_party索引/NOTICE与开发者维护说明，不改依赖或源码。
+- [x] 3. 检查diff/引用，执行严格及归档校验后记录验证，并关闭该backlog文档项。

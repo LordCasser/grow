@@ -43,6 +43,20 @@ impl AgentView {
             }
             return InputOutcome::Action(Action::FocusPrompt);
         }
+        // Advisory suggestion card reply entry: 'r' on the selected card row
+        // asks the canonical admission state before the editor may open
+        // (the card flips to Checking; the admission callback resolves the
+        // projection). Bare 'r' on any other row keeps existing behavior.
+        if key.code == KeyCode::Char('r') && key.modifiers.is_empty() {
+            if let Some(idx) = self.scrollback.selected()
+                && let Some((source, tool_call_id)) = self.advisory_card_query_target_at(idx)
+            {
+                return InputOutcome::Action(Action::QueryAdvisoryReplyAdmission {
+                    source_session_id: source,
+                    tool_call_id,
+                });
+            }
+        }
         if key!(Enter).matches(key)
             && let Some(target) = self.highlighted_link_target().cloned()
         {

@@ -6,7 +6,7 @@ Crash handler for SIGBUS/SIGSEGV with best-effort backtrace capture.
 
 `install()` registers a `sigaction` handler. On crash it writes a binary blob (`GCRX` format) to `crash_dir/last-crash.bin` and restores the terminal via pre-computed escape sequences. The handler uses only async-signal-safe operations for file I/O, terminal restore, and re-raise.
 
-On next launch, `check_previous_crash()` reads the blob, resolves IPs to symbols via `backtrace`, writes `last-crash-report.txt`, and archives it (keeping the last 5 reports).
+On next launch, `check_previous_crash()` reads the blob, preserves the raw frame addresses verbatim (format v1 records no module identity or load addresses, so automatic symbolication is unavailable and no function attribution is made), writes `last-crash-report.txt`, and archives it (keeping the last 5 reports).
 
 No-ops on non-unix platforms. Frame-pointer capture is fully supported on
 Linux release builds (the release pipeline builds glibc-based binaries).

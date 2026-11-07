@@ -78,6 +78,44 @@ impl ChatStateHandle {
         .ok_or_else(|| "runtime authority is unavailable".into())
     }
 
+    /// Capture runtime state and all original Subagent Spawned/Ended events in
+    /// one owner operation, preserving their payloads, headers and sequence order.
+    /// The owner has already validated these facts on live admission or recovery.
+    /// This projection is for Shell tree coordination, not a complete Timeline;
+    /// it must not be replayed with `Timeline::from_events` as a standalone ledger.
+    /// Returns an error if the owner cannot answer.
+    pub async fn runtime_tree_snapshot(
+        &self,
+    ) -> Result<
+        (
+            crate::session_runtime::RuntimeLifecycle,
+            Vec<crate::TimelineEvent>,
+        ),
+        String,
+    > {
+        self.query("GetRuntimeTreeSnapshot", |reply| {
+            ChatStateCommand::GetRuntimeTreeSnapshot { reply }
+        })
+        .await
+        .ok_or_else(|| "runtime tree authority is unavailable".into())
+    }
+
+    /// Canonical lifecycle projection of one recorded input identity, folded
+    /// from the same durable Timeline facts the actor mutates. `Ok(None)`
+    /// means the identity has no committed submission; an unavailable actor
+    /// is reported as `Err` instead.
+    pub async fn input_state(
+        &self,
+        input_id: &str,
+    ) -> Result<Option<crate::InputLifecycle>, String> {
+        let input_id = input_id.to_owned();
+        self.query("GetInputState", move |reply| {
+            ChatStateCommand::GetInputState { input_id, reply }
+        })
+        .await
+        .ok_or_else(|| "input lifecycle authority is unavailable".into())
+    }
+
     /// The Timeline owner selects the frontier in the same mailbox operation
     /// as the checkpoint commit; a caller cannot race a query against writes.
     pub async fn checkpoint_runtime(
@@ -1072,6 +1110,18 @@ impl ChatStateHandle {
             ChatStateCommand::GetRetainedNotificationPayloadHashes { reply }
         })
         .await
+    }
+
+    /// Read raw image-files envelope paths from all committed physical User
+    /// messages, including history removed from the current Surface by
+    /// compaction or rewind. The owner has already validated these events.
+    /// Returns an error if the owner cannot answer, rather than an empty set.
+    pub async fn committed_user_image_paths(&self) -> Result<BTreeSet<String>, String> {
+        self.query("GetCommittedUserImagePaths", |reply| {
+            ChatStateCommand::GetCommittedUserImagePaths { reply }
+        })
+        .await
+        .ok_or_else(|| "committed user image authority is unavailable".into())
     }
 
     pub async fn get_pending_allowed_inputs(&self) -> Option<Vec<crate::PendingAllowedInput>> {

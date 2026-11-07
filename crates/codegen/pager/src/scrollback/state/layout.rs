@@ -3,13 +3,14 @@
 use super::verb_group::{RunStep, run_step};
 use super::*;
 
-/// A width-stable anchor for the content at the viewport top, captured before a
-/// width rebuild so the same content can be re-pinned afterward.
+/// A content anchor for the viewport top, captured before layout coordinates
+/// change so the same content can be re-pinned afterward.
 ///
-/// The position is stored as `(entry, logical_line, sub_rows)` rather than an
-/// absolute wrapped-row count: a row count is meaningless after re-wrapping (the
-/// whole transcript can be one giant entry), but the logical (newline-delimited)
-/// line it sits on is width-independent. `sub_rows` is the signed wrapped-row
+/// Entry-top pins store only the stable entry identity. Other positions use
+/// `(logical_line, sub_rows)` rather than an absolute wrapped-row count: a row
+/// count is meaningless after re-wrapping (the whole transcript can be one giant
+/// entry), but the logical (newline-delimited) line it sits on is width-independent.
+/// `sub_rows` is the signed wrapped-row
 /// offset from that logical line's start (covers vpad / mid-paragraph anchors;
 /// zero for the common non-wrapping top line). `sub_rows` is exact only for a
 /// non-wrapping anchor line; if the anchor line itself re-wraps, restore clamps
@@ -17,9 +18,10 @@ use super::*;
 /// one line's wrap delta and never spills into the next logical line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScrollAnchor {
-    entry_idx: usize,
-    logical_line: usize,
-    sub_rows: i64,
+    entry_id: EntryId,
+    /// Entry-top pins resolve directly from virtual_y without rendering or
+    /// collecting logical-line rows on every follow pass.
+    line: Option<(usize, i64)>,
 }
 
 /// Cached layout data for efficient navigation and rendering.
@@ -497,11 +499,17 @@ impl ScrollbackState {
         let cache = self.layout_cache.as_ref()?;
         let entry_y = *cache.virtual_y.get(entry_idx)?;
         let rows_into_entry = top_content_y.saturating_sub(entry_y);
+        let (entry_id, entry) = self.entries.get_index(entry_idx)?;
+        if rows_into_entry == 0 {
+            return Some(ScrollAnchor {
+                entry_id: *entry_id,
+                line: None,
+            });
+        }
 
         // Convert the display-row offset within the entry to a logical line +
         // signed sub-row offset, both resolved at the cache's (old) width.
         let area_width = self.entry_area_width(cache.width);
-        let (_, entry) = self.entries.get_index(entry_idx)?;
         let theme = Theme::current();
         let renderer = EntryRenderer::new(entry, &theme)
             .with_appearance_ref(&self.appearance)
@@ -511,9 +519,8 @@ impl ScrollbackState {
         let line_start = renderer.rendered_row_of_logical_line(area_width, logical_line);
         let sub_rows = rows as i64 - line_start as i64;
         Some(ScrollAnchor {
-            entry_idx,
-            logical_line,
-            sub_rows,
+            entry_id: *entry_id,
+            line: Some((logical_line, sub_rows)),
         })
     }
 
@@ -522,23 +529,33 @@ impl ScrollbackState {
     /// layout cache and `total_height` are rebuilt at the new width, before
     /// `settle` re-pins.
     pub(super) fn restore_scroll_anchor(&mut self, anchor: ScrollAnchor) {
-        let ScrollAnchor {
-            entry_idx,
-            logical_line,
-            sub_rows,
-        } = anchor;
+        if let Some(offset) = self.scroll_anchor_offset(anchor) {
+            self.scroll_offset = offset.min(self.max_scroll_offset());
+        }
+    }
+
+    /// Resolve an anchor in the current geometry without the manual-scroll
+    /// bottom clamp: a follow-preserve pin may legitimately be above max_offset.
+    pub(super) fn scroll_anchor_offset(&self, anchor: ScrollAnchor) -> Option<usize> {
+        let ScrollAnchor { entry_id, line } = anchor;
+        let entry_idx = self.index_of_id(entry_id)?;
+        let range = self.visible_entry_range();
+        if !range.contains(&entry_idx) {
+            return None;
+        }
+        let cache = self.layout_cache.as_ref()?;
+        let base_y = *cache.virtual_y.get(range.start)?;
+        let entry_y = *cache.virtual_y.get(entry_idx)?;
+        let Some((logical_line, sub_rows)) = line else {
+            return Some(entry_y.saturating_sub(base_y));
+        };
         // Re-resolve the logical line's start row at the NEW width — this is what
         // makes a re-wrapping top entry re-anchor correctly: the wrapped rows
         // above the anchor line grow/shrink, and the rebuilt start rows account
         // for that. `sub_rows` is width-stable for a non-wrapping line.
-        let Some(width) = self.layout_cache.as_ref().map(|c| c.width) else {
-            return;
-        };
-        let area_width = self.entry_area_width(width);
+        let area_width = self.entry_area_width(cache.width);
         let (new_line_start, line_last_row) = {
-            let Some((_, entry)) = self.entries.get_index(entry_idx) else {
-                return;
-            };
+            let entry = self.get_by_id(entry_id)?;
             let theme = Theme::current();
             let renderer = EntryRenderer::new(entry, &theme)
                 .with_appearance_ref(&self.appearance)
@@ -562,20 +579,7 @@ impl ScrollbackState {
         let new_rows_into_entry =
             (new_line_start as i64 + sub_rows).clamp(0, line_last_row as i64) as usize;
 
-        let Some(cache) = self.layout_cache.as_ref() else {
-            return;
-        };
-        let range = self.visible_entry_range();
-        let (Some(&base_y), Some(&entry_y)) = (
-            cache.virtual_y.get(range.start),
-            cache.virtual_y.get(entry_idx),
-        ) else {
-            return;
-        };
-        let new_top_content_y = entry_y + new_rows_into_entry;
-        self.scroll_offset = new_top_content_y
-            .saturating_sub(base_y)
-            .min(self.max_scroll_offset());
+        Some((entry_y + new_rows_into_entry).saturating_sub(base_y))
     }
 
     /// Index range `[start, end]` of entries to measure exactly for the current
@@ -1757,6 +1761,147 @@ mod tests {
     use crate::theme::cache::pin_theme;
     use pretty_assertions::assert_eq;
     use ratatui::style::Color;
+
+    #[test]
+    fn follow_pin_rebuild_keeps_prompt_and_first_reply_visible() {
+        use crate::scrollback::blocks::tool::{
+            AdvisoryCard, AdvisoryCardStatus, AdvisoryReplyStatus, OtherToolCallBlock,
+        };
+        use crate::scrollback::render::ScratchBuffer;
+        use crate::scrollback::scrollback_pane::ScrollbackPane;
+        use ratatui::{Terminal, backend::TestBackend};
+        use tools::implementations::grow_build::ask_user_question::{Question, QuestionOption};
+
+        let _theme = pin_theme();
+        let mut h = ScrollTestHarness::new(120, 40);
+        let mut appearance = h.state.appearance().clone();
+        appearance.scrollback.blocks.prompt.vpad = true;
+        h.state.set_appearance(appearance);
+        h.push_prompt("old prompt");
+        let card = OtherToolCallBlock::new("ask_user_question", "recommendation")
+            .with_output("recommendation presented")
+            .with_advisory_card(AdvisoryCard {
+                source_session_id: "session".into(),
+                tool_call_id: "question".into(),
+                questions: vec![Question {
+                    question: "Which approach?".into(),
+                    options: vec![QuestionOption {
+                        label: "A".into(),
+                        description: "continue".into(),
+                        preview: None,
+                        id: None,
+                    }],
+                    multi_select: None,
+                    recommended_option: Some("A".into()),
+                    id: None,
+                }],
+                status: AdvisoryCardStatus::Confirmed,
+                reply_status: AdvisoryReplyStatus::Accepted,
+                reply_open_intent: false,
+            });
+        let card_id = h.state.push(ScrollbackEntry::new(RenderBlock::ToolCall(
+            ToolCallBlock::Other(card),
+        )));
+        h.frame();
+        h.push_agent("old answer");
+        h.state.push_block(RenderBlock::notice("old turn done"));
+        let prompt_id = h.send_prompt("reply\nquestion\nrecommendation\nanswer\ncontext");
+        let prompt_idx = h.state.index_of_id(prompt_id).unwrap();
+        let card_idx = h.state.index_of_id(card_id).unwrap();
+        assert_eq!(h.state.get_cached_entry_height(card_idx), Some(2));
+        assert_eq!(h.state.get_cached_entry_height(prompt_idx), Some(5));
+        h.assert_entry_at_top(prompt_idx, "exact prompt before rebuild");
+        assert!(h.is_follow() && h.is_preserve());
+
+        // A provisional streaming row is replaced through the real removal
+        // API. This invalidates the full layout without changing the card or
+        // prompt, just like a replacement before the first admitted reply.
+        let preview = h.state.push_block(agent_block("provisional reply"));
+        assert!(h.state.remove_entry(preview));
+        assert!(h.state.layout_cache.is_none());
+        let body_id = h.state.push_block(agent_block("FOLLOW_PIN_REPLY"));
+        let body_idx = h.state.index_of_id(body_id).unwrap();
+        h.frame();
+
+        assert_eq!(h.state.get_cached_entry_height(card_idx), Some(1));
+        assert!(!measured_at(&h.state, card_idx), "history stays estimated");
+        assert_eq!(h.state.get_cached_entry_height(body_idx), Some(1));
+        // Every phase uses the same real pane draw, including an inactive
+        // scrollback as in the mouse reply path (no focus/navigation gesture).
+        let assert_reply_visible = |h: &mut ScrollTestHarness| {
+            let prompt_idx = h.state.index_of_id(prompt_id).unwrap();
+            let body_idx = h.state.index_of_id(body_id).unwrap();
+            let sticky = h.state.sticky_layout().unwrap_or_default();
+            let (paint, _) = h.state.paint_window(
+                h.state.visible_entry_range(),
+                sticky.scroll_for_content(h.state.scroll_offset()),
+                h.height.saturating_sub(sticky.header_screen_rows()) as usize,
+            );
+            let mut terminal = Terminal::new(TestBackend::new(h.width, h.height)).unwrap();
+            let mut scratch = ScratchBuffer::new();
+            terminal
+                .draw(|frame| {
+                    ScrollbackPane::new().render_with_scratch(
+                        frame.area(),
+                        frame.buffer_mut(),
+                        &h.state,
+                        &mut scratch,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let marker_visible = (0..h.height).any(|y| {
+                (0..h.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+                    .contains("FOLLOW_PIN_REPLY")
+            });
+            let prompt_y = h.state.get_cached_virtual_y().unwrap()[prompt_idx];
+            assert!(
+                marker_visible && paint.contains(&body_idx) && h.state.scroll_offset() == prompt_y,
+                "same prompt must remain at top and first reply must paint: prompt_y={prompt_y}, \
+                 offset={}, header={}, paint={paint:?}, body_idx={body_idx}, marker={marker_visible}",
+                h.state.scroll_offset(),
+                sticky.header_screen_rows(),
+            );
+            assert!(h.is_follow() && h.is_preserve());
+        };
+        assert_reply_visible(&mut h);
+
+        // Resolving the same history back to exact heights must move the pin
+        // with its prompt, without consuming preserve or hiding the body.
+        h.state.measure_around_entry(card_idx, h.width);
+        h.frame();
+        assert_eq!(h.state.get_cached_entry_height(card_idx), Some(2));
+        assert_reply_visible(&mut h);
+
+        // Structural removal before the pin changes its index; identity must
+        // still resolve to this prompt rather than the entry now at that index.
+        let old_turn_done = h.state.entry(3).unwrap().id;
+        assert!(h.state.remove_entry(old_turn_done));
+        h.frame();
+        assert_ne!(h.state.index_of_id(prompt_id), Some(prompt_idx));
+        assert_reply_visible(&mut h);
+    }
+
+    #[test]
+    fn follow_top_anchor_does_not_rebuild_evicted_render_output() {
+        let _theme = pin_theme();
+        let mut h = ScrollTestHarness::new(80, 20);
+        h.push_prompt("old prompt");
+        let prompt_id = h.send_prompt("new prompt");
+        assert!(h.state.get_by_id(prompt_id).unwrap().evict_render_cache());
+
+        h.state.enable_follow_with_preserve();
+        h.frame();
+        h.frame();
+        h.assert_entry_at_top(h.state.index_of_id(prompt_id).unwrap(), "top pin holds");
+        assert!(h.is_follow() && h.is_preserve());
+        assert!(
+            !h.state.get_by_id(prompt_id).unwrap().evict_render_cache(),
+            "arming and following a top pin must not materialize logical-line output"
+        );
+    }
 
     /// After the first `prepare_layout`, subsequent `push_block` calls should
     /// EXTEND the layout cache instead of nuking it. This prevents the O(N)

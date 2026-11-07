@@ -1,7 +1,7 @@
 //! Named session registry stored at ~/.local/state/ptyctl/sessions/.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,25 @@ pub fn register_session(name: &str, info: &SessionInfo) -> Result<()> {
     let dir = registry_dir()?;
     fs::create_dir_all(&dir).context("failed to create session registry directory")?;
 
+    let _lock = registry_lock(&dir)?;
+    register_in(&dir, name, info)
+}
+
+// Keep this inode in place: removing the lock file would split concurrent users
+// between different locks. Each transaction opens an independent owned handle.
+fn registry_lock(dir: &Path) -> Result<fs::File> {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(".registry.lock"))
+        .context("failed to open session registry lock")?;
+    lock.lock().context("failed to lock session registry")?;
+    Ok(lock)
+}
+
+fn register_in(dir: &Path, name: &str, info: &SessionInfo) -> Result<()> {
     let path = dir.join(format!("{name}.json"));
     let json = serde_json::to_string_pretty(info)?;
 
@@ -58,11 +77,26 @@ pub fn lookup_session(name: &str) -> Result<SessionInfo> {
     Ok(info)
 }
 
-/// Remove a named session.
-pub fn unregister_session(name: &str) -> Result<()> {
+/// Remove only this registration generation, atomically with respect to writers.
+pub fn unregister_session_if_current(name: &str, expected: &SessionInfo) -> Result<()> {
     let dir = registry_dir()?;
+    let _lock = registry_lock(&dir)?;
+    unregister_in(&dir, name, expected)
+}
+
+fn unregister_in(dir: &Path, name: &str, expected: &SessionInfo) -> Result<()> {
     let path = dir.join(format!("{name}.json"));
-    if path.exists() {
+    let json = match fs::read_to_string(&path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("failed to read session file during cleanup"),
+    };
+    let current: SessionInfo =
+        serde_json::from_str(&json).context("failed to parse session file during cleanup")?;
+    if current.port == expected.port
+        && current.started_at == expected.started_at
+        && current.pid == expected.pid
+    {
         fs::remove_file(&path).context("failed to remove session file")?;
     }
     Ok(())
@@ -124,4 +158,85 @@ pub fn list_sessions() -> Result<Vec<(String, SessionInfo)>> {
     }
 
     Ok(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    struct Registry(PathBuf);
+
+    impl Registry {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ptyctl-registry-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn read(&self) -> SessionInfo {
+            serde_json::from_slice(&fs::read(self.0.join("named.json")).unwrap()).unwrap()
+        }
+    }
+
+    impl Drop for Registry {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn info(generation: &str) -> SessionInfo {
+        SessionInfo {
+            port: 12345,
+            pid: Some(123),
+            command: vec!["fixture".into()],
+            cwd: ".".into(),
+            started_at: generation.into(),
+        }
+    }
+
+    #[test]
+    fn cleanup_preserves_a_replacement_even_if_port_and_pid_are_reused() {
+        let registry = Registry::new();
+        let _lock = registry_lock(&registry.0).unwrap();
+        register_in(&registry.0, "named", &info("new")).unwrap();
+        unregister_in(&registry.0, "named", &info("old")).unwrap();
+        assert_eq!(registry.read().started_at, "new");
+        unregister_in(&registry.0, "named", &info("new")).unwrap();
+        assert!(!registry.0.join("named.json").exists());
+    }
+
+    #[test]
+    fn writer_waits_for_the_entire_compare_delete_transaction() {
+        let registry = Registry::new();
+        let lock = registry_lock(&registry.0).unwrap();
+        register_in(&registry.0, "named", &info("old")).unwrap();
+        let path = registry.0.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _lock = registry_lock(&path).unwrap();
+            register_in(&path, "named", &info("new")).unwrap();
+            written_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            written_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "writer bypassed the transaction lock"
+        );
+        unregister_in(&registry.0, "named", &info("old")).unwrap();
+        drop(lock);
+        written_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        writer.join().unwrap();
+        assert_eq!(registry.read().started_at, "new");
+        assert!(registry.0.join(".registry.lock").exists());
+    }
 }

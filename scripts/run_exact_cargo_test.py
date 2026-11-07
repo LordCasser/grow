@@ -67,9 +67,9 @@ def test_commands(executable: str, test_name: str, ignored: bool) -> tuple[list[
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> bool:
-    """Attempt to stop the command tree and reap the direct child within a bound."""
-    tree_signal_sent = False
+    """Attempt bounded tree cleanup and report whether the whole tree stopped."""
     if os.name == "nt":
+        tree_signal_sent = False
         try:
             result = subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
@@ -95,7 +95,6 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> bool:
 
     try:
         os.killpg(process.pid, signal.SIGTERM)
-        tree_signal_sent = True
     except (ProcessLookupError, PermissionError):
         pass
     try:
@@ -105,7 +104,6 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> bool:
     # Kill the group even if its leader exited: descendants may still be alive.
     try:
         os.killpg(process.pid, signal.SIGKILL)
-        tree_signal_sent = True
     except (ProcessLookupError, PermissionError):
         pass
     if process.poll() is None:
@@ -117,7 +115,9 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> bool:
                 process.wait(timeout=TERMINATE_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 return False
-    return tree_signal_sent and process.poll() is not None
+    # A descendant may have left this group and closed the output pipe.
+    # Group signals and direct-child reaping cannot confirm that it stopped.
+    return False
 
 
 def _append_tail(output: CommandOutput, text: str) -> None:
@@ -313,6 +313,11 @@ def _run_phase(
         and reader_done.is_set()
         and not reader.is_alive()
     )
+    cleanup_limitation = (
+        "process-group cleanup cannot confirm detached descendants stopped"
+        if os.name != "nt"
+        else "a descendant may still be running"
+    )
     if cancellation is not None:
         if reader_errors:
             print(f"[{phase}] output reader failed: {reader_errors[0]}", file=sys.stderr, flush=True)
@@ -320,7 +325,7 @@ def _run_phase(
             print(f"[{phase}] cancelled; process tree termination confirmed", file=sys.stderr, flush=True)
         else:
             print(
-                f"[{phase}] cancelled; process-tree cleanup unconfirmed (a descendant may still be running)",
+                f"[{phase}] cancelled; process-tree cleanup unconfirmed ({cleanup_limitation})",
                 file=sys.stderr,
                 flush=True,
             )
@@ -330,12 +335,12 @@ def _run_phase(
             failure.args = (f"{failure}; output reader failed: {reader_errors[0]}",)
         if not cleanup_confirmed:
             failure.args = (
-                f"{failure}; process-tree cleanup unconfirmed (a descendant may still be running)",
+                f"{failure}; process-tree cleanup unconfirmed ({cleanup_limitation})",
             )
         raise failure
     if not cleanup_confirmed:
         raise TestSelectionError(
-            f"Cargo {phase} ended without confirming process-tree cleanup (a descendant may still be running)"
+            f"Cargo {phase} ended without confirming process-tree cleanup ({cleanup_limitation})"
         )
     if reader_errors:
         raise TestSelectionError(

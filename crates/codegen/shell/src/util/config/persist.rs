@@ -175,7 +175,10 @@ fn merge_ask_user_question_section(
     table: &mut TomlMap<String, TomlValue>,
     ask: &crate::tools::config::AskUserQuestionToolConfig,
 ) {
-    if ask.timeout_enabled.is_none() && ask.timeout_secs.is_none() {
+    if ask.timeout_enabled.is_none()
+        && ask.timeout_secs.is_none()
+        && ask.allow_non_blocking.is_none()
+    {
         return;
     }
     let toolset = table
@@ -418,6 +421,34 @@ future_flag = true
             .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), invalid_utf8);
+    }
+
+    #[tokio::test]
+    async fn ask_allow_non_blocking_write_preserves_raw_and_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[toolset.ask_user_question]\ntimeout_secs = 30\n").unwrap();
+        update_config_at(&path, |cfg| {
+            cfg.ask_user_question.allow_non_blocking = Some(false)
+        })
+        .await
+        .unwrap();
+        let saved: TomlValue = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ask = &saved["toolset"]["ask_user_question"];
+        assert_eq!(ask["allow_non_blocking"].as_bool(), Some(false));
+        assert_eq!(
+            ask["timeout_secs"].as_integer(),
+            Some(30),
+            "hand-written sibling keys must survive the write"
+        );
+        // Clearing the field removes only that key.
+        update_config_at(&path, |cfg| cfg.ask_user_question.allow_non_blocking = None)
+            .await
+            .unwrap();
+        let saved: TomlValue = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ask = &saved["toolset"]["ask_user_question"];
+        assert!(ask.get("allow_non_blocking").is_none());
+        assert_eq!(ask["timeout_secs"].as_integer(), Some(30));
     }
 
     #[tokio::test]

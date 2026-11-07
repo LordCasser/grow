@@ -15,6 +15,12 @@ enum FailQuestionPersistenceAt {
 
 struct QuestionTestPersistence {
     fail_at: Option<FailQuestionPersistenceAt>,
+    /// Retain (never deliver) the durable ACK for this interaction point,
+    /// letting the test release it later. Reuses the same enum because the
+    /// hold points are the same durable writes the failure injection targets.
+    hold_at: Option<FailQuestionPersistenceAt>,
+    retained:
+        std::sync::Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<std::io::Result<()>>>>>,
     committed: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
 }
 
@@ -23,6 +29,35 @@ impl chat_state::TimelinePersistence for QuestionTestPersistence {
         &mut self,
         event: &chat_state::TimelineEvent,
     ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+        let should_hold = matches!(
+            (&self.hold_at, &event.kind),
+            (
+                Some(FailQuestionPersistenceAt::Opened),
+                chat_state::TimelineEventKind::Interaction(
+                    chat_state::InteractionEvent::Opened { .. }
+                ),
+            ) | (
+                Some(FailQuestionPersistenceAt::Resolved),
+                chat_state::TimelineEventKind::Interaction(
+                    chat_state::InteractionEvent::Resolved { .. },
+                ),
+            )
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if should_hold {
+            // Retain the ACK: the durable write never completes until the
+            // test explicitly releases the sender. The event itself is
+            // accepted by the persistence layer at write time.
+            self.committed
+                .lock()
+                .expect("question persistence log must remain available")
+                .push(event.clone());
+            self.retained
+                .lock()
+                .expect("question persistence log must remain available")
+                .push(tx);
+            return rx;
+        }
         let should_fail = matches!(
             (&self.fail_at, &event.kind),
             (
@@ -57,12 +92,14 @@ impl chat_state::TimelinePersistence for QuestionTestPersistence {
     fn flush(&mut self) {}
 }
 
-async fn question_worker_actor(
+async fn question_worker_actor_inner(
     fail_at: Option<FailQuestionPersistenceAt>,
+    hold_at: Option<FailQuestionPersistenceAt>,
 ) -> (
     std::sync::Arc<super::super::SessionActor>,
     tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<std::io::Result<()>>>>>,
 ) {
     use super::support::create_test_actor;
 
@@ -70,6 +107,7 @@ async fn question_worker_actor(
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     let committed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let retained = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sampling_config = actor
         .chat_state_handle
         .get_sampling_config()
@@ -81,13 +119,40 @@ async fn question_worker_actor(
         sampling_config,
         Box::new(QuestionTestPersistence {
             fail_at,
+            hold_at,
+            retained: retained.clone(),
             committed: committed.clone(),
         }),
         event_tx,
         tokio_util::sync::CancellationToken::new(),
     );
     actor.events = crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
-    (std::sync::Arc::new(actor), gateway_rx, committed)
+    (std::sync::Arc::new(actor), gateway_rx, committed, retained)
+}
+
+async fn question_worker_actor(
+    fail_at: Option<FailQuestionPersistenceAt>,
+) -> (
+    std::sync::Arc<super::super::SessionActor>,
+    tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+) {
+    let (actor, gateway_rx, committed, _retained) =
+        question_worker_actor_inner(fail_at, None).await;
+    (actor, gateway_rx, committed)
+}
+
+/// Like [`question_worker_actor`], but the durable ACK for one interaction
+/// point is retained (never delivered) until the test releases the sender.
+async fn question_worker_actor_with_retained_ack(
+    hold_at: FailQuestionPersistenceAt,
+) -> (
+    std::sync::Arc<super::super::SessionActor>,
+    tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<std::io::Result<()>>>>>,
+) {
+    question_worker_actor_inner(None, Some(hold_at)).await
 }
 
 fn submit_plan_candidate(actor: &super::super::SessionActor, plan: &str) -> u64 {
@@ -129,6 +194,110 @@ fn interaction_events(events: &[chat_state::TimelineEvent]) -> Vec<chat_state::I
         .collect()
 }
 
+/// `tool_call_id`s carried by `grow/session_notification`
+/// `interaction_resolved` broadcasts in one gateway message.
+fn resolved_ids_from(message: &acp_transport::AcpClientMessage) -> Vec<String> {
+    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+        return Vec::new();
+    };
+    if args.request.method.as_ref() != "grow/session_notification" {
+        return Vec::new();
+    }
+    // Parse with the production type so field naming on the wire cannot
+    // drift from what the shell actually broadcasts.
+    let Ok(notification) = serde_json::from_str::<
+        crate::extensions::notification::SessionNotification,
+    >(args.request.params.get()) else {
+        return Vec::new();
+    };
+    match notification.update {
+        crate::extensions::notification::SessionUpdate::InteractionResolved { tool_call_id } => {
+            vec![tool_call_id]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Wait until the worker actually sends one `interaction_resolved` broadcast
+/// for `call_id` on the gateway, acking unrelated traffic on the way.
+async fn await_interaction_resolved(
+    gateway_rx: &mut tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    call_id: &str,
+    within: std::time::Duration,
+) {
+    tokio::time::timeout(within, async {
+        loop {
+            let message = gateway_rx
+                .recv()
+                .await
+                .expect("gateway remains open while waiting for the resolution broadcast");
+            let is_target = resolved_ids_from(&message).iter().any(|id| id == call_id);
+            if let acp_transport::AcpClientMessage::SessionNotification(args) = message {
+                let _ = args.response_tx.send(Ok(()));
+            }
+            if is_target {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("worker must broadcast interaction_resolved for {call_id}"));
+}
+
+/// Observe the gateway for `window` and count `interaction_resolved`
+/// broadcasts for `call_id` (0 or more; no failure on zero).
+async fn count_interaction_resolved(
+    gateway_rx: &mut tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    call_id: &str,
+    window: std::time::Duration,
+) -> usize {
+    let mut seen = 0;
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return seen;
+        }
+        match tokio::time::timeout(remaining, gateway_rx.recv()).await {
+            Ok(Some(message)) => {
+                let hits = resolved_ids_from(&message)
+                    .iter()
+                    .filter(|id| *id == call_id)
+                    .count();
+                if let acp_transport::AcpClientMessage::SessionNotification(args) = message {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                seen += hits;
+            }
+            Ok(None) => return seen,
+            Err(_) => return seen,
+        }
+    }
+}
+
+/// Observe the gateway for `window` and return whether any reverse-request
+/// (`ExtMethod`) was emitted in that window.
+async fn any_ext_method_emitted(
+    gateway_rx: &mut tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    window: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        match tokio::time::timeout(remaining, gateway_rx.recv()).await {
+            Ok(Some(acp_transport::AcpClientMessage::SessionNotification(args))) => {
+                let _ = args.response_tx.send(Ok(()));
+            }
+            Ok(Some(acp_transport::AcpClientMessage::ExtMethod(_))) => return true,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return false,
+        }
+    }
+}
+
 #[test]
 fn ask_user_question_request_carries_session_id() {
     let req = AskUserQuestionExtRequest {
@@ -136,6 +305,7 @@ fn ask_user_question_request_carries_session_id() {
         tool_call_id: "call-1".to_string(),
         questions: vec![],
         mode: AskUserQuestionMode::Default,
+        blocking: true,
     };
     assert!(!req.session_id.is_empty());
     // Wire format is camelCase (`sessionId`); Tier-2 routing reads it.
@@ -526,6 +696,7 @@ async fn cancelled_question_does_not_stop_worker() {
             tx.send(UserQuestionRequest {
                 tool_call_id: "cancelled".into(),
                 questions: vec![],
+                blocking: true,
                 deadline: None,
                 result_tx: first_tx,
             })
@@ -534,6 +705,7 @@ async fn cancelled_question_does_not_stop_worker() {
             tx.send(UserQuestionRequest {
                 tool_call_id: "next".into(),
                 questions: vec![],
+                blocking: true,
                 deadline: None,
                 result_tx: next_tx,
             })
@@ -581,6 +753,14 @@ async fn question_worker_resolves_user_outcomes_with_opened_durable_before_acp()
                     None,
                     chat_state::InteractionResolution::Failed,
                 ),
+                // A presentation acknowledgement on a blocking question is a
+                // client protocol violation: the worker must reject it (and
+                // durably resolve Failed), not record Answered.
+                (
+                    "presented-to-blocking-question",
+                    Some(serde_json::json!({"outcome":"presented"})),
+                    chat_state::InteractionResolution::Failed,
+                ),
             ] {
                 let (actor, mut gateway_rx, _) = question_worker_actor(None).await;
                 let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -589,6 +769,7 @@ async fn question_worker_resolves_user_outcomes_with_opened_durable_before_acp()
                     .send(UserQuestionRequest {
                         tool_call_id: call_id.into(),
                         questions: Vec::new(),
+                        blocking: true,
                         deadline: None,
                         result_tx,
                     })
@@ -629,7 +810,8 @@ async fn question_worker_resolves_user_outcomes_with_opened_durable_before_acp()
                     ("answered-question", Ok(UserQuestionResponse::Accepted { .. })) => {}
                     ("cancelled-question", Ok(UserQuestionResponse::Cancelled)) => {}
                     (
-                        "malformed-question" | "transport-question",
+                        "malformed-question" | "transport-question"
+                        | "presented-to-blocking-question",
                         Err(tools::implementations::grow_build::ask_user_question::UserQuestionError::MalformedResponse(_)
                             | tools::implementations::grow_build::ask_user_question::UserQuestionError::TransportError(_)),
                     ) => {}
@@ -660,6 +842,203 @@ async fn question_worker_resolves_user_outcomes_with_opened_durable_before_acp()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn advisory_question_presents_once_without_guard_and_serves_next() {
+    use super::support::*;
+    use tools::implementations::grow_build::ask_user_question::{
+        UserQuestionRequest, UserQuestionResponse,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut gateway_rx, _) = question_worker_actor(None).await;
+            let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "advisory-presented".into(),
+                    questions: Vec::new(),
+                    blocking: false,
+                    deadline: Some(
+                        tokio::time::Instant::now()
+                            + tools::implementations::grow_build::ask_user_question::ADVISORY_PRESENTATION_BUDGET,
+                    ),
+                    result_tx,
+                })
+                .unwrap();
+            let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+            super::super::spawn::start_user_question_worker(&actor, request_rx, runtime_suspend);
+
+            let ext_args = receive_question_ext_method(&mut gateway_rx).await;
+            let payload: serde_json::Value =
+                serde_json::from_str(ext_args.request.params.get()).unwrap();
+            assert_eq!(payload["blocking"], false, "advisory wire flag");
+
+            // Before the ACK there is no durable interaction at all: no
+            // pending guard, no waiting-for-user Opened.
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(
+                interaction_events(&events).is_empty(),
+                "advisory admission must not open a durable interaction"
+            );
+
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({"outcome":"presented"}))
+                .unwrap();
+            ext_args
+                .response_tx
+                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())))
+                .unwrap();
+
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+                .await
+                .expect("advisory question must resolve after Presented")
+                .expect("worker must return a result");
+            assert!(matches!(result, Ok(UserQuestionResponse::Presented)));
+
+            // Still no durable interaction after completion.
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(
+                interaction_events(&events).is_empty(),
+                "advisory completion must not write interaction events"
+            );
+
+            // No guard remains: the worker immediately serves the next request.
+            let (next_tx, next_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "advisory-next".into(),
+                    questions: Vec::new(),
+                    blocking: false,
+                    deadline: Some(
+                        tokio::time::Instant::now()
+                            + tools::implementations::grow_build::ask_user_question::ADVISORY_PRESENTATION_BUDGET,
+                    ),
+                    result_tx: next_tx,
+                })
+                .unwrap();
+            let _ = receive_question_ext_method(&mut gateway_rx).await;
+            drop(next_rx);
+            actor.background_service_shutdown.cancel();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn advisory_question_rejects_user_responses_and_transport_failures() {
+    use super::support::*;
+    use tools::implementations::grow_build::ask_user_question::{
+        UserQuestionError, UserQuestionRequest, UserQuestionResponse,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (call_id, response, expected) in [
+                (
+                    "advisory-wrong-ack",
+                    Some(serde_json::json!({"outcome":"accepted", "answers":{}})),
+                    false,
+                ),
+                ("advisory-transport", None, true),
+            ] {
+                let (actor, mut gateway_rx, _) = question_worker_actor(None).await;
+                let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                request_tx
+                    .send(UserQuestionRequest {
+                        tool_call_id: call_id.into(),
+                        questions: Vec::new(),
+                        blocking: false,
+                        deadline: Some(
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                        ),
+                        result_tx,
+                    })
+                    .unwrap();
+                let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+                super::super::spawn::start_user_question_worker(
+                    &actor,
+                    request_rx,
+                    runtime_suspend,
+                );
+                let ext_args = receive_question_ext_method(&mut gateway_rx).await;
+                match response {
+                    Some(value) => {
+                        let raw = serde_json::value::to_raw_value(&value).unwrap();
+                        let _ = ext_args
+                            .response_tx
+                            .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+                    }
+                    None => drop(ext_args.response_tx),
+                }
+                let result = tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+                    .await
+                    .expect("advisory question must resolve")
+                    .expect("worker must return a result");
+                match result {
+                    Err(UserQuestionError::MalformedResponse(_)) if !expected => {}
+                    Err(UserQuestionError::TransportError(_)) if expected => {}
+                    other => panic!("unexpected result for {call_id}: {other:?}"),
+                }
+                // Neither failure path may fabricate a user answer or durable
+                // interaction state.
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(
+                    interaction_events(&events).is_empty(),
+                    "{call_id} must not open or resolve a durable interaction"
+                );
+                actor.background_service_shutdown.cancel();
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn advisory_question_expired_in_queue_sends_no_card() {
+    use super::support::*;
+    use tools::implementations::grow_build::ask_user_question::{
+        UserQuestionError, UserQuestionRequest,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut gateway_rx, _) = question_worker_actor(None).await;
+            let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "advisory-expired".into(),
+                    questions: Vec::new(),
+                    blocking: false,
+                    deadline: Some(tokio::time::Instant::now()),
+                    result_tx,
+                })
+                .unwrap();
+            let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+            super::super::spawn::start_user_question_worker(&actor, request_rx, runtime_suspend);
+
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+                .await
+                .expect("expired advisory request must resolve")
+                .expect("worker must return a result");
+            assert!(
+                matches!(result, Err(UserQuestionError::TransportError(_))),
+                "expiry must be an infrastructure failure, got {result:?}"
+            );
+            // Give the worker a moment; it must not have sent a card.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            while let Ok(message) = gateway_rx.try_recv() {
+                assert!(
+                    !matches!(message, acp_transport::AcpClientMessage::ExtMethod(_)),
+                    "expired advisory question must not reach the client"
+                );
+            }
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(interaction_events(&events).is_empty());
+            actor.background_service_shutdown.cancel();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn question_deadline_requires_closed_receiver_and_expired_shared_deadline() {
     use super::support::*;
     use tools::implementations::grow_build::ask_user_question::UserQuestionRequest;
@@ -674,6 +1053,7 @@ async fn question_deadline_requires_closed_receiver_and_expired_shared_deadline(
                 .send(UserQuestionRequest {
                     tool_call_id: "timed-out-question".into(),
                     questions: Vec::new(),
+                    blocking: true,
                     deadline: Some(deadline),
                     result_tx,
                 })
@@ -733,6 +1113,7 @@ async fn question_worker_resolves_suspend_when_foreground_receiver_closes_before
                 .send(UserQuestionRequest {
                     tool_call_id: "suspended-question-receiver-drop".into(),
                     questions: Vec::new(),
+                    blocking: true,
                     deadline: None,
                     result_tx,
                 })
@@ -820,6 +1201,7 @@ async fn question_worker_never_reports_answer_when_open_or_resolution_persistenc
                 .send(UserQuestionRequest {
                     tool_call_id: "open-failure-question".into(),
                     questions: Vec::new(),
+                    blocking: true,
                     deadline: None,
                     result_tx,
                 })
@@ -872,6 +1254,7 @@ async fn question_worker_never_reports_answer_when_open_or_resolution_persistenc
                 .send(UserQuestionRequest {
                     tool_call_id: "resolve-failure-question".into(),
                     questions: Vec::new(),
+                    blocking: true,
                     deadline: None,
                     result_tx,
                 })
@@ -926,6 +1309,7 @@ async fn suspended_question_attempt_is_closed_and_fresh_attempt_can_reuse_call_i
                 .send(UserQuestionRequest {
                     tool_call_id: "reused-after-suspend".into(),
                     questions: Vec::new(),
+                    blocking: true,
                     deadline: None,
                     result_tx,
                 })
@@ -989,6 +1373,7 @@ async fn suspended_question_attempt_is_closed_and_fresh_attempt_can_reuse_call_i
                 .send(UserQuestionRequest {
                     tool_call_id: "reused-after-suspend".into(),
                     questions: Vec::new(),
+                    blocking: true,
                     deadline: None,
                     result_tx: fresh_result_tx,
                 })
@@ -1062,6 +1447,445 @@ async fn suspended_question_attempt_is_closed_and_fresh_attempt_can_reuse_call_i
                     && new != old
             ));
             fresh_actor.background_service_shutdown.cancel();
+        })
+        .await;
+}
+
+/// Scenario 1 (minimal reproducer, counter-evidence collection): a normal
+/// question whose receiver stays alive, answered only after a controlled
+/// long-idle barrier. Must settle exactly once — one tool result and one
+/// canonical `interaction_resolved` broadcast — and the same worker must
+/// serve the next question afterwards. The artificial barrier stands in for
+/// the real long idle; no real 30-minute wait is required.
+///
+/// NOTE: passing this test is counter-evidence only. It does not reproduce
+/// or fix the reported user-visible stall; it pins the healthy boundary.
+#[tokio::test(flavor = "current_thread")]
+async fn answered_question_after_long_idle_settles_exactly_once_and_worker_continues() {
+    use super::support::*;
+    use tools::implementations::grow_build::ask_user_question::{
+        UserQuestionRequest, UserQuestionResponse,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut gateway_rx, committed) = question_worker_actor(None).await;
+            let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "long-idle-answered".into(),
+                    questions: Vec::new(),
+                    blocking: true,
+                    deadline: None,
+                    result_tx,
+                })
+                .unwrap();
+            let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+            super::super::spawn::start_user_question_worker(&actor, request_rx, runtime_suspend);
+
+            let ext_args = receive_question_ext_method(&mut gateway_rx).await;
+            // Controlled long-idle barrier: the pager/user holds the question
+            // unanswered for an extended stretch before replying.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "outcome": "accepted",
+                "answers": {}
+            }))
+            .unwrap();
+            let _ = ext_args
+                .response_tx
+                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+                    .await
+                    .expect("long-idle answer must reach the tool exactly once")
+                    .expect("worker must return a result"),
+                Ok(UserQuestionResponse::Accepted { .. })
+            ));
+
+            // Exactly one canonical interaction_resolved broadcast: the durable
+            // resolution owns the entry, so the guard drop must not re-broadcast.
+            await_interaction_resolved(
+                &mut gateway_rx,
+                "long-idle-answered",
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+            assert_eq!(
+                count_interaction_resolved(
+                    &mut gateway_rx,
+                    "long-idle-answered",
+                    std::time::Duration::from_millis(150),
+                )
+                .await,
+                0,
+                "resolution must broadcast interaction_resolved exactly once"
+            );
+
+            assert!(matches!(
+                interaction_events(&committed.lock().expect("log available").clone()).as_slice(),
+                [
+                    chat_state::InteractionEvent::Opened { tool_call_id, .. },
+                    chat_state::InteractionEvent::Resolved {
+                        tool_call_id: resolved_id,
+                        resolution: chat_state::InteractionResolution::Answered,
+                        ..
+                    }
+                ] if tool_call_id == "long-idle-answered" && resolved_id == tool_call_id
+            ));
+
+            // The same worker must serve the next request afterwards.
+            let (next_tx, next_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "long-idle-next".into(),
+                    questions: Vec::new(),
+                    blocking: true,
+                    deadline: None,
+                    result_tx: next_tx,
+                })
+                .unwrap();
+            let next_ext = receive_question_ext_method(&mut gateway_rx).await;
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "outcome": "accepted",
+                "answers": {}
+            }))
+            .unwrap();
+            let _ = next_ext
+                .response_tx
+                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), next_rx)
+                    .await
+                    .expect("worker must serve the next request")
+                    .expect("worker must return the next result"),
+                Ok(UserQuestionResponse::Accepted { .. })
+            ));
+            actor.background_service_shutdown.cancel();
+        })
+        .await;
+}
+
+/// Scenario 2 (minimal reproducer): the tool-side receiver closes (real
+/// simulation of timeout/cancel aborting the foreground owner) while the
+/// question is unanswered. The worker must abandon the ACP wait, durably
+/// resolve the attempt, and actually send one `interaction_resolved`
+/// broadcast (observed on the gateway, not asserted via helpers). A late
+/// ACP response for the orphaned request must then be inert — it cannot
+/// settle a new question or the old turn — and the worker must still answer
+/// the next question normally.
+///
+/// Transport ownership note: dropping the worker's ext future does not by
+/// itself make this response_tx dead. In the real transport the tx travels
+/// with the forwarded message (gateway `enqueue` moves it into
+/// `AcpClientMessage`); the awaiting future only owns the rx. This harness
+/// holds the tx directly — mirroring that ownership — so the late send
+/// exercises the "send into an abandoned receiver" path.
+///
+/// NOTE: passing this test is counter-evidence only. It does not reproduce
+/// or fix the reported user-visible stall.
+#[tokio::test(flavor = "current_thread")]
+async fn late_acp_response_after_receiver_close_is_inert_and_worker_survives() {
+    use super::support::*;
+    use tools::implementations::grow_build::ask_user_question::{
+        UserQuestionRequest, UserQuestionResponse,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut gateway_rx, committed) = question_worker_actor(None).await;
+            let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "late-orphan-answer".into(),
+                    questions: Vec::new(),
+                    blocking: true,
+                    deadline: None,
+                    result_tx,
+                })
+                .unwrap();
+            let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+            super::super::spawn::start_user_question_worker(&actor, request_rx, runtime_suspend);
+
+            let ext_args = receive_question_ext_method(&mut gateway_rx).await;
+            // Foreground owner is gone: the tool receiver closes before any
+            // answer arrives (timeout / turn cancel aborts the tool future).
+            drop(result_rx);
+
+            // The worker must actually send the canonical resolution broadcast.
+            await_interaction_resolved(
+                &mut gateway_rx,
+                "late-orphan-answer",
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+            assert!(matches!(
+                interaction_events(&committed.lock().expect("log available").clone()).as_slice(),
+                [
+                    chat_state::InteractionEvent::Opened { tool_call_id, .. },
+                    chat_state::InteractionEvent::Resolved {
+                        tool_call_id: resolved_id,
+                        resolution: chat_state::InteractionResolution::Cancelled,
+                        ..
+                    }
+                ] if tool_call_id == "late-orphan-answer" && resolved_id == tool_call_id
+            ));
+
+            // The stale ACP response arrives after the worker abandoned the
+            // wait. It must be inert: no second resolution broadcast, no new
+            // reverse-request, no extra durable events.
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "outcome": "accepted",
+                "answers": {}
+            }))
+            .unwrap();
+            let _ = ext_args
+                .response_tx
+                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+            assert_eq!(
+                count_interaction_resolved(
+                    &mut gateway_rx,
+                    "late-orphan-answer",
+                    std::time::Duration::from_millis(200),
+                )
+                .await,
+                0,
+                "the late response must not resolve the abandoned attempt again"
+            );
+            assert!(
+                matches!(
+                    interaction_events(&committed.lock().expect("log available").clone())
+                        .as_slice(),
+                    [
+                        chat_state::InteractionEvent::Opened { .. },
+                        chat_state::InteractionEvent::Resolved {
+                            resolution: chat_state::InteractionResolution::Cancelled,
+                            ..
+                        }
+                    ]
+                ),
+                "the late response must not durably settle anything"
+            );
+
+            // Question B is answered normally by the same worker: the late
+            // response must not have wedged the request loop or been applied
+            // to B.
+            let (b_tx, b_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "late-orphan-next".into(),
+                    questions: Vec::new(),
+                    blocking: true,
+                    deadline: None,
+                    result_tx: b_tx,
+                })
+                .unwrap();
+            let b_ext = receive_question_ext_method(&mut gateway_rx).await;
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "outcome": "accepted",
+                "answers": {}
+            }))
+            .unwrap();
+            let _ = b_ext
+                .response_tx
+                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), b_rx)
+                    .await
+                    .expect("worker must still serve question B")
+                    .expect("worker must return B's result"),
+                Ok(UserQuestionResponse::Accepted { .. })
+            ));
+            assert!(matches!(
+                interaction_events(&committed.lock().expect("log available").clone()).as_slice(),
+                [
+                    chat_state::InteractionEvent::Opened { tool_call_id: a, .. },
+                    chat_state::InteractionEvent::Resolved {
+                        resolution: chat_state::InteractionResolution::Cancelled,
+                        ..
+                    },
+                    chat_state::InteractionEvent::Opened { tool_call_id: b, .. },
+                    chat_state::InteractionEvent::Resolved {
+                        tool_call_id: b_resolved,
+                        resolution: chat_state::InteractionResolution::Answered,
+                        ..
+                    }
+                ] if a == "late-orphan-answer"
+                    && b == "late-orphan-next"
+                    && b_resolved == b
+            ));
+            actor.background_service_shutdown.cancel();
+        })
+        .await;
+}
+
+/// E1 discriminator (retained-ACK): a durable write whose ACK is retained
+/// (never delivered) parks the worker. Held at Opened, no ACP reverse-request
+/// may be emitted before the ACK arrives; held at Resolved, the accepted
+/// answer must not reach the tool until the ACK arrives, and the retained
+/// write must resolve as Answered once released — an unknown ACK is never
+/// converted to Failed/done.
+///
+/// This only establishes the generic persistence precondition (a parked
+/// durable write blocks the tool). It is NOT evidence that the reported user
+/// scenario's root cause is this park; that would require showing the
+/// production persistence layer parks in that scenario.
+#[tokio::test(flavor = "current_thread")]
+async fn retained_durable_ack_parks_open_and_resolution_until_released() {
+    use super::support::*;
+    use tools::implementations::grow_build::ask_user_question::{
+        UserQuestionRequest, UserQuestionResponse,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            // Hold at Opened: the reverse-request must wait for the durable
+            // Opened ACK.
+            let (actor, mut gateway_rx, _committed, retained) =
+                question_worker_actor_with_retained_ack(FailQuestionPersistenceAt::Opened).await;
+            let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "retained-open".into(),
+                    questions: Vec::new(),
+                    blocking: true,
+                    deadline: None,
+                    result_tx,
+                })
+                .unwrap();
+            let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+            super::super::spawn::start_user_question_worker(&actor, request_rx, runtime_suspend);
+            assert!(
+                !any_ext_method_emitted(&mut gateway_rx, std::time::Duration::from_millis(200))
+                    .await,
+                "the ACP question must not be sent before the durable Opened ACK"
+            );
+
+            let mut parked = {
+                let mut retained = retained.lock().expect("retained log available");
+                retained.drain(..).collect::<Vec<_>>()
+            };
+            let open_ack = parked.pop().expect("the Opened ACK is retained");
+            drop(open_ack.send(Ok(())));
+            let ext_args = receive_question_ext_method(&mut gateway_rx).await;
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "outcome": "accepted",
+                "answers": {}
+            }))
+            .unwrap();
+            let _ = ext_args
+                .response_tx
+                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+                    .await
+                    .expect("released Opened ACK must let the question settle")
+                    .expect("worker must return a result"),
+                Ok(UserQuestionResponse::Accepted { .. })
+            ));
+            await_interaction_resolved(
+                &mut gateway_rx,
+                "retained-open",
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+            actor.background_service_shutdown.cancel();
+
+            // Hold at Resolved: the accepted answer is parked behind the
+            // durable Resolved ACK; the tool result only flows once the ACK
+            // is released, and the resolution stays Answered.
+            let (actor, mut gateway_rx, committed, retained) =
+                question_worker_actor_with_retained_ack(FailQuestionPersistenceAt::Resolved).await;
+            let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "retained-resolve".into(),
+                    questions: Vec::new(),
+                    blocking: true,
+                    deadline: None,
+                    result_tx,
+                })
+                .unwrap();
+            let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+            super::super::spawn::start_user_question_worker(&actor, request_rx, runtime_suspend);
+            let ext_args = receive_question_ext_method(&mut gateway_rx).await;
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "outcome": "accepted",
+                "answers": {}
+            }))
+            .unwrap();
+            let _ = ext_args
+                .response_tx
+                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+
+            // While the Resolved ACK is retained, no result may reach the
+            // tool and no resolution broadcast may be sent. Observation-only
+            // window: an unknown ACK is never itself converted to a failure.
+            assert!(
+                count_interaction_resolved(
+                    &mut gateway_rx,
+                    "retained-resolve",
+                    std::time::Duration::from_millis(200),
+                )
+                .await
+                    == 0,
+                "no interaction_resolved broadcast before the durable Resolved ACK"
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut result_rx)
+                    .await
+                    .is_err(),
+                "the tool result must stay parked behind the retained Resolved ACK"
+            );
+            assert!(
+                interaction_events(&committed.lock().expect("log available").clone())
+                    .iter()
+                    .all(|event| !matches!(
+                        event,
+                        chat_state::InteractionEvent::Resolved {
+                            resolution: chat_state::InteractionResolution::Failed,
+                            ..
+                        }
+                    )),
+                "a retained ACK must not be recorded as a Failed resolution"
+            );
+
+            // Release: the same answer flows and settles as Answered.
+            let mut parked = {
+                let mut retained = retained.lock().expect("retained log available");
+                retained.drain(..).collect::<Vec<_>>()
+            };
+            let resolve_ack = parked.pop().expect("the Resolved ACK is retained");
+            drop(resolve_ack.send(Ok(())));
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+                    .await
+                    .expect("released Resolved ACK must deliver the parked answer")
+                    .expect("worker must return a result"),
+                Ok(UserQuestionResponse::Accepted { .. })
+            ));
+            await_interaction_resolved(
+                &mut gateway_rx,
+                "retained-resolve",
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+            assert!(matches!(
+                interaction_events(&committed.lock().expect("log available").clone()).as_slice(),
+                [
+                    chat_state::InteractionEvent::Opened { .. },
+                    chat_state::InteractionEvent::Resolved {
+                        resolution: chat_state::InteractionResolution::Answered,
+                        ..
+                    }
+                ]
+            ));
+            actor.background_service_shutdown.cancel();
         })
         .await;
 }

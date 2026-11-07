@@ -554,6 +554,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "default_selected_permission",
             // SHELL-owned ask_user_question timeout (Agent category).
             "toolset.ask_user_question.timeout_enabled",
+            "toolset.ask_user_question.allow_non_blocking",
             // SHELL-owned default_model (Models category).
             "default_model",
             "show_model_provider",
@@ -716,6 +717,36 @@ fn cmd_comma_closes_modal_on_macos() {
     assert!(matches!(
         handle_settings_key(&mut s, &key),
         SettingsKeyOutcome::Close
+    ));
+}
+
+#[test]
+fn non_blocking_preference_is_searchable_and_emits_toggle_action() {
+    let mut s = make_state();
+    handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    );
+    for ch in "non-blocking".chars() {
+        handle_settings_key(
+            &mut s,
+            &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        );
+    }
+    assert!(
+        s.rows
+            .iter()
+            .any(|row| matches!(row, RowEntry::Setting { key, .. }
+        if *key == "toolset.ask_user_question.allow_non_blocking"))
+    );
+    handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let outcome = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    );
+    assert!(matches!(
+        outcome,
+        SettingsKeyOutcome::Action(Action::SetAskUserQuestionAllowNonBlocking(false))
     ));
 }
 

@@ -1,0 +1,6 @@
+- [x] 核唯一grow_home调用、转发与真正owner，确认不改行为。
+- [x] coder完成manifest/调用及唯一local lock依赖边收缩。
+- [x] 定向fmt、既有crate check/tests和lock差异校验（见verification.md）。
+- [x] 父验收完整diff及验证证据。
+- [x] 更新backlog，准备skip-specs归档；strict/all/archived复核按verification记录。
+- [x] 完成skip-specs本地归档；后置全量校验结果记入verification。

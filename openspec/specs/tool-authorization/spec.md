@@ -630,3 +630,46 @@ The `set_subagent_model` tool SHALL obtain the source identity from the host-bou
 #### Scenario: Target stops during preparation
 - **WHEN** target cancellation, terminal execution or actor replacement wins before target admission
 - **THEN** the request fails without redirecting to a replacement actor or reporting queued without an actor receipt.
+
+### Requirement: Ripgrep external programs require invocation authority
+
+Grow SHALL conservatively classify an `rg` invocation containing an external-program argument shaped as `--pre` or `--hostname-bin`, in separate-value or equals form, as having executable effects beyond built-in observational search. Built-in safe-command and Auto routine shortcuts and a grant for a plain `rg` prefix SHALL NOT authorize that external program. Explicit exact-invocation grants and deny precedence SHALL retain their existing policy. Delegated capability projection SHALL require All rather than ReadExecute for such an invocation. Classification SHALL NOT stop at a `--` argument whose role as an option terminator has not been proved; conservative review of a literal flag-shaped pattern is permitted.
+
+#### Scenario: Hostname helper without hyperlink output
+
+- **WHEN** an `rg` invocation selects `--hostname-bin` while hyperlink or color output is disabled
+- **THEN** the external-execution classification still applies before permission or delegated capability admission.
+
+#### Scenario: Prefix and exact invocation grants
+
+- **WHEN** the session has granted a plain `rg` prefix but receives an invocation with either external-program flag
+- **THEN** it requires the ordinary additional authorization path; an existing exact grant for that invocation continues to obey the configured policy and deny rules.
+
+#### Scenario: A separator-shaped option value does not hide execution
+
+- **WHEN** `rg --glob -- --hostname-bin helper` uses `--` as the glob value before the execution option
+- **THEN** permission and delegated capability classification still require the external-program authority.
+
+#### Scenario: Ordinary search remains observational
+
+- **WHEN** an ordinary `rg` search or `--pre-glob` filter contains no external-program flag-shaped argument
+- **THEN** its existing observational classification and permission path remain available.
+
+### Requirement: Questions can offer provisional recommendations without blocking
+
+The Agent MAY explicitly select a nonblocking question when every question has an unambiguous recommended option and proceeding under that provisional choice is within existing authorization. The tool SHALL complete after bounded presentation admission and identify its result as the Agent's recommendation, not a user answer. Required user permission or decision gates SHALL remain blocking. Omitted per-call selection SHALL use the existing blocking form.
+
+#### Scenario: Recommendation permits independent progress
+
+- **WHEN** nonblocking mode is admitted and every recommended label matches an explicit option
+- **THEN** the model may continue without a user response, and the returned recommendation grants no new user authority.
+
+#### Scenario: Ambiguous recommendation
+
+- **WHEN** effective nonblocking mode has a missing or unmatched recommendation
+- **THEN** the call fails validation before publication rather than guessing an option.
+
+#### Scenario: User requires blocking questions
+
+- **WHEN** the effective persistent preference disables nonblocking questions
+- **THEN** every newly admitted question uses the existing response-waiting form even if the Agent requested nonblocking mode.

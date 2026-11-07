@@ -630,7 +630,9 @@ fn subagent_row(
     let child_session_id = info.child_session_id.as_ref();
     let child_view = parent_view.subagent_views.get(child_session_id);
     let permission_pending = child_view.is_some_and(|child| !child.permission_queue.is_empty());
-    let question_pending = child_view.is_some_and(|child| child.question_view.is_some());
+    let question_pending = child_view
+        .and_then(|child| child.question_view.as_ref())
+        .is_some_and(|qv| !qv.is_advisory_reply_edit());
     let state = classify_subagent(info, permission_pending || question_pending);
     let (label_raw, desc_raw) = format_subagent_label(info);
     let label = {

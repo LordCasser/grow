@@ -24,7 +24,7 @@ async fn run_with_session_end_hook() -> (HeadlessResult, MockInferenceServer, te
     let server = MockInferenceServer::start()
         .await
         .expect("start mock server");
-    let sandbox = TestSandbox::builder().mock_url(server.url()).git().build();
+    let mut sandbox = TestSandbox::builder().mock_url(server.url()).git().build();
 
     let state = state_dir.path().display();
     let script_path = sandbox.home().join("session_end_hook.sh");
@@ -64,13 +64,54 @@ async fn run_with_session_end_hook() -> (HeadlessResult, MockInferenceServer, te
     )
     .expect("write hook config");
 
+    // The sandbox builder only isolates credentials; without an explicit
+    // provider config the headless prompt fails with "no LLM configured"
+    // before reaching the mock server. Mirror the isolated mock provider
+    // shape used by test_subagent_session_end_order.rs.
+    let models_dir = sandbox.grow_home();
+    std::fs::write(
+        models_dir.join("config.toml"),
+        format!(
+            r#"[models]
+default = "mock/headless"
+[provider.mock]
+api_backend = "chat_completions"
+[provider.mock.options]
+base_url = "{}"
+env_key = "GROW_API_KEY"
+[provider.mock.models.headless]
+model = "headless-wire"
+context_window = 200000
+agent_type = "grow-build"
+"#,
+            server.url()
+        ),
+    )
+    .expect("write mock provider config");
+
+    // Diagnostic trail for the hook-lifecycle path (same shape as
+    // test_subagent_session_end_order.rs), so a missing marker can be
+    // attributed to a specific session-end lifecycle decision. Kept inside
+    // the sandbox tempdir (no shared /tmp) and attached to failure messages.
+    let diagnostic_log = state_dir.path().join("grow-session-end-e2e.log");
+    sandbox.set_env("GROW_LOG_FILE", &diagnostic_log);
+
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "say hello", "--permission-mode", "always-approve"])
-        .current_dir(sandbox.workspace())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+    cmd.args([
+        "-p",
+        "say hello",
+        // The regression targets the non-leader exit path; without this flag
+        // the default leader mode may keep the session resident and never
+        // route the process exit through SessionCommand::Shutdown.
+        "--no-leader",
+        "--permission-mode",
+        "always-approve",
+    ])
+    .current_dir(sandbox.workspace())
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
     let result = run_headless_in_sandbox(cmd, sandbox).await;
 
     (result, server, state_dir)
@@ -82,11 +123,18 @@ async fn session_end_hook_fires_on_headless_exit() {
     let (result, server, state_dir) = run_with_session_end_hook().await;
     assert_headless_success(&result, "session_end hook e2e", Some(&server));
 
+    // Attach the diagnostic trail to failure messages so a missing marker can
+    // be attributed to a specific session-end lifecycle decision.
+    let diagnostic_log = state_dir.path().join("grow-session-end-e2e.log");
+    let diagnostics = std::fs::read_to_string(&diagnostic_log)
+        .map(|text| format!("\n--- {diagnostic_log:?} ---\n{text}"))
+        .unwrap_or_else(|e| format!("\n(diagnostic log {diagnostic_log:?} unreadable: {e})"));
+
     let marker = state_dir.path().join("marker");
     assert!(
         marker.is_file(),
         "SessionEnd hook must write a marker on process exit (non-leader flush path); \
-         missing {marker:?}. stderr:\n{}",
+         missing {marker:?}. stderr:\n{}{diagnostics}",
         result.stderr
     );
 

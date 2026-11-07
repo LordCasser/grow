@@ -997,6 +997,30 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: true,
             hidden_in_minimal: false,
         },
+        SettingMeta {
+            key: "toolset.ask_user_question.allow_non_blocking",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Allow non-blocking questions",
+            description: "When on, the Agent may decide to continue with recommended answers; \
+                          when off, questions wait for your answer. Saved changes apply to the \
+                          next question. GROW_ASK_USER_QUESTION_ALLOW_NON_BLOCKING overrides \
+                          this saved preference.",
+            keywords: &[
+                "ask",
+                "question",
+                "ask_user_question",
+                "blocking",
+                "non-blocking",
+                "recommendation",
+                "wait",
+            ],
+            kind: SettingKind::Bool {
+                default: ask_user_question::DEFAULT_ASK_USER_QUESTION_ALLOW_NON_BLOCKING,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned startup-time settings (restart_required: true).
         // The running pager doesn't re-read these mid-session.
         SettingMeta {

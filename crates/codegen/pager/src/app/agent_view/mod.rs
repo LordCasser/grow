@@ -1364,6 +1364,13 @@ fn translate_local_submit(
             }
         }
         LocalQuestionKind::ProjectSelect { .. } => unreachable!(),
+        LocalQuestionKind::AdvisoryReply { .. } => {
+            // Intercepted in `submit_question_answers`, which builds the
+            // literal reply and routes it through
+            // `Action::SubmitAdvisoryReply`; reaching here means a future
+            // caller bypassed that path, so drop without side effects.
+            InputOutcome::Changed
+        }
     }
 }
 fn translate_project_select(

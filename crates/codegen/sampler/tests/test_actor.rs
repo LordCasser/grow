@@ -1443,6 +1443,347 @@ async fn messages_named_error_discards_a_partial_tool_candidate() {
     server.shutdown();
 }
 
+/// The existing loopback actor fixture exercises the real Messages reader,
+/// admission, settlement and recovery owners. No tool executor lives here:
+/// these assertions cover candidate projection/retraction, not tool side effects.
+async fn standard_messages_recovery_case(code: &'static str, mode: &'static str) {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let charges = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let wire_inputs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = Router::new().route(
+        "/v1/messages",
+        post({
+            let attempts = attempts.clone();
+            let charges = charges.clone();
+            let wire_inputs = wire_inputs.clone();
+            move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(charges.lock().unwrap().len(), attempt as usize,
+                    "every prior wire attempt must settle before readmission");
+                let mut inputs = wire_inputs.lock().unwrap();
+                if let Some(first) = inputs.first() {
+                    assert_eq!(first, &body, "recovery reuses the original valid request");
+                }
+                inputs.push(body);
+                async move {
+                    let events = if mode == "recover" && attempt > 0 {
+                        sse::messages_api_events("recovered", "test-model", "end_turn")
+                    } else {
+                        let start = sse::messages_api_events("unused", "test-model", "end_turn")
+                            .into_iter().next().unwrap();
+                        vec![
+                            start,
+                            Event::default().data(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"failed-candidate","name":"test_tool","input":{}}}"#),
+                            Event::default().data(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#),
+                            Event::default().data(r#"{"type":"content_block_stop","index":0}"#),
+                            Event::default().event("error").data(json!({
+                                "type": "error", "request_id": "provider-recovery",
+                                "error": {"type": code, "message": "  processing failed  "}
+                            }).to_string()),
+                        ]
+                    };
+                    Sse::new(stream::iter(events.into_iter().map(Ok::<_, std::convert::Infallible>)))
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let mut cfg = messages_config(server.base_url());
+    cfg.max_retries = Some(if mode == "disabled" { 0 } else { 2 });
+    let recovery = if matches!(mode, "unsafe" | "deadline") {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        sampler::RecoveryBudget::restore(sampler::RecoveryBudgetSnapshot {
+            attempts: 0,
+            max_attempts: Some(2),
+            deadline_ms: Some(now_ms + if mode == "deadline" { 1000 } else { 30_000 }),
+            replay_safe: mode != "unsafe",
+        })
+        .unwrap()
+    } else {
+        sampler::RecoveryBudget::default()
+    };
+    let usage_sink: sampler::AttemptUsageSink = {
+        let charges = charges.clone();
+        Arc::new(move |charge| {
+            charges.lock().unwrap().push(charge);
+            Box::pin(async move {
+                if mode == "deadline" {
+                    // Settlement is independent of the expired provider deadline.
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                }
+                if mode == "usage_failure" {
+                    Err("settlement rejected".into())
+                } else {
+                    Ok(())
+                }
+            })
+        })
+    };
+    let admissions = Arc::new(AtomicU32::new(0));
+    let capture: sampler::AttemptScopeCapture = {
+        let admissions = admissions.clone();
+        Arc::new(move || {
+            let admission = admissions.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if mode == "admission_closed" && admission > 0 {
+                    Err("owner budget closed".into())
+                } else {
+                    Ok(Some("standard-error-scope".into()).into())
+                }
+            })
+        })
+    };
+    let records = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let evidence: sampler::audit::EvidenceSink = {
+        let records = records.clone();
+        let charges = charges.clone();
+        Arc::new(move |record| {
+            if record.kind == "retry" {
+                assert!(
+                    !charges.lock().unwrap().is_empty(),
+                    "retry evidence follows usage settlement"
+                );
+            }
+            records.lock().unwrap().push(record);
+            Box::pin(async { Ok(()) })
+        })
+    };
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    let mut owner = SamplerActor::spawn_owned(
+        cfg,
+        RetryPolicy {
+            output_delivery: if mode == "irreversible" {
+                sampler::OutputDelivery::Irreversible
+            } else {
+                sampler::OutputDelivery::Retractable
+            },
+            ..Default::default()
+        },
+        event_tx,
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(12),
+        owner.handle().submit_and_collect_accounted(
+            RequestId::from("standard-recovery"),
+            user_request("hi"),
+            Some(capture),
+            Some(usage_sink),
+            Some(evidence),
+            recovery.clone(),
+        ),
+    )
+    .await
+    .expect("bounded service-error recovery");
+    owner.shutdown().await.unwrap();
+    let events = drain_until_terminal(&mut events, Duration::from_secs(1)).await;
+    server.shutdown();
+
+    let expected_attempts = if matches!(mode, "recover" | "exhaust") {
+        2
+    } else {
+        1
+    };
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        expected_attempts,
+        "{code}/{mode}: {result:?}, {events:?}"
+    );
+    let charges = charges.lock().unwrap();
+    assert_eq!(charges.len(), expected_attempts as usize, "{code}/{mode}");
+    for (index, charge) in charges.iter().enumerate() {
+        if mode == "recover" && index == 1 {
+            assert!(
+                matches!(charge, sampler::AttemptUsage::Known { attempt_key, scope: Some(scope), usage, .. }
+                if attempt_key == "standard-recovery:2" && scope == "standard-error-scope" && usage.total_tokens == 15)
+            );
+        } else {
+            assert!(
+                matches!(charge, sampler::AttemptUsage::Incomplete { attempt_key, scope: Some(scope) }
+                if attempt_key == &format!("standard-recovery:{}", index + 1) && scope == "standard-error-scope")
+            );
+        }
+    }
+    let preview = events.iter().position(|event| matches!(event, SamplingEvent::ToolCallDelta { id: Some(id), .. } if id == "failed-candidate")).expect("tool candidate preview");
+    let discarded = events
+        .iter()
+        .position(|event| matches!(event, SamplingEvent::AttemptDiscarded { attempt: 1, .. }))
+        .expect("failed attempt must retract its candidate");
+    assert!(preview < discarded);
+    if let Some(next) = events
+        .iter()
+        .position(|event| matches!(event, SamplingEvent::AttemptStarted { attempt: 2, .. }))
+    {
+        assert!(
+            discarded < next,
+            "candidate retracts before next attempt starts"
+        );
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+    );
+    if mode == "recover" {
+        let (response, metrics) = result.expect("standard service error should recover");
+        assert_eq!(response.assistant_text(), "recovered");
+        assert!(
+            response.tool_calls().is_empty(),
+            "failed candidate must not reach accepted output"
+        );
+        assert_eq!(metrics.attempts, 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SamplingEvent::Retrying { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SamplingEvent::RequestCompleted { .. }))
+                .count(),
+            1
+        );
+    } else {
+        assert!(result.is_err(), "{code}/{mode}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SamplingEvent::RequestCompleted { .. }))
+        );
+        if !matches!(mode, "exhaust" | "admission_closed") {
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SamplingEvent::Retrying { .. })),
+                "{mode}: {events:?}"
+            );
+        }
+    }
+    assert_eq!(
+        admissions.load(Ordering::SeqCst),
+        if mode == "admission_closed" {
+            2
+        } else {
+            expected_attempts
+        }
+    );
+    if mode == "deadline" {
+        assert!(!recovery.can_recover());
+    }
+    let records = records.lock().unwrap();
+    let first = records
+        .iter()
+        .find(|record| record.kind == "response")
+        .unwrap();
+    let raw = std::str::from_utf8(&first.body).unwrap();
+    assert!(
+        raw.contains(code)
+            && raw.contains("provider-recovery")
+            && raw.contains("  processing failed  ")
+    );
+    assert_eq!(first.metadata["status"], 200);
+    assert!(first.metadata["provider_terminal"].is_null());
+    assert_eq!(
+        first.metadata["outcome"]["details"]["error"]["status_code"],
+        if code == "api_error" { 500 } else { 504 }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standard_messages_api_error_recovers_after_retracting_accounted_candidate() {
+    standard_messages_recovery_case("api_error", "recover").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standard_messages_timeout_error_recovers_after_retracting_accounted_candidate() {
+    standard_messages_recovery_case("timeout_error", "recover").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standard_messages_stream_errors_obey_recovery_gates() {
+    for mode in [
+        "exhaust",
+        "disabled",
+        "unsafe",
+        "irreversible",
+        "deadline",
+        "usage_failure",
+        "admission_closed",
+    ] {
+        standard_messages_recovery_case("timeout_error", mode).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standard_messages_timeout_http_500_keeps_actual_status_and_server_veto() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let app = Router::new().route(
+        "/v1/messages",
+        post({
+            let attempts = attempts.clone();
+            move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [("x-should-retry", "false")],
+                        axum::Json(json!({"type": "error", "error": {
+                            "type": "timeout_error", "message": "processing timed out"
+                        }})),
+                    )
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    let mut owner = SamplerActor::spawn_owned(
+        messages_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let charges = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink: sampler::AttemptUsageSink = {
+        let charges = charges.clone();
+        Arc::new(move |charge| {
+            charges.lock().unwrap().push(charge);
+            Box::pin(async { Ok(()) })
+        })
+    };
+    let result = owner
+        .handle()
+        .submit_and_collect_accounted(
+            RequestId::from("actual-http-500"),
+            user_request("hi"),
+            None,
+            Some(sink),
+            None,
+            sampler::RecoveryBudget::default(),
+        )
+        .await;
+    owner.shutdown().await.unwrap();
+    let events = drain_until_terminal(&mut events, Duration::from_secs(1)).await;
+    server.shutdown();
+    let error = result.unwrap_err();
+    assert!(matches!(&error, sampling_types::SamplingError::Api {
+        status: StatusCode::INTERNAL_SERVER_ERROR, should_retry: Some(false), message, ..
+    } if message == "timeout_error: processing timed out"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Retrying { .. }))
+    );
+    assert!(
+        matches!(charges.lock().unwrap().as_slice(), [sampler::AttemptUsage::Incomplete { attempt_key, .. }] if attempt_key == "actual-http-500:1")
+    );
+}
+
 /// Server-reported doom-loop triggers flow through the actor rung onto the
 /// completed response, without retries. The trigger is non-confident
 /// (`@response` channel), so the recovery — which resamples only confident

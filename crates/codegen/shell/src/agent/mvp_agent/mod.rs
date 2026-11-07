@@ -325,6 +325,48 @@ pub(crate) fn build_prompt_response_meta(
     serde_json::to_value(meta).expect("PromptResponseMeta is always serializable")
 }
 
+/// Minimal `_meta` for a canonical input-admission replay observation. Only
+/// identity and the current admission status travel on the wire: no tokens,
+/// usage, or structured output, because this RPC observes a previously
+/// recorded immutable request instead of completing a new turn.
+pub(crate) fn build_admission_replay_meta(
+    session_id: &str,
+    prompt_id: &str,
+    input_id: &str,
+    state: &chat_state::InputState,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    use chat_state::InputState;
+    let status = match state {
+        InputState::Submitted => serde_json::json!({ "status": "submitted" }),
+        InputState::Allowed { route } => serde_json::json!({
+            "status": "allowed",
+            "route": route,
+        }),
+        InputState::Blocked { reason } => serde_json::json!({
+            "status": "blocked",
+            "reason": reason,
+        }),
+        InputState::Consumed { route } => serde_json::json!({
+            "status": "consumed",
+            "route": route,
+        }),
+        InputState::Handled { .. } => serde_json::json!({ "status": "handled" }),
+        InputState::Dismissed { reason } => serde_json::json!({
+            "status": "dismissed",
+            "reason": reason,
+        }),
+    };
+    let meta = serde_json::json!({
+        "sessionId": session_id,
+        "promptId": prompt_id,
+        "grow/inputAdmission": {
+            "inputId": input_id,
+            "status": status,
+        },
+    });
+    meta.as_object().cloned()
+}
+
 pub(crate) fn build_suspended_prompt_response_meta(
     session_id: &str,
     prompt_id: &str,

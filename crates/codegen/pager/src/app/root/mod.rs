@@ -779,6 +779,8 @@ pub struct AppView {
     /// from the effective TOML merge like `show_tips`. `None` = unset in TOML
     /// (default `true`); toggles write the user layer.
     pub ask_user_question_timeout_enabled: Option<bool>,
+    /// Saved preference for the next ask; Shell owns the effective policy.
+    pub ask_user_question_allow_non_blocking: Option<bool>,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
     /// Structured startup warnings collected from the terminal diagnostics
@@ -1001,6 +1003,288 @@ impl AppView {
         self.local_drafts.transfer_prompt_rpc_ownership(effect);
     }
 
+    /// Resolve which view owns the advisory card for `(source, call)`.
+    ///
+    /// Routes by the card's ORIGINAL source session (root or a registered
+    /// child view) — never by the currently active tab. A replay-recovered
+    /// card carries an empty `source_session_id`; it resolves against the
+    /// owning view's actual session identity. Returns
+    /// `(owner agent id, child key, resolved source)`.
+    fn locate_advisory_card(
+        &self,
+        source_session_id: &str,
+        tool_call_id: &str,
+    ) -> Option<(AgentId, Option<String>, String)> {
+        let card_matches = |view: &AgentView, view_session: Option<&str>| {
+            (0..view.scrollback.len()).any(|idx| {
+                view.scrollback
+                    .get(idx)
+                    .is_some_and(|entry| match &entry.block {
+                        crate::scrollback::block::RenderBlock::ToolCall(
+                            crate::scrollback::ToolCallBlock::Other(other),
+                        ) => other.advisory.as_ref().is_some_and(|card| {
+                            card.tool_call_id == tool_call_id
+                                && (card.source_session_id == source_session_id
+                                    || (card.source_session_id.is_empty()
+                                        && view_session == Some(source_session_id)))
+                        }),
+                        _ => false,
+                    })
+            })
+        };
+        for (id, agent) in &self.agents {
+            let root_session = agent
+                .session
+                .session_id
+                .as_ref()
+                .map(|sid| sid.0.to_string());
+            if card_matches(agent, root_session.as_deref()) {
+                let resolved = if root_session.as_deref() == Some(source_session_id) {
+                    source_session_id.to_owned()
+                } else {
+                    root_session.unwrap_or_default()
+                };
+                return Some((*id, None, resolved));
+            }
+            for (key, child) in &agent.subagent_views {
+                if card_matches(child, Some(key)) {
+                    return Some((*id, Some(key.clone()), key.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Target the view owning an advisory card (root or the child view).
+    fn advisory_card_view_mut(
+        &mut self,
+        owner: AgentId,
+        child_key: Option<&str>,
+    ) -> Option<&mut AgentView> {
+        let agent = self.agents.get_mut(&owner)?;
+        match child_key {
+            Some(key) => agent.subagent_views.get_mut(key).map(|child| &mut **child),
+            None => Some(agent),
+        }
+    }
+
+    /// Set the human-reply projection on one advisory card. Returns `false`
+    /// when no card matches `(source, call)` in any view.
+    pub(crate) fn set_advisory_reply_status(
+        &mut self,
+        source_session_id: &str,
+        tool_call_id: &str,
+        status: crate::scrollback::blocks::tool::AdvisoryReplyStatus,
+    ) -> bool {
+        let Some((owner, child_key, _)) =
+            self.locate_advisory_card(source_session_id, tool_call_id)
+        else {
+            return false;
+        };
+        let Some(view) = self.advisory_card_view_mut(owner, child_key.as_deref()) else {
+            return false;
+        };
+        let mut set = false;
+        for idx in 0..view.scrollback.len() {
+            let Some(entry_id) = view.scrollback.get(idx).map(|entry| entry.id) else {
+                continue;
+            };
+            let Some(entry) = view.scrollback.get_by_id_mut(entry_id) else {
+                continue;
+            };
+            if let crate::scrollback::block::RenderBlock::ToolCall(
+                crate::scrollback::ToolCallBlock::Other(other),
+            ) = &mut entry.block
+                && let Some(card) = other.advisory.as_mut()
+                && card.tool_call_id == tool_call_id
+            {
+                // Terminal projections are absorbing and report precision:
+                // a stale callback proposing a DIFFERENT status on an
+                // Accepted/Rejected card is refused (`false`) so consumers
+                // (submit gate, admission callback) stop before touching
+                // queue/inflight state; repeating the same terminal status
+                // acknowledges (`true`). Non-terminal cards update normally.
+                let terminal = matches!(
+                    card.reply_status,
+                    crate::scrollback::blocks::tool::AdvisoryReplyStatus::Accepted
+                        | crate::scrollback::blocks::tool::AdvisoryReplyStatus::Rejected
+                );
+                if terminal && card.reply_status != status {
+                    set = false;
+                } else {
+                    card.reply_status = status;
+                    entry.invalidate_cache();
+                    set = true;
+                }
+            }
+        }
+        set
+    }
+
+    /// Open the local advisory-reply editor for one card. Only an
+    /// `Available` card opens; a missing card, an unavailable primary, or an
+    /// open blocking overlay on the target view returns `false` and leaves
+    /// the card's projection untouched.
+    pub(crate) fn open_advisory_reply_editor(
+        &mut self,
+        source_session_id: &str,
+        tool_call_id: &str,
+    ) -> bool {
+        let Some((owner, child_key, resolved_source)) =
+            self.locate_advisory_card(source_session_id, tool_call_id)
+        else {
+            return false;
+        };
+        let Some(view) = self.advisory_card_view_mut(owner, child_key.as_deref()) else {
+            return false;
+        };
+        view.open_advisory_reply(&resolved_source, tool_call_id)
+    }
+
+    /// Map a durable prompt id back to the advisory card identity it
+    /// belongs to, searching ONLY `owner_id`'s root and child views. The
+    /// match is the complete stable-id format
+    /// `question-reply:{source}:{call}` (never a colon-split). When several
+    /// distinct `(source, call)` pairs produce the same prompt id, no card
+    /// is chosen.
+    pub(crate) fn advisory_reply_card_identity(
+        &self,
+        owner_id: AgentId,
+        prompt_id: &str,
+    ) -> Option<(String, String)> {
+        let mut matches: Vec<(String, String)> = Vec::new();
+        let mut consider = |card: &crate::scrollback::blocks::tool::AdvisoryCard,
+                            view_session: Option<&str>| {
+            let resolved = if card.source_session_id.is_empty() {
+                view_session.unwrap_or_default().to_owned()
+            } else {
+                card.source_session_id.clone()
+            };
+            if format!("question-reply:{}:{}", resolved, card.tool_call_id) == prompt_id {
+                let pair = (resolved, card.tool_call_id.clone());
+                if !matches.contains(&pair) {
+                    matches.push(pair);
+                }
+            }
+        };
+        let Some(agent) = self.agents.get(&owner_id) else {
+            return None;
+        };
+        let root_session = agent
+            .session
+            .session_id
+            .as_ref()
+            .map(|sid| sid.0.to_string());
+        for idx in 0..agent.scrollback.len() {
+            let Some(entry) = agent.scrollback.get(idx) else {
+                continue;
+            };
+            if let crate::scrollback::block::RenderBlock::ToolCall(
+                crate::scrollback::ToolCallBlock::Other(other),
+            ) = &entry.block
+                && let Some(card) = &other.advisory
+            {
+                consider(card, root_session.as_deref());
+            }
+        }
+        for (key, child) in &agent.subagent_views {
+            for idx in 0..child.scrollback.len() {
+                let Some(entry) = child.scrollback.get(idx) else {
+                    continue;
+                };
+                if let crate::scrollback::block::RenderBlock::ToolCall(
+                    crate::scrollback::ToolCallBlock::Other(other),
+                ) = &entry.block
+                    && let Some(card) = &other.advisory
+                {
+                    consider(card, Some(key));
+                }
+            }
+        }
+        match matches.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
+    }
+
+    /// Consume the one-shot local open intent recorded on a card by a reply
+    /// click/keypress. Reading it clears it; a second consumer sees `false`.
+    pub(crate) fn take_advisory_reply_open_intent(&mut self, source: &str, call: &str) -> bool {
+        let Some((owner, child_key, _)) = self.locate_advisory_card(source, call) else {
+            return false;
+        };
+        let Some(view) = self.advisory_card_view_mut(owner, child_key.as_deref()) else {
+            return false;
+        };
+        let mut consumed = false;
+        for idx in 0..view.scrollback.len() {
+            let Some(entry_id) = view.scrollback.get(idx).map(|entry| entry.id) else {
+                continue;
+            };
+            let Some(entry) = view.scrollback.get_by_id_mut(entry_id) else {
+                continue;
+            };
+            if let crate::scrollback::block::RenderBlock::ToolCall(
+                crate::scrollback::ToolCallBlock::Other(other),
+            ) = &mut entry.block
+                && let Some(card) = other.advisory.as_mut()
+                && card.tool_call_id == call
+            {
+                consumed |= card.reply_open_intent;
+                card.reply_open_intent = false;
+                entry.invalidate_cache();
+            }
+        }
+        consumed
+    }
+
+    /// Begin a canonical admission query for one advisory card: flips a
+    /// queryable projection (`Unobserved`/`Available`/`Unconfirmed`) to
+    /// `Checking` and records the one-shot open intent. Returns
+    /// `(owning agent, resolved source)` when a query should be sent;
+    /// `None` when the card is missing, already `Checking`, or terminal.
+    pub(crate) fn start_advisory_reply_check(
+        &mut self,
+        source_session_id: &str,
+        tool_call_id: &str,
+    ) -> Option<(AgentId, String)> {
+        use crate::scrollback::blocks::tool::AdvisoryReplyStatus;
+        let (owner, child_key, resolved) =
+            self.locate_advisory_card(source_session_id, tool_call_id)?;
+        let Some(view) = self.advisory_card_view_mut(owner, child_key.as_deref()) else {
+            return None;
+        };
+        let mut queryable = false;
+        for idx in 0..view.scrollback.len() {
+            let Some(entry_id) = view.scrollback.get(idx).map(|entry| entry.id) else {
+                continue;
+            };
+            let Some(entry) = view.scrollback.get_by_id_mut(entry_id) else {
+                continue;
+            };
+            if let crate::scrollback::block::RenderBlock::ToolCall(
+                crate::scrollback::ToolCallBlock::Other(other),
+            ) = &mut entry.block
+                && let Some(card) = other.advisory.as_mut()
+                && card.tool_call_id == tool_call_id
+            {
+                let can_query = matches!(
+                    card.reply_status,
+                    AdvisoryReplyStatus::Unobserved
+                        | AdvisoryReplyStatus::Available
+                        | AdvisoryReplyStatus::Unconfirmed
+                );
+                if can_query {
+                    card.reply_status = AdvisoryReplyStatus::Checking;
+                    card.reply_open_intent = true;
+                    entry.invalidate_cache();
+                    queryable = true;
+                }
+            }
+        }
+        queryable.then_some((owner, resolved))
+    }
+
     /// Reconcile reducer-derived display phases for every agent, including
     /// hidden tabs and fullscreen subagent children.
     pub(crate) fn reconcile_activity_phases(&mut self, now: Instant) {
@@ -1128,6 +1412,7 @@ impl AppView {
             show_tips: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
+            ask_user_question_allow_non_blocking: None,
             reconnect_pending: false,
             startup_warnings: Vec::new(),
             pending_update_version: None,
@@ -4139,6 +4424,7 @@ pub(crate) mod tests {
             show_tips: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
+            ask_user_question_allow_non_blocking: None,
             bundle_state: BundleState::default(),
             scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
             fps_hud: crate::views::fps_hud::FpsHud::new(),
@@ -9475,6 +9761,7 @@ pub(crate) mod tests {
                     id: None,
                 }],
                 multi_select: None,
+                recommended_option: None,
                 id: None,
             })
             .collect();

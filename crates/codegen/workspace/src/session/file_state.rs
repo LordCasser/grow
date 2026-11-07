@@ -149,6 +149,15 @@ const MAX_REWIND_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REWIND_SCAN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_REWIND_RECORDS: usize = 50_000;
 
+/// Total wall-clock budget for one `end_prompt` after-snapshot capture round.
+///
+/// Fixed by design (no user configuration): the capture is post-turn
+/// bookkeeping and must not delay prompt settlement indefinitely, while one
+/// unresponsive backend read must not fabricate state for the other files.
+/// Paths whose read error, fails UTF-8 decoding, or misses the deadline get NO
+/// after entry — their final state stays unknown for the rewind consumer.
+const END_PROMPT_AFTER_CAPTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(test)]
 fn open_rewind_points(path: &Path) -> io::Result<Option<io::BufReader<std::fs::File>>> {
     match std::fs::File::open(path) {
@@ -450,6 +459,13 @@ pub fn merge_rewind_points_from(
         // `previous` instead of cloning (MEMORY.md).
         for merged in to_merge {
             for (path, snapshot) in merged.file_snapshots {
+                // A later round touching this path owns the "what did the agent
+                // last leave behind" fact for it. If that round could not
+                // confirm its after state (missing after entry), the
+                // predecessor's older known-after must not survive the fold —
+                // consumers would otherwise read a stale entry as the latest
+                // fact instead of reporting the state unknown.
+                previous.after_snapshots.remove(&path);
                 // or_insert: we own `snapshot`; earliest before-snapshot wins.
                 previous.file_snapshots.entry(path).or_insert(snapshot);
             }
@@ -571,20 +587,45 @@ impl FileStateTracker {
     ///
     /// The caller provides the explicit `prompt_index` so that end_prompt works
     /// even when `begin_prompt` was never received.
+    ///
+    /// The whole capture round is bounded by [`END_PROMPT_AFTER_CAPTURE_BUDGET`]:
+    /// reads that finish in time are recorded, a confirmed absence records
+    /// `content = None`, and read errors, non-UTF-8 bodies or an expired budget
+    /// leave the path without an after entry — its final state is UNKNOWN.
+    /// Consumers (shell rewind) treat a touched path without an after entry as
+    /// `snapshot_unavailable`, never as clean or confirmed-absent.
     pub async fn end_prompt(&self, fs: &AsyncFsWrapper, prompt_index: usize) {
+        self.end_prompt_with_budget(fs, prompt_index, END_PROMPT_AFTER_CAPTURE_BUDGET)
+            .await;
+    }
+
+    /// [`FileStateTracker::end_prompt`] with an injected total budget. Private
+    /// so only in-crate tests can shrink it; the shipped budget is the fixed
+    /// constant and is deliberately not user-configurable.
+    async fn end_prompt_with_budget(
+        &self,
+        fs: &AsyncFsWrapper,
+        prompt_index: usize,
+        budget: std::time::Duration,
+    ) {
         // Clear internal current-prompt tracking.
         {
             let mut current = self.current_prompt_index.lock().await;
             *current = None;
         }
 
-        // Capture after-snapshots for all files that were touched
+        // Collect the touched paths and, in the same short lock, discard any
+        // after entries a previous end_prompt attempt recorded for this prompt
+        // (retry residue). The new capture round owns the after state: entries
+        // it cannot re-confirm must not survive it.
         let paths_to_capture: Vec<RelPathBuf> = {
-            let points = self.rewind_points.lock().await;
-            if let Some(point) = points.get(&prompt_index) {
-                point.file_snapshots.keys().cloned().collect()
-            } else {
-                vec![]
+            let mut points = self.rewind_points.lock().await;
+            match points.get_mut(&prompt_index) {
+                Some(point) => {
+                    point.after_snapshots.clear();
+                    point.file_snapshots.keys().cloned().collect()
+                }
+                None => vec![],
             }
         };
 
@@ -592,18 +633,38 @@ impl FileStateTracker {
         // Bound filesystem fan-out so many touched files do not serialize the
         // time before the cancelled prompt can settle, while avoiding an
         // unbounded burst against remote/ACP filesystems.
+        //
+        // The deadline is absolute and shared by every read (queueing plus the
+        // read itself), so one unresponsive backend cannot extend the round
+        // past the budget. Dropping an in-flight future does NOT terminate an
+        // underlying operation (a remote read may still complete unobserved);
+        // it only means nothing is recorded for that path now, and nothing
+        // writes this point afterwards.
+        let deadline = tokio::time::Instant::now() + budget;
         let snapshots = futures::stream::iter(paths_to_capture)
-            .map(|rel_path| async move {
-                let content = fs
-                    .try_read_file(&rel_path)
-                    .await
-                    .and_then(|opt| opt.map(bytes_to_string).transpose())
-                    .unwrap_or(None);
-                FileSnapshot::new(rel_path, content)
+            .map(|rel_path| {
+                let fs = fs.clone();
+                async move {
+                    match tokio::time::timeout_at(deadline, fs.try_read_file(&rel_path)).await {
+                        Ok(Ok(Some(bytes))) => {
+                            // Invalid UTF-8 is also an unknown final state,
+                            // never a fabricated confirmed absence.
+                            bytes_to_string(bytes)
+                                .map(|content| FileSnapshot::new(rel_path, Some(content)))
+                                .ok()
+                        }
+                        // Confirmed the file does not exist.
+                        Ok(Ok(None)) => Some(FileSnapshot::new(rel_path, None)),
+                        // Read error or budget expired: unknown final state.
+                        _ => None,
+                    }
+                }
             })
             .buffer_unordered(8)
+            .filter_map(|snapshot| async move { snapshot })
             .collect::<Vec<_>>()
             .await;
+
         let mut points = self.rewind_points.lock().await;
         if let Some(point) = points.get_mut(&prompt_index) {
             for snapshot in snapshots {
@@ -1667,5 +1728,356 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_rewind_points_file(dir.path()).is_err());
         assert!(scan_rewind_point_metas(dir.path()).is_err());
+    }
+
+    // ── Bounded end_prompt after-capture (unknown final states) ──────────────
+
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    use crate::file_system::FsError;
+
+    fn rel(name: &str) -> RelPathBuf {
+        RelPathBuf::new(name).unwrap()
+    }
+
+    /// Controlled backend for bounded-capture tests. Each path (matched by
+    /// file name) resolves per its class; "hang" paths park on a one-shot
+    /// whose senders are kept alive by this struct, so the read future never
+    /// resolves — like an unresponsive remote backend whose request stays
+    /// in flight.
+    struct ControlledCaptureFs {
+        root: PathBuf,
+        content: HashMap<&'static str, &'static str>,
+        absent: HashSet<&'static str>,
+        read_error: HashSet<&'static str>,
+        invalid_utf8: HashSet<&'static str>,
+        hang: HashSet<&'static str>,
+        /// Kept-alive senders of hung reads: the receiver stays Pending
+        /// precisely because the sender neither answers nor drops.
+        hung_senders: std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    impl ControlledCaptureFs {
+        fn new(root: PathBuf) -> Self {
+            Self {
+                root,
+                content: HashMap::new(),
+                absent: HashSet::new(),
+                read_error: HashSet::new(),
+                invalid_utf8: HashSet::new(),
+                hang: HashSet::new(),
+                hung_senders: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_content(mut self, name: &'static str, body: &'static str) -> Self {
+            self.content.insert(name, body);
+            self
+        }
+
+        fn with_absent(mut self, name: &'static str) -> Self {
+            self.absent.insert(name);
+            self
+        }
+
+        fn with_read_error(mut self, name: &'static str) -> Self {
+            self.read_error.insert(name);
+            self
+        }
+
+        fn with_invalid_utf8(mut self, name: &'static str) -> Self {
+            self.invalid_utf8.insert(name);
+            self
+        }
+
+        fn with_hang(mut self, name: &'static str) -> Self {
+            self.hang.insert(name);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncFileSystem for ControlledCaptureFs {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        async fn exists(&self, path: &Path) -> Result<bool, FsError> {
+            Ok(self.try_read_file(path).await?.is_some())
+        }
+
+        async fn read_file(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+            match self.try_read_file(path).await? {
+                Some(bytes) => Ok(bytes),
+                None => Err(FsError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "file not found",
+                ))),
+            }
+        }
+
+        async fn try_read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, FsError> {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if self.hang.contains(name) {
+                let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+                self.hung_senders.lock().unwrap().push(sender);
+                // Never resolves: the sender is kept alive and never fires.
+                let _ = receiver.await;
+                return Ok(None);
+            }
+            if self.read_error.contains(name) {
+                return Err(FsError::Other("backend read failure".into()));
+            }
+            if self.invalid_utf8.contains(name) {
+                return Ok(Some(vec![0xff, 0xfe]));
+            }
+            if self.absent.contains(name) {
+                return Ok(None);
+            }
+            Ok(self.content.get(name).map(|body| body.as_bytes().to_vec()))
+        }
+
+        async fn write_file(&self, _path: &Path, _data: &[u8]) -> Result<(), FsError> {
+            Ok(())
+        }
+
+        async fn delete_file(&self, _path: &Path) -> Result<(), FsError> {
+            Ok(())
+        }
+    }
+
+    /// Success, confirmed absence, read error, invalid UTF-8 and a
+    /// never-returning read (sender kept alive) in one bounded round: only
+    /// confirmed facts are recorded, everything else stays unknown while the
+    /// touched-path membership survives.
+    #[tokio::test]
+    async fn bounded_capture_records_facts_and_leaves_unknown() {
+        let root = std::env::temp_dir();
+        let backend = Arc::new(
+            ControlledCaptureFs::new(root.clone())
+                .with_content("ok.rs", "v1")
+                .with_absent("gone.rs")
+                .with_read_error("err.rs")
+                .with_invalid_utf8("bin.rs")
+                .with_hang("hang.rs"),
+        );
+        let backend_dyn: Arc<dyn AsyncFileSystem> = backend.clone();
+        let fs = AsyncFsWrapper::new(backend_dyn);
+        let tracker = FileStateTracker::new();
+        tracker.begin_prompt(0).await;
+        for name in ["ok.rs", "gone.rs", "err.rs", "bin.rs", "hang.rs"] {
+            tracker
+                .add_before_snapshot_for_prompt(0, &root.join(name), &root, Some("before".into()))
+                .await;
+        }
+
+        let round = tracker.end_prompt_with_budget(&fs, 0, Duration::from_millis(200));
+        tokio::time::timeout(Duration::from_secs(5), round)
+            .await
+            .expect("end_prompt must return within its capture budget");
+
+        let point = tracker.get_rewind_point(0).await.unwrap();
+        let after = &point.after_snapshots;
+        assert_eq!(
+            after.get(&rel("ok.rs")).unwrap().content,
+            Some("v1".into()),
+            "successful reads stay recorded"
+        );
+        assert_eq!(
+            after.get(&rel("gone.rs")).unwrap().content,
+            None,
+            "confirmed absence is the only None"
+        );
+        for unknown in ["err.rs", "bin.rs", "hang.rs"] {
+            assert!(
+                !after.contains_key(&rel(unknown)),
+                "{unknown} must stay unknown (no after entry), not confirmed-absent"
+            );
+            assert!(
+                point.file_snapshots.contains_key(&rel(unknown)),
+                "touched membership must survive for unknown paths"
+            );
+        }
+        assert_eq!(
+            backend.hung_senders.lock().unwrap().len(),
+            1,
+            "the hung read's sender stayed alive: the read never resolved"
+        );
+    }
+
+    /// The shipped `end_prompt` must return within its fixed budget even when
+    /// one read never resolves. Against the pre-fix implementation (unbounded
+    /// reads) this test fails via the outer watchdog instead of hanging
+    /// forever — the timeout is the old-behaviour red proof.
+    #[tokio::test]
+    async fn public_end_prompt_returns_within_fixed_budget_with_live_hang() {
+        let root = std::env::temp_dir();
+        let backend = Arc::new(
+            ControlledCaptureFs::new(root.clone())
+                .with_content("kept.rs", "kept")
+                .with_hang("stuck.rs"),
+        );
+        let backend_dyn: Arc<dyn AsyncFileSystem> = backend.clone();
+        let fs = AsyncFsWrapper::new(backend_dyn);
+        let tracker = FileStateTracker::new();
+        tracker.begin_prompt(0).await;
+        tracker
+            .add_before_snapshot_for_prompt(0, &root.join("kept.rs"), &root, Some("before".into()))
+            .await;
+        tracker
+            .add_before_snapshot_for_prompt(0, &root.join("stuck.rs"), &root, Some("before".into()))
+            .await;
+
+        let point = tokio::time::timeout(Duration::from_secs(6), async {
+            tracker.end_prompt(&fs, 0).await;
+            tracker.get_rewind_point(0).await.unwrap()
+        })
+        .await
+        .expect("public end_prompt must return within its fixed budget");
+
+        assert_eq!(
+            point.after_snapshots.get(&rel("kept.rs")).unwrap().content,
+            Some("kept".into()),
+            "in-budget successes stay recorded on the shipped path"
+        );
+        assert!(
+            !point.after_snapshots.contains_key(&rel("stuck.rs")),
+            "the never-returning read must stay unknown"
+        );
+        assert_eq!(backend.hung_senders.lock().unwrap().len(), 1);
+    }
+
+    /// A retried capture for the same prompt must not let the previous
+    /// round's after entries survive next to the new (unconfirmed) round.
+    #[tokio::test]
+    async fn retry_capture_discards_stale_after_entries() {
+        let root = std::env::temp_dir();
+        let tracker = FileStateTracker::new();
+        tracker.begin_prompt(0).await;
+        tracker
+            .add_before_snapshot_for_prompt(0, &root.join("retry.rs"), &root, Some("before".into()))
+            .await;
+
+        // Round 1 confirms retry.rs = "v1".
+        let confirmed = AsyncFsWrapper::new(Arc::new(
+            ControlledCaptureFs::new(root.clone()).with_content("retry.rs", "v1"),
+        ));
+        tracker
+            .end_prompt_with_budget(&confirmed, 0, Duration::from_secs(1))
+            .await;
+        let point = tracker.get_rewind_point(0).await.unwrap();
+        assert_eq!(
+            point.after_snapshots.get(&rel("retry.rs")).unwrap().content,
+            Some("v1".into())
+        );
+
+        // Round 2 hangs for the same path: the stale known entry must go.
+        let hanging = AsyncFsWrapper::new(Arc::new(
+            ControlledCaptureFs::new(root.clone()).with_hang("retry.rs"),
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tracker.end_prompt_with_budget(&hanging, 0, Duration::from_millis(200)),
+        )
+        .await
+        .expect("retry round must stay bounded");
+        let point = tracker.get_rewind_point(0).await.unwrap();
+        assert!(
+            !point.after_snapshots.contains_key(&rel("retry.rs")),
+            "stale after entry must be discarded before the retry capture"
+        );
+        assert!(point.file_snapshots.contains_key(&rel("retry.rs")));
+    }
+
+    /// Folding rounds into their predecessor must follow the latest touching
+    /// round: an unknown touching round invalidates the predecessor's stale
+    /// after entry, a later confirmed round owns the merged entry again.
+    #[test]
+    fn merge_follows_latest_touching_round_for_after_entries() {
+        let shared = rel("shared.rs");
+        let mut p0 = RewindPoint::new(0);
+        p0.add_snapshot(FileSnapshot::new(shared.clone(), Some("p0-before".into())));
+        p0.set_after_snapshot(FileSnapshot::new(shared.clone(), Some("p0-after".into())));
+
+        let mut unknown_round = RewindPoint::new(1);
+        unknown_round.add_snapshot(FileSnapshot::new(shared.clone(), Some("p1-before".into())));
+
+        let mut confirmed_round = RewindPoint::new(2);
+        confirmed_round.add_snapshot(FileSnapshot::new(shared.clone(), Some("p2-before".into())));
+        confirmed_round
+            .set_after_snapshot(FileSnapshot::new(shared.clone(), Some("p2-after".into())));
+
+        let merged = merge_rewind_points_from(vec![p0.clone(), unknown_round.clone()], 1);
+        assert_eq!(merged.len(), 1);
+        assert!(
+            !merged[0].after_snapshots.contains_key(&shared),
+            "a known-after must not survive a later touching round that is unknown"
+        );
+        assert_eq!(
+            merged[0].get_snapshot(&shared).unwrap().content,
+            Some("p0-before".into())
+        );
+
+        let merged = merge_rewind_points_from(vec![p0, unknown_round, confirmed_round], 1);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].after_snapshots.get(&shared).unwrap().content,
+            Some("p2-after".into())
+        );
+    }
+
+    /// Missing after entry (unknown) must survive serialization unchanged.
+    #[test]
+    fn unknown_after_state_survives_serialization() {
+        let mut point = RewindPoint::new(4);
+        point.add_snapshot(FileSnapshot::new(rel("known.rs"), Some("before".into())));
+        point.set_after_snapshot(FileSnapshot::new(rel("known.rs"), Some("after".into())));
+        point.add_snapshot(FileSnapshot::new(rel("unknown.rs"), Some("before".into())));
+
+        let json = serde_json::to_string(&point).unwrap();
+        let roundtrip: RewindPoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            roundtrip
+                .after_snapshots
+                .get(&rel("known.rs"))
+                .unwrap()
+                .content,
+            Some("after".into())
+        );
+        assert!(
+            !roundtrip.after_snapshots.contains_key(&rel("unknown.rs")),
+            "unknown must survive serialization as a missing entry"
+        );
+    }
+
+    /// Unknown must survive the pinned JSONL load; metadata scans keep working.
+    #[tokio::test]
+    async fn unknown_after_state_survives_lazy_historical_load() {
+        let mut historical = RewindPoint::new(0);
+        historical.add_snapshot(FileSnapshot::new(rel("u.rs"), Some("h-before".into())));
+        historical.set_after_snapshot(FileSnapshot::new(rel("u.rs"), Some("h-after".into())));
+        let mut interrupted = RewindPoint::new(7);
+        interrupted.add_snapshot(FileSnapshot::new(rel("u.rs"), Some("before".into())));
+        let file = write_rewind_file(&[historical, interrupted]);
+        let tracker = lazy_tracker(&file);
+
+        let metas = tracker.get_rewind_point_metas().await.unwrap();
+        assert_eq!(metas.len(), 2);
+
+        let points = tracker.get_rewind_points().await.unwrap();
+        let known = points.iter().find(|point| point.prompt_index == 0).unwrap();
+        assert_eq!(
+            known.after_snapshots.get(&rel("u.rs")).unwrap().content,
+            Some("h-after".into())
+        );
+        let unknown = points.iter().find(|point| point.prompt_index == 7).unwrap();
+        assert!(
+            unknown.after_snapshots.get(&rel("u.rs")).is_none(),
+            "unknown must survive the pinned JSONL load"
+        );
     }
 }

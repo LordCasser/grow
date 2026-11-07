@@ -1,0 +1,29 @@
+# AC-07/08 插件操作的实施准备
+
+这里只保存本轮源码事实与待独立交付边界，未改插件生产行为、未运行Git安装/故障注入实验。父核当前`session/actor/hooks_plugins.rs`的Update分支、`shell/plugin.rs`共享application逻辑及`agent/plugins/git_install.rs::update_repo`；历史审计定位仍成立。
+
+## Update采用结果的落点
+
+actor仍加载immutable InstallRegistry，直接`git_install::update_repo`后仅检查changed形成文案，最后保存原registry；低层返回new_commit/plugins且不会替调用者采用，故checkout更新后durable记录仍旧。CLI现走`plugin::update_plugins_by_selector`：先按selector解析克隆条目；marketplace provenance走已有transactional updater，普通Git changed结果经过私有`apply_update_to_registry`同步commit、updated_at、repo_plugin_map。输出已是`RepoUpdateOutcome`（Updated/AlreadyUpToDate/Pinned/LiveLocal/Failed），并有`repo_update_requires_reload`，无需新结果枚举或第二套Git updater。
+
+最小候选是actor Update复用现共享application入口、仅负责wire outcome和文案。原plugin_id取最后路径段选plugin、空安装NotFound、pinned/local与reload语义需要逐一保持，不借此次改成新selector政策。marketplace项不能丢provenance直接git pull；复用shared入口才保其现发布/registry事务。已冻结[独立change和交接](../2026-11-07-adopt-acp-plugin-update-results/design.md)，尚未实施。真实ACP Update用隔离本地bare remote＋branch推进commit并新增plugin：一次更新后checkout/commit/plugins一致、第二次同tip无更新；不能只单测apply helper。
+
+## 与持久化错误的独立边界
+
+`plugin::save_registry_or_warn`仍吞关键save错误，install/uninstall/update共享这条旧行为；actor也各自warn-and-continue。AC-07的“无I/O错误仍保存旧值”与AC-08的“save/removal失败仍成功”分别验证和交付，不因复用shared入口就宣称AC-08闭合。
+
+AC-08至少按各操作的承诺拆分：安装在artifact发布后save失败要报告部分完成；卸载remove失败不得撤掉仍存在的repo记录，remove成功但save失败也不能宣称完整成功；更新持久化错误须保真实已变checkout/已采用记录状态。当前UninstallError只有NotFound/NeedsConfirm，UpdateError只有NotFound，不能靠日志或warnings伪装typed成功。故障后的rollback是否存在以实际低层owner为准，不预建通用事务框架，也不因marketplace有transaction就称普通Git操作具备原子回滚。
+
+后续实施要读实际CLI/Pager outcome消费者，冻结已有typed错误的最小扩展及partial状态文案，再分别派一个operation-owner coder。配置TOML写入的AC-01已归档，不重做其原始字段/锁事务；installer路径、InstallRegistry文件与删除责任是这次另外的持久化边界。
+
+## AC-08 后续核实的具体机制
+
+父已核CLI `pager/plugin_cmd.rs`：install现Result<InstallOutcome,InstallError>可直接传播typed错误；uninstall显式match现NotFound/NeedsConfirm，新增失败变体时必须适配；update逐项Failed仅输出stderr，最终函数仍Ok，不能把共享owner返回了失败当CLI exit已正确。Pager `app/root/dispatch/router.rs`按OutcomeStatus区分success/error，只有Success才消费requires_reload，故无需为失败另造wire status或恢复控制协议。
+
+`InstallRegistry::save_atomic`已有可返回InstallError的写/rename路径及现有隔离故障开关；无需本轮再加一套故障注入框架。`try_load_from(resolve_install_dir())`也已存在（只有NotFound视空，读取/解析错返回Err），而这几个mutation入口仍用会warn后置空的`load()`。该事实目前仅静态记录，后续独立操作修复要用真实坏registry控制，不能把成功覆盖旧记录当完整持久化保证。只读list的容错政策不因mutation修复自动改变。
+
+普通install在artifact发布后才save，save失败前没有统一回滚；不得宣称失败就撤销了artifact。post_install_plugin会重新读取durable registry并把auto-enable错误作为warnings，它依赖前一save成功才能知道正确插件；必要停止点是save失败立即返回，不能继续post-install然后显示Installed 0。是否改变auto-enable warning政策另按本项承诺决定，不顺带改所有配置写失败等级。
+
+uninstall先remove_repo_path，再清data、remove record、save；remove失败必须停止，不能删仍在目录的记录。低层remove_repo_path对symlink/directory做Result，对普通file或不存在当前直接Ok，cleanup_plugin_data也丢错误；后续真实失败fixture应针对实际目录删除失败，不以`chmod`在当前权限/用户下必然失败作假设。是否覆盖unexpected普通file和data清理要先依据操作契约/可达反例定边界，不能把未运行实验记为修复。
+
+marketplace updater已有staging/backup/registry保存失败回滚，现测试使用GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE；普通branch更新已在Git pull后改变checkout。错误结果需保两条现owner的实际后果，不以统一“已回滚”文案抹平区别。AC-07采用结果先复用共享入口，随后AC-08 update在这个owner修失败表达/CLI结果；无需跨操作通用事务实体。

@@ -778,6 +778,44 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
     assert!(!saw_wrong_action.load(Ordering::SeqCst));
     assert!(!saw_success_notification.load(Ordering::SeqCst));
 }
+/// `PersistDismissedPluginCta` runs on the effect executor and persists via
+/// the same Shell public write path (`shell::config::add_dismissed_plugin_cta`),
+/// completing with the shared no-op `CancelComplete` result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn persist_dismissed_plugin_cta_effect_writes_via_shell_path() {
+    let test_name = concat!(
+        module_path!(),
+        "::persist_dismissed_plugin_cta_effect_writes_via_shell_path"
+    );
+    if crate::test_util::run_with_isolated_grow_home(test_name) {
+        return;
+    }
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::PersistDismissedPluginCta {
+            plugin_id: "figma".into(),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    assert!(matches!(result, TaskResult::CancelComplete));
+    let config_path = shell::util::grow_home::grow_home().join("config.toml");
+    let dismissed = shell::config::dismissed_plugin_ctas_in_file(&config_path);
+    assert!(
+        dismissed.contains("figma"),
+        "dismissal must be persisted by the effect via the Shell write path"
+    );
+}
+
 /// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`);
 /// browse opts into `allowRelax` and parses `grow/listScope`; all
 /// outcomes echo `seq`/`query`.

@@ -1,0 +1,6 @@
+- [x] 核对当前编辑、immutable接纳、Timeline supersedes/query、恢复及F1/F3边界。
+- [x] 明确canonical FIFO替换顺序与既有行/运行身份映射，建立delta。
+- [x] ChatState独立交付pending替换槽位顺序，公共查询旧红新绿及相关fold回归。
+- [x] Shell独立交付原行运行身份恢复，实际编辑→冷恢复A/B/C多次替换及既有失败/未知ACK控制。
+- [x] 父核两侧最终diff与跨边界验证，保留reorder/平台限制。
+- [x] 更新开发说明、backlog；strict/archive结果见verification。

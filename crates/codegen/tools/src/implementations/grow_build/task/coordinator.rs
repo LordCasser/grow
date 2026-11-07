@@ -1892,6 +1892,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             let Some(child) = self.completed.get(id) else {
                 continue;
             };
+            // A not-ready host observation skips this tick without consuming
+            // the attempt budget or renewing the cycle deadline.
+            if !self
+                .runner
+                .finalization_ready(&child.request, &pending.output.completion_data)
+            {
+                continue;
+            }
             pending.attempts += 1;
             match self.runner.reconcile(
                 child.request.clone(),

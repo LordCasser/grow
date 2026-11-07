@@ -692,6 +692,44 @@ impl ContainedDirectory {
         Ok(file)
     }
 
+    /// Open an existing contained file read/write without creating it. Used
+    /// for durability barriers (Windows FlushFileBuffers / file locks need a
+    /// writable handle) where creating a missing file would fabricate state.
+    pub(crate) fn open_read_write_existing(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<std::fs::File> {
+        let name = Self::component(name)?;
+        let fd = unsafe {
+            libc::openat(
+                self.handle.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd == -1 {
+            let error = io::Error::last_os_error();
+            return Err(if error.raw_os_error() == Some(libc::ELOOP) {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{description} is a symlink"),
+                )
+            } else {
+                error
+            });
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a regular file"),
+            ));
+        }
+        Ok(file)
+    }
+
     pub(crate) fn sync(&self) -> io::Result<()> {
         self.handle.sync_all()
     }
@@ -1073,7 +1111,7 @@ impl ContainedDirectory {
             match self.open_relative(Path::new(&name), "contained child directory", false) {
                 Ok(directory) => directory.sync_tree()?,
                 Err(directory_error) => {
-                    match self.open_regular_for_sync(&name, "contained child file") {
+                    match self.open_read_write_existing(&name, "contained child file") {
                         Ok(file) => sync_file_durable(&file)?,
                         Err(_) => return Err(directory_error),
                     }
@@ -1487,7 +1525,10 @@ impl ContainedDirectory {
         Self::into_regular_file(file, description)
     }
 
-    fn open_regular_for_sync(
+    /// Open an existing contained file read/write without creating it, so
+    /// durability barriers (FlushFileBuffers, file locks) get a writable
+    /// handle without fabricating a missing file.
+    pub(crate) fn open_read_write_existing(
         &self,
         name: &std::ffi::OsStr,
         description: &str,
@@ -4841,6 +4882,55 @@ mod tests {
             std::fs::read(detached.join("state.json")).unwrap(),
             b"inside-state"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_read_write_existing_is_noncreating_writable_and_no_follow() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = ContainedDirectory::open(
+            root.path(),
+            Path::new(""),
+            "noncreating reopen fixture",
+            false,
+        )
+        .unwrap();
+        let name = std::ffi::OsStr::new("journal.jsonl");
+
+        let error = directory
+            .open_read_write_existing(name, "missing journal")
+            .expect_err("a missing file must not be created");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            directory
+                .open_regular(name, "still missing journal")
+                .is_err(),
+            "the failed reopen must not create the file"
+        );
+
+        drop(directory.open_read_write_create(name).unwrap());
+        let mut handle = directory
+            .open_read_write_existing(name, "existing journal")
+            .unwrap();
+        handle.write_all(b"durable").unwrap();
+        handle.sync_all().unwrap();
+        drop(handle);
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("journal.jsonl"), b"outside").unwrap();
+        symlink(
+            outside.path().join("journal.jsonl"),
+            root.path().join("swapped.jsonl"),
+        )
+        .unwrap();
+        let error = directory
+            .open_read_write_existing(std::ffi::OsStr::new("swapped.jsonl"), "swapped journal")
+            .expect_err("a symlink target must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("symlink"), "{error}");
     }
 
     #[test]

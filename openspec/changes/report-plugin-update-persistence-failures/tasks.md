@@ -1,0 +1,5 @@
+- [x] 核 ordinary/marketplace 保存所有权，冻结load/save与部分完成结果契约。
+- [ ] 在AC-07及前序plugin写面释放后实施单项错误传播，取得有效旧红/新绿。
+- [ ] 验证ACP/CLI实际入口、坏registry、故障后显式重试与no-op/marketplace回归。
+- [ ] 父及独立数据完整性review、最终插件产品链验收。
+- [ ] 同步开发说明/backlog，strict/archive及all/archived复核。

@@ -2129,26 +2129,10 @@ impl AgentView {
                         .tracker
                         .running_execute_tool_call_id()
                         .is_some();
-                // Child pending questions light the parent turn-status ◆ only
-                // for a NON-FINISHED subagent whose own ACP question is parked
-                // on its child view. This must stay in sync with
-                // `activity::AgentActivityProjection::from_sessions`'s
-                // `child_question_pending` (same source-session match +
-                // non-finished guards): a finished child's residual question
-                // view (InteractionResolved lost in a reconnect race) or a
-                // child-local question (source_session_id == None, e.g. a
-                // /fork modal) must NOT light the diamond.
-                let is_pending_user_input = !self.permission_queue.is_empty()
-                    || self.question_view.is_some()
-                    || self.subagent_views.iter().any(|(child_sid, child)| {
-                        child.question_view.as_ref().is_some_and(|question| {
-                            question.source_session_id.as_deref() == Some(child_sid.as_str())
-                        }) && self
-                            .session
-                            .subagent_sessions
-                            .get(child_sid)
-                            .is_some_and(|info| !info.finished)
-                    });
+                // See `pending_user_input_for_turn_status`: the diamond and
+                // NeedsInput projections live in one place, excluding local
+                // advisory-reply edits on both own and child arms.
+                let is_pending_user_input = self.pending_user_input_for_turn_status();
                 let held_queue = self.held_queue_count();
                 let held_queue_top_sendable = self.held_queue_top_sendable();
                 let turn_output = turn_status::render_turn_status(

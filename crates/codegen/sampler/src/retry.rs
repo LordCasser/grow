@@ -597,6 +597,42 @@ mod tests {
     }
 
     #[test]
+    fn standard_messages_stream_errors_use_bounded_service_retry_and_keep_vetoes() {
+        for code in ["api_error", "timeout_error"] {
+            let error = SamplingError::from_stream_error(code, "processing failed");
+            assert!(matches!(
+                classify_error(&error, 0, 2, 2),
+                RetryDecision::RetryWithClientRebuild { .. }
+            ));
+            for (count, cap) in [(1, 2), (0, 0)] {
+                assert!(matches!(
+                    classify_error(&error, count, cap, 2),
+                    RetryDecision::Fatal(_)
+                ));
+            }
+            let content_failure = SamplingError::from_stream_error(code, "prompt is too long");
+            assert!(matches!(
+                classify_error(&content_failure, 0, 2, 2),
+                RetryDecision::Fatal(_)
+            ));
+            let body = format!(
+                r#"{{"type":"error","error":{{"type":"{code}","message":"processing failed"}}}}"#
+            );
+            let vetoed = SamplingError::from_api_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                body.as_bytes(),
+                None,
+                None,
+                Some(false),
+            );
+            assert!(matches!(
+                classify_error(&vetoed, 0, 2, 2),
+                RetryDecision::Fatal(_)
+            ));
+        }
+    }
+
+    #[test]
     fn named_provider_error_codes_preserve_bounded_retry_policy() {
         for code in [
             "InvalidParameter",

@@ -44,12 +44,19 @@ pub(super) async fn stop_session_background_services(
     fatal: bool,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
+    let started = std::time::Instant::now();
+    let progress = |service: &str, phase: &str| {
+        tracing::info!(session_id = %session.session_info.id.0, service, phase, elapsed_ms = started.elapsed().as_millis() as u64, "session service retirement progress");
+    };
     session.background_service_shutdown.cancel();
     for (label, slot) in [
         ("ask-user-question service", &session.user_question_worker),
         ("context-recall service", &session.context_recall_worker),
     ] {
-        if let Err(error) = join_background_service(slot, label).await {
+        progress(label, "started");
+        let result = join_background_service(slot, label).await;
+        progress(label, "finished");
+        if let Err(error) = result {
             tracing::warn!(service = label, %error, "failed to join Session background service");
             errors.push(error);
         }
@@ -67,34 +74,52 @@ pub(super) async fn stop_session_background_services(
         ("initial memory reindex", &session.memory_reindex_worker),
         ("planning delivery", &session.planning_delivery),
     ] {
-        if let Err(error) = join_background_service_exact(slot, label).await {
+        progress(label, "started");
+        let result = join_background_service_exact(slot, label).await;
+        progress(label, "finished");
+        if let Err(error) = result {
             tracing::warn!(service = label, %error, "Session storage worker failed while joining");
             errors.push(error);
         }
     }
-    if let Some(extension) = &session.idle_prompt_extension
-        && let Err(error) = extension.shutdown().await
-    {
-        tracing::warn!(%error, "failed to join idle notification timer");
-        errors.push(format!("idle notification timer: {error}"));
+    if let Some(extension) = &session.idle_prompt_extension {
+        progress("idle notification timer", "started");
+        let result = extension.shutdown().await;
+        progress("idle notification timer", "finished");
+        if let Err(error) = result {
+            tracing::warn!(%error, "failed to join idle notification timer");
+            errors.push(format!("idle notification timer: {error}"));
+        }
     }
     let fs_watch = session.fs_watch_handle.borrow_mut().take();
-    if let Some(fs_watch) = fs_watch
-        && let Err(error) = fs_watch.shutdown_and_join().await
-    {
-        tracing::warn!(%error, "failed to join filesystem watcher");
-        errors.push(format!("filesystem watcher: {error}"));
+    if let Some(fs_watch) = fs_watch {
+        progress("filesystem watcher", "started");
+        let result = fs_watch.shutdown_and_join().await;
+        progress("filesystem watcher", "finished");
+        if let Err(error) = result {
+            tracing::warn!(%error, "failed to join filesystem watcher");
+            errors.push(format!("filesystem watcher: {error}"));
+        }
     }
-    if let Err(error) = session.mcp_initialization_worker.abort_and_join().await {
+    progress("MCP initialization worker", "started");
+    let result = session.mcp_initialization_worker.abort_and_join().await;
+    progress("MCP initialization worker", "finished");
+    if let Err(error) = result {
         tracing::warn!(%error, "failed to join MCP initialization worker");
         errors.push(format!("MCP initialization worker: {error}"));
     }
+    progress("MCP client event channel", "started");
     session.mcp_state.lock().await.close_client_event_channel();
-    if let Err(error) = session.project_discovery_worker.abort_and_join().await {
+    progress("MCP client event channel", "finished");
+    progress("project discovery watcher", "started");
+    let result = session.project_discovery_worker.abort_and_join().await;
+    progress("project discovery watcher", "finished");
+    if let Err(error) = result {
         tracing::warn!(%error, "failed to join project discovery watcher");
         errors.push(format!("project discovery watcher: {error}"));
     }
     if let Some(mut dispatcher) = session.mcp_dispatcher_worker.take() {
+        progress("MCP status dispatcher", "started");
         if fatal {
             dispatcher.abort();
         }
@@ -111,6 +136,7 @@ pub(super) async fn stop_session_background_services(
                 errors.push("MCP status dispatcher did not stop within 3 seconds".to_string());
             }
         }
+        progress("MCP status dispatcher", "finished");
     }
     if errors.is_empty() {
         Ok(())
@@ -241,9 +267,12 @@ pub(super) async fn stop_permission_manager_and_drain_audit(
     Ok(())
 }
 
-/// Cross the final persistence barrier after every teardown producer,
-/// including the drained permission bridge and session-end hooks, has stopped.
-pub(super) async fn final_session_persistence_flush(session: &SessionActor) {
+/// Retire every remaining append-capable owner before the final persistence
+/// frontier: close Sideband admission, revoke the detached durability tokens,
+/// and wait for session activities to go idle. Idempotent. Returns false when
+/// an owner can still append, in which case no final frontier — and no
+/// terminal subagent result — may be declared.
+pub(super) async fn drain_final_persistence_owners(session: &SessionActor) -> bool {
     // Every session-end producer (hooks, memory dream, Workflow/Goal
     // checkpoints and permission audit) has stopped at this boundary. Exact
     // Sideband retries remain live until now so teardown work can still use
@@ -263,7 +292,16 @@ pub(super) async fn final_session_persistence_flush(session: &SessionActor) {
         // Do not declare a final durable frontier while an owner can still
         // append behind it. Closing the persistence sender when the Session
         // drops is safer than publishing a false final-flush guarantee.
-        tracing::error!("final persistence flush withheld because session writers did not drain");
+        tracing::error!("final persistence drain failed because session writers did not retire");
+        return false;
+    }
+    true
+}
+
+/// Cross the final persistence barrier after every teardown producer,
+/// including the drained permission bridge and session-end hooks, has stopped.
+pub(super) async fn final_session_persistence_flush(session: &SessionActor) {
+    if !drain_final_persistence_owners(session).await {
         return;
     }
     let (respond_to, ack) = tokio::sync::oneshot::channel();

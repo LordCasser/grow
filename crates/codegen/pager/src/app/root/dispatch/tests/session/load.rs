@@ -1344,6 +1344,7 @@ fn project_picker_freeform_path_used_when_no_option_selected() {
             preview: None,
             id: None,
         }],
+        recommended_option: None,
         multi_select: Some(false),
     };
     let mut qv = QuestionViewState::new("test".into(), vec![q], StashedPrompt::default());
@@ -1384,6 +1385,7 @@ fn project_picker_freeform_overrides_dont_ask() {
         question: "Pick".into(),
         id: None,
         options: vec![opt("a (current)"), opt("Don't ask me again")],
+        recommended_option: None,
         multi_select: Some(false),
     };
     let mut qv = QuestionViewState::new("test".into(), vec![q], StashedPrompt::default());
@@ -1441,6 +1443,7 @@ fn project_picker_dont_ask_again_sets_disable_flag() {
         question: "Pick".into(),
         id: None,
         options: vec![opt("a (current)"), opt("Don't ask me again")],
+        recommended_option: None,
         multi_select: Some(false),
     };
     let mut qv = QuestionViewState::new("test".into(), vec![q], StashedPrompt::default());
@@ -1483,6 +1486,7 @@ fn project_picker_recent_project_selection_uses_that_path() {
             opt("alpha"),
             opt("Don't ask me again"),
         ],
+        recommended_option: None,
         multi_select: Some(false),
     };
     let mut qv = QuestionViewState::new("test".into(), vec![q], StashedPrompt::default());

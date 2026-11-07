@@ -4,8 +4,12 @@ use super::*;
 ///
 /// The matched view's mutation must happen on the agent identified here,
 /// regardless of which view the user is currently looking at.
+///
+/// `pub(crate)`: `find_session_match` is re-exported `pub(crate)` for the
+/// advisory-reply submit path, so its result type and `agent_id` accessor
+/// must travel with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SessionMatch {
+pub(crate) enum SessionMatch {
     /// The session_id matches the root session of this agent.
     Root(AgentId),
     /// The session_id matches a subagent view child of this agent
@@ -23,7 +27,7 @@ impl SessionMatch {
     /// Callers that only need to look up the owning agent (without
     /// distinguishing root vs child) should use this instead of duplicating
     /// the `match { Root(id) | Child(id) => id }` pattern.
-    pub(super) fn agent_id(self) -> AgentId {
+    pub(crate) fn agent_id(self) -> AgentId {
         match self {
             SessionMatch::Root(id) | SessionMatch::Child(id) => id,
         }
@@ -108,7 +112,7 @@ pub(super) fn resolve_target_view<'a>(
 ///
 /// All ACP-notification handlers must route through this function rather than
 /// gating on `app.active_view` directly.
-pub(super) fn find_session_match(
+pub(crate) fn find_session_match(
     app: &AppView,
     session_id: &acp::SessionId,
 ) -> Option<SessionMatch> {

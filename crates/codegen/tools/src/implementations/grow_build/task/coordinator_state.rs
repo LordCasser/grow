@@ -230,6 +230,21 @@ pub trait ChildRunner: 'static {
         None
     }
 
+    /// Synchronous readiness observation before the coordinator admits a
+    /// finalization reconciliation attempt. Must not dispatch reconciliation
+    /// I/O, append canonical facts, acquire a writer lease or extend deadlines.
+    /// Existing host retirement observation may request its persistence rail
+    /// to stop after its actor exits; that does not admit recovery writes.
+    /// A false result skips this tick without consuming the attempt budget.
+    /// The default preserves hosts without physical readiness constraints.
+    fn finalization_ready(
+        &self,
+        _request: &SubagentRequest,
+        _completion_data: &Self::CompletionData,
+    ) -> bool {
+        true
+    }
+
     /// Resume persistence/delivery only. This must never run the child again.
     fn reconcile(
         &self,

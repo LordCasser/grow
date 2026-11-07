@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// Conflict type for a path the agent touched whose final after-state was
+/// never confirmed (bounded end-of-prompt capture leaves no after entry).
+/// Unknown is never clean; the pager UI falls back to a generic "conflict"
+/// label for unrecognized conflict types.
+const SNAPSHOT_UNAVAILABLE_CONFLICT_TYPE: &str = "snapshot_unavailable";
+
 impl SessionActor {
     pub(super) async fn close_rewind_window(&self) {
         let mut state = self.state.lock().await;
@@ -189,30 +195,48 @@ impl SessionActor {
                     })?;
                 current_files.insert(path.clone(), current_content.clone());
 
-                // Find the latest after_snapshot for this file (what the agent
-                // most recently left it as) for conflict detection.
-                let after_content = all_points
+                // Judge by the latest point that TOUCHES this path (before-
+                // snapshot membership) and only that point's own after entry:
+                // what the agent most recently left behind. A missing entry
+                // there means that round's final state could not be confirmed
+                // (bounded end-of-prompt capture) — it must not fall back to
+                // an older point's entry, and it must never count as clean.
+                let latest_after = all_points
                     .iter()
                     .rev()
-                    .find_map(|p| p.after_snapshots.get(path))
-                    .and_then(|s| s.content.clone());
+                    .find(|point| point.file_snapshots.contains_key(path))
+                    .and_then(|point| point.after_snapshots.get(path));
 
-                let is_clean = current_content == after_content;
-
-                if is_clean {
-                    clean_files.push(path.to_string());
-                } else {
-                    let conflict_type = if current_content.is_none() && after_content.is_some() {
-                        "deleted_externally"
-                    } else if current_content.is_some() && after_content.is_none() {
-                        "created_externally"
-                    } else {
-                        "modified_externally"
-                    };
-                    conflicts.push(RewindConflictInfo {
-                        path: path.to_string(),
-                        conflict_type: conflict_type.to_string(),
-                    });
+                match latest_after {
+                    Some(after_snapshot) => {
+                        let after_content = after_snapshot.content.clone();
+                        let is_clean = current_content == after_content;
+                        if is_clean {
+                            clean_files.push(path.to_string());
+                        } else {
+                            let conflict_type =
+                                if current_content.is_none() && after_content.is_some() {
+                                    "deleted_externally"
+                                } else if current_content.is_some() && after_content.is_none() {
+                                    "created_externally"
+                                } else {
+                                    "modified_externally"
+                                };
+                            conflicts.push(RewindConflictInfo {
+                                path: path.to_string(),
+                                conflict_type: conflict_type.to_string(),
+                            });
+                        }
+                    }
+                    None => {
+                        // Unknown final state: report it explicitly regardless
+                        // of whether the file currently exists. Force still
+                        // lets the user confirm the rewind as before.
+                        conflicts.push(RewindConflictInfo {
+                            path: path.to_string(),
+                            conflict_type: SNAPSHOT_UNAVAILABLE_CONFLICT_TYPE.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -221,10 +245,26 @@ impl SessionActor {
         // Return what WOULD happen so the TUI can show a confirmation
         // modal. Nothing is written, deleted, or truncated.
         if !request.force {
-            let error = if !conflicts.is_empty() {
-                Some("External modifications detected. Confirm to revert anyway.".to_string())
-            } else {
-                None
+            let has_unknown = conflicts
+                .iter()
+                .any(|conflict| conflict.conflict_type == SNAPSHOT_UNAVAILABLE_CONFLICT_TYPE);
+            let has_external = conflicts
+                .iter()
+                .any(|conflict| conflict.conflict_type != SNAPSHOT_UNAVAILABLE_CONFLICT_TYPE);
+            let error = match (has_unknown, has_external) {
+                (true, true) => Some(
+                    "Some files' final state cannot be confirmed, and others were externally \
+                     modified. Confirm to revert anyway."
+                        .to_string(),
+                ),
+                (true, false) => Some(
+                    "Some files' final state cannot be confirmed. Confirm to revert anyway."
+                        .to_string(),
+                ),
+                (false, true) => {
+                    Some("External modifications detected. Confirm to revert anyway.".to_string())
+                }
+                (false, false) => None,
             };
             return Ok(RewindResponse {
                 success: false,

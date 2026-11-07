@@ -441,6 +441,110 @@ async fn freeze_timeout_marks_report_and_both_ledgers() {
         .await;
 }
 
+/// Regression for the freeze deadline-coverage gap: a receiver that accepts
+/// the Outstanding request and keeps `respond_to` alive without replying must
+/// not extend the freeze past its budget. The freeze ends fail-closed (report
+/// and both ledgers incomplete). The guard timeout makes the old unbounded
+/// ACK wait fail instead of hanging the suite.
+#[tokio::test(flavor = "current_thread")]
+async fn freeze_held_outstanding_ack_fails_closed_at_deadline() {
+    use tools::implementations::grow_build::task::types::SubagentEvent;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut actor = make_actor().await;
+            // Holds every request (and its respond_to sender) without replying.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+            tokio::task::spawn_local(async move {
+                let mut held = Vec::new();
+                while let Some(event) = rx.recv().await {
+                    if let SubagentEvent::Outstanding(req) = event {
+                        held.push(req);
+                    }
+                }
+            });
+            actor.tool_context.subagent_event_tx = Some(tx);
+
+            let usage = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                actor.freeze_prompt_usage_bounded("p-1", std::time::Duration::from_millis(120)),
+            )
+            .await
+            .expect("held ACK must end at the freeze deadline")
+            .expect("incomplete usage always attaches");
+            assert!(usage.usage_is_incomplete);
+            let prompt = actor
+                .chat_state_handle
+                .try_get_prompt_usage()
+                .await
+                .unwrap()
+                .expect("fail-closed mark opens the prompt ledger");
+            assert!(prompt.incomplete);
+            assert!(
+                actor
+                    .chat_state_handle
+                    .try_get_session_usage()
+                    .await
+                    .unwrap()
+                    .incomplete
+            );
+        })
+        .await;
+}
+
+/// A responder that eventually replies but only after the budget has expired
+/// must not hold the freeze until the late reply arrives (the old unbounded
+/// ACK wait exited at the late-reply moment, past the deadline). The guard is
+/// deliberately generous — it distinguishes deadline-bounded termination from
+/// a ~400ms late-reply exit without asserting millisecond wall-clock timing.
+#[tokio::test(flavor = "current_thread")]
+async fn freeze_late_reply_fails_closed_at_deadline() {
+    use tools::implementations::grow_build::task::types::SubagentEvent;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut actor = make_actor().await;
+            // Replies to every Outstanding query, but only 400ms later.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+            tokio::task::spawn_local(async move {
+                while let Some(event) = rx.recv().await {
+                    if let SubagentEvent::Outstanding(req) = event {
+                        tokio::task::spawn_local(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            let _ = req.respond_to.send(Default::default());
+                        });
+                    }
+                }
+            });
+            actor.tool_context.subagent_event_tx = Some(tx);
+
+            let usage = tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                actor.freeze_prompt_usage_bounded("p-1", std::time::Duration::from_millis(120)),
+            )
+            .await
+            .expect("late reply must not hold the freeze past its deadline")
+            .expect("incomplete usage always attaches");
+            assert!(usage.usage_is_incomplete);
+            let prompt = actor
+                .chat_state_handle
+                .try_get_prompt_usage()
+                .await
+                .unwrap()
+                .expect("fail-closed mark opens the prompt ledger");
+            assert!(prompt.incomplete);
+            assert!(
+                actor
+                    .chat_state_handle
+                    .try_get_session_usage()
+                    .await
+                    .unwrap()
+                    .incomplete
+            );
+        })
+        .await;
+}
+
 /// A live background child flags only the report: no ledger is marked,
 /// because its fold still lands on the session ledger at completion.
 #[tokio::test(flavor = "current_thread")]

@@ -1,0 +1,19 @@
+# U4 · 建议展示与leader共享交互缓存
+
+## 当前源码事实
+
+父为核默认leader路径亲读 `shell/src/leader/server.rs`：`is_interaction_request`按方法名把所有grow/ask_user_question识别为blocking共享交互，不看新的effective blocking；reverse request在约2264的is_interaction分支缓存到按session/call的interaction_requests，并向所有subscriber广播。已有cache在session/load后向新subscriber重发（约1945），只在InteractionResolved广播时移除（约2253）。父核全部该map读写点，没有按Presented响应直接移除。
+
+本特性的Shell advisoryworker刻意不创建PendingInteractionGuard，不发阻塞Opened/Resolved；它只等五秒展示并接Presented。因此advisory被当共享pending缓存后，不具备缓存设计要求的Resolved事实。当前风险是已结束建议在后续attach被重发旧reverse request、缓存持续保留；这是新路径违反已有owner前提，不把它升级成所有leader容量/ACP-1问题。尚未跑真实socket反例，不称现场复现。
+
+## 修复决策
+
+leader reverse-request分类owner识别grow/ask_user_question的显式blocking=false（使用已有method_of和interaction_inner_params正确解包）：建议展示按原普通driver reverse-request路由，不入blocking共享interactioncache。blocking缺省/true、permissions、Plan approval仍共享并按InteractionResolved收敛。保已归档broadcast/first-answer-wins及driver归属，不改其超时/重连/登记表，也不为advisory增加假的Resolved事件。
+
+其他subscriber从正常工具update/result恢复建议卡片；coldattach从原历史恢复，已由Pager typedrawoutput恢复路径承担，不依赖重发已结算reverse RPC。原presentation是否成功仍只由本次driver真正展示后给Presented判定，不能因分类把未显示默认为成功。
+
+## 独立交接与验收
+
+一个Shell leader路由coder只修这一行为，生产落点预计仅server.rs内分类helper。不改Pager/U2、Tools或genericinputquery。用现有setup_persistent_server_with_agent/connect_and_register/load_session/next_acp_payload等真实socket fixture，在初始source上发正确wrapped/directfalse请求，证明它被错误共享或latejoiner重播；再最小修复。至少一项实际servereventloop反例，不能只测helper布尔值。
+
+验收：driver收到false展示RPC并可回Presented，已附着其他subscriber不作为共享人类回答者；展示完成后latejoiner完成load，不重放旧reverseid/call，后续真blocking仍共享。缺省blocking/明确true、request_permission、Plan原重放和Resolved清理回归保持。direct/wrapped分类对照，false的结果数据仍是工具历史，不伪造pending交互。任务测试使用隔离socket/home和受控期限，原owner回收；不碰真实leader/session。记录完整oldred/newgreen，父核实source和实际eventloop证据后才接受。唯一Cargo窗口待U2释放，当前不改编译输入。

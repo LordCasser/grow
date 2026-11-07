@@ -5017,3 +5017,348 @@ LSP document state SHALL publish the revision and UTF-16 end position of a didOp
 
 - **WHEN** a report describes an older revision, a document never admitted, or a revision beyond what was admitted
 - **THEN** existing revision and unopened-document boundaries remain in effect; the admission fix does not make those reports settle an unrelated edit.
+
+### Requirement: ClientFS 文件操作的摘要与 size 来自同一次当前读取
+
+`workspace.client_fs_stat` 与 `workspace.client_fs_read_file` 对文件的响应 SHALL 在对当前打开文件的同一次流式读取中产生全内容 SHA-256、请求 range 字节与上报 size；SHALL NOT 以 `(size, mtime_ms)` 等元数据元组缓存或复用摘要，SHALL NOT 将预读取的 metadata `len()` 作为文件响应的 size。元数据 SHALL 仅决定节点类型与 mtime 显示。普通并发原地 writer 下本操作不提供文件系统原子快照，该一致性 SHALL NOT 被宣称为瞬时全文件快照。既有 root-confinement、symlink 逃逸排除、read cap 与 binary-safe 编码行为保持。
+
+#### Scenario: 同 size 且保持 mtime 的原地改写
+
+- **WHEN** 文件已被 stat/read 后以相同长度的新内容原地改写，且 mtime 恢复为原值（同毫秒）
+- **THEN** stat 与 read_file 返回的 hash 等于新内容全量 SHA-256，read_file 的 range 内容为新字节，size 等于新内容长度，mtime_ms 显示不变。
+
+#### Scenario: 同 size、同毫秒不同纳秒的改写
+
+- **WHEN** 文件以相同长度新内容改写，且 mtime 恢复到同一毫秒内的不同纳秒值
+- **THEN** stat 与 read_file 返回的 hash、range 字节与 size 反映新内容，mtime_ms 显示不变。
+
+#### Scenario: atomic replacement 保持元数据
+
+- **WHEN** 以同长度临时文件 rename 原子替换目标文件，并将 mtime 恢复为原值
+- **THEN** stat 与 read_file 返回的 hash 等于替换后内容的全量 SHA-256，size 等于替换后长度。
+
+#### Scenario: 既有边界行为保持
+
+- **WHEN** 越权路径、symlink 逃逸、超出 read 预算的请求或非 UTF-8 内容到达 client_fs 操作
+- **THEN** root-confinement 拒绝、symlink 逃逸拒绝、read cap 截断与 binary-safe 编码降级行为与既有契约一致。
+
+### Requirement: After-snapshot capture completes within a fixed budget and never fabricates states
+
+End-of-prompt after-snapshot capture SHALL bound the entire asynchronous read-observation round with one fixed total budget covering queueing and read waiting for every touched path, keeping the existing fan-out. The budget SHALL NOT be described as forcibly interrupting tracker lock acquisition or underlying synchronous I/O. Reads that finish within the budget SHALL be recorded; a read error, a non-UTF-8 body, or an expired budget SHALL leave that path's final state unknown (no after-snapshot entry) instead of recording a fabricated confirmed-absent snapshot. A read that confirms the file is absent SHALL record content `None`. A retried capture for the same prompt SHALL discard that prompt's previous after-snapshot entries before inserting new ones. After the budget expires, nothing SHALL write the prompt's rewind point later, and the implementation SHALL NOT claim the underlying read was terminated. The budget SHALL NOT be user-configurable.
+
+#### Scenario: A never-returning read cannot hold the prompt end
+
+- **WHEN** an after-read for a touched path never resolves while its underlying request sender stays alive
+- **THEN** end-of-prompt capture still returns within the fixed budget, earlier successful captures stay recorded, the unresponsive path has no after entry (unknown final state, not confirmed absent), and nothing writes the rewind point afterwards.
+
+#### Scenario: Read error or invalid UTF-8 stays unknown
+
+- **WHEN** an after-read fails, or returns bytes that are not valid UTF-8
+- **THEN** no after-snapshot entry is inserted for that path.
+
+#### Scenario: Confirmed absence is recorded as None
+
+- **WHEN** the after-read reports that the file does not exist
+- **THEN** the after entry records content `None`, and rewind clean detection may treat current absence as clean.
+
+#### Scenario: Retry discards stale after entries of the same prompt
+
+- **WHEN** capture runs again for a prompt whose earlier capture recorded after entries
+- **THEN** those stale entries are discarded first, so neither stale known states nor residue of an interrupted round survive next to the new capture.
+
+### Requirement: Rewind conflict detection preserves unknown after-snapshots
+
+Rewind preview conflict detection SHALL judge each path by the latest rewind point that touches it (before-snapshot membership) and only that point's own after-snapshot entry. A touched path whose latest touching point lacks an after entry SHALL report conflict type `snapshot_unavailable`, SHALL NOT be reported clean, and the preview SHALL name the unknown final state instead of claiming external modification, regardless of whether the file currently exists. An earlier point's after entry SHALL NOT be substituted for the unknown one. A confirmed-deleted after entry (content `None`) with the file currently absent SHALL remain clean. Folding later points into an earlier one SHALL remove the earlier same-path after entry whenever a later touching point lacks its own after entry. Forcing the rewind SHALL keep the existing explicit user-confirmed conflict semantics with no new approval step.
+
+#### Scenario: Latest touching point is unknown
+
+- **WHEN** the latest point touching a path has no after entry while an earlier point records one
+- **THEN** the preview reports `snapshot_unavailable` and does not report the path clean, regardless of current file state, and never uses the earlier entry.
+
+#### Scenario: Confirmed deletion stays clean
+
+- **WHEN** the latest touching point recorded content `None` and the file is currently absent
+- **THEN** the path is reported clean.
+
+#### Scenario: Preview with unknown conflicts refuses clearly
+
+- **WHEN** a preview encounters `snapshot_unavailable` conflicts
+- **THEN** it refuses, names the unknown final states without asserting external modification for them, and mutates nothing.
+
+#### Scenario: Force keeps existing semantics
+
+- **WHEN** the user confirms execution on a rewind with conflicts, including `snapshot_unavailable`
+- **THEN** the rewind proceeds under the existing conflict-confirmation flow with no new approval step.
+
+#### Scenario: Merge must not resurface a stale known-after
+
+- **WHEN** later points that touch a path without an own after entry fold into an earlier point
+- **THEN** the earlier point's same-path after entry is removed, so the merged point presents the path as unknown.
+
+#### Scenario: Unknown survives persistence
+
+- **WHEN** a rewind point with an unknown after state round-trips through the rewind ledger or the lazy historical load
+- **THEN** the state remains unknown with no schema change, and metadata-only scans continue to work unchanged.
+
+### Requirement: Stdio bridge observes closed sessions before reconnect replay
+
+The CLI stdio bridge SHALL deliver each nonempty outgoing message to its existing replay-cache parser before forwarding. The parser SHALL apply its supported session close operations to the same replay owner as initialize/new/load and SHALL leave unrelated methods unchanged. Closed sessions SHALL be excluded from later reconnect loads and primary restored-session selection; other cached sessions SHALL retain their deterministic replay order.
+
+#### Scenario: Closed session is excluded through the real forwarding path
+
+- **WHEN** the client forwards initialize, loads two sessions, closes one with a supported close method and reconnects to a replacement leader
+- **THEN** the replacement receives no load for the closed session, receives one load for the remaining session and reports an open primary restored session.
+
+#### Scenario: Unrelated content contains lifecycle text
+
+- **WHEN** an unrelated outgoing method includes lifecycle method text in its payload
+- **THEN** the message is forwarded without mutating the replay cache according to payload text.
+
+### Requirement: Crash evidence survives failed report publication
+
+Crash recovery SHALL return an observable error for existing-file read or report/history publication failure. It SHALL retain valid raw evidence until both its primary report and history report have been published with supported file and directory durability barriers. Published reports SHALL be private on Unix from creation, and failure SHALL NOT return a nonexistent report path as success. A partially published report SHALL NOT cause raw evidence to be consumed before the remaining publication succeeds. Missing or empty raw files SHALL remain a normal no-crash observation; nonempty malformed evidence SHALL remain available with an explicit parse error.
+
+#### Scenario: Primary report cannot be published
+
+- **WHEN** a valid raw crash exists but primary report publication fails
+- **THEN** recovery returns an error, the original raw bytes remain available, and no report success is claimed.
+
+#### Scenario: History publication fails after primary success
+
+- **WHEN** primary publication succeeds but history creation, write or supported synchronization fails
+- **THEN** recovery reports failure and retains the same raw crash for retry; the published primary report remains available.
+
+#### Scenario: Storage recovers
+
+- **WHEN** the same preserved crash is retried after publication storage recovers
+- **THEN** recovery reports its original identity only after primary and history are committed, and raw consumption follows that commit.
+
+#### Scenario: Older crash is recovered after newer history
+
+- **WHEN** existing history is at its retention bound and a recovered crash has an older timestamp than the retained records
+- **THEN** that call's pruning preserves the just-published crash archive, prunes other oldest eligible records within the existing bound, and only then permits raw consumption.
+
+#### Scenario: Startup recovery is blocked
+
+- **WHEN** CLI startup receives a crash recovery error
+- **THEN** it reports the blocked recovery and retains terminal restoration without installing capture that truncates the preserved raw file.
+
+### Requirement: Stdio creation replay state follows the JSON-RPC request identity
+
+The CLI bridge SHALL associate each pending session/new snapshot with that request's exact JSON-RPC ID and SHALL settle it only upon a matching response. Numeric and string IDs SHALL remain distinct. A matching error or unusable success SHALL discard only that pending creation. A matching successful creation SHALL cache its assigned session ID with that request's cwd and MCP declaration; unrelated responses SHALL NOT consume another creation. Duplicate settled responses and unconfirmed creations SHALL NOT add reconnect loads. Existing deterministic confirmed-session replay and close removal SHALL remain intact.
+
+#### Scenario: Overlapping creations respond in reverse order
+
+- **WHEN** two session/new requests with different IDs and cwd/MCP snapshots receive successful responses in reverse order
+- **THEN** both confirmed sessions retain their own request snapshots and each is loaded exactly once on reconnect.
+
+#### Scenario: Error and unrelated response interleave
+
+- **WHEN** one pending creation errors while a load response and another creation response arrive
+- **THEN** only each matching creation is settled, the load response does not take either snapshot, and only successfully confirmed open sessions are replayed.
+
+#### Scenario: Numeric and string IDs differ
+
+- **WHEN** creations use numeric 1 and string "1"
+- **THEN** their responses settle separate entries and cannot exchange cwd or MCP snapshots.
+
+### Requirement: Advisory question responses use current user input admission
+
+Pager SHALL present advisory questions without marking the session as waiting for the user or blocking its composer. A later user response SHALL be admitted as new user input through the ordinary durable input path, with the original question and recommendation attributed as context. It SHALL NOT complete an old tool again or revive a stopped Goal.
+
+#### Scenario: Answer after the original task ended
+
+- **WHEN** the user responds to an advisory question after its original tool and task have ended
+- **THEN** the response is submitted to the current owning session as new user input, and the historical tool keeps its single original result.
+
+#### Scenario: User explicitly opens the reply editor
+
+- **WHEN** the user opens an available advisory reply from its history card
+- **THEN** the source view's local question editor receives keyboard input immediately, preserves the ordinary composer for restoration, and does not mark the session as awaiting a blocking answer.
+
+#### Scenario: Reply is drawn after an earlier card changes estimated height
+
+- **WHEN** a new reply prompt is pinned at the viewport top and rebuilding the layout changes an earlier advisory card from its measured height to an estimate before the reply body arrives
+- **THEN** the preserved position follows the same prompt in the current layout, and the body that fits below it is drawn without additional navigation; a stale absolute offset does not enable a sticky header that hides the body.
+
+#### Scenario: Response admission fails or is retried
+
+- **WHEN** the response fails durable admission or the client retries the same submission
+- **THEN** failed text remains available and the stable input identity prevents duplicate accepted input.
+
+#### Scenario: Leader forwards a provisional presentation
+
+- **WHEN** an advisory question with effective blocking=false is presented through the leader
+- **THEN** its bounded presentation request uses the current driver path and is not retained or replayed as a pending shared human interaction; other attached clients recover the suggestion through ordinary tool history, while blocking question sharing remains unchanged.
+
+### Requirement: Blocking question preference is persistent
+
+Settings SHALL expose whether the Agent may select nonblocking questions. This preference SHALL default to enabled, persist through the existing raw settings transaction, and govern new question admission after a successful live settings update and after restart. Questions already admitted SHALL retain their effective mode.
+
+#### Scenario: Disable and reload
+
+- **WHEN** the user disables nonblocking questions and later reconnects or restarts
+- **THEN** newly admitted Agent questions remain blocking until the user changes the preference again.
+
+### Requirement: Parent sampling tools show dispatch completion in place
+
+Pager SHALL display a parent `set_subagent_model` call using one compact tool row whose state changes in place from dispatching to queued or failure. The row SHALL retain the target and requested model and/or effort. A queued result SHALL mean target actor admission only and SHALL NOT claim that the new selection is already applied. Detailed and raw views SHALL retain the full arguments and result.
+
+#### Scenario: A busy child admits a selection
+
+- **WHEN** a parent sends a model or effort selection and the busy child admits it before its current Step closes
+- **THEN** the same tool row changes from dispatching to queued without a second completion row or an applied claim.
+
+#### Scenario: Dispatch is rejected
+
+- **WHEN** the target or selection is rejected
+- **THEN** the original tool row shows failure and preserves the error rather than remaining in dispatching or showing queued.
+
+#### Scenario: Completion is observed again
+
+- **WHEN** the same tool completion is repeated or restored within its owning session
+- **THEN** Pager retains one completed row for that call and preserves its target and requested fields.
+
+### Requirement: Child sampling tools retain ordinary control feedback
+
+A host-authorized parent tool selecting child sampling SHALL enter the child's existing Sampling control feedback and durable receipt path using a host-owned operation identity. Child UI SHALL show the admitted pending control and the ordinary terminal control notice when the effective selection changes. The control SHALL remain distinct from user input, and a queued parent tool result SHALL NOT establish application. Existing closed-Step application, no-op, supersession, failure and hydration behavior SHALL remain authoritative.
+
+#### Scenario: Selection applies after a Step
+
+- **WHEN** a child receives an authorized parent selection while a Step is running
+- **THEN** the child shows pending control while its current selection remains unchanged, and after that Step closes it records the ordinary applied receipt and displays one Sampling control notice.
+
+#### Scenario: Initial child controls precede opening the child view
+
+- **WHEN** the parent receives queued before the user opens its running child and child startup crosses asynchronous parent lifecycle publication
+- **THEN** the child initial control authority is published after its Spawned route is established and before its first prompt or live Pending, so opening the child retains the ordinary pending display without accepting an unknown actor epoch.
+
+#### Scenario: Effort is selected alone
+
+- **WHEN** the parent changes only reasoning effort
+- **THEN** the child composes it with its latest desired model, displays the effective applied selection and does not restore a stale model.
+
+#### Scenario: No change or superseded control
+
+- **WHEN** the selection is a no-op or a newer admitted control supersedes it
+- **THEN** existing terminal receipt and no-op/supersession presentation semantics are retained without claiming a switch that did not occur.
+
+#### Scenario: Application cannot be durably confirmed
+
+- **WHEN** the selection's terminal control event fails persistence
+- **THEN** the existing finish path reports the failure and does not synthesize a durable applied notice, even if the parent earlier received queued.
+
+#### Scenario: Hydration and recovery
+
+- **WHEN** a session merely restores or reloads its persisted model selection
+- **THEN** it does not manufacture a parent tool control, a user prompt or a new switch notice.
+
+### Requirement: PTY session controls acknowledge the owned child lifecycle
+
+PTY Session SHALL retain one owner for its directly spawned child, stop and timeout requests, actual exit status, and final output delivery. Reader EOF SHALL NOT establish child retirement. Stop success SHALL require confirmed child settlement and owned I/O completion; cancellation of an observer SHALL NOT cancel an admitted stop responsibility. Natural exit SHALL close the service unless linger is enabled. Explicit stop and the configured startup timeout SHALL close the session regardless of linger. Failed settlement SHALL remain observable rather than returning success.
+
+#### Scenario: Child exits with final output
+- **WHEN** the child writes its final line and exits with a nonzero status
+- **THEN** complete terminal observation contains that output and the actual status, and EOF alone cannot supply a fabricated successful exit.
+
+#### Scenario: Explicit stop or timeout
+- **WHEN** stop is requested or the original timeout expires, including a linger session
+- **THEN** the original child owner settles that request once, exposes its real terminal result or an explicit failure, and does not extend the deadline on repeated observations.
+
+#### Scenario: Natural linger
+- **WHEN** a child naturally completes under linger
+- **THEN** the service retains final screen and status until a later explicit stop or timeout requests service shutdown.
+
+### Requirement: PTY services consume the Session terminal owner
+
+The PTY HTTP/WS service and CLI SHALL consume the Session's control and completion handles without holding the outer Session lock across shutdown waits. HTTP stop SHALL report success only after confirmed settlement. WS terminal status SHALL agree with the Session's actual result and bounded connection cleanup SHALL not indefinitely block service shutdown. Bind, registration and serve failures after child spawn SHALL clean up that exact child owner. Name cleanup SHALL remove only the registration still pointing to the current server's port; force replacement SHALL NOT authorize stopping the previous registered PID.
+
+#### Scenario: Service startup fails after spawn
+- **WHEN** bind or name registration fails after this CLI has spawned its child
+- **THEN** this child is settled and the startup failure remains visible, including an explicit cleanup failure if settlement cannot be confirmed.
+
+#### Scenario: Stop with an open WebSocket
+- **WHEN** HTTP stop is requested while a WS is observing the same session
+- **THEN** successful stop and the WS closed result describe the same actual child exit, and a slow WS cannot hold service shutdown indefinitely.
+
+#### Scenario: Name has been replaced
+- **WHEN** this server ends after another server has force-replaced its name registration
+- **THEN** cleanup leaves the replacement's registration and process intact.
+
+### Requirement: Crash address symbolication requires matching image provenance
+
+Crash recovery SHALL not resolve captured absolute instruction pointers using the recovering process's current address map unless matching captured image and load provenance has been established. For capture formats without that provenance, reports SHALL preserve every raw instruction pointer and explicitly identify automatic symbolication as unavailable, without inventing function names or file locations. PID or version equality alone SHALL not establish matching address-space provenance. Existing report and raw evidence durability SHALL remain in effect.
+
+#### Scenario: Old IP overlaps a current function
+- **WHEN** an unverified captured address happens to point into a known function of the recovering process
+- **THEN** recovery retains the original raw address but does not attribute the crash to that current function.
+
+#### Scenario: A PIE process restarts with another slide
+- **WHEN** capture and recovery execute with different address-space slides and the capture lacks module/load metadata
+- **THEN** the report preserves captured addresses and explains the missing provenance rather than attempting current-map symbolication.
+
+### Requirement: Skills management responses belong to their requesting session binding
+
+Pager skill-list and toggle operations SHALL send the exact sessionId and preserve the originating session binding epoch through asynchronous completion. Before changing catalog data, errors or pending-action state, Pager SHALL confirm both the current session and its binding epoch. Toggle SHALL retain the existing global disabled configuration and baseline refresh semantics.
+
+#### Scenario: Session view is rebound before completion
+
+- **WHEN** a list or toggle response arrives after its view changes from session A to B, or from A to B and back to A
+- **THEN** the stale response does not change the current view's skill data, error or pending-action state.
+
+#### Scenario: Same binding receives its catalog
+
+- **WHEN** a skill-list or toggle operation completes under the same sessionId and binding epoch that initiated it
+- **THEN** Pager applies the returned management catalog normally and retains the existing refresh behavior.
+
+### Requirement: Crash captures retain per-process file ownership
+
+When crash capture is enabled, each installation SHALL exclusively create its own private raw file and retain an OS-backed claim on the exact capture handle until its final write or process retirement. Another process's startup SHALL NOT truncate, read, consume or remove a claimed raw file. Recovery SHALL obtain an exclusive nonblocking claim before reading or consuming evidence, serialize report publication and retention, and distinguish crashes captured in the same second. Raw evidence SHALL remain intact until the existing report and history durability boundaries succeed. Existing raw evidence from the former single-file layout SHALL remain recoverable.
+
+#### Scenario: Another process starts while capture is live
+- **WHEN** A holds a live capture and B starts capture or recovery in the same directory
+- **THEN** B uses a distinct capture file and leaves A's bytes and file identity untouched.
+
+#### Scenario: A captured process dies
+- **WHEN** A's capture owner retires and C successfully claims its nonempty raw file
+- **THEN** C publishes that crash's report and unique history before consuming only the claimed raw file.
+
+#### Scenario: Concurrent recovery and same-second crashes
+- **WHEN** multiple recoverers observe two completed captures with the same timestamp
+- **THEN** only a claim holder consumes each capture, publication/retention is serialized, and the two crash histories cannot overwrite one another by timestamp alone.
+
+#### Scenario: Empty or failed capture recovery
+- **WHEN** recovery sees a claimed empty capture or encounters read, parse or publication failure
+- **THEN** a live capture remains untouched; only a successfully claimed inactive empty file may be removed, and nonempty failed evidence remains available with an observable error.
+
+### Requirement: Resident exit tree evidence reuses the canonical validated owner
+
+Resident session-tree suspension SHALL query the existing canonical owner for a coherent runtime lifecycle and complete Spawned/Ended projection, without copying unrelated history bodies or replaying the entire already-validated Timeline solely to reconstruct child facts. The projection SHALL retain original event identity, sequence and child/result references. Cold or otherwise unvalidated storage sources SHALL retain their complete existing validation. Suspension SHALL reobserve child facts after the existing retirement frontier and SHALL preserve the shared five-second deadline, durable checkpoints and physical writer retirement requirements.
+
+#### Scenario: Long unrelated history
+- **WHEN** a resident session with long ordinary history requests confirmed exit
+- **THEN** tree coordination obtains the same canonical child facts through the narrow owner projection without copying unrelated history bodies or reconstructing their Surface.
+
+#### Scenario: Child finishes during suspension
+- **WHEN** a child terminal is committed while suspension drains its owners
+- **THEN** the post-retirement projection observes that original terminal and the final tree remains consistent with verified child identity and result references.
+
+#### Scenario: Source is cold or unavailable
+- **WHEN** a tree source must be loaded from storage or its canonical query fails
+- **THEN** cold source validation remains required and query failure remains an unconfirmed error rather than an empty successful tree.
+
+### Requirement: Live image maintenance uses committed owner evidence
+
+Startup image-asset maintenance for a resident session SHALL obtain retained image references from the existing validated canonical owner, including committed historical User references no longer present in the Surface, without rereading and replaying the whole live Timeline. The existing artifact gate, contained-directory deletion and writer retirement ownership SHALL remain in force. Failed authority queries SHALL preserve all assets, and cancellation SHALL stop optional cleanup without detaching an accepted deletion or claiming an unfinished worker has retired.
+
+#### Scenario: Immediate exit after loading long history
+- **WHEN** a long-history session begins startup image maintenance and immediately requests exit
+- **THEN** image maintenance does not add another full-history disk decode and replay to the service retirement barrier, and the shared five-second confirmed-exit contract remains unchanged.
+
+#### Scenario: Historical and orphan image batches
+- **WHEN** image assets include a committed historical batch removed from the current Surface and an unreferenced recognized batch
+- **THEN** maintenance preserves the committed batch and may remove only the unreferenced recognized batch under the existing gate and contained directory authority.
+
+#### Scenario: Maintenance is cancelled or authority fails
+- **WHEN** cleanup is cancelled or the committed-reference query is unavailable
+- **THEN** no unconfirmed reference is treated as absent, pending cleanup stops conservatively, and the exact worker ownership barrier still completes before successful exit.

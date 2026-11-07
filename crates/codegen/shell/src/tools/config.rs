@@ -96,6 +96,12 @@ pub struct AskUserQuestionToolConfig {
     /// Wait budget in seconds when the timer is armed (positive integer;
     /// default: 1800 / 30 minutes).
     pub timeout_secs: Option<u64>,
+    /// Whether the Agent may select nonblocking (advisory) questions
+    /// (default: `true`). `false` forces every newly admitted question to the
+    /// blocking form. Live-reloaded per admission by the shell-injected
+    /// `UserQuestionPolicyResolver`; the timeout fields above stay
+    /// build-time-only.
+    pub allow_non_blocking: Option<bool>,
 }
 
 /// User configurable settings for the web_fetch tool (`[toolset.web_fetch]`).

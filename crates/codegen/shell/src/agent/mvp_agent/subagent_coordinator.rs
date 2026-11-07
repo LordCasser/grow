@@ -149,7 +149,10 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             // its new transport identities after the direct parent finishes
             // discovery, rather than permanently freezing a transient empty pool.
             ctx.parent_mcp_pool = if let Some(checkpoint) = restore.as_ref() {
-                let Some(pool) = delegation_handle.snapshot_initialized_mcp_pool(&cancellation).await else {
+                let Some(pool) = delegation_handle
+                    .snapshot_initialized_mcp_pool(&cancellation)
+                    .await
+                else {
                     return tools::implementations::grow_build::task::coordinator::ChildRunOutcome::RestoreBlocked {
                         checkpoint: checkpoint.clone(),
                         error: if cancellation.is_cancelled() {
@@ -174,6 +177,21 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             )
             .await
         })
+    }
+    /// Synchronous readiness observation; `reconcile` remains authoritative.
+    /// Resolves the lifecycle-root parent the same way `reconcile` would
+    /// before `refresh_finalization_parent`, and lets `ShellCompletionData`
+    /// answer from its retained I/O/thread/parent facts. No I/O, mutation,
+    /// lease or deadline interaction happens here.
+    fn finalization_ready(
+        &self,
+        request: &tools::implementations::grow_build::task::types::SubagentRequest,
+        completion_data: &Self::CompletionData,
+    ) -> bool {
+        let this = self.agent_ref.get();
+        let parent =
+            this.get_session_handle(&acp::SessionId::new(request.parent_session_id.clone()));
+        completion_data.finalization_ready(parent.as_ref())
     }
     fn reconcile(
         &self,

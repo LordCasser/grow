@@ -1,18 +1,21 @@
 //! HTTP + WebSocket server exposing PTY session control.
 
+use std::future::IntoFuture;
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::Router;
+use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
+use axum::{Extension, Router};
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tower_http::cors::CorsLayer;
 
-use crate::session::{PtySession, WaitCondition, WaitOutcome};
+use crate::session::{PtySession, SessionControl, WaitCondition, WaitOutcome};
 use crate::term::ScreenOpts;
 
 /// Shared application state.
@@ -88,11 +91,81 @@ enum WsClientMessage {
     Resize { cols: u16, rows: u16 },
 }
 
-/// Build the axum router.
-pub fn build_router(session: PtySession) -> Router {
-    let state: AppState = Arc::new(Mutex::new(session));
+/// The router and its accepted WS connections share one bounded retirement.
+pub struct SessionServer {
+    router: Router,
+    connections: watch::Receiver<usize>,
+}
 
-    Router::new()
+const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const WS_SEND_TIMEOUT: Duration = Duration::from_millis(500);
+const WS_TERMINAL_TIMEOUT: Duration = Duration::from_secs(1);
+
+impl SessionServer {
+    pub async fn serve(
+        self,
+        listener: tokio::net::TcpListener,
+        control: &SessionControl,
+    ) -> Result<()> {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let mut connections = self.connections;
+        let serving = axum::serve(listener, self.router)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .into_future();
+        tokio::pin!(serving);
+        let terminal = tokio::select! {
+            result = &mut serving => return result.context("HTTP server error"),
+            result = control.wait_for_shutdown() => result,
+        };
+        let _ = shutdown_tx.send(());
+        let drained = tokio::time::timeout(SERVICE_DRAIN_TIMEOUT, async {
+            serving.await.context("HTTP server error")?;
+            // axum's upgraded connections outlive the HTTP serve future.
+            // Count upgrades at acceptance, including ones not yet scheduled.
+            while *connections.borrow_and_update() != 0 {
+                connections
+                    .changed()
+                    .await
+                    .context("WS connection tracking closed")?;
+            }
+            Ok(())
+        })
+        .await
+        .context("HTTP/WS service did not drain within 2 seconds")
+        .and_then(|r| r);
+        match (terminal, drained) {
+            (Ok(()), result) => result,
+            (Err(primary), Ok(())) => Err(primary),
+            (Err(primary), Err(cleanup)) => {
+                Err(primary.context(format!("service cleanup also failed: {cleanup:#}")))
+            }
+        }
+    }
+}
+
+struct WsConnection(watch::Sender<usize>);
+
+impl WsConnection {
+    fn accept(connections: watch::Sender<usize>) -> Self {
+        connections.send_modify(|count| *count += 1);
+        Self(connections)
+    }
+}
+
+impl Drop for WsConnection {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| *count -= 1);
+    }
+}
+
+/// Build the HTTP router and retain its upgraded-connection retirement handle.
+pub fn build_router(session: PtySession) -> SessionServer {
+    let state: AppState = Arc::new(Mutex::new(session));
+    let (connections, connection_rx) = watch::channel(0);
+
+    let router = Router::new()
         .route("/query/screen", get(handle_screen))
         .route("/query/cursor", get(handle_cursor))
         .route("/query/status", get(handle_status))
@@ -104,7 +177,12 @@ pub fn build_router(session: PtySession) -> Router {
         .route("/control/stop", post(handle_stop))
         .route("/ws", get(handle_ws_upgrade))
         .layer(CorsLayer::very_permissive())
-        .with_state(state)
+        .layer(Extension(connections))
+        .with_state(state);
+    SessionServer {
+        router,
+        connections: connection_rx,
+    }
 }
 
 /// Parse a range string like "1:5", "5:", ":10", "5" into a Range<usize>.
@@ -259,10 +337,20 @@ async fn handle_wait(
     }
 }
 
-async fn handle_stop(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let mut session = state.lock().await;
-    let _ = session.stop().await;
-    Json(serde_json::json!({"ok": true}))
+async fn handle_stop(State(state): State<AppState>) -> Response {
+    let control = state.lock().await.control_handle();
+    stop_response(control.stop().await)
+}
+
+fn stop_response(result: Result<()>) -> Response {
+    match result {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{error:#}")})),
+        )
+            .into_response(),
+    }
 }
 
 // -- Scrollback --
@@ -285,9 +373,20 @@ async fn handle_scrollback(
 /// Upgrade an HTTP request to a WebSocket connection.
 async fn handle_ws_upgrade(
     State(state): State<AppState>,
+    Extension(connections): Extension<watch::Sender<usize>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+    let connection = WsConnection::accept(connections);
+    // Subscribe before accepting the upgrade so the first post-handshake output
+    // already belongs to this connection's FIFO, even before its task is polled.
+    let (output_rx, control) = {
+        let session = state.lock().await;
+        (session.subscribe(), session.control_handle())
+    };
+    ws.on_upgrade(move |socket| async move {
+        let _connection = connection;
+        handle_ws_connection(socket, state, output_rx, control).await;
+    })
 }
 
 /// Handle a single WebSocket connection.
@@ -304,67 +403,81 @@ async fn handle_ws_upgrade(
 ///   - `{"type":"input","data":"text"}` — send text to PTY
 ///   - `{"type":"keys","keys":"<C-c>"}` — vim-notation keystrokes
 ///   - `{"type":"resize","cols":120,"rows":40}` — resize terminal
-async fn handle_ws_connection(socket: WebSocket, state: AppState) {
+async fn handle_ws_connection(
+    socket: WebSocket,
+    state: AppState,
+    mut output_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
+    control: SessionControl,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
-
-    // Subscribe to the PTY output broadcast channel.
-    let session = state.lock().await;
-    let mut output_rx = session.subscribe();
-    drop(session);
-
-    // Task: forward PTY output -> WebSocket (binary frames).
-    let state_output = state.clone();
-    let mut send_task = tokio::spawn(async move {
-        loop {
-            match output_rx.recv().await {
-                Ok(bytes) => {
-                    if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
-                        break;
+    let sending = async {
+        let terminal = control.wait_for_exit();
+        tokio::pin!(terminal);
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut terminal => break result,
+                output = output_rx.recv() => match output {
+                    Ok(bytes) => {
+                        if !ws_send(&mut ws_tx, Message::Binary(bytes.into())).await { return; }
                     }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // Client is too slow; send a warning and continue.
-                    let msg = serde_json::json!({
-                        "type": "warning",
-                        "message": format!("dropped {n} output chunks (slow consumer)"),
-                    });
-                    let _ = ws_tx.send(Message::Text(msg.to_string().into())).await;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    // PTY output channel closed — process likely exited.
-                    let session = state_output.lock().await;
-                    let status = session.status().await;
-                    let msg = serde_json::json!({
-                        "type": "closed",
-                        "exit_code": status.exit_code,
-                    });
-                    let _ = ws_tx.send(Message::Text(msg.to_string().into())).await;
-                    break;
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        if !ws_send(&mut ws_tx, lag_warning(n)).await { return; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break terminal.await,
                 }
             }
-        }
-    });
-
-    // Task: receive WebSocket messages -> PTY input / control.
-    let state_input = state.clone();
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_rx.next().await {
-            match msg {
+        };
+        // Complete terminal observation fences the producer. A retained Session
+        // sender need not close: drain the accepted FIFO before the real result.
+        let _ = tokio::time::timeout(WS_TERMINAL_TIMEOUT, async {
+            loop {
+                match output_rx.try_recv() {
+                    Ok(bytes) => {
+                        if !ws_send(&mut ws_tx, Message::Binary(bytes.into())).await {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                        if !ws_send(&mut ws_tx, lag_warning(n)).await {
+                            return;
+                        }
+                    }
+                    Err(
+                        tokio::sync::broadcast::error::TryRecvError::Empty
+                        | tokio::sync::broadcast::error::TryRecvError::Closed,
+                    ) => break,
+                }
+            }
+            let event = match result {
+                Ok(code) => serde_json::json!({"type": "closed", "exit_code": code}),
+                Err(error) => serde_json::json!({
+                    "type": "error", "exit_code": null,
+                    "message": format!("PTY terminal state is unknown: {error:#}"),
+                }),
+            };
+            if ws_send(&mut ws_tx, Message::Text(event.to_string().into())).await {
+                let _ = tokio::time::timeout(WS_SEND_TIMEOUT, ws_tx.close()).await;
+            }
+        })
+        .await;
+    };
+    let receiving = async {
+        while let Some(Ok(message)) = ws_rx.next().await {
+            match message {
                 Message::Binary(bytes) => {
-                    // Raw binary input -> PTY.
-                    let session = state_input.lock().await;
+                    let session = state.lock().await;
                     let _ = session.send_bytes(&bytes).await;
                 }
                 Message::Text(text) => {
-                    // JSON-structured command.
-                    if let Ok(cmd) = serde_json::from_str::<WsClientMessage>(&text) {
-                        let session = state_input.lock().await;
-                        match cmd {
+                    if let Ok(command) = serde_json::from_str::<WsClientMessage>(&text) {
+                        let session = state.lock().await;
+                        match command {
                             WsClientMessage::Input { data } => {
                                 let _ = session.send_bytes(data.as_bytes()).await;
                             }
-                            WsClientMessage::Keys { keys: notation } => {
-                                let _ = session.send_keys(&notation).await;
+                            WsClientMessage::Keys { keys } => {
+                                let _ = session.send_keys(&keys).await;
                             }
                             WsClientMessage::Resize { cols, rows } => {
                                 let _ = session.resize(cols, rows).await;
@@ -376,13 +489,33 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState) {
                 _ => {}
             }
         }
-    });
-
-    // Wait for either task to finish, then abort the other.
+    };
+    tokio::pin!(sending, receiving);
     tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
+        _ = &mut sending => {},
+        _ = &mut receiving => {},
     }
+}
+
+async fn ws_send(
+    socket: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: Message,
+) -> bool {
+    matches!(
+        tokio::time::timeout(WS_SEND_TIMEOUT, socket.send(message)).await,
+        Ok(Ok(()))
+    )
+}
+
+fn lag_warning(chunks: u64) -> Message {
+    Message::Text(
+        serde_json::json!({
+            "type": "warning",
+            "message": format!("dropped {chunks} output chunks (slow consumer)"),
+        })
+        .to_string()
+        .into(),
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -392,6 +525,26 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::session::tests::start_session;
+
+    #[tokio::test]
+    async fn failed_settlement_is_an_explicit_http_error() {
+        let response = super::stop_response(Err(anyhow::anyhow!("owned child settlement unknown")));
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("settlement unknown")
+        );
+        assert!(body.get("ok").is_none());
+    }
 
     /// Send one raw HTTP/1.1 request and read the full response (Connection: close).
     async fn http(port: u16, request: &str) -> String {
@@ -426,7 +579,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_does_not_block_other_endpoints() {
         let session = start_session(vec!["/bin/sh".into()]).await;
-        let router = super::build_router(session);
+        let router = super::build_router(session).router;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {

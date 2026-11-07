@@ -525,70 +525,94 @@ max_depth = 3
             let load_request = acp::LoadSessionRequest::new(root_id.clone(), cwd.clone())
                 .mcp_servers(mcp_servers.clone());
             let loaded = if gate_parent_mcp_initialize {
-                let (loaded, initialize_reached, remained_pending, command_executor_responded, snapshot_cancelled) =
-                    cold_recovery_stage("authority.cold_load", async {
-                        let load_future = agent.load_session(load_request);
-                        tokio::pin!(load_future);
-                        let initialize_wait = parent_mcp_initialize_started.notified();
-                        tokio::pin!(initialize_wait);
-                        let mut early_result = tokio::select! {
-                            _ = &mut initialize_wait => None,
-                            result = &mut load_future => Some(result),
-                        };
-                        let initialize_reached = early_result.is_none();
+                let (
+                    loaded,
+                    initialize_reached,
+                    remained_pending,
+                    command_executor_responded,
+                    snapshot_cancelled,
+                ) = cold_recovery_stage("authority.cold_load", async {
+                    let load_future = agent.load_session(load_request);
+                    tokio::pin!(load_future);
+                    let initialize_wait = parent_mcp_initialize_started.notified();
+                    tokio::pin!(initialize_wait);
+                    let mut early_result = tokio::select! {
+                        _ = &mut initialize_wait => None,
+                        result = &mut load_future => Some(result),
+                    };
+                    let initialize_reached = early_result.is_none();
 
-                        let (command_executor_responded, snapshot_cancelled) = if initialize_reached {
+                    // The actor thread can reach MCP initialize before the
+                    // load owner publishes its control handle. Keep polling
+                    // load under this stage's deadline while the gate stays
+                    // closed; the initialize notification is not readiness.
+                    let root = if initialize_reached {
+                        loop {
                             if let Some(root) = agent.control_session_handle(&root_id) {
-                                let responsive = tokio::time::timeout(
-                                    std::time::Duration::from_millis(100),
-                                    root.snapshot_mcp_pool(),
-                                )
-                                .await
-                                .is_ok_and(|pool| pool.is_some());
-                                let cancellation = tokio_util::sync::CancellationToken::new();
-                                let snapshot = root.snapshot_initialized_mcp_pool(&cancellation);
-                                tokio::pin!(snapshot);
-                                let pending = tokio::time::timeout(
-                                    std::time::Duration::from_millis(100), &mut snapshot,
-                                ).await.is_err();
-                                cancellation.cancel();
-                                let cancelled = tokio::time::timeout(
-                                    std::time::Duration::from_millis(100), snapshot,
-                                ).await.is_ok_and(|pool| pool.is_none());
-                                (responsive, pending && cancelled)
-                            } else {
-                                (false, false)
+                                break Some(root);
                             }
-                        } else {
-                            (false, false)
-                        };
-                        if initialize_reached
-                            && let Ok(result) = tokio::time::timeout(
-                                std::time::Duration::from_millis(100),
-                                &mut load_future,
-                            )
-                            .await
-                        {
-                            early_result = Some(result);
+                            tokio::select! {
+                                result = &mut load_future => {
+                                    early_result = Some(result);
+                                    break None;
+                                }
+                                _ = tokio::task::yield_now() => {}
+                            }
                         }
-                        let remained_pending = early_result.is_none();
-
-                        // Always release before assertions so a failing
-                        // observation cannot strand the root initializer.
-                        parent_mcp_initialize_gate.send_replace(true);
-                        let loaded = match early_result {
-                            Some(result) => result,
-                            None => load_future.await,
-                        };
-                        (
-                            loaded,
-                            initialize_reached,
-                            remained_pending,
-                            command_executor_responded,
-                            snapshot_cancelled,
+                    } else {
+                        None
+                    };
+                    let (command_executor_responded, snapshot_cancelled) = if let Some(root) = root
+                    {
+                        // This is a liveness check under the existing
+                        // stage deadline, not a 100ms latency contract.
+                        let responsive = root.snapshot_mcp_pool().await.is_some();
+                        let cancellation = tokio_util::sync::CancellationToken::new();
+                        let snapshot = root.snapshot_initialized_mcp_pool(&cancellation);
+                        tokio::pin!(snapshot);
+                        let pending = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            &mut snapshot,
                         )
-                    })
-                    .await;
+                        .await
+                        .is_err();
+                        cancellation.cancel();
+                        let cancelled =
+                            tokio::time::timeout(std::time::Duration::from_millis(100), snapshot)
+                                .await
+                                .is_ok_and(|pool| pool.is_none());
+                        (responsive, pending && cancelled)
+                    } else {
+                        (false, false)
+                    };
+                    if initialize_reached
+                        && early_result.is_none()
+                        && let Ok(result) = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            &mut load_future,
+                        )
+                        .await
+                    {
+                        early_result = Some(result);
+                    }
+                    let remained_pending = early_result.is_none();
+
+                    // Always release before assertions so a failing
+                    // observation cannot strand the root initializer.
+                    parent_mcp_initialize_gate.send_replace(true);
+                    let loaded = match early_result {
+                        Some(result) => result,
+                        None => load_future.await,
+                    };
+                    (
+                        loaded,
+                        initialize_reached,
+                        remained_pending,
+                        command_executor_responded,
+                        snapshot_cancelled,
+                    )
+                })
+                .await;
                 assert!(
                     initialize_reached,
                     "parent MCP initialize must begin while cold load is pending"
@@ -601,7 +625,10 @@ max_depth = 3
                     command_executor_responded,
                     "root command executor must answer a pool snapshot while MCP initialize is gated"
                 );
-                assert!(snapshot_cancelled, "cancelling one initialized snapshot must finish without releasing the parent handshake gate");
+                assert!(
+                    snapshot_cancelled,
+                    "cancelling one initialized snapshot must finish without releasing the parent handshake gate"
+                );
                 loaded
             } else {
                 cold_recovery_stage("authority.cold_load", agent.load_session(load_request)).await

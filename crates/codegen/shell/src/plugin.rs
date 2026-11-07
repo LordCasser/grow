@@ -47,19 +47,26 @@ pub fn install_source_is_local(source: &str, cwd: &Path) -> bool {
     )
 }
 
-pub fn install_plugin(source: &str, cwd: &Path) -> Result<InstallOutcome, InstallError> {
+pub async fn install_plugin(source: &str, cwd: &Path) -> Result<InstallOutcome, InstallError> {
     let install_source = git_install::parse_install_source(source, cwd);
     let is_local = matches!(install_source, git_install::InstallSource::Local { .. });
-    let mut registry = InstallRegistry::load();
+    let mut registry = InstallRegistry::try_load_from(InstallRegistry::resolve_install_dir())?;
 
     let result =
         git_install::install_from_source(&install_source, &registry, marketplace_require_sha())?;
 
     let repo = git_install::build_installed_repo(&result, &install_source);
     registry.insert(result.repo_key.clone(), repo);
-    save_registry_or_warn(&registry);
+    registry.save().map_err(|error| InstallError::InstallFailed {
+        detail: format!(
+            "plugin files for repo \"{}\" were published at {}, but installation registration is incomplete: failed to save registry at {}: {error}. Published files have been retained",
+            result.repo_key,
+            result.repo_path.display(),
+            registry.install_dir().join("registry.json").display(),
+        ),
+    })?;
 
-    let (plugin_names, post_warnings) = crate::config::post_install_plugin(&result.repo_key);
+    let (plugin_names, post_warnings) = crate::config::post_install_plugin(&result.repo_key).await;
 
     Ok(InstallOutcome {
         repo_key: result.repo_key,
@@ -888,7 +895,7 @@ fn plan_install(
 /// Install a plugin by marketplace name, optionally pinned via `qualifier`
 /// (`owner/repo` or `local/<slug>`). Loads allowlist-filtered sources and
 /// delegates selection to [`plan_install`].
-pub fn install_marketplace_plugin(
+pub async fn install_marketplace_plugin(
     name: &str,
     qualifier: Option<&str>,
 ) -> Result<MarketplaceInstallOutcome, MarketplaceInstallError> {
@@ -903,15 +910,16 @@ pub fn install_marketplace_plugin(
         qualifier,
         crate::config::post_install_plugin,
     )
+    .await
 }
 
-fn install_marketplace_plugin_with(
+async fn install_marketplace_plugin_with(
     sources: &[MarketplaceSource],
     registry: &mut InstallRegistry,
     cache_root: &Path,
     name: &str,
     qualifier: Option<&str>,
-    post_install: impl Fn(&str) -> (Vec<String>, Vec<String>),
+    post_install: impl AsyncFn(&str) -> (Vec<String>, Vec<String>),
 ) -> Result<MarketplaceInstallOutcome, MarketplaceInstallError> {
     let plan = plan_install(sources, name, qualifier, |source| {
         resolve_source_root_for_install(source, cache_root)
@@ -926,7 +934,7 @@ fn install_marketplace_plugin_with(
         }
     })?;
     let mut outcome =
-        install_marketplace_entry(source, &root.path, &plan.entry, registry, post_install)?;
+        install_marketplace_entry(source, &root.path, &plan.entry, registry, post_install).await?;
     if !outcome.already_installed {
         outcome.other_copies_note = plan.other_copies_note;
         for skipped in plan.skipped_sources {
@@ -991,12 +999,12 @@ fn map_qualifier_resolve_error(
     }
 }
 
-fn install_marketplace_entry(
+async fn install_marketplace_entry(
     source: &MarketplaceSource,
     marketplace_root: &Path,
     entry: &MarketplaceEntry,
     registry: &mut InstallRegistry,
-    post_install: impl Fn(&str) -> (Vec<String>, Vec<String>),
+    post_install: impl AsyncFn(&str) -> (Vec<String>, Vec<String>),
 ) -> Result<MarketplaceInstallOutcome, MarketplaceInstallError> {
     let source_is_git = matches!(&source.kind, SourceKind::Git { .. });
     let source_identity = match &source.kind {
@@ -1054,7 +1062,7 @@ fn install_marketplace_entry(
         Err(e) => return Err(MarketplaceInstallError::Install(e)),
     };
 
-    let (plugin_names, warnings) = post_install(&repo_key);
+    let (plugin_names, warnings) = post_install(&repo_key).await;
 
     Ok(MarketplaceInstallOutcome {
         repo_key,
@@ -1895,8 +1903,8 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), "# Demo").unwrap();
     }
 
-    #[test]
-    fn install_marketplace_plugin_with_local_installs_then_short_circuits() {
+    #[tokio::test]
+    async fn install_marketplace_plugin_with_local_installs_then_short_circuits() {
         let marketplace = tempfile::tempdir().unwrap();
         write_marketplace_plugin(marketplace.path(), "demo", "1.0.0");
         let install_dir = tempfile::tempdir().unwrap();
@@ -1906,7 +1914,7 @@ mod tests {
             "Local Dev",
             marketplace.path().to_str().unwrap(),
         )];
-        let no_post = |_: &str| (Vec::new(), Vec::new());
+        let no_post = async |_: &str| (Vec::new(), Vec::new());
 
         let outcome = install_marketplace_plugin_with(
             &sources,
@@ -1916,6 +1924,7 @@ mod tests {
             None,
             no_post,
         )
+        .await
         .expect("local marketplace install should succeed");
 
         assert!(!outcome.already_installed);
@@ -1946,6 +1955,7 @@ mod tests {
             None,
             no_post,
         )
+        .await
         .expect("second install should short-circuit");
         assert!(outcome2.already_installed);
         assert_eq!(outcome2.repo_key, outcome.repo_key);

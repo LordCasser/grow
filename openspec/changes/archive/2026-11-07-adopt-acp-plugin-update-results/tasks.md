@@ -1,0 +1,4 @@
+- [x] 核实际ACP→actor Update、共享application采用结果及marketplace provenance、CLI/Pager outcome/reload消费者，冻结一项更新采用行为。
+- [x] 真实ACP与隔离bare remote/branch取得更新后registry旧值的有效旧红，修正actor复用共享application入口；首次commit/plugins采用及第二次同tip no-op通过。
+- [x] 核选择、空安装/不存在、pinned/local与marketplace原路径和reload定向回归，父完成实际diff与调用链验收。
+- [x] 同步开发说明/backlog、记录AC-08未覆盖边界，strict/archive及all/archived复查。

@@ -415,23 +415,13 @@ fn read_durable_input_status(
             "submitted input intent does not match its payload artifact",
         ));
     }
-    let handled = events.iter().any(|event| {
-        matches!(
-            &event.kind,
-            TimelineEventKind::Input(InputEvent::Handled { input_ids, .. })
-                if input_ids.iter().any(|id| id == &input_id)
-        )
-    });
-    let status = if handled {
-        InputAdmissionObservation::Handled
-    } else {
-        match lifecycle.state {
-            InputState::Submitted => InputAdmissionObservation::Submitted,
-            InputState::Allowed { route } => InputAdmissionObservation::Allowed { route },
-            InputState::Blocked { reason } => InputAdmissionObservation::Blocked { reason },
-            InputState::Consumed { route } => InputAdmissionObservation::Consumed { route },
-            InputState::Dismissed { reason } => InputAdmissionObservation::Dismissed { reason },
-        }
+    let status = match lifecycle.state {
+        InputState::Submitted => InputAdmissionObservation::Submitted,
+        InputState::Allowed { route } => InputAdmissionObservation::Allowed { route },
+        InputState::Blocked { reason } => InputAdmissionObservation::Blocked { reason },
+        InputState::Consumed { route } => InputAdmissionObservation::Consumed { route },
+        InputState::Handled { .. } => InputAdmissionObservation::Handled,
+        InputState::Dismissed { reason } => InputAdmissionObservation::Dismissed { reason },
     };
     Ok(DurableInputObservation::Found(status))
 }

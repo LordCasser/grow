@@ -1,0 +1,5 @@
+- [x] 核现单文件截断/恢复链与 PB-07 不变量，冻结唯一 capture 及同句柄 claim 契约。
+- [x] 建立隔离多进程旧红，实施安装/恢复/CLI 消费循环。
+- [x] 验证 live owner、同秒并发恢复、空文件及既有持久失败边界。
+- [x] 完成父审查与独立数据完整性 review，修正必要问题。
+- [x] 同步开发说明/backlog、strict/archive 后复核 all/archived。

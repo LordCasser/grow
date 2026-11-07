@@ -1,0 +1,11 @@
+# Address provenance policy
+
+父已核format.rs v1只有frames绝对usize、pid/timestamp/app_version；symbolicate.rs::resolve_frames无source-map检查直接backtrace::resolve；lib启动恢复是唯一生产caller。当前信息不能建立旧IP→本次image的映射，继续调用resolver会制造未经支持的归因。
+
+本轮最小正确行为：resolve_frames对每个原IP输出ResolvedFrame并保ip，symbol_name/filename/lineno未知；报告在backtrace前明确“raw addresses from a previous process; module identity/load addresses were not captured; automatic symbolication unavailable”，不得用当前pid/version相等作为放行。已有format_report可接受外部ResolvedFrame但本capture报告路径不创造未知符号，文档不再声称一般startup resolve可靠。不需新public错误enum或标志，现Option字段表达未知；blob格式和原始证据保持。
+
+这明确关闭“错误按当前映射解析”的行为，并非承诺完整自动跨启动symbolication。原backlog owner允许保存identity/relative或明确限制；当前选择后者以保真实性。离线诊断仍需匹配capture时的binary/debug image及其load mapping；当前格式未记录mapping，因此不能声称仅凭report就可完整恢复符号。future升级触发是明确要求自动符号化且具备platform module枚举/身份验证测试，再独立设计最小format，不在这里预建。
+
+Coder单项write：symbolicate.rs对应解析/报告、lib必要注释（不改PB-05生命周期）、crash-handler manifest/lock唯一backtrace本地边若已无消费及本项tests。必须等PB-05父验收并释放整个crash写面，不能并行。Tier2：构造包含当前进程已知非inline函数IP但明确来自未建立映射的blob，旧resolver会填当前函数，新行为必须保raw且None/限制文案；真实独立PIE子进程捕获已知函数raw地址，下一进程load mapping不同，恢复保原IP和证据，绝不归因本次函数。报告/barrier/malformed/多进程回归由PB-05既有suite保持，必要相邻checks，不声称已实现模块相对符号化或Windows现场。
+
+父核调用方无隐藏current-process模式、原raw保真与说明不夸大；不为了测试强行关闭ASLR或依赖某次恰好相同slide。actual不同slide可由两个自spawn进程报告函数addr证明，若平台ASLR不产生差异要明确未覆盖而非放宽断言。真实错误归因控制仍独立成立。主spec/docs/backlog/archive由父维护。

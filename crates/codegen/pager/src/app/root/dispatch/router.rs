@@ -32,6 +32,7 @@ use super::prompt::{
     dispatch_accept_word_select_tip, dispatch_clear_prompt, dispatch_open_history_search,
     dispatch_send_bash_command, dispatch_send_prompt, dispatch_send_prompt_inner,
     dispatch_show_plan_nudge, dispatch_show_undo_tip, dispatch_show_word_select_tip,
+    dispatch_submit_advisory_reply,
 };
 use super::queue;
 use super::queue::dispatch_drain_queue;
@@ -63,18 +64,18 @@ use super::session::load::{
 use super::session::modal::dispatch_rename_session;
 use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
-    preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
-    set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_combine_queued_prompts,
-    set_compact_mode, set_contextual_hint_image_input, set_contextual_hint_plan_mode,
-    set_contextual_hint_send_now, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
-    set_contextual_hint_undo, set_contextual_hint_word_select, set_default_model,
-    set_default_selected_permission, set_display_refresh_auto_cadence, set_fork_secondary_model,
-    set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
-    set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
-    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_model_provider,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode,
+    preview_auto_light_theme, preview_theme, set_ask_user_question_allow_non_blocking,
+    set_ask_user_question_timeout_enabled, set_auto_dark_theme, set_auto_light_theme,
+    set_auto_update, set_combine_queued_prompts, set_compact_mode, set_contextual_hint_image_input,
+    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
+    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
+    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
+    set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll,
+    set_keep_text_selection, set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send,
+    set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
+    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
+    set_show_model_provider, set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme,
+    set_timeline, set_timestamps, set_vim_mode,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -331,6 +332,15 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::SendPrompt(text) => dispatch_send_prompt(app, text),
         Action::SubmitFollowUp(text) => dispatch_send_prompt_inner(app, text, false, true, true),
+        Action::QueryAdvisoryReplyAdmission {
+            source_session_id,
+            tool_call_id,
+        } => dispatch_query_advisory_reply_admission(app, source_session_id, tool_call_id),
+        Action::SubmitAdvisoryReply {
+            source_session_id,
+            tool_call_id,
+            text,
+        } => dispatch_submit_advisory_reply(app, source_session_id, tool_call_id, text),
         Action::SendSlashCommandPreservingDraft(text) => {
             dispatch_send_prompt_inner(app, text, false, false, false)
         }
@@ -652,6 +662,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 Effect::FetchSkillsList {
                     agent_id: id,
                     session_id: session_id.clone(),
+                    binding_epoch: agent.session_binding_epoch,
                 },
                 Effect::FetchWorkflowsList {
                     agent_id: id,
@@ -774,6 +785,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![Effect::ToggleSkill {
                 agent_id: id,
                 session_id,
+                binding_epoch: agent.session_binding_epoch,
                 skill_name,
                 enabled,
             }]
@@ -1018,6 +1030,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetRememberToolApprovals(v) => set_remember_tool_approvals(app, v),
         Action::SetAskUserQuestionTimeoutEnabled(v) => {
             set_ask_user_question_timeout_enabled(app, v)
+        }
+        Action::SetAskUserQuestionAllowNonBlocking(v) => {
+            set_ask_user_question_allow_non_blocking(app, v)
         }
         Action::SetKeepTextSelection(v) => set_keep_text_selection(app, v),
         Action::SetScrollSpeed(v) => set_scroll_speed(app, v),
@@ -1388,6 +1403,48 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     };
     sync_sleep_inhibitor(app);
     effects
+}
+
+/// Ask the shell for the canonical admission state of one advisory card's
+/// stable reply identity before the editor may open.
+///
+/// The card flips to `Checking` with a one-shot open intent; the query goes
+/// to the owning primary's current session entry (root session of the agent
+/// whose view graph contains the source session), never to whichever tab
+/// happens to be active. The admission callback (TaskB's
+/// `InputAdmissionStatusResolved` consumer) resolves the projection.
+fn dispatch_query_advisory_reply_admission(
+    app: &mut AppView,
+    source_session_id: String,
+    tool_call_id: String,
+) -> Vec<Effect> {
+    let Some((owner, resolved_source)) =
+        app.start_advisory_reply_check(&source_session_id, &tool_call_id)
+    else {
+        // Missing card, a query already in flight, or a terminal
+        // (answered/rejected) projection: nothing to ask.
+        return vec![];
+    };
+    let Some(agent) = app.agents.get(&owner) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        // No live primary session to query: surface the unknown state
+        // instead of silently defaulting to Available.
+        let _ = app.set_advisory_reply_status(
+            &resolved_source,
+            &tool_call_id,
+            crate::scrollback::blocks::tool::AdvisoryReplyStatus::Unconfirmed,
+        );
+        return vec![];
+    };
+    let binding_epoch = agent.session_binding_epoch;
+    vec![Effect::QueryInputAdmissionStatus {
+        agent_id: owner,
+        session_id,
+        binding_epoch,
+        prompt_id: format!("question-reply:{resolved_source}:{tool_call_id}"),
+    }]
 }
 
 fn begin_exit_suspension(app: &mut AppView, restart_for_update: bool, retry: bool) -> Vec<Effect> {

@@ -1,0 +1,12 @@
+# 产品验收计划
+
+模块证据先核Shell真实provider→parenttool→coordinator→child actor的Pending/Applied/持久回执及下一provider请求，再核Pager使用Shell公开`acp_conversion::acp_tool_update`生成完成事件的同EntryId行。最终用同次构建CLI做一条实际终端链，不把genericblock helper通过当作显示验证。
+
+隔离临时HOME/GROW_HOME/project、loopback mockprovider；沿现ContentController/PtyHarness与Task脚本，不写真实用户状态。parent与child用不同wiremodel或API endpoint区分并发请求。
+
+1. 实际todo_write＋后台spawn_subagent产生direct child。child provider首Step由握手barrier保持运行，parent初始Turn可正常结束。只从实际toolresult/validatedspawn取childid，不能自造runtime或假冒另一session。
+2. 用已知childid脚本化parent的set_subagent_model（effort或model+effort）。保持child Step未释放，先从精确call的canonical typed ToolResult确认queued；不能把mock正文sentinel当成功。保默认活动组配置，若已完成工具按既有契约收进折叠组，保存折叠屏幕并通过该组的正常展开入口核对同一工具行Queued；不能出现Applied/switch成功文案，也不为该工具造分组例外。捕获Dispatching沿实际tracker测试，不为瞬时态加sleep/生产观测字段。
+3. 打开实际child视图，确认原有效selection与pending控制并存；释放child Step，让其正常工具批次收尾，下一mockprovider请求使用目标selection。child可见普通Sampling control成功notice，仅一次；rootselection保持，hostintent具有同一来源namespace及合法receipt。
+4. 检查canonicalchild model.changed/ControlState terminal与实际人类可见行一致、parent原call单一结果/行、不重复消息和用户输入；readonly/cold行为沿既有人工控制规则，不扩大为新历史policy。
+
+同一条真实PTY证据足以验收首个完整显示链。invalid/denied/no-op/supersede/durablefailure仍用已接受的定向模块控制，不在PTY重做所有矩阵。仅构建最终稳定Shell/Pager后执行；保命令actualexit和产物SHA/hash/mtime，源修改后重建对应产物。首个产品失败先记录/定位，不能通过额外导航改断言掩盖。父决定最终里程碑和归档。

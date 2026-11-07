@@ -20,7 +20,11 @@ futures-util = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+# `raw_value` lets the Responses usage-detail completion patch borrowed raw
+# JSON text (see `normalize_response_usage_details` in src/client.rs) so the
+# decode copy keeps every original byte, including duplicate known fields the
+# locked SDK must still reject.
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

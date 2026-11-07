@@ -683,6 +683,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
                 modal,
                 agent_id,
                 hydrate_sid.clone(),
+                agent.session_binding_epoch,
             ));
         }
         effects.push(Effect::RegisterActiveSession {

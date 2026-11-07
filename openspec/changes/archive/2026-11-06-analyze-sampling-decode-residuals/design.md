@@ -1,0 +1,19 @@
+# Investigation boundary
+
+本次回答用户“还会不会有类似问题”，以分析结论为终点，不自动实施生产修复。工作基线为main8ab486a6e45870561b91dba872934a6e24a795f1；公开2.6.1仍为deaca4899。前者含已验收但未发布的annotations和稀疏failed修复，不能混淆运行版本。
+
+## Ownership and evidence
+
+父核SDK完整对象被复用于初始事件、client rawSSE/typeddecode/normalizer、error预解析、L2终态/身份/工具候选接纳和既有boundedretry。两个互不重叠的调查分别检查：usage补全的全事件Value重编码是否弱化SDK拒收；共享error预解析是否覆盖已知普通事件的协议错误。第一项允许隔离worktree临时测试且独占Cargo，第二项只读源码与/tmp报告，父仅写分析文档。无真实provider或用户会话重放。
+
+证据按三层报告：实际锁定SDK及当前真实client/L2实验；可直接由完整调用路径推出但本轮未执行的源码事实；需要真实路由原始形状才能认定应兼容的候选。缺省字段不能因看似空容器而一律赋默认值，generic serialization不能一律变可重试。新工具执行和恢复入口仍由原权限/候选接纳/副作用/结算/预算所有者决定。
+
+## Assessment criteria
+
+SDK直接拒绝的同一known-field冲突不能仅因缺少无关usage明细而被接纳。共享服务错误识别应保留bare legacy/named/typederror支持，同时普通事件身份和畸形字段不能获得错误的服务重试分类。unknown顶层扩展沿已有路径处理，不能将它们当作协议缺陷。
+
+对于reasoning.summary、message.content/status、event.sequence_number等SDK必填形状，以及精确稀疏failed之外的变化，源码可以证明当前会拒收，但没有真实路由证据便不能认定这些字段允许缺省。后续实施以独立owner/单一行为change推进，不预建provider兼容注册表或自建完整协议框架。
+
+## Review and closure
+
+父读实际探针源码、锁定SDK对照、原日志/最终hash及完整errorcaller顺序，验收候选结论和限制。只重复能确定结论的探针，不跑无关全量。记录明确的修复边界及启动门槛到现backlog，执行全量strict与archive校验；生产源码和公开资产保持不变。分析文档不自动提交Git。

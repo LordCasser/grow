@@ -1109,13 +1109,19 @@ impl SessionActor {
     ) {
         let mut gate = Some(self.step_control_gate.lock().await);
         let mut responds_to = Some(responds_to);
+        let mut admission = self.state.lock().await;
+        // A native tool selection has no client-authored intent. Mint the
+        // host-owned identity under the same Step gate and admission lock that
+        // admits it, so its ordered sequence cannot race a concurrent call.
+        let intent = intent.or_else(|| {
+            admitted.is_some().then(|| {
+                admission
+                    .pending_step_controls
+                    .next_native_sampling_intent(&self.control_epoch)
+            })
+        });
         let Some(mut admission) = self
-            .begin_sampling_intent(
-                self.state.lock().await,
-                &mut gate,
-                &intent,
-                &mut responds_to,
-            )
+            .begin_sampling_intent(admission, &mut gate, &intent, &mut responds_to)
             .await
         else {
             if let Some(admitted) = admitted {
@@ -1242,13 +1248,19 @@ impl SessionActor {
     ) {
         let mut gate = Some(self.step_control_gate.lock().await);
         let mut responds_to = Some(responds_to);
+        let mut admission = self.state.lock().await;
+        // A native tool selection has no client-authored intent. Mint the
+        // host-owned identity under the same Step gate and admission lock that
+        // admits it, so its ordered sequence cannot race a concurrent call.
+        let intent = intent.or_else(|| {
+            admitted.is_some().then(|| {
+                admission
+                    .pending_step_controls
+                    .next_native_sampling_intent(&self.control_epoch)
+            })
+        });
         let Some(admission) = self
-            .begin_sampling_intent(
-                self.state.lock().await,
-                &mut gate,
-                &intent,
-                &mut responds_to,
-            )
+            .begin_sampling_intent(admission, &mut gate, &intent, &mut responds_to)
             .await
         else {
             if let Some(admitted) = admitted {
@@ -5034,6 +5046,752 @@ mod tests {
                 assert_eq!(
                     contexts[1].layer,
                     chat_state::ControlContextLayer::AgentRole
+                );
+            })
+            .await;
+    }
+    fn take_sampling_control_updates(
+        gateway_rx: &mut tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    ) -> Vec<crate::extensions::notification::ControlStateUpdate> {
+        std::iter::from_fn(|| gateway_rx.try_recv().ok())
+            .filter_map(|message| {
+                let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                    return None;
+                };
+                (args.request.method.as_ref() == "grow/session_notification")
+                    .then(|| {
+                        serde_json::from_str::<
+                            crate::extensions::notification::SessionNotification,
+                        >(args.request.params.get())
+                        .ok()
+                    })
+                    .flatten()
+            })
+            .filter_map(|notification| match notification.update {
+                crate::extensions::notification::SessionUpdate::ControlStateUpdate(update)
+                    if update.domain
+                        == crate::extensions::notification::ControlDomain::Sampling =>
+                {
+                    Some(update)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn native_test_route(
+        actor: &SessionActor,
+        model_id: &str,
+        effort: Option<sampling_types::ReasoningEffort>,
+    ) -> (
+        crate::agent::models::PublishedSessionRoute,
+        std::sync::Arc<crate::agent::models::PublishedModelCatalog>,
+    ) {
+        let mut sampling_config = actor.model_route.snapshot().sampling_config;
+        sampling_config.model = format!("{model_id}-wire");
+        sampling_config.reasoning_effort = effort;
+        let route = SessionActor::selection_route_for_test(
+            crate::agent::models::ModelId::new(model_id),
+            sampling_config.clone(),
+            85,
+        );
+        let catalog = SessionActor::published_catalog_for_test(
+            route.model_id.clone(),
+            sampling_config,
+            None,
+            std::time::Duration::from_secs(300),
+            3,
+            85,
+        );
+        (route, catalog)
+    }
+
+    fn host_sampling_receipt(
+        state: &AdmissionState,
+        client_id: &str,
+    ) -> (u64, u64, ControlIntentLifecycle) {
+        let receipt = state
+            .control_intents
+            .get(&(
+                crate::extensions::notification::ControlDomain::Sampling,
+                client_id.to_owned(),
+            ))
+            .expect("host-owned Sampling client receipt");
+        (receipt.token.0, receipt.token.1, receipt.lifecycle.clone())
+    }
+
+    #[tokio::test]
+    async fn native_tool_sampling_rejects_model_and_effort_after_execution_closes() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for effort_only in [false, true] {
+                    let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                    super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                    while gateway_rx.try_recv().is_ok() {}
+                    let initial = actor.model_route.snapshot();
+                    let (route, catalog) = native_test_route(
+                        &actor,
+                        "test/retired",
+                        Some(sampling_types::ReasoningEffort::High),
+                    );
+                    // Prepare against a live execution, then use the same
+                    // production foreground transition as natural settlement.
+                    let selection = if effort_only {
+                        let mut sampling = initial.sampling_config.clone();
+                        sampling.reasoning_effort = Some(sampling_types::ReasoningEffort::High);
+                        crate::session::SessionSamplingSelection::Effort {
+                            effort: sampling_types::ReasoningEffort::High,
+                            authority: crate::session::SessionEffortAuthority::Catalog {
+                                catalog: SessionActor::published_catalog_for_test(
+                                    initial.model_id.clone(),
+                                    sampling,
+                                    None,
+                                    std::time::Duration::from_secs(300),
+                                    3,
+                                    85,
+                                ),
+                                origin_client: None,
+                            },
+                        }
+                    } else {
+                        crate::session::SessionSamplingSelection::Model {
+                            route,
+                            catalog: Some(catalog),
+                        }
+                    };
+                    let retired = {
+                        let mut state = actor.state.lock().await;
+                        assert!(state.execution_open());
+                        let task = state.foreground.begin_settling().unwrap();
+                        assert!(!state.can_continue_regular_turn(&task.prompt_id));
+                        task
+                    };
+                    let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+                    let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+                    actor
+                        .admit_tool_sampling(selection, admitted_tx, respond_tx)
+                        .await;
+                    assert_eq!(
+                        admitted_rx.await.unwrap().unwrap_err(),
+                        "the target subagent execution is no longer open"
+                    );
+                    assert_eq!(
+                        respond_rx.await.unwrap().unwrap_err().data,
+                        Some(serde_json::json!(
+                            "the target subagent execution is no longer open"
+                        ))
+                    );
+                    assert!(actor.state.lock().await.pending_step_controls.is_empty());
+                    assert!(
+                        take_sampling_control_updates(&mut gateway_rx).is_empty(),
+                        "closed execution cannot publish Pending"
+                    );
+                    let final_route = actor.model_route.snapshot();
+                    assert_eq!(final_route.model_id, initial.model_id);
+                    assert_eq!(
+                        final_route.sampling_config.model,
+                        initial.sampling_config.model
+                    );
+                    assert_eq!(
+                        final_route.sampling_config.reasoning_effort,
+                        initial.sampling_config.reasoning_effort
+                    );
+                    retired.handle.abort();
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn native_tool_sampling_uses_host_control_identity_through_closed_step() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                while gateway_rx.try_recv().is_ok() {}
+                let (route, catalog) = native_test_route(
+                    &actor,
+                    "test/native",
+                    Some(sampling_types::ReasoningEffort::High),
+                );
+                let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+                let (respond_tx, mut respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_tool_sampling(
+                        crate::session::SessionSamplingSelection::Model {
+                            route: route.clone(),
+                            catalog: Some(catalog),
+                        },
+                        admitted_tx,
+                        respond_tx,
+                    )
+                    .await;
+                admitted_rx.await.unwrap().unwrap();
+
+                let mut updates = take_sampling_control_updates(&mut gateway_rx);
+                assert_eq!(updates.len(), 1, "{updates:#?}");
+                assert_eq!(
+                    updates[0].phase,
+                    crate::extensions::notification::ControlPhase::Pending
+                );
+                assert_eq!(updates[0].intent.as_ref().unwrap().sequence, 0);
+                assert_eq!(actor.model_route.snapshot().model_id.0.as_ref(), "test");
+                assert!(matches!(
+                    respond_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                let boundary = actor.end_step_control_boundary("next").await.unwrap();
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (true, false, false)
+                );
+                updates.extend(take_sampling_control_updates(&mut gateway_rx));
+                assert_eq!(
+                    updates
+                        .iter()
+                        .map(|update| update.phase)
+                        .collect::<Vec<_>>(),
+                    vec![
+                        crate::extensions::notification::ControlPhase::Pending,
+                        crate::extensions::notification::ControlPhase::Applying,
+                        crate::extensions::notification::ControlPhase::Applied,
+                    ]
+                );
+                let host_client = format!("native-sampling:{}", actor.control_epoch);
+                for update in updates.iter().filter(|update| !update.snapshot) {
+                    let intent = update
+                        .intent
+                        .as_ref()
+                        .expect("every native Sampling projection carries the host intent");
+                    assert_eq!(intent.client_id, host_client);
+                    assert_eq!(intent.generation, 0);
+                    assert!(!update.receipt_only);
+                    assert!(matches!(
+                        update.phase,
+                        crate::extensions::notification::ControlPhase::Pending
+                            | crate::extensions::notification::ControlPhase::Applying
+                            | crate::extensions::notification::ControlPhase::Applied
+                    ));
+                }
+                let applied = updates
+                    .iter()
+                    .find(|update| {
+                        update.phase == crate::extensions::notification::ControlPhase::Applied
+                    })
+                    .expect("applied Sampling control");
+                assert_eq!(
+                    applied.desired,
+                    Some(crate::extensions::notification::ControlTarget::Sampling {
+                        model_id: "test/native".into(),
+                        reasoning_effort: Some("high".into()),
+                    })
+                );
+                assert_eq!(
+                    applied.message.as_deref(),
+                    Some("Sampling switched to test/native (high)")
+                );
+                assert_eq!(applied.current, applied.desired.clone().unwrap());
+                let intent = applied.intent.clone().unwrap();
+                assert_eq!(
+                    respond_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(
+                        crate::agent::models::ModelId::new("test/native")
+                    )
+                );
+                assert_eq!(
+                    actor.model_route.snapshot().model_id.0.as_ref(),
+                    "test/native"
+                );
+                let state = actor.state.lock().await;
+                let (generation, sequence, lifecycle) = host_sampling_receipt(&state, &host_client);
+                assert_eq!((generation, sequence), (0, intent.sequence));
+                assert!(matches!(
+                    lifecycle,
+                    ControlIntentLifecycle::Terminal(terminal)
+                        if terminal.phase
+                            == crate::extensions::notification::ControlPhase::Applied
+                            && terminal.ui_terminal_durable
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn repeated_native_controls_share_one_host_client_and_supersede_in_order() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                while gateway_rx.try_recv().is_ok() {}
+                let (first_route, first_catalog) = native_test_route(
+                    &actor,
+                    "test/first",
+                    Some(sampling_types::ReasoningEffort::High),
+                );
+                let (second_route, second_catalog) = native_test_route(
+                    &actor,
+                    "test/second",
+                    Some(sampling_types::ReasoningEffort::High),
+                );
+                let (first_admitted_tx, first_admitted_rx) = tokio::sync::oneshot::channel();
+                let (first_respond_tx, first_respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_tool_sampling(
+                        crate::session::SessionSamplingSelection::Model {
+                            route: first_route,
+                            catalog: Some(first_catalog),
+                        },
+                        first_admitted_tx,
+                        first_respond_tx,
+                    )
+                    .await;
+                first_admitted_rx.await.unwrap().unwrap();
+                let (second_admitted_tx, second_admitted_rx) = tokio::sync::oneshot::channel();
+                let (second_respond_tx, second_respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_tool_sampling(
+                        crate::session::SessionSamplingSelection::Model {
+                            route: second_route,
+                            catalog: Some(second_catalog),
+                        },
+                        second_admitted_tx,
+                        second_respond_tx,
+                    )
+                    .await;
+                second_admitted_rx.await.unwrap().unwrap();
+                assert_eq!(
+                    first_respond_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Superseded
+                );
+
+                let host_client = format!("native-sampling:{}", actor.control_epoch);
+                let pending_updates = take_sampling_control_updates(&mut gateway_rx);
+                assert!(
+                    pending_updates.iter().all(|update| update.phase
+                        == crate::extensions::notification::ControlPhase::Pending),
+                    "{pending_updates:#?}"
+                );
+                let sequences = pending_updates
+                    .iter()
+                    .filter_map(|update| update.intent.as_ref().map(|intent| intent.sequence))
+                    .collect::<Vec<_>>();
+                assert_eq!(sequences.len(), 2);
+                assert_eq!(
+                    pending_updates
+                        .iter()
+                        .filter_map(|update| update.intent.as_ref())
+                        .map(|intent| intent.client_id.as_str())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    std::collections::BTreeSet::from([host_client.as_str()]),
+                    "repeated native controls keep one host client namespace"
+                );
+                assert!(sequences[0] < sequences[1], "{sequences:?}");
+                let targets = pending_updates
+                    .iter()
+                    .filter_map(|update| update.desired.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    targets[1],
+                    crate::extensions::notification::ControlTarget::Sampling {
+                        model_id: "test/second".into(),
+                        reasoning_effort: Some("high".into()),
+                    }
+                );
+                {
+                    let state = actor.state.lock().await;
+                    assert_eq!(state.control_intents.len(), 1);
+                    let (generation, sequence, lifecycle) =
+                        host_sampling_receipt(&state, &host_client);
+                    assert_eq!((generation, sequence), (0, sequences[1]));
+                    assert!(matches!(lifecycle, ControlIntentLifecycle::InFlight));
+                }
+
+                let boundary = actor.end_step_control_boundary("next").await.unwrap();
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (true, false, false)
+                );
+                assert_eq!(
+                    second_respond_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(
+                        crate::agent::models::ModelId::new("test/second")
+                    )
+                );
+                let applied_updates = take_sampling_control_updates(&mut gateway_rx);
+                assert_eq!(
+                    applied_updates
+                        .iter()
+                        .map(|update| update.phase)
+                        .collect::<Vec<_>>(),
+                    vec![
+                        crate::extensions::notification::ControlPhase::Applying,
+                        crate::extensions::notification::ControlPhase::Applied,
+                    ],
+                    "{applied_updates:#?}"
+                );
+                assert!(applied_updates.iter().all(|update| {
+                    update.intent.as_ref().map(|intent| intent.sequence) == Some(sequences[1])
+                }));
+                let state = actor.state.lock().await;
+                let (_, _, lifecycle) = host_sampling_receipt(&state, &host_client);
+                assert!(matches!(
+                    lifecycle,
+                    ControlIntentLifecycle::Terminal(terminal)
+                        if terminal.phase
+                            == crate::extensions::notification::ControlPhase::Applied
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn rejected_native_effort_consumes_sequence_without_colliding_with_next_selection() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                while gateway_rx.try_recv().is_ok() {}
+                let mut sampling_config = actor.model_route.snapshot().sampling_config;
+                sampling_config.reasoning_effort = Some(sampling_types::ReasoningEffort::Low);
+                let catalog = SessionActor::published_catalog_for_test(
+                    crate::agent::models::ModelId::new("test"),
+                    sampling_config,
+                    None,
+                    std::time::Duration::from_secs(300),
+                    3,
+                    85,
+                );
+                let authority = crate::session::SessionEffortAuthority::Catalog {
+                    catalog,
+                    origin_client: None,
+                };
+                let (rejected_admitted_tx, rejected_admitted_rx) = tokio::sync::oneshot::channel();
+                let (rejected_respond_tx, rejected_respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_tool_sampling(
+                        crate::session::SessionSamplingSelection::Effort {
+                            effort: sampling_types::ReasoningEffort::High,
+                            authority: authority.clone(),
+                        },
+                        rejected_admitted_tx,
+                        rejected_respond_tx,
+                    )
+                    .await;
+                assert!(
+                    rejected_admitted_rx
+                        .await
+                        .unwrap()
+                        .unwrap_err()
+                        .contains("does not admit")
+                );
+                assert!(rejected_respond_rx.await.unwrap().is_err());
+                let rejected_sequence = {
+                    let state = actor.state.lock().await;
+                    let (generation, sequence, lifecycle) = host_sampling_receipt(
+                        &state,
+                        &format!("native-sampling:{}", actor.control_epoch),
+                    );
+                    assert_eq!(generation, 0);
+                    assert!(matches!(
+                        lifecycle,
+                        ControlIntentLifecycle::Terminal(terminal)
+                            if terminal.phase
+                                == crate::extensions::notification::ControlPhase::Rejected
+                    ));
+                    sequence
+                };
+                assert!(
+                    take_sampling_control_updates(&mut gateway_rx).is_empty(),
+                    "a rejection before application publishes no fake switch"
+                );
+
+                let (accepted_admitted_tx, accepted_admitted_rx) = tokio::sync::oneshot::channel();
+                let (accepted_respond_tx, accepted_respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_tool_sampling(
+                        crate::session::SessionSamplingSelection::Effort {
+                            effort: sampling_types::ReasoningEffort::Low,
+                            authority,
+                        },
+                        accepted_admitted_tx,
+                        accepted_respond_tx,
+                    )
+                    .await;
+                accepted_admitted_rx.await.unwrap().unwrap();
+                let pending_updates = take_sampling_control_updates(&mut gateway_rx);
+                assert_eq!(pending_updates.len(), 1, "{pending_updates:#?}");
+                let accepted_sequence = pending_updates[0]
+                    .intent
+                    .as_ref()
+                    .expect("accepted native control has an intent")
+                    .sequence;
+                assert!(
+                    accepted_sequence > rejected_sequence,
+                    "rejection must consume the ordered sequence: {rejected_sequence} < {accepted_sequence}"
+                );
+                let boundary = actor.end_step_control_boundary("next").await.unwrap();
+                assert_eq!(
+                    actor.apply_pending_controls_at_step_boundary(boundary).await,
+                    (true, false, false)
+                );
+                assert_eq!(
+                    accepted_respond_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(
+                        crate::agent::models::ModelId::new("test")
+                    )
+                );
+                let state = actor.state.lock().await;
+                assert_eq!(state.control_intents.len(), 1);
+                let (_, sequence, lifecycle) = host_sampling_receipt(
+                    &state,
+                    &format!("native-sampling:{}", actor.control_epoch),
+                );
+                assert_eq!(sequence, accepted_sequence);
+                assert!(matches!(
+                    lifecycle,
+                    ControlIntentLifecycle::Terminal(terminal)
+                        if terminal.phase
+                            == crate::extensions::notification::ControlPhase::Applied
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn native_no_op_selection_keeps_receipt_without_switch_message() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                while gateway_rx.try_recv().is_ok() {}
+                let current = actor.model_route.snapshot();
+                let route = crate::agent::models::PublishedSessionRoute {
+                    model_id: current.model_id.clone(),
+                    sampling_config: current.sampling_config.clone(),
+                    image_description_model: actor.image_description_model.read().clone(),
+                    inference_idle_timeout: actor.inference_idle_timeout.get(),
+                    max_retries: actor.max_retries.get(),
+                    auto_compact_threshold_percent: actor.compaction.threshold_percent.get(),
+                };
+                let catalog = SessionActor::published_catalog_for_test(
+                    current.model_id.clone(),
+                    current.sampling_config.clone(),
+                    None,
+                    std::time::Duration::from_secs(300),
+                    3,
+                    85,
+                );
+                let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+                let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_tool_sampling(
+                        crate::session::SessionSamplingSelection::Model {
+                            route: route.clone(),
+                            catalog: Some(catalog),
+                        },
+                        admitted_tx,
+                        respond_tx,
+                    )
+                    .await;
+                admitted_rx.await.unwrap().unwrap();
+                let boundary = actor.end_step_control_boundary("next").await.unwrap();
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (false, false, false),
+                    "an identical selection is not a runtime switch"
+                );
+                assert_eq!(
+                    respond_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(current.model_id.clone())
+                );
+                let updates = take_sampling_control_updates(&mut gateway_rx);
+                assert_eq!(
+                    updates
+                        .iter()
+                        .map(|update| update.phase)
+                        .collect::<Vec<_>>(),
+                    vec![
+                        crate::extensions::notification::ControlPhase::Pending,
+                        crate::extensions::notification::ControlPhase::Applying,
+                        crate::extensions::notification::ControlPhase::Applied,
+                    ],
+                    "{updates:#?}"
+                );
+                assert!(
+                    updates.iter().all(|update| update.message.is_none()),
+                    "no-op control must not claim a switch"
+                );
+                assert_eq!(updates[2].current, updates[2].desired.clone().unwrap());
+                let intent = updates[2].intent.as_ref().unwrap();
+                let host_client = format!("native-sampling:{}", actor.control_epoch);
+                assert!(
+                    updates
+                        .iter()
+                        .all(|update| update.intent.as_ref() == Some(intent))
+                );
+                assert_eq!(intent.client_id, host_client);
+                assert_eq!(intent.generation, 0);
+                let state = actor.state.lock().await;
+                let (_, sequence, lifecycle) = host_sampling_receipt(&state, &host_client);
+                assert_eq!(sequence, intent.sequence);
+                assert!(
+                    matches!(lifecycle, ControlIntentLifecycle::Terminal(terminal)
+                    if terminal.phase == crate::extensions::notification::ControlPhase::Applied
+                        && terminal.ui_terminal_durable)
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn native_terminal_ui_persistence_failure_preserves_applied_receipt() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (mut actor, _events) =
+                    super::super::tests::support::create_test_actor_ex_with_projection_error(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                        None,
+                    )
+                    .await;
+                // Keep the existing Timeline ACK fixture, but reject the terminal
+                // UI append at NotificationSender's ordinary persistence boundary.
+                let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.notifications.persistence_tx = ui_tx;
+                let (failed_tx, failed_rx) = tokio::sync::oneshot::channel();
+                let writer = tokio::task::spawn_local(async move {
+                    let mut failed_tx = Some(failed_tx);
+                    while let Some(message) = ui_rx.recv().await {
+                        if let PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } =
+                            message
+                        {
+                            let crate::session::storage::SessionUpdate::Grow(notification) = update
+                            else {
+                                panic!("expected terminal Grow projection");
+                            };
+                            let GrowSessionUpdate::ControlStateUpdate(update) = notification.update
+                            else {
+                                panic!("expected terminal control projection");
+                            };
+                            assert_eq!(
+                                update.phase,
+                                crate::extensions::notification::ControlPhase::Applied
+                            );
+                            failed_tx.take().unwrap().send(update).unwrap();
+                            let _ = respond_to.send(Err(
+                                crate::session::storage::AppendUpdateError::NotCommitted(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "injected terminal UI append failure",
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                });
+                let actor = std::sync::Arc::new(actor);
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                while gateway_rx.try_recv().is_ok() {}
+                let (route, catalog) = native_test_route(&actor, "test/native-failed-ui", None);
+                let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+                let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_tool_sampling(
+                        crate::session::SessionSamplingSelection::Model {
+                            route,
+                            catalog: Some(catalog),
+                        },
+                        admitted_tx,
+                        respond_tx,
+                    )
+                    .await;
+                admitted_rx.await.unwrap().unwrap();
+                let boundary = actor.end_step_control_boundary("next").await.unwrap();
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (true, false, false)
+                );
+                let error = respond_rx.await.unwrap().unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("terminal UI event was not durably recorded"),
+                    "{error}"
+                );
+                let failed = failed_rx.await.unwrap();
+                let intent = failed.intent.unwrap();
+                let host_client = format!("native-sampling:{}", actor.control_epoch);
+                assert_eq!(intent.client_id, host_client);
+                assert_eq!(intent.generation, 0);
+                assert_eq!(
+                    actor.model_route.snapshot().model_id.0.as_ref(),
+                    "test/native-failed-ui"
+                );
+                assert_eq!(
+                    take_sampling_control_updates(&mut gateway_rx)
+                        .iter()
+                        .map(|update| update.phase)
+                        .collect::<Vec<_>>(),
+                    vec![
+                        crate::extensions::notification::ControlPhase::Pending,
+                        crate::extensions::notification::ControlPhase::Applying
+                    ],
+                    "failed terminal append must not publish an Applied notice"
+                );
+                let state = actor.state.lock().await;
+                let (generation, sequence, lifecycle) = host_sampling_receipt(&state, &host_client);
+                assert_eq!((generation, sequence), (0, intent.sequence));
+                assert!(
+                    matches!(lifecycle, ControlIntentLifecycle::Terminal(terminal)
+                    if terminal.phase == crate::extensions::notification::ControlPhase::Applied
+                        && !terminal.ui_terminal_durable)
+                );
+                drop(state);
+                writer.abort();
+                assert!(writer.await.unwrap_err().is_cancelled());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn no_intent_sampling_application_stays_ui_silent() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                while gateway_rx.try_recv().is_ok() {}
+                let current = actor.model_route.snapshot();
+                let route = crate::agent::models::PublishedSessionRoute {
+                    model_id: current.model_id.clone(),
+                    sampling_config: current.sampling_config.clone(),
+                    image_description_model: actor.image_description_model.read().clone(),
+                    inference_idle_timeout: actor.inference_idle_timeout.get(),
+                    max_retries: actor.max_retries.get(),
+                    auto_compact_threshold_percent: actor.compaction.threshold_percent.get(),
+                };
+                let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_session_model_selection(route.clone(), None, None, respond_tx)
+                    .await;
+                assert_eq!(
+                    respond_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(route.model_id)
+                );
+                assert!(
+                    take_sampling_control_updates(&mut gateway_rx).is_empty(),
+                    "hydration/recovery without a client intent must not manufacture a control"
                 );
             })
             .await;

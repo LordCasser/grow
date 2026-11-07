@@ -875,3 +875,195 @@ Project configuration, Agent, skill and rule discovery SHALL determine checkout 
 #### Scenario: Worktree and alias boundaries
 - **WHEN** discovery starts in a nested or aliased directory of a linked or separate worktree
 - **THEN** the boundary is that checkout's root, without widening to the common Git directory's parent or to another checkout.
+
+### Requirement: envrc bash fallback never treats caller paths as code
+
+`.envrc` 的 bash fallback 加载 SHALL 以不含调用方路径字节的固定脚本执行：脚本 SHALL 通过 `current_dir` 进入目标目录并以固定相对名加载 `.envrc`，SHALL NOT 将调用方目录或文件路径插值进 shell 源码。`$PWD` 相对展开 SHALL 继续解析到调用方传入的目标目录。direnv 成功路径与 folder-trust 门控位置不受影响。
+
+#### Scenario: 命令替换目录名不被求值
+- **WHEN** 目录名含 `$(...)` 或反引号且 `.envrc` 合法导出唯一环境变量
+- **THEN** 变量被正确加载，目录名从未被当作 shell 代码求值（探测标记文件不出现）。
+
+#### Scenario: 引号、空格与换行目录名正常加载
+- **WHEN** 目录名含单引号、双引号、空格或换行且 `.envrc` 合法导出唯一环境变量
+- **THEN** bash fallback 加载成功，`$PWD` 相对展开解析到目标目录，不出现加倍路径。
+
+#### Scenario: 非 UTF-8 Unix 路径保持原字节
+- **WHEN** Unix 文件系统支持该非 UTF-8 目录名，目录实际存在且 `.envrc` 合法导出唯一环境变量
+- **THEN** 路径仅经 OS 字符串进入子进程，变量正确加载，不经显示层有损替换。
+
+#### Scenario: 既有 fallback 行为保持
+- **WHEN** `.envrc` 正常导出变量、不存在或仅使用 direnv stub 辅助函数
+- **THEN** 两层加载结构、`set -e`、stubs、`env -0` 输出与基线过滤行为保持不变。
+
+### Requirement: Agent discovery terminates physical directory cycles
+
+Recursive file-defined Agent discovery SHALL compare each directory against the physical directory identities on its current ancestor chain before descending. A repeated ancestor or unresolvable directory identity SHALL be skipped. Traversal identity SHALL NOT replace lexical path-derived Agent namespaces or globally suppress a legal alias reached through another branch. Existing stable path order, source scope and precedence SHALL remain unchanged.
+
+#### Scenario: Self or parent link forms a cycle
+
+- **WHEN** an Agent directory contains a link to itself or a physical ancestor
+- **THEN** discovery terminates at that link without repeatedly advertising the same physical definitions under deeper aliases, while ordinary definitions remain available.
+
+#### Scenario: Independent aliases are valid namespaces
+
+- **WHEN** separate sibling directory aliases reach the same valid non-ancestor target containing Agent definitions
+- **THEN** each lexical namespace remains discoverable in stable order and neither is suppressed by the other branch's traversal history.
+
+### Requirement: Project Agent rules follow physical checkout ancestry
+
+Project Agent rule discovery SHALL derive cwd ancestry and the Git checkout boundary from the same physical path identity. It SHALL include checkout root through the actual cwd in root-to-cwd order and SHALL NOT add an external alias's lexical ancestors. Project rule source attribution SHALL identify the physical checkout paths. Explicit user roots, canonical candidate deduplication, and existing no-checkout and home-as-repository policies SHALL remain intact.
+
+#### Scenario: External alias points inside a checkout
+
+- **WHEN** the supplied cwd is an external directory alias pointing at a checkout's internal subdirectory
+- **THEN** discovery includes the actual checkout root and internal rules in order and excludes AGENTS.md and rule directories belonging to external alias ancestors.
+
+#### Scenario: Alias points at a linked worktree
+
+- **WHEN** the supplied cwd resolves inside a linked worktree
+- **THEN** discovery stops at that worktree's physical checkout boundary without importing main-checkout or alias-parent rules.
+
+#### Scenario: Explicit workspace user roots remain authorized
+
+- **WHEN** a configured workspace user rule root participates alongside the physical checkout chain
+- **THEN** it retains its established insertion order and contributes each canonical rule file once.
+
+### Requirement: Plugin config mutations share the raw settings transaction
+
+Plugin path, enable/disable and CTA dismissal config.toml edits SHALL acquire the existing process-wide settings write lock before reading and retain it through atomic publication. They SHALL mutate raw TOML, preserving unrelated unknown fields and authored environment references. Only missing files MAY be treated as empty under the existing operation policy; hard read errors and invalid TOML SHALL fail without replacing the original file. Successful replacement SHALL retain existing platform permission handling. Async consumers SHALL await this transaction; synchronous UI handlers SHALL route persistence through the existing effect executor.
+
+#### Scenario: Unreadable plugin config is not an empty config
+
+- **WHEN** a plugin/CTA edit encounters a hard read error or invalid TOML
+- **THEN** it returns an observable failure and preserves the prior target rather than publishing a default or partial config.
+
+#### Scenario: Plugin and settings edits overlap
+
+- **WHEN** plugin/CTA mutations and a settings update are admitted concurrently in one process
+- **THEN** each reads the prior committed raw config under the same write lock, and their unrelated changes and unknown/environment-valued fields survive the final publication.
+
+#### Scenario: CTA dismissal uses async persistence
+
+- **WHEN** the user dismisses a plugin CTA from the synchronous mouse handler
+- **THEN** local UI behavior remains responsive and the existing effect executor awaits the same serialized raw transaction, retaining the current persistence error reporting.
+
+### Requirement: Session LSP construction uses its own plugin snapshot
+
+When Shell constructs a new session LSP backend, it SHALL derive active plugin LSP configurations from the same cwd, trust and session-plugin-root snapshot used to construct that session. A process shared latest snapshot SHALL NOT add or replace another session's plugin execution configuration. Existing user/project/plugin precedence, project trust filtering, LSP enablement and inherited backend ownership SHALL remain in force.
+
+#### Scenario: Different cwd values have the same server name
+
+- **WHEN** sessions A and B have different permitted plugin snapshots defining the same LSP server name
+- **THEN** each newly constructed backend uses and launches only the plugin command permitted for its own snapshot.
+
+#### Scenario: Session plugin roots differ at the same cwd
+
+- **WHEN** two sessions share cwd but specify different pluginDirs with file or inline LSP definitions
+- **THEN** their newly constructed backends include the corresponding session roots without using cwd as a substitute for session identity.
+
+#### Scenario: Current session has no active plugin contribution
+
+- **WHEN** a new session's plugin snapshot is absent or contains no active plugins while the process latest snapshot still contains another session's LSP
+- **THEN** the new backend does not use that latest plugin contribution, and its own allowed user and project configuration remains eligible.
+
+#### Scenario: A backend was already inherited
+
+- **WHEN** the ToolContext already carries the parent's LSP backend
+- **THEN** bootstrap preserves that backend and its existing lifecycle rather than replacing it because another plugin snapshot exists.
+
+### Requirement: ACP plugin updates adopt their resulting install state
+
+A successful plugin update performed through `grow/plugins/action` SHALL adopt the update result into the existing install registry through the shared plugin application owner. When a mutable Git branch advances without an operation or persistence failure, the recorded commit, update timestamp and discovered plugin map SHALL describe the resulting checkout. Marketplace registrations SHALL retain their existing provenance-aware update path. The action SHALL retain its existing selection and reload semantics without duplicating the registry or updating Git state independently of the shared application owner.
+
+#### Scenario: An installed branch adds a plugin
+
+- **WHEN** the remote branch advances to a new commit containing a new plugin and a session performs an ACP Update successfully
+- **THEN** the checkout and saved install entry use that commit, the saved plugin map reflects the discovered plugins, and the action requests the existing reload path.
+
+#### Scenario: The updated branch is already at its tip
+
+- **WHEN** a second ACP Update targets the same already adopted remote tip
+- **THEN** it reports no update, does not request a reload, and does not manufacture a new update timestamp or commit change.
+
+#### Scenario: Selection and nonmutable entries
+
+- **WHEN** an ACP Update selects one installed plugin or encounters a pinned or live local registration
+- **THEN** the existing selected-repository scope and pinned/local policy remain in effect, and only actual adopted updates request reload.
+
+### Requirement: Session skill catalog discovery uses the named owner
+
+Skills catalog and configuration requests SHALL resolve a supplied sessionId to that exact resident primary owner, use its actual execution cwd and acknowledged plugin snapshot, and fail when that owner cannot answer. A successful empty plugin snapshot SHALL remain distinct from a closed command or reply channel. Requests without sessionId SHALL retain each method's existing cwd parameter rules and discover plugins for that cwd without borrowing another session's plugin roots or the shared latest registry.
+
+#### Scenario: Sessions have different plugin roots in the same directory
+
+- **WHEN** two sessions share cwd but have different session pluginDirs and each requests its skill catalog by sessionId
+- **THEN** each result uses the named session's snapshot, even if the shared latest registry contains another session's plugins.
+
+#### Scenario: Owner is absent or retired
+
+- **WHEN** a supplied sessionId has no resident primary or its owner cannot confirm the plugin snapshot
+- **THEN** the request fails before any associated configuration mutation and does not fall back to another session or a successful native-only catalog.
+
+#### Scenario: Owner acknowledges no plugin snapshot
+
+- **WHEN** the exact owner successfully returns an empty plugin snapshot
+- **THEN** discovery succeeds using that session's cwd and native skill sources.
+
+#### Scenario: Conflicting request contexts
+
+- **WHEN** a request supplies both a nonempty sessionId and a nonnull cwd string
+- **THEN** it returns invalid_params before discovery or configuration mutation; cwd:null is treated as omitted.
+
+#### Scenario: Discovery without a session
+
+- **WHEN** no sessionId is supplied and the request satisfies that method's existing cwd rule
+- **THEN** discovery builds a read-only registry for that cwd, retains explicit process plugin roots, excludes session pluginDirs, and does not publish the shared latest snapshot.
+
+#### Scenario: Fresh management catalog includes inactive candidates
+
+- **WHEN** a skill is disabled by global configuration or awaits conditional runtime activation
+- **THEN** the management catalog retains its existing display semantics while runtime invocation remains governed by the named session's SkillManager.
+
+### Requirement: Plugin installation reports incomplete registry publication
+
+Ordinary Git or local plugin installation through the shared CLI and ACP application path SHALL load the existing registry with failure propagation before changing installation artifacts, and SHALL report success only after the resulting install entry is saved. A registry read or parse failure SHALL preserve existing evidence without treating it as an empty writable registry. A save failure after artifact publication SHALL return an error describing the incomplete registration and possible remaining files, and SHALL NOT continue post-install auto-enablement or report a complete installation. This contract SHALL NOT imply rollback of already published artifacts.
+
+#### Scenario: Saving the new installation fails
+
+- **WHEN** plugin files have been published but the install registry cannot be saved
+- **THEN** CLI public dispatch returns an error and ACP reports InternalError without requesting reload; both describe the incomplete installation, preserve the actual artifact state, and do not run post-install enablement.
+
+#### Scenario: Existing registry cannot be parsed or read
+
+- **WHEN** an installation encounters an existing registry read or parse error
+- **THEN** it fails before publishing a new artifact or enabling a plugin and preserves the existing registry bytes and installed entries.
+
+#### Scenario: Installation saves successfully
+
+- **WHEN** artifact publication and registry save succeed
+- **THEN** the existing post-install warnings policy and successful CLI/ACP result apply, with the recorded plugin names and paths corresponding to the installed files.
+
+### Requirement: Skills configuration changes reach the existing session catalog owner
+
+Both leader and in-process runtimes SHALL deliver accepted Skills configuration updates to the existing per-session reload owner. Changes to disabled, ignore or paths SHALL refresh model-callable Skills and slash advertisement from fresh configuration and each session's own plugin snapshot. Discovery watcher ownership SHALL follow the latest configured custom paths, including updates arriving during initial registration. Watcher replacement SHALL retain the prior owner on construction failure and retire all owned registrations on cancellation. Removed roots SHALL not remain actively watched after successful replacement.
+
+#### Scenario: Only the configuration file changes
+- **WHEN** disabled or ignore is changed in the configuration without editing a skill directory
+- **THEN** both runtime entry paths deliver reload and the session catalog and slash advertisement reflect that configuration.
+
+#### Scenario: A custom root is added and removed
+- **WHEN** paths adds an external root, a skill is later created or changed there, and the root is subsequently removed
+- **THEN** the new root supplies discovery events while configured, the existing owner refreshes the session catalog, and successful removal releases its active watch.
+
+#### Scenario: Configuration changes during registration
+- **WHEN** paths changes before the first or replacement watcher registration completes
+- **THEN** the latest pending paths are still processed rather than lost due to startup timing.
+
+#### Scenario: macOS discovery does not wait for native stream registration
+- **WHEN** a macOS runtime starts or replaces Skills/Workflow discovery watches
+- **THEN** metadata polling supplies the existing create, modify and delete refresh path without waiting for FSEvents stream startup or hashing arbitrary custom-root file contents.
+
+#### Scenario: Failed replacement or runtime cancellation
+- **WHEN** replacement registration fails or runtime cancellation races registration
+- **THEN** failure preserves the previous valid watcher with visible diagnostics, cancellation retires all registrations owned by that runtime, and no unconfirmed replacement is reported as active.

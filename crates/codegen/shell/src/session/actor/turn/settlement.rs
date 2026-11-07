@@ -70,6 +70,28 @@ impl SessionActor {
         rx.await.ok()
     }
 
+    /// [`outstanding_reply_for_prompt`] bounded by an absolute deadline: the
+    /// caller's budget covers the coordinator queue and this ACK wait alike,
+    /// so a receiver that keeps `respond_to` alive without replying cannot
+    /// push the wait past the deadline. `timeout_at` keeps the caller's
+    /// original instant instead of refreshing a per-call window; a missed
+    /// deadline maps to `None`, the same shape as a failed send. A
+    /// zero-budget round either consumes an immediately ready observation or
+    /// fails closed; both satisfy the freeze contract.
+    pub(in crate::session::actor) async fn outstanding_reply_for_prompt_bounded(
+        &self,
+        prompt_id: &str,
+        deadline: std::time::Instant,
+    ) -> Option<tools::implementations::grow_build::task::types::SubagentOutstandingReply> {
+        tokio::time::timeout_at(
+            deadline.into(),
+            self.outstanding_reply_for_prompt(prompt_id),
+        )
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Report-level incomplete (error-path attach, tests). Same OR as
     /// [`super::turn::UsageDrainOutcome::report_incomplete`].
     pub(in crate::session::actor) fn usage_incomplete_from_reply(

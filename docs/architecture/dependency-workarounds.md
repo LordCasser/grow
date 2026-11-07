@@ -37,7 +37,7 @@ feature, or a decision to accept aws-lc-rs (re-evaluate the OHOS constraint).
 
 ## 2. `[patch.crates-io] nix` → `third_party/nix-ohos` (0.26.4)
 
-**Why**: pprof 0.15.0 (the latest release) requires `nix ^0.26`. nix 0.26.x
+**Why**: the locked pprof 0.15.0 requires `nix ^0.26`. nix 0.26.x
 predates OpenHarmony support, so the vendored copy patches
 `target_env="ohos"` to behave like musl. Microsecond value accessors now return
 `i64` instead of the deprecated musl `suseconds_t` alias; the raw
@@ -46,13 +46,20 @@ predates OpenHarmony support, so the vendored copy patches
 
 **Blocking evidence**: pprof 0.15.0's `Cargo.toml`:
 `nix = { version = "0.26", default-features = false, features = ["signal", "fs"] }`.
-Remaining nix versions in the graph are also upstream-locked:
-- 0.28.0 ← portable-pty 0.9.0 (= latest, requires nix ^0.28)
-- 0.29.0 ← mac_address 1.1.8 (= latest, requires nix ^0.29)
+Remaining locked nix versions resolve from the registry:
+
+- 0.28.0 ← portable-pty 0.9.0 (`nix ^0.28`)
+- 0.29.0 ← mac_address 1.1.8 (`nix ^0.29`)
 - 0.31.3 ← workspace crates + vendored nono
 
-**Unblock condition**: pprof releasing with nix 0.28+/0.30+ (native OHOS), then
-the patch and vendored copy can be deleted.
+The path patch applies only to the 0.26.4 package satisfying pprof; it does not
+replace all nix versions in the workspace. These are the current Cargo.lock
+entries, not a statement about the latest upstream releases.
+
+**Unblock condition**: pprof no longer requires nix ^0.26 and the replacement
+supports the required OHOS ABI. Recheck the resolved target graph and the
+maintained TimeVal/ABI fixes before removing this copy; a version bump alone
+is not evidence that every local fix is covered.
 
 ## 3. `[patch.crates-io] nono` → `third_party/nono` (=0.53.0)
 
@@ -85,6 +92,12 @@ upstream; see `third_party/sqlite-vec/Cargo.toml` VENDORING NOTES and the
 **Unblock condition**: a crates.io release that both contains the musl fix and
 packages every included C file and incorporates equivalent boundary fixes.
 Do not drop the maintained fixes merely because packaging is corrected.
+Before switching source, review every repair in the vendor header and run
+`third_party/sqlite-vec/tests/native_boundaries.c` with the strict normal and
+ASan/UBSan configurations in
+[Core regression](../../.github/workflows/core-regression.yml). That harness
+covers the boundary and supported SQL paths; it is not a proof of all vector
+algorithms or every target ABI.
 
 ## 5. rmcp's reqwest 0.13 integration
 

@@ -660,8 +660,12 @@ pub async fn call_mcp_tool(
 
     let tool_timeout_sec = client.tool_timeout_for(tool_name);
     let timeout = std::time::Duration::from_secs(tool_timeout_sec);
+    // The MCP owner revalidates the captured client against this same session
+    // state once preparation completes. The pre-admission checks above stay: they
+    // reject a stale app request before any work is done, including the explicit
+    // endpoint check that must not degrade into a same-name fallback.
     let result = client
-        .call_tool(tool_name, arguments, timeout)
+        .call_tool(mcp_state, tool_name, arguments, timeout)
         .await
         .map_err(|e| format!("tool call failed: {}", e))?;
 

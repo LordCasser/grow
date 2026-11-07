@@ -36,15 +36,86 @@ struct ActiveRun {
 
 struct SessionJournalStorage {
     run: crate::session::storage::ContainedDirectory,
+    /// Test-only barrier faults bound to this instance. Product paths never
+    /// read or set them, so no global fault framework or config is involved.
+    #[cfg(test)]
+    fail_file_sync: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_dir_sync: Arc<AtomicBool>,
+}
+
+impl SessionJournalStorage {
+    fn new(run: crate::session::storage::ContainedDirectory) -> Self {
+        Self {
+            run,
+            #[cfg(test)]
+            fail_file_sync: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_dir_sync: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn sync_file_barrier(&self, file: &std::fs::File) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.fail_file_sync.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected workflow journal file sync failure",
+            ));
+        }
+        file.sync_data()
+    }
+
+    fn sync_dir_barrier(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.fail_dir_sync.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected workflow journal directory sync failure",
+            ));
+        }
+        self.run.sync()
+    }
 }
 
 impl workflow::JournalStorage for SessionJournalStorage {
     fn read_bounded(&self, max_bytes: u64) -> std::io::Result<Vec<u8>> {
-        self.run.read_bounded(
-            std::ffi::OsStr::new("journal.jsonl"),
-            "Workflow journal",
-            max_bytes,
-        )
+        // Recovery must not accept bytes that are merely readable: the same
+        // file + directory durability barriers that govern append have to
+        // succeed first. Open the existing journal without creating it (a
+        // missing file keeps its NotFound semantics), take the same exclusive
+        // lock as append/truncate, read the bounded prefix from this handle,
+        // and only return it after the same-handle file barrier and the
+        // directory barrier succeed. Never reopen the name after reading:
+        // the file generation may have changed.
+        let mut file = self
+            .run
+            .open_read_write_existing(std::ffi::OsStr::new("journal.jsonl"), "Workflow journal")?;
+        file.lock_exclusive()?;
+        let result = (|| {
+            let metadata = file.metadata()?;
+            if metadata.len() > max_bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Workflow journal exceeds the byte limit",
+                ));
+            }
+            let mut bytes = Vec::new();
+            (&file)
+                .take(max_bytes.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > max_bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Workflow journal grew while reading",
+                ));
+            }
+            self.sync_file_barrier(&file)?;
+            self.sync_dir_barrier()?;
+            Ok(bytes)
+        })();
+        let _ = file.unlock();
+        result
     }
 
     fn append(&self, bytes: &[u8]) -> std::io::Result<()> {
@@ -62,11 +133,11 @@ impl workflow::JournalStorage for SessionJournalStorage {
             }
             file.seek(std::io::SeekFrom::End(0))?;
             file.write_all(bytes)?;
-            file.sync_data()?;
+            self.sync_file_barrier(&file)?;
             // A newly-created journal is not durable until its directory entry
             // is synchronized.  This runs before the engine may dispatch the
             // operation whose intent was appended above.
-            self.run.sync()
+            self.sync_dir_barrier()
         })();
         let _ = file.unlock();
         result
@@ -85,8 +156,8 @@ impl workflow::JournalStorage for SessionJournalStorage {
                 ));
             }
             file.set_len(len)?;
-            file.sync_data()?;
-            self.run.sync()
+            self.sync_file_barrier(&file)?;
+            self.sync_dir_barrier()
         })();
         let _ = file.unlock();
         result
@@ -447,7 +518,7 @@ impl WorkflowManager {
                 false,
             )
             .map_err(|error| LaunchError::Journal(error.to_string()))?;
-        Ok(Some(Arc::new(SessionJournalStorage { run })))
+        Ok(Some(Arc::new(SessionJournalStorage::new(run))))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1847,6 +1918,7 @@ mod tests {
     use super::*;
     use crate::session::persistence::PersistenceMsg;
     use crate::session::workflow::registry::resolve_inline;
+    use workflow::JournalStorage as _;
 
     type SubagentEventRx =
         mpsc::UnboundedReceiver<tools::implementations::grow_build::task::types::SubagentEvent>;
@@ -3961,5 +4033,197 @@ complete("restored after explicit resume");"#;
             state.status,
             crate::session::workflow::tracker::WorkflowRunStatus::Failed
         );
+    }
+
+    // --- Journal recovery durability barriers (Session F4) ---
+
+    fn pinned_journal_storage() -> (
+        tempfile::TempDir,
+        Arc<crate::session::storage::ContainedDirectory>,
+        Arc<SessionJournalStorage>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || {
+            crate::session::storage::ContainedDirectory::open(
+                dir.path(),
+                std::path::Path::new(""),
+                "Workflow journal barrier fixture",
+                false,
+            )
+            .expect("pin Workflow journal barrier fixture")
+        };
+        let run = std::sync::Arc::new(open());
+        let storage = Arc::new(SessionJournalStorage::new(open()));
+        (dir, run, storage)
+    }
+
+    #[test]
+    fn journal_recovery_read_requires_sync_barriers_before_returning_bytes() {
+        let (_dir, run, storage) = pinned_journal_storage();
+        let dyn_storage: Arc<dyn workflow::JournalStorage> = storage.clone();
+
+        // Seed a durable Pending operation intent with no injected faults.
+        let mut journal = Journal::with_storage(dyn_storage.clone());
+        journal
+            .begin_operation(0, "wf.f4.op", "hash-0".into(), "op-f4".into())
+            .unwrap();
+        let completed = serde_json::json!({"value": "settled"});
+
+        // The live writer completes the operation while the file barrier is
+        // failing: the physical completion replacement line may be fully
+        // readable on disk, but durability was never confirmed and the live
+        // journal still folds nothing beyond its Pending intent.
+        storage.fail_file_sync.store(true, Ordering::SeqCst);
+        let error = journal
+            .complete_operation(0, "wf.f4.op", "hash-0".into(), completed.clone())
+            .expect_err("a failed completion must surface its file sync error");
+        assert!(error.to_string().contains("file sync"), "{error}");
+        assert_eq!(journal.entries().len(), 1);
+        let live_replay = journal
+            .replay_operation(0, "wf.f4.op", "hash-0")
+            .unwrap()
+            .expect("the live operation replays");
+        assert!(
+            matches!(
+                live_replay,
+                workflow::journal::OperationReplay::Pending { .. }
+            ),
+            "live journal must stay Pending after the failed completion: {live_replay:?}"
+        );
+
+        // The raw bytes on disk are readable and already contain the legal
+        // completion replacement line — exactly the cold-restore trap a
+        // barrier-less read would accept as Completed.
+        let raw = run
+            .read_bounded(
+                std::ffi::OsStr::new("journal.jsonl"),
+                "raw prefix",
+                workflow::journal::MAX_JOURNAL_BYTES,
+            )
+            .expect("the readable prefix exists on disk");
+        assert!(!raw.is_empty());
+        let raw_tail = raw
+            .strip_suffix(b"\n")
+            .unwrap_or(&raw)
+            .rsplit(|byte| *byte == b'\n')
+            .next()
+            .unwrap();
+        let raw_line: workflow::JournalEntry =
+            serde_json::from_slice(raw_tail).expect("the readable tail is a well-formed line");
+        assert_eq!(raw_line.seq, 0);
+        assert_eq!(
+            raw_line.result, completed,
+            "the readable line carries the completed result"
+        );
+
+        // A recovery read under the still-failing file barrier returns no
+        // bytes, so neither restore path can fold the unconfirmed completion.
+        let error = storage
+            .read_bounded(workflow::journal::MAX_JOURNAL_BYTES)
+            .expect_err("read must not bypass the file barrier");
+        assert!(error.to_string().contains("file sync"), "{error}");
+        let error = Journal::load_storage(dyn_storage.clone())
+            .expect_err("cold restore must not accept the unconfirmed completion");
+        assert!(
+            error.to_string().contains("file sync"),
+            "unexpected restore error: {error}"
+        );
+
+        // Same for a failing directory barrier with a healthy file barrier.
+        storage.fail_file_sync.store(false, Ordering::SeqCst);
+        storage.fail_dir_sync.store(true, Ordering::SeqCst);
+        let error = storage
+            .read_bounded(workflow::journal::MAX_JOURNAL_BYTES)
+            .expect_err("read must not bypass the directory barrier");
+        assert!(error.to_string().contains("directory sync"), "{error}");
+
+        // With both barriers healthy, recovery reads the same prefix and
+        // restores the same operation as Completed with the original result:
+        // the physical prefix keeps one intent and one completion, with no
+        // re-sent intent or second completion.
+        storage.fail_dir_sync.store(false, Ordering::SeqCst);
+        let bytes = storage
+            .read_bounded(workflow::journal::MAX_JOURNAL_BYTES)
+            .expect("healthy barriers admit the durable prefix");
+        assert_eq!(
+            bytes.iter().filter(|byte| **byte == b'\n').count(),
+            2,
+            "one intent line and one completion line, nothing more"
+        );
+
+        let restored = Journal::load_storage(dyn_storage).unwrap();
+        assert_eq!(restored.entries().len(), 1);
+        assert_eq!(
+            restored.entries()[0].result,
+            completed,
+            "the restored entry folds the first completion"
+        );
+        let replayed = restored
+            .replay_operation(0, "wf.f4.op", "hash-0")
+            .unwrap()
+            .expect("restored operation replays");
+        match replayed {
+            workflow::journal::OperationReplay::Completed(result) => {
+                assert_eq!(
+                    result, completed,
+                    "the first completion keeps its value with no new intent"
+                );
+            }
+            other => panic!("expected Completed replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn journal_recovery_read_missing_file_keeps_not_found_and_creates_nothing() {
+        let (_dir, run, storage) = pinned_journal_storage();
+        let error = storage
+            .read_bounded(workflow::journal::MAX_JOURNAL_BYTES)
+            .expect_err("a missing journal keeps NotFound semantics");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            run.read_bounded(
+                std::ffi::OsStr::new("journal.jsonl"),
+                "still missing journal",
+                8
+            )
+            .is_err(),
+            "recovery reads must not create the journal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_recovery_read_rejects_a_symlinked_journal() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, _run, storage) = pinned_journal_storage();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("journal.jsonl"), b"outside\n").unwrap();
+        symlink(
+            outside.path().join("journal.jsonl"),
+            dir.path().join("journal.jsonl"),
+        )
+        .unwrap();
+        let error = storage
+            .read_bounded(workflow::journal::MAX_JOURNAL_BYTES)
+            .expect_err("a symlinked journal must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("symlink"), "{error}");
+    }
+
+    #[test]
+    fn journal_recovery_read_keeps_the_byte_limit() {
+        let (_dir, run, storage) = pinned_journal_storage();
+        let mut file = run
+            .open_read_write_create(std::ffi::OsStr::new("journal.jsonl"))
+            .unwrap();
+        file.set_len(workflow::journal::MAX_JOURNAL_BYTES + 1)
+            .unwrap();
+        drop(file);
+        let error = storage
+            .read_bounded(workflow::journal::MAX_JOURNAL_BYTES)
+            .expect_err("an oversized journal must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("byte limit"), "{error}");
     }
 }

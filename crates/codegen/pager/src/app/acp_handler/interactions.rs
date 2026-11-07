@@ -63,9 +63,65 @@ pub(crate) fn handle_ask_user_question(
         return false;
     };
 
+    // Effective advisory (`blocking=false` after Shell policy): the pager's
+    // only obligation is to acknowledge presentation. The suggestion card is
+    // rendered from the tool call row in this session view (and recovers
+    // from its successful result on replay), so this branch must not touch
+    // the composer, an active blocking question, `question_pending`, or the
+    // turn-pause clock — the agent keeps running. The UI ACK is NOT a user
+    // answer. Queue/delivery deadlines belong to the shell.
+    if !ext_req.blocking {
+        // The card must be renderable BEFORE the Presented acknowledgement:
+        // upsert the structured questions, recommendations, and source
+        // identity onto this view's `ask_user_question` tool row (or a
+        // registered row when the call event has not landed yet). The tool
+        // row IS the storage — no pending registry, no composer/question
+        // state touched, and the turn keeps running.
+        let tracker = &mut agent.session.tracker;
+        let scrollback = &mut agent.scrollback;
+        tracker.present_advisory_card(
+            &ext_req.session_id,
+            &ext_req.tool_call_id,
+            ext_req.questions.clone(),
+            scrollback,
+        );
+        let presented = AskUserQuestionExtResponse::Presented;
+        let raw = serde_json::value::to_raw_value(&presented)
+            .expect("Presented serialization should not fail");
+        if ext
+            .response_tx
+            .send(Ok(acp::ExtResponse::new(raw.into())))
+            .is_err()
+        {
+            // Receiver closed (deadline raced the round-trip): the tool
+            // already treats the dropped ack as a transport failure — never
+            // claim Presented after a failed send.
+            tracing::warn!(
+                tool_call_id = %ext_req.tool_call_id,
+                "advisory ask_user_question Presented ack dropped (receiver closed)"
+            );
+        }
+        tracing::info!(
+            session_id = %ext_req.session_id,
+            tool_call_id = %ext_req.tool_call_id,
+            question_count = ext_req.questions.len(),
+            has_blocking_question = agent.question_view.is_some(),
+            target_active = is_active,
+            "Advisory question presented (no user wait)"
+        );
+        // New scrollback state (the card) warrants a repaint even when the
+        // owning view is parked off-screen — same rationale as the blocking
+        // path's unconditional `true`.
+        return true;
+    }
+
     // If a question is already active, cancel it before replacing.
     if let Some(mut old_qv) = agent.take_question_view() {
-        agent.session.turn_paused_duration += old_qv.opened_at.elapsed();
+        if !old_qv.is_advisory_reply_edit() {
+            // A local advisory-reply edit never paused the turn; only real
+            // blocking questions accumulate pause while being replaced.
+            agent.session.turn_paused_duration += old_qv.opened_at.elapsed();
+        }
         tracing::warn!(
             old_tool_call_id = %old_qv.tool_call_id,
             new_tool_call_id = %ext_req.tool_call_id,
@@ -86,16 +142,24 @@ pub(crate) fn handle_ask_user_question(
         // after answering the model's question.
         if let Some(ref kind) = old_qv.local_kind {
             use crate::views::question_view::LocalQuestionKind;
-            let cmd = match kind {
-                LocalQuestionKind::Fork { .. } => "/fork",
-                LocalQuestionKind::NewSession => "/new",
-                LocalQuestionKind::ProjectSelect { .. } => "project select",
-                LocalQuestionKind::DoctorFix { .. } => "/doctor fix",
-            };
-            let message = if matches!(kind, LocalQuestionKind::DoctorFix { .. }) {
-                "/doctor fix was cancelled because another question opened.".to_owned()
-            } else {
-                format!("{cmd} cancelled because another question opened.")
+            let message = match kind {
+                LocalQuestionKind::Fork { .. } => {
+                    "/fork cancelled because another question opened.".to_owned()
+                }
+                LocalQuestionKind::NewSession => {
+                    "/new cancelled because another question opened.".to_owned()
+                }
+                LocalQuestionKind::ProjectSelect { .. } => {
+                    "project select cancelled because another question opened.".to_owned()
+                }
+                LocalQuestionKind::DoctorFix { .. } => {
+                    "/doctor fix was cancelled because another question opened.".to_owned()
+                }
+                LocalQuestionKind::AdvisoryReply { .. } => {
+                    // The dropped artifact is only a local reply draft; the
+                    // suggestion card stays in history and stays replyable.
+                    "Reply draft closed because another question opened.".to_owned()
+                }
             };
             agent.scrollback.push_block(RenderBlock::notice(message));
         }

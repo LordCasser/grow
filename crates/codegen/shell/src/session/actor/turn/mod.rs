@@ -518,7 +518,9 @@ impl SessionActor {
     }
 
     /// Wait for turn-blocking subagents (up to 120s on the turn task),
-    /// snapshot, clear sticky. Background children never gate the drain: the
+    /// snapshot, clear sticky. The single budget covers the Outstanding query
+    /// queue and its ACK wait, so a silent responder cannot outlive it.
+    /// Background children never gate the drain: the
     /// prompt report is marked incomplete immediately and their spend reaches
     /// the session ledger when they finish.
     /// Cancel intentionally skips this multi-second drain (actor-loop safety).
@@ -541,9 +543,11 @@ impl SessionActor {
         self.finalize_usage_from_outcome(prompt_id, drain).await
     }
     /// Waits for turn-blocking folds only.
-    /// `fail_closed` on timeout or query failure; sticky and `background_live`
-    /// are report-level only (no ledger mark). Must run on the turn task (not
-    /// the session actor loop) so folds can land.
+    /// One absolute budget covers the coordinator queue and every Outstanding
+    /// ACK wait, and each poll round is clamped to that same deadline;
+    /// `fail_closed` on deadline expiry or query failure; sticky and
+    /// `background_live` are report-level only (no ledger mark). Must run on
+    /// the turn task (not the session actor loop) so folds can land.
     pub(super) async fn drain_subagent_usage_for_prompt_bounded(
         &self,
         prompt_id: &str,
@@ -552,12 +556,14 @@ impl SessionActor {
         const POLL: std::time::Duration = std::time::Duration::from_millis(50);
         let deadline = std::time::Instant::now() + max_wait;
         loop {
-            let reply = self.outstanding_reply_for_prompt(prompt_id).await;
+            let reply = self
+                .outstanding_reply_for_prompt_bounded(prompt_id, deadline)
+                .await;
             match reply.as_ref() {
                 None => {
                     tracing::warn!(
                         prompt_id,
-                        "outstanding subagent query failed; treating usage as incomplete"
+                        "outstanding subagent query failed or missed the freeze deadline; treating usage as incomplete"
                     );
                     return UsageDrainOutcome {
                         fail_closed: true,
@@ -588,7 +594,12 @@ impl SessionActor {
                     }
                 }
             }
-            tokio::time::sleep(POLL).await;
+            // Stay on the original absolute deadline: a round that starts just
+            // before the deadline must not sleep past it awaiting the next poll.
+            tokio::time::sleep_until(
+                std::cmp::min(std::time::Instant::now() + POLL, deadline).into(),
+            )
+            .await;
         }
     }
     pub(super) async fn snapshot_prompt_usage(
@@ -622,12 +633,21 @@ impl SessionActor {
         }
     }
     /// When freeze did not attach: incomplete if billed or may under-count; else omit.
+    /// Same bounded-observation convention as the cancel path (tasks_cancel):
+    /// completion runs on the actor loop, so a coordinator that never replies
+    /// must not block it past a short fixed window.
     pub(super) async fn error_path_usage_fallback(
         &self,
         prompt_id: &str,
     ) -> Option<crate::extensions::notification::PromptUsage> {
+        const OBSERVATION: std::time::Duration = std::time::Duration::from_millis(250);
         let may_undercount = Self::usage_incomplete_from_reply(
-            self.outstanding_reply_for_prompt(prompt_id).await.as_ref(),
+            self.outstanding_reply_for_prompt_bounded(
+                prompt_id,
+                std::time::Instant::now() + OBSERVATION,
+            )
+            .await
+            .as_ref(),
         );
         match self.chat_state_handle.try_get_prompt_usage().await {
             Ok(ledger) => crate::extensions::notification::PromptUsage::for_error_path(

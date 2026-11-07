@@ -324,3 +324,123 @@ Context-only delivery SHALL preserve its runtime producer identity and SHALL NOT
 #### Scenario: Long explicit steer survives recovery
 - **WHEN** 长 UTF-8 steer 经原身份持久消费后重建 Timeline
 - **THEN** 恢复的用户正文仍包含完整文本，重复 drain 不产生第二次消费或丢掉尾部。
+
+### Requirement: Canonical input lifecycle query
+
+ChatState SHALL 提供以 `input_id` 为键的只读 canonical 生命周期查询 `ChatStateHandle::input_state`，由 Timeline 既有输入折叠直接投影，不维护第二份输入登记或事件扫描。查询失败（actor 不可用）SHALL 返回 `Err`，该身份在 Timeline 中无持久 Submitted 事实 SHALL 返回 `Ok(None)`，两者不得混淆。投影 SHALL 区分模型上下文已发布（`Consumed`）与终局处理未发布（`Handled`，携带 route）；被后续接纳取代的输入 SHALL 保持既有 `Dismissed(RouteSuperseded)` 折叠，不新增 registry。同一事件流冷恢复后 SHALL 返回相同投影。Shell `grow/input/admission_status` SHALL 依据该投影输出既有 `handled` wire 形状，不再平行扫描 Handled 事件。
+
+#### Scenario: Handle 查询追踪完整生命周期
+
+- **WHEN** 调用方通过真实 ChatStateHandle 依次查询一个输入在 Submitted、Allowed、Consumed（或 Handled）提交后的状态
+- **THEN** 每个阶段返回该阶段的 canonical 投影；Handled 终局返回 `Handled { route }` 而非 `Consumed`。
+
+#### Scenario: 身份不存在与查询失败区分
+
+- **WHEN** 查询 Timeline 中没有 Submitted 事实的 input_id，或 actor 已关闭时查询任一 input_id
+- **THEN** 前者返回 `Ok(None)`，后者返回 `Err`，调用方不得把两者当作同一语义。
+
+#### Scenario: Route superseded 保持原折叠
+
+- **WHEN** 一次 Allow 携带 supersedes 取代一个已 Allowed 的旧输入后查询旧 input_id
+- **THEN** 返回 `Dismissed { reason: RouteSuperseded }`，该事实仍由输入折叠自身拥有。
+
+#### Scenario: 冷恢复返回同一投影
+
+- **WHEN** 从持久事件重建 Timeline 后查询同一 input_id
+- **THEN** 返回与原 Timeline 相同的生命周期投影，含 Handled 与 Consumed 的区分。
+
+#### Scenario: Shell handled wire 形状不变
+
+- **WHEN** `grow/input/admission_status` 观察一个已 Handled 的输入
+- **THEN** 输出原有 `handled` 状态形状，不再对事件流做第二次 Handled 扫描。
+
+证据与实施入口：`crates/codegen/chat-state/src/timeline.rs::Timeline::input_state`、`InputState`、`InputFold.consumption`，`crates/codegen/chat-state/src/commands.rs::ChatStateCommand::GetInputState`，`crates/codegen/chat-state/src/handle.rs::ChatStateHandle::input_state`，`crates/codegen/chat-state/src/actor/mod.rs` 查询分发，`crates/codegen/shell/src/extensions/session_admin.rs::read_durable_input_status`。
+
+### Requirement: Stable retry of an immutable input request returns the canonical admission state
+
+同 session/prompt 稳定身份的不可变请求重试 SHALL 先以 canonical Timeline fold
+（稳定 input identity 查询）命中并只读该输入的 payload_ref 核对完整不可变
+payload 与 requested_route（排除服务端冻结 skill_invocations，不剥用户正文、
+图片或 route）。命中后重试 SHALL 作为观察返回原 input identity 与当前
+canonical 状态，不重复 Submitted、接纳 Hook、入队或执行。服务端按 FIFO
+idle/running 边界派生 Prompt 与 Followup 的差异 SHALL NOT 构成重试冲突；
+显式 Steer、requested_route、正文、图片或 metadata 变化 SHALL 返回身份冲突
+并保留原输入。接纳查询 SHALL NOT 为核对一个 prompt 遍历读取全部历史 blob。
+
+#### Scenario: 已接纳请求的运行中重试
+
+- **WHEN** 一个 FIFO 输入已按 Prompt 接纳，当前有 regular turn 运行，客户端以
+  同 promptId 与相同不可变请求重试
+- **THEN** 返回原 input identity 与 canonical 状态观察，intent 派生差异不报
+  冲突，不重复 Hook、入队或执行。
+
+#### Scenario: ACK 丢失后的冷重试
+
+- **WHEN** 用户输入已持久接纳/执行，客户端丢失 ACK 后以原请求重试
+- **THEN** 返回原 input identity 与当前状态（submitted/allowed/blocked/
+  consumed/handled/dismissed 之一），接纳 Hook 与输入执行各只发生一次。
+
+#### Scenario: payload 或显式 route 变化
+
+- **WHEN** 同 session/prompt 重试携带不同正文、图片、metadata 或显式
+  requested_route/intent
+- **THEN** 返回身份冲突，原输入保留，新内容不触发 Hook 或入队。
+
+### Requirement: Duplicate retry responses are observations, not turn completion
+
+session/prompt 重复输入的应答 SHALL 使用内部 replay 完成种类携带原 input
+identity 与 canonical 状态，ACP 层 SHALL 在正常 completion、usage、roster 投影
+与 TurnCompleted 广播之前短路：StopReason::EndTurn 仅结束本次观察 RPC；meta
+只含 sessionId、promptId 与 `grow/inputAdmission`（inputId 和按现有
+input/admission_status 形状的 status）。重复分支 SHALL NOT 附 totalTokens、
+usage、structured output，SHALL NOT 发布新的 Working/Idle roster 投影或伪造
+RemovedFromQueue/TurnCompleted。重复分支 SHALL 先返回观察应答再回原持久确认；
+未取得本次实际提交确认的接纳错误 SHALL NOT 发布假的 roster Idle。新输入的
+原 Hook、错误与完成政策保持不变。直接 Steer 扩展应答形状保持，只同步消费
+canonical 状态。
+
+#### Scenario: Running 状态下重试已接纳输入
+
+- **WHEN** 输入已接纳（例如 idle 时按 Prompt 接纳）且当前有 regular turn
+  运行，客户端以同 promptId 与相同不可变请求重试 session/prompt
+- **THEN** RPC 以 EndTurn 观察应答返回原 inputId 与当前 canonical 状态，
+  不发布 Working/Idle、不附 usage/totalTokens、不发新的 TurnCompleted 或
+  RemovedFromQueue。
+
+#### Scenario: 接纳错误未获提交确认
+
+- **WHEN** 本次提交未取得 durable 用户消息确认即失败
+- **THEN** 不发布假的 roster Idle；执行开始后的错误仍沿原完成/error 路径。
+
+### Requirement: Pending steering reconstructs against the preserved turn
+
+Cold input reconstruction SHALL use the canonical runtime checkpoint to distinguish a preserved logical Turn from a target closed by interruption recovery. An admitted, unconsumed Steer input targeting the preserved Turn SHALL retain its original route, identity and content in the existing steering owner until the restored Turn reaches its normal safe boundary. Reconstruction SHALL NOT append a FIFO reroute, rerun admission Hooks, submit the input again or consume it before runtime execution release. Inputs whose targets were durably closed by normal interruption recovery SHALL retain the existing validated FIFO reroute behavior.
+
+#### Scenario: Suspended target survives physical runtime retirement
+
+- **WHEN** a session with a valid suspended checkpoint for Turn T and an allowed unconsumed Steer(T) is cold loaded after the old actor and persistence retire
+- **THEN** restoration reaches the original runtime release barrier, the input remains bound to T, and T consumes it exactly once at its existing safe boundary without repeating admission.
+
+#### Scenario: Process interruption has no preserved checkpoint
+
+- **WHEN** interruption recovery closes the input's target Turn without a preserved runtime checkpoint
+- **THEN** reconstruction durably reroutes that input to FIFO once and preserves its original payload and input identity under the existing validator.
+
+### Requirement: Durable queued replacements retain their recovery slot and runtime identity
+
+A saved replacement of a pending FIFO row SHALL inherit the replaced row's canonical FIFO position across cold recovery. The queue row and runtime prompt identity SHALL remain the original row identity while the edited submission retains its own immutable admission identity and current payload/version. Recovery SHALL consume the Timeline-owned replacement order, without replaying superseded inputs or their Hooks.
+
+#### Scenario: Earlier queued row is edited after later rows arrive
+
+- **WHEN** pending rows A, B and C are admitted in that order and A is durably replaced one or more times after B and C are admitted
+- **THEN** recovery restores the latest A replacement ahead of B and C, with A's original row/runtime identity and the latest content, version and input identity.
+
+#### Scenario: Multiple rows are independently edited
+
+- **WHEN** A is edited twice and B is edited once before any row is consumed
+- **THEN** every recovery cut after a successful replacement admission restores A, B and C once in their original order, and each superseded input remains ineligible for execution.
+
+#### Scenario: Replacement admission is unresolved or rejected
+
+- **WHEN** an edit has no successful durable replacement admission
+- **THEN** recovery uses the last successfully admitted row content and identity, and does not expose an unconfirmed replacement as accepted work.

@@ -1,0 +1,11 @@
+# Investigation boundary
+
+父负责实际根因判断，当前只读调查main8ab486a6。所见child核心执行在其独立Session/runtime中，不能把任务概念机械理解为stdout子进程EOF；平台文件实现、Shell命令进程或Hook可能参与，但都须实际证据。
+
+模型最终正文可显示在prompt返回前；甚至child `Turn.ended`已提交，仍可能在等待post-turn hook、flush、文件状态收尾与usage冻结（session/actor/turn/admission.rs:1248、1557、1580）。handle_request.rs先等待prompt返回，之后reporter.execution_returned，再在30秒finalizationcycle中写outputartifact、child SubagentResult、父usage ACK、父Ended及完成receipt。输出artifact/持久化worker的未知结果保留owner；超时不允许重写新terminal。后续finalization还核旧child actor/persistence已退役、planning结果及receipt的确认。当前核心wrapper没有另设Windows结果提交算法，底层storage/线程退出仍需平台事实。
+
+只要Windows文件、process状态与taskID不可见，源码只能提供可区分假设，不能确认死锁。优先读取现有trace/typedstage/commitcertainty，而不是给await任意加timeout或看到Result就强制标Completed。保留原始结果、partialtool准入、用量、严格父子ref和只交付一次的不变量。
+
+用户随后明确无法取得Windows资料，授权改为纯代码分析。本次不再等待版本、父子ID或trace，以可定位的控制流/平台实现和反例条件完成调查；不把静态可发生的等待形态当实际Windows根因。使用bigmodel/glm-5.3默认effort作独立只读Windows artifact路径复核，父保留跨模块结论；不开Windows沙箱、不读用户会话、不新增测试或业务代码。
+
+源码已确认用量冻结的OutstandingACK不受120秒循环deadline覆盖；after-snapshot及flushACK在prompt返回前等待；30秒/3次收尾恢复耗尽后只读查询不会起新周期。SessionEnd在child Result后写Hook的既有顺序债务也已核对，保持独立修复边界。后续设计应在各owner区别读操作的不可得结果和持久写入的未知ACK，保留原结果、费用、writerlease及只交付一次；不能以一个通用timeout抹掉这些区别。

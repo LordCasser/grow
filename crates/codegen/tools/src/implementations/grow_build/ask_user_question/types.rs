@@ -59,6 +59,17 @@ pub struct AskUserQuestionExtRequest {
     pub questions: Vec<Question>,
     /// Controls whether the client shows plan-mode-only actions.
     pub mode: AskUserQuestionMode,
+    /// Effective blocking mode for this call (NOT the requested mode):
+    /// `true` waits for the user's typed response (the four user-path
+    /// outcomes); `false` is advisory — the client only acknowledges that
+    /// the questions were shown by replying [`Presented`][Self::Presented].
+    #[serde(default = "default_blocking")]
+    pub blocking: bool,
+}
+
+/// Serde default for `blocking` fields: absent means blocking.
+fn default_blocking() -> bool {
+    true
 }
 
 /// ACP `ext_method` response payload (client/pager returns to shell coordinator).
@@ -98,6 +109,11 @@ pub enum AskUserQuestionExtResponse {
     },
     /// User cancelled / dismissed (Path D). NOT an error.
     Cancelled,
+    /// Presentation acknowledgement for an effective advisory question
+    /// (`blocking = false`). Means "the questions are on screen", NOT a user
+    /// answer. Only valid as a reply to an advisory request; a blocking
+    /// request receiving this is malformed.
+    Presented,
 }
 
 // ── In-process types (coordinator <-> tool) ──────────────────────────────
@@ -137,6 +153,9 @@ pub enum UserQuestionResponse {
     },
     /// User explicitly dismissed (Esc). NOT an error.
     Cancelled,
+    /// Advisory presentation acknowledgement: the client showed the
+    /// questions. NOT a user answer; only valid for `blocking = false`.
+    Presented,
 }
 
 /// Infrastructure failure (NOT a user action).
@@ -161,7 +180,12 @@ pub enum UserQuestionError {
 pub struct UserQuestionRequest {
     pub tool_call_id: String,
     pub questions: Vec<Question>,
+    /// Effective blocking value for this admission (after preference
+    /// enforcement), NOT the model's requested `input.blocking`.
+    pub blocking: bool,
     /// The tool and worker share one deadline, including time in the queue.
+    /// Blocking: optional user-wait budget. Advisory: the fixed
+    /// presentation budget.
     pub deadline: Option<tokio::time::Instant>,
     #[educe(Debug(ignore))]
     pub result_tx: oneshot::Sender<UserQuestionResult>,
@@ -217,6 +241,7 @@ impl AskUserQuestionExtResponse {
                 annotations,
             },
             Self::Cancelled => UserQuestionResponse::Cancelled,
+            Self::Presented => UserQuestionResponse::Presented,
         }
     }
 }
@@ -248,6 +273,7 @@ mod tests {
                     },
                 ],
                 multi_select: None,
+                recommended_option: None,
                 id: None,
             },
             Question {
@@ -267,6 +293,7 @@ mod tests {
                     },
                 ],
                 multi_select: None,
+                recommended_option: None,
                 id: None,
             },
         ]
@@ -304,12 +331,14 @@ mod tests {
             tool_call_id: "tc-1".to_string(),
             questions: vec![],
             mode: AskUserQuestionMode::Plan,
+            blocking: true,
         };
         let json = serde_json::to_value(&req).unwrap();
         // camelCase field names
         assert!(json.get("sessionId").is_some());
         assert!(json.get("toolCallId").is_some());
         assert_eq!(json["mode"], "plan");
+        assert_eq!(json["blocking"], true);
     }
 
     #[test]
@@ -319,6 +348,7 @@ mod tests {
             tool_call_id: "tc-1".to_string(),
             questions: sample_questions(),
             mode: AskUserQuestionMode::Default,
+            blocking: true,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: AskUserQuestionExtRequest = serde_json::from_str(&json).unwrap();

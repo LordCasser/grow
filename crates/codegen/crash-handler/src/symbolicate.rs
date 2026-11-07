@@ -1,12 +1,22 @@
-//! Backtrace symbolication for crash reports.
+//! Crash report assembly for captured raw evidence.
 //!
-//! Runs at normal startup (not in a signal handler), so full Rust APIs
-//! are available. Resolves raw instruction pointer addresses from the
-//! crash blob into function names and file locations.
+//! Startup recovery runs in a new process whose address map has no
+//! established relationship to the crashing process's map. Capture format
+//! v1 records only absolute instruction pointers (plus pid/version), not
+//! module identity or load addresses, so this module preserves the raw
+//! addresses and never consults a symbolizer: resolving them against the
+//! current map would attribute the crash to whatever now occupies those
+//! addresses (ASLR re-slides every run, binaries change between versions).
+//! Equal pid or version strings do not establish address-space provenance.
 
 use crate::format::CrashBlob;
 
-/// A resolved backtrace frame.
+/// A captured backtrace frame.
+///
+/// `ip` is the raw instruction pointer recorded by the signal handler in
+/// the crashing process. The symbol fields are `None` whenever no verified
+/// symbolication exists for that address; recovery never fills them from
+/// the recovering process's own address map.
 #[derive(Debug, Clone)]
 pub struct ResolvedFrame {
     pub ip: usize,
@@ -15,33 +25,26 @@ pub struct ResolvedFrame {
     pub lineno: Option<u32>,
 }
 
-/// Resolve raw instruction pointers from a crash blob into symbol names.
+/// Preserve the captured instruction pointers of a crash blob verbatim.
 ///
-/// Uses the `backtrace` crate's `resolve` function. This works best when
-/// the binary has debug info or at least a symbol table. For stripped
-/// release binaries, symbol names may still be available (e.g.
-/// `my_app::render::draw_frame`) but file/line info will
-/// be missing.
+/// Capture format v1 stores absolute addresses without module identity or
+/// load-address mapping, so the recovering process cannot verify that a
+/// captured address belongs to any of its own images. Symbolicating such
+/// addresses against the current map would attribute the crash to whatever
+/// now occupies that address; equal pid or version strings do not
+/// establish address-space provenance either. No resolver is consulted:
+/// every address is returned as-is with all symbol fields left `None`.
+/// Offline symbolication remains possible from the report's raw addresses
+/// only with the crashing binary and its load mapping, which format v1
+/// does not record.
 pub fn resolve_frames(blob: &CrashBlob) -> Vec<ResolvedFrame> {
     blob.frames
         .iter()
-        .map(|&ip| {
-            let mut resolved = ResolvedFrame {
-                ip,
-                symbol_name: None,
-                filename: None,
-                lineno: None,
-            };
-
-            backtrace::resolve(ip as *mut std::ffi::c_void, |sym| {
-                if resolved.symbol_name.is_none() {
-                    resolved.symbol_name = sym.name().map(|n| n.to_string());
-                    resolved.filename = sym.filename().map(|f| f.display().to_string());
-                    resolved.lineno = sym.lineno();
-                }
-            });
-
-            resolved
+        .map(|&ip| ResolvedFrame {
+            ip,
+            symbol_name: None,
+            filename: None,
+            lineno: None,
         })
         .collect()
 }
@@ -64,6 +67,14 @@ pub fn format_report(blob: &CrashBlob, frames: &[ResolvedFrame]) -> String {
 
     // Format timestamp as ISO 8601 (best-effort without chrono dependency).
     out.push_str(&format!("Time:    {} (unix)\n", blob.timestamp));
+
+    // Raw v1 captures carry no module identity or load addresses, so the
+    // addresses below were recorded by a previous process and cannot be
+    // verified against this process's images. State the limitation before
+    // the backtrace so the report is never read as symbolicated output.
+    out.push_str(
+        "\nNote: frames are raw addresses from a previous process; module\nidentity and load addresses were not captured, so automatic\nsymbolication is unavailable and no function attribution is made.\n",
+    );
 
     out.push_str(&format!("\nBacktrace ({} frames):\n", frames.len()));
     for (i, frame) in frames.iter().enumerate() {
@@ -117,6 +128,83 @@ fn si_code_name(sig: u8, code: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A known non-inline function of the recovering (test) process. A
+    /// pre-PB06 resolver attributed raw addresses pointing here to this
+    /// very function; recovery must keep the address unresolved instead.
+    #[inline(never)]
+    fn current_process_function() {
+        std::hint::black_box(());
+    }
+
+    fn current_process_function_address() -> usize {
+        std::hint::black_box(current_process_function as fn() as usize)
+    }
+
+    #[test]
+    fn resolve_frames_preserves_raw_addresses_without_attribution() {
+        let blob = CrashBlob {
+            signal: 11,
+            si_code: 1,
+            si_addr: 0,
+            pid: 4242,
+            timestamp: 1_700_000_000,
+            frames: vec![
+                current_process_function_address(),
+                current_process_function_address() + 0x10,
+            ],
+            app_version: "0.0.0-tst".to_string(),
+        };
+
+        let frames = resolve_frames(&blob);
+
+        assert_eq!(frames.len(), 2, "one output frame per captured ip");
+        assert_eq!(
+            frames[0].ip, blob.frames[0],
+            "raw ip must be preserved verbatim"
+        );
+        assert_eq!(frames[1].ip, blob.frames[1]);
+        for frame in &frames {
+            assert!(
+                frame.symbol_name.is_none(),
+                "unverifiable address must not be attributed to the current map, got {:?}",
+                frame.symbol_name
+            );
+            assert!(frame.filename.is_none());
+            assert!(frame.lineno.is_none());
+        }
+    }
+
+    #[test]
+    fn format_report_states_symbolication_unavailable_for_raw_captures() {
+        let ip = current_process_function_address();
+        let blob = CrashBlob {
+            signal: 11,
+            si_code: 1,
+            si_addr: 0,
+            pid: 4242,
+            timestamp: 1_700_000_000,
+            frames: vec![ip],
+            app_version: "0.0.0-tst".to_string(),
+        };
+
+        let report = format_report(&blob, &resolve_frames(&blob));
+
+        assert!(
+            report.contains("previous process"),
+            "report must state the capture provenance:\n{report}"
+        );
+        assert!(report.contains("symbolication is unavailable"));
+        assert!(report.contains("no function attribution is made"));
+        assert!(
+            report.contains(&format!("{ip:#018x}")),
+            "raw ip must be preserved in the report"
+        );
+        assert!(
+            !report.contains("current_process_function"),
+            "report must not attribute the raw address to the current process:\n{report}"
+        );
+    }
 
     #[test]
     fn signal_names() {

@@ -728,12 +728,10 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     {
         return false;
     }
-    // `rg --pre <cmd>` runs <cmd> per searched file; `--pre-glob` only filters.
-    if head == "rg"
-        && inner
-            .iter()
-            .any(|w| w == "--pre" || w.starts_with("--pre="))
-    {
+    // `rg --pre`/`--hostname-bin <cmd>` runs an external program per search;
+    // `--pre-glob` only filters. Shared classifier with the permission
+    // manager (`manager.rs::rg_selects_external_program`).
+    if head == "rg" && super::manager::rg_selects_external_program(inner) {
         return false;
     }
     // kubectl with caller-controlled kubeconfig/endpoint/identity can run an
@@ -2062,7 +2060,7 @@ mod tests {
     }
 
     /// `rg --pre <cmd>` executes <cmd> per searched file → must not auto-allow,
-    /// mirroring `manager.rs::rg_has_pre_flag`. `--pre-glob` only filters and
+    /// mirroring `manager.rs::rg_selects_external_program`. `--pre-glob` only filters and
     /// stays routine.
     #[test]
     fn heuristic_guards_rg_pre() {
@@ -2079,6 +2077,53 @@ mod tests {
         assert_eq!(v("rg --pre=./pre.sh TODO ."), ClassifierVerdict::Block);
         assert_eq!(v("rg --pre-glob '*.pdf' TODO ."), ClassifierVerdict::Allow);
         assert_eq!(v("rg TODO ."), ClassifierVerdict::Allow);
+    }
+
+    /// `rg --hostname-bin FILE` executes `FILE` even when hyperlink output is
+    /// disabled, so neither flag form may ride the routine fast path.
+    #[test]
+    fn heuristic_guards_rg_hostname_bin() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        assert_eq!(
+            v("rg --hostname-bin ./h.sh TODO ."),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("rg --hostname-bin=./h.sh TODO ."),
+            ClassifierVerdict::Block
+        );
+        // Helper still runs with hyperlink/color output disabled.
+        assert_eq!(
+            v("rg --hyperlink-format=none --hostname-bin ./h.sh TODO ."),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("rg --color=never --hostname-bin ./h.sh TODO ."),
+            ClassifierVerdict::Block
+        );
+        // Option-value `--`: the following --hostname-bin is still a real
+        // flag (verified executing on ripgrep 15.2).
+        assert_eq!(
+            v("rg --glob -- --hostname-bin ./h.sh needle file.txt"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("rg --regexp -- --hostname-bin=./h.sh needle file.txt"),
+            ClassifierVerdict::Block
+        );
+        // Conservative: flag-shaped words after a plain `--` also block.
+        assert_eq!(v("rg -- --hostname-bin TODO ."), ClassifierVerdict::Block);
+        // Ordinary searches, including plain literal `--` operands, stay Allow.
+        assert_eq!(v("rg TODO ."), ClassifierVerdict::Allow);
+        assert_eq!(v("rg -- pattern -- file"), ClassifierVerdict::Allow);
     }
 
     /// `kubectl` with a caller-controlled kubeconfig/endpoint/identity flag must

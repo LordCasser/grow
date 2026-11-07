@@ -718,7 +718,7 @@ impl ToolOutput {
             ToolOutput::SetSubagentModel(output) => {
                 serde_json::to_string(output).expect("subagent model admission is JSON data")
             }
-            ToolOutput::AskUserQuestion(AskUserQuestionOutput { message }) => message.clone(),
+            ToolOutput::AskUserQuestion(AskUserQuestionOutput { message, .. }) => message.clone(),
             ToolOutput::Monitor(o) => {
                 if o.persistent {
                     format!(
@@ -827,6 +827,25 @@ pub enum TodoWriteOutput {
 pub struct AskUserQuestionOutput {
     /// Pre-formatted tool result string for the model.
     pub message: String,
+    /// Structured advisory payload, present only after a successful advisory
+    /// presentation acknowledgement (`blocking = false` admitted as advisory).
+    /// `None` for every blocking result. Source routing (which session owns
+    /// the question) comes from this tool event's existing session identity,
+    /// not from fields added here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory: Option<AdvisoryQuestion>,
+}
+/// Structured advisory-question payload for Pager card recovery.
+///
+/// Carries the original tool-call identity and the questions as presented
+/// (each with its Agent-recommended option). It records that the questions
+/// were shown — never a user answer.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AdvisoryQuestion {
+    /// Tool call id of the advisory question.
+    pub tool_call_id: String,
+    /// The presented questions, each carrying its Agent recommendation.
+    pub questions: Vec<crate::implementations::grow_build::ask_user_question::Question>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlanControlOutput {

@@ -175,7 +175,6 @@ impl WorkspaceHandle {
             workspace_home,
             #[cfg(test)]
             post_resolve_test_hook: parking_lot::Mutex::new(None),
-            client_fs_hash_memo: Default::default(),
         };
         Ok(Self {
             shared: Arc::new(shared),

@@ -1,0 +1,5 @@
+# Bounded transport experiment
+
+父已读channel/common/gateway：public mpsc Unbounded两侧队列，acp_send send→oneshot，GatewayReceiver每msg spawn_fn默认spawn_local。使用真实gateway sender/receiver和受控handler/barrier，有限并发32/128/512（足以区分常数上限和随producer增长，不无限flood）。阶段一暂不poll receiver证明queue admission数；阶段二poll receiver但handler卡在barrier，记录active/peak/pending；release后核全部已接纳response完成、后续普通请求正常。payload固定1KiB、计数与elapsed可复现，系统内存若能窄观测则附，不能用估算字节假称RSS实测。不要为实验引入依赖或production counters。用现with_spawn_fn或私有test handler观测；不需要全链CLI或外部网络。
+
+Coder只在gateway.rs测试区（或同crate私有test module）增加ignored测试/必要fixture和本目录verification/tasks，不改production/API/manifest/lock/其它模块。准备fixture后报告exact命令排Cargo，保所有既有dirty。有效实验必须实际通过有限旧生产路径，zero test/启动失败不计。返回已确认queue/handler增长、释放收敛、缺少什么证据才能选policy；不自主改预算/Control优先级。取消/permission/reverse callback/长prompt的死锁风险由父决定行为设计，单pure experiment不声称ACP-1修复闭合。
