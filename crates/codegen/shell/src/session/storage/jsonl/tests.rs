@@ -7656,13 +7656,19 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
             let error = deleting
                 .delete_session_by_id_sync(parent_info.id.0.as_ref(), None)
                 .expect_err("a linked parent cannot be explicitly deleted by itself");
-            assert!(error.to_string().contains(child_info.id.0.as_ref()));
+            assert!(
+                error.to_string().contains(child_info.id.0.as_ref()),
+                "parent deletion: {error:?}; terminal={has_terminal}, surface={surface_completion}, receipt={receipt}, outcome={outcome:?}, stale={stale}"
+            );
             drop(deleting);
             let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
             let error = deleting
                 .delete_session_by_id_sync(child_info.id.0.as_ref(), None)
                 .expect_err("a linked child cannot be explicitly deleted by itself");
-            assert!(error.to_string().contains(parent_info.id.0.as_ref()));
+            assert!(
+                error.to_string().contains(parent_info.id.0.as_ref()),
+                "child deletion: {error:?}; terminal={has_terminal}, surface={surface_completion}, receipt={receipt}, outcome={outcome:?}, stale={stale}"
+            );
             drop(deleting);
         }
         let (deleted, errors) = cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap();
@@ -8326,6 +8332,89 @@ async fn cleanup_preserves_callers_live_writer() {
     assert!(!observer.try_acquire_writer_lease(&info).unwrap());
     drop(writer);
     assert!(observer.try_acquire_writer_lease(&info).unwrap());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writer_lease_release_does_not_wait_for_inherited_descriptors() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    const CHILD: &str = "GROW_TEST_INHERITED_WRITER_FD";
+    const READY: &str = "GROW_TEST_INHERITED_WRITER_READY";
+    const TEST: &str = "session::storage::jsonl::tests::writer_lease_release_does_not_wait_for_inherited_descriptors";
+    if let Ok(fd) = std::env::var(CHILD) {
+        let fd = fd.parse::<libc::c_int>().unwrap();
+        // This child only retains a descriptor, never a storage writer owner.
+        assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        std::fs::write(std::env::var_os(READY).unwrap(), b"inherited").unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0]);
+        return;
+    }
+
+    struct KillChildOnDrop(std::process::Child);
+    impl Drop for KillChildOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    for explicit_release in [false, true] {
+        let root = TempDir::new().unwrap();
+        let info = create_test_info();
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        writer.init_session(&info, default_model_id()).await.unwrap();
+        let retained = writer.clone();
+        let key = format!("{}\0{}", info.id, info.cwd);
+        let fd = writer.writer_leases.lock().unwrap()[&key].file.as_raw_fd();
+        let ready = root.path().join("inherited-ready");
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, fd.to_string())
+            .env(READY, &ready)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null());
+        // Extend the normal fork-to-exec inheritance window deterministically.
+        // Only this child clears CLOEXEC; the parent's descriptor is unchanged.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        #[expect(clippy::disallowed_methods, reason = "This isolated descriptor fixture has a kill/wait guard and bounded readiness wait")]
+        let child = command.spawn().unwrap();
+        let mut child = KillChildOnDrop(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !ready.is_file() && std::time::Instant::now() < deadline {
+            assert!(child.0.try_wait().unwrap().is_none(), "descriptor child exited before readiness");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ready.is_file(), "descriptor child did not become ready before deadline");
+
+        let replacement = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        assert!(!replacement.try_acquire_writer_lease(&info).unwrap());
+        drop(writer);
+        assert!(!replacement.try_acquire_writer_lease(&info).unwrap(), "a real shared owner still holds the lease");
+        if explicit_release {
+            retained.release_writer_lease(&key).unwrap();
+        } else {
+            drop(retained);
+        }
+        assert!(child.0.try_wait().unwrap().is_none(), "the inherited descriptor must still be held");
+        let acquired = replacement.try_acquire_writer_lease(&info).unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(acquired, "retired writer lock outlived its owner; explicit_release={explicit_release}");
+
+        let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        assert!(!contender.try_acquire_writer_lease(&info).unwrap(), "closing an inherited descriptor must not unlock the replacement");
+        drop(replacement);
+        assert!(contender.try_acquire_writer_lease(&info).unwrap());
+    }
 }
 
 #[tokio::test]

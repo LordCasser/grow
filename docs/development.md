@@ -436,6 +436,8 @@ Windows 协调清单用句柄级原子替换保留已有读者；独立会话加
 
 会话 TTL 按已验证的 parent/child Timeline 闭链作为回收单位：所有成员必须分别过期、没有 writer 且结果与交付责任闭合。提交后的回收意图会在重启后继续完成；身份不符时保留整个意图和相关目录。显式单 session 删除遇到跨会话边时会拒绝并指出关联 ID。详见 [闭链回收 change](../openspec/changes/archive/2026-10-19-reclaim-closed-session-chains/design.md)。
 
+writer lease 由 adapter 共享 owner 持有，在最后一个 owner 退役或显式释放时先解锁再关闭文件。Unix 子进程在 fork 到 exec 之间继承的描述符不能延长已退役 writer 的所有权；仍存活的真实 clone 继续阻止替代 writer。排查关联删除断言时保留实际错误与矩阵条件，区分 writer 忙、canonical 校验失败和关联会话拒绝，不能把错误文本断言失败解释为已经误删。见 [完整 writer 退役契约](../openspec/specs/session-timeline/spec.md#requirement-drain-the-complete-session-writer-incarnation)。
+
 询问按 source session 与 inquiry ID 建立稳定身份，source/target Timeline 约束重试、恢复、响应关联和取消；见 [询问身份与恢复契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-identity-and-replay-are-durable-across-session-recovery)。
 
 source 的 durable startup 与 runtime 登记使用同一 admission 边界，查询也在该边界内回退到历史，避免把正在接纳的询问误判为重启遗留。对应契约见 [启动与查询一致性](../openspec/specs/local-coordination/spec.md#requirement-live-source-inquiry-startup-and-queries-share-an-admission-boundary)。协调回归包含 actor/runtime 单测及 `python3 scripts/test_local_coordination.py --binary <本次构建的 grow>` 的真实独立进程测试；包级测试通过不能代替后者。`Local agent coordination` workflow 对相关 PR、相关 main push 及手动触发执行；发布 workflow 仍对可原生运行的实际 release binary 执行同一进程回归。

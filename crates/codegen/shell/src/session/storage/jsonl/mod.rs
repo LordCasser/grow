@@ -52,6 +52,22 @@ type TimelinePrefix = std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>;
 type TimelinePrefixCache =
     std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, TimelinePrefix>>>;
 
+/// The shared adapter owner, not an inherited descriptor, owns this lease.
+struct SessionWriterLease {
+    file: std::fs::File,
+}
+
+impl Drop for SessionWriterLease {
+    fn drop(&mut self) {
+        // Unix flock survives close while a forked child still holds the same
+        // open file description, even for CLOEXEC files before the child execs.
+        // Explicitly unlock only when the shared map releases this owner.
+        if let Err(error) = FileExt::unlock(&self.file) {
+            tracing::warn!(%error, "failed to unlock session writer lease");
+        }
+    }
+}
+
 /// JSONL storage under `{root}/sessions/{encoded_cwd}/{session_id}/`.
 /// Long CWDs use the shared bounded slug/hash encoding.
 #[derive(Clone)]
@@ -64,7 +80,7 @@ pub struct JsonlStorageAdapter {
         >,
     >,
     writer_leases:
-        std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, std::fs::File>>>,
+        std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, SessionWriterLease>>>,
     timeline_prefixes: TimelinePrefixCache,
     #[cfg(test)]
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
@@ -3664,7 +3680,7 @@ impl JsonlStorageAdapter {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
             Err(error) => return Err(error),
         }
-        leases.insert(key, lease);
+        leases.insert(key, SessionWriterLease { file: lease });
         Ok(true)
     }
 
