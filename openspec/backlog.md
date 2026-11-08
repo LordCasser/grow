@@ -53,7 +53,7 @@ AC-07 ACP 更新采用已通过真实 bare remote 的旧红新绿；checkout 与
 | AC-08 · P2 · 卸载/普通更新I/O失败 | plugin application分别传播durable失败与部分完成 | 普通 Install 已独立验收归档；卸载 removal/save 与普通更新 save 的错误传播本轮未实施，继续按独立任务保留，不把installer重写成框架 |
 | macOS 文件监听退役抖动 · P2 · 现场待进一步复现 | 通用 fsnotify watcher 的 native Drop/join 与进程退出尾部 | 2.6.2 长历史 CLI 验证中，一轮 filesystem watcher 退役 4747ms，runtime 4845ms 已确认但进程 6019ms 仍活；其它同负载两轮 actual wait 225ms。慢段未采到动态栈，源码有同步 join，不能凭两轮成功宣称该 OS 抖动已修。保留 `/tmp/grow-complex-cli-acceptance-ready-8cf671e4/` 与 `/tmp/grow-complex-cli-slowwatch-8cf671e4/`，独立定位，不扩大本轮为通用 fsnotify backend 重写。 |
 | ACP-1 · 容量债务 | ACP transport明确queue/handler预算及过载语义 | [客户端报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/client-ui.md)；静态风险，先慢handler/生产者负载实验或证明现有外部上限，不预设正常CLI失效阈值 |
-| MD-1 · 性能债务 | Markdown开放fence输出复用边界 | 同报告，逐帧clone已知residual；先分别测parse和copy成本与帧预算，再决定最小表示变化 |
+| MD-1 · 已测量性能债务 | Markdown开放fence输出复用边界 | [优化构建测量](changes/archive/2026-11-09-measure-open-fence-copy-costs/verification.md)：502 项输出回归及显式测量通过；4096 行合成 YAML 的 warm clone 为 3.101ms，实际 Markdown 增长帧中位 7.772ms、最大 8.638ms。未超过默认 30FPS 动画间隔不等于全 UI 预算通过；累计复制仍为二次增长，未改生产表示或宣称债务已修复。 |
 | Workflow测试隔离 · 工具维护 | 复用测试sandbox隔离user discovery，不改产品manifest上限 | [固定产物隔离对照](changes/archive/2026-11-06-diagnose-workflow-manifest-capacity/analysis.md)：同产物非隔离25fail、隔离147pass；本轮集成已用隔离环境验证，用户资源字段的精确字节占比未测，不以假设提高512KiB上限 |
 | Agent公共实体用途核对 · 待用途核对 | Agent owner确认ToolExecConfig/Retry与preset public seam消费者 | [配置报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/agent-config.md)，无仓内消费不足以证明公开API可删；先确认受支持外部产品需求，再做窄删除/依赖收缩，不预建框架；announcements直接依赖config已独立[验收](changes/archive/2026-11-07-depend-on-config-for-announcements/verification.md)，原转发路径和状态语义保持 |
 
@@ -83,7 +83,7 @@ AC-07 ACP 更新采用已通过真实 bare remote 的旧红新绿；checkout 与
 用户无法取得Windows现场，明确改为纯代码分析。主报告见[收尾链路分析](changes/archive/2026-11-06-investigate-windows-subagent-result-stall/investigation.md)。以下为源码边界，均不等于该机器根因已确认，不在本轮实施：
 
 - **已闭合的观察与快照边界**：Shell Outstanding ACK和轮询共用原绝对期限，超时保留incomplete及child责任，见[用量冻结修复与18项回归](changes/archive/2026-11-06-bound-usage-freeze-observation/verification.md)。Workspace after读取采用5秒总观察预算、保留已成功项，未知与确认不存在分开；Shell最新触及点未知时给出snapshot_unavailable，见[after-snapshot与rewind验证](changes/archive/2026-11-06-bound-after-snapshot-capture/verification.md)。这些验证不证明Windows现场根因，也不提供强制中断同步I/O或锁等待的保证。
-- **有限finalization周期的readiness阻塞（需先定是否改政策）**：原I/O或actor/persistence未退役时，推进可在没有新写入的情况下耗掉三次机会；owner随后退出也不单独起新周期，状态/wait只读，新Turn准入才开下一周期。现契约明确有限重试与待修复状态，此行为不能直接称协议错误。若改善自动收敛，应核原周期内readiness检查和mutation/ACK次数是否应分开，保留绝对期限及writerlease，不以无限续期修复。已登记SessionEnd顺序问题仍单独处理，见下项。
+- **readiness 预算边界已闭合**：原“未就绪观察耗掉三次机会”的问题已由[独立修复](changes/archive/2026-11-06-separate-finalization-readiness-budget/verification-shell.md)关闭。当前 readiness 观察不消耗 reconciliation 尝试，原绝对期限、有限 mutation/ACK 次数及 writer lease 保持；child SessionEnd/Result 顺序也已[独立验收](changes/archive/2026-11-06-finalize-child-hooks-before-result/verification.md)。这些源码与回归结论不等同于 Windows 现场根因确认。
 
 ## 明确暂缓
 

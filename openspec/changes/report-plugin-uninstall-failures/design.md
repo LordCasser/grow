@@ -7,3 +7,7 @@
 复用 UninstallError，增一项 operation failure（detail含实际repo/path/原因即可）；NotFound/NeedsConfirm保原输入/确认逻辑。actor只验证plugin_id非空、取最后name并调用共享uninstall(name,confirmed,keep_data=true)，将NotFound/NeedsConfirm/error分别映射原NotFound/ConfirmationRequired/InternalError，失败无reload/restart。CLI新增错误分支并沿公开run返回Err；不发成功diagnostic。
 
 Coder只交这一项：plugin.rs Uninstall、actor Uninstall、CLI相应消费方和同一行为测试；必须等前一安装/更新owner释放相邻文件，保护dirty。Tier3本地隔离：坏registry无删除，真实删除失败/异常存在path保记录，save故障保真实已删artifact和旧字节且ACP/CLI错误；正常、多插件confirm和keep_data回归。可用既有save fault，不以chmod在当前权限下必失败作证。优先有效旧红/新绿。不得顺便改Update、Install、cleanup_plugin_data或低层通用remove所有调用语义。父审查关键失败分支和真实ACP/CLI入口，最终插件里程碑使用同次CLI；独立数据完整性review覆盖操作结果。父维护主spec/docs/backlog/archive。
+
+## 实施时的调用方复核
+
+除 ACP modal 和 CLI 外，`slash_exec.rs` 的 `/plugins uninstall` 也消费 `UninstallError`；新增 operation failure 必须沿其既有 slash-command error 事件返回，不能发 success diagnostic。真实 remove 错误以隔离临时路径末尾 `/.` 在 Unix 上触发 unlinkat EINVAL，不依赖 chmod 或是否以 root 运行；这条路径允许底层已部分删除，只要求保留登记并如实报错。

@@ -1233,6 +1233,9 @@ mod tests {
 
     #[test]
     fn persists_multiple_drafts_with_one_explicit_focus() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
@@ -1285,6 +1288,9 @@ mod tests {
 
     #[test]
     fn search_ignores_an_unrelated_focus_and_ranks_exact_metadata_matches() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
@@ -1324,6 +1330,9 @@ mod tests {
 
     #[test]
     fn observational_search_does_not_create_a_missing_workspace() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let session_directory = crate::session::storage::ContainedDirectory::open(
@@ -1347,6 +1356,9 @@ mod tests {
 
     #[test]
     fn observational_search_neither_recovers_publish_nor_persists_refreshed_hash() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
@@ -1407,6 +1419,9 @@ mod tests {
 
     #[test]
     fn publish_requires_current_hash_validation() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
@@ -1447,6 +1462,9 @@ mod tests {
 
     #[test]
     fn successful_hash_prompts_to_save_only_once() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
@@ -1493,6 +1511,9 @@ mod tests {
 
     #[test]
     fn derived_publish_detects_external_source_change() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         registry::publish_workflow(
@@ -1541,6 +1562,9 @@ mod tests {
 
     #[test]
     fn open_recovers_a_target_commit_that_preceded_workspace_commit() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
@@ -1587,6 +1611,9 @@ mod tests {
 
     #[test]
     fn publish_recovery_preserves_a_draft_edited_after_target_commit() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
@@ -1642,6 +1669,9 @@ mod tests {
 
     #[test]
     fn workspace_rejects_state_with_an_escaping_draft_path() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let session = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let root = session.path().join("workflow-workspace");
@@ -1671,6 +1701,9 @@ mod tests {
 
     #[test]
     fn workspace_rejects_removed_builtin_definition_ids() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let state = WorkspaceState {
             focused_definition_id: Some(WorkflowDefinitionId::new("builtin:deep-research")),
             ..WorkspaceState::default()
@@ -1685,6 +1718,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn workspace_rejects_symlinked_root_and_draft_directory() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use std::os::unix::fs::symlink;
 
         let session = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-//! AC-08: ordinary Install through the shared application and actual ACP actor.
+//! AC-08: ordinary Install/Uninstall through the shared application and actual ACP actor.
 //! Re-exec before HOME/GROW_HOME OnceLocks or runtime initialization.
 
 use std::path::{Path, PathBuf};
@@ -401,6 +401,289 @@ fn acp_install_reports_persistence_failures() {
         })
         .await
         .expect("ACP install test timeout");
+    }));
+    drop(local);
+    drop(rt);
+    drop(server);
+    drop(mock_rt);
+}
+
+fn uninstall_error(
+    result: Result<shell::plugin::UninstallOutcome, shell::plugin::UninstallError>,
+) -> String {
+    match result {
+        Err(error) => error.to_string(),
+        Ok(outcome) => panic!("unexpected uninstall success: {}", outcome.repo_key),
+    }
+}
+
+fn plugin_data(fixture: &Fixture) -> PathBuf {
+    let id = agent::plugins::discovery::PluginId::new(
+        agent::plugins::discovery::PluginScope::User,
+        &fixture.old_artifact,
+        "existing",
+    );
+    let path = fixture.home.join(".grow/plugin-data").join(&id.0);
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("data.txt"), "preserved").unwrap();
+    path
+}
+
+#[test]
+fn shared_uninstall_reports_persistence_failures() {
+    let Some(home) = isolated("shared_uninstall_reports_persistence_failures") else {
+        return;
+    };
+    let fixture = Fixture::new(home);
+    let data = plugin_data(&fixture);
+    let uninstall =
+        |confirm, keep_data| shell::plugin::uninstall_plugin("existing", confirm, keep_data);
+
+    std::fs::write(&fixture.registry_path, "{ broken registry").unwrap();
+    assert!(uninstall_error(uninstall(false, false)).contains("failed to load registry"));
+    assert!(fixture.old_artifact.join("payload.txt").is_file());
+    assert!(data.is_dir());
+    assert_eq!(
+        std::fs::read_to_string(&fixture.registry_path).unwrap(),
+        "{ broken registry"
+    );
+    std::fs::remove_file(&fixture.registry_path).unwrap();
+    std::fs::create_dir(&fixture.registry_path).unwrap();
+    assert!(uninstall_error(uninstall(false, false)).contains("failed to load registry"));
+    assert!(fixture.registry_path.is_dir());
+    assert!(fixture.old_artifact.join("payload.txt").is_file());
+    std::fs::remove_dir(&fixture.registry_path).unwrap();
+    std::fs::write(&fixture.registry_path, &fixture.registry_bytes).unwrap();
+
+    std::fs::remove_dir_all(&fixture.old_artifact).unwrap();
+    std::fs::write(&fixture.old_artifact, "unexpected ordinary file").unwrap();
+    let error = uninstall_error(uninstall(false, false));
+    assert!(
+        error.contains("still exists") && error.contains("retained"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.old_artifact).unwrap(),
+        "unexpected ordinary file"
+    );
+    assert_eq!(
+        std::fs::read(&fixture.registry_path).unwrap(),
+        fixture.registry_bytes
+    );
+    assert!(data.is_dir());
+    std::fs::remove_file(&fixture.old_artifact).unwrap();
+    std::fs::create_dir(&fixture.old_artifact).unwrap();
+    std::fs::write(
+        fixture.old_artifact.join("payload.txt"),
+        "original snapshot",
+    )
+    .unwrap();
+
+    let mut registry = InstallRegistry::try_load_from(fixture.install_dir.clone()).unwrap();
+    let key = registry.find_plugin("existing").unwrap().0.to_owned();
+    let repo = registry.get_repo_mut(&key).unwrap();
+    repo.plugins
+        .insert("sibling".into(), repo.plugins["existing"].clone());
+    registry.save().unwrap();
+    let before = std::fs::read(&fixture.registry_path).unwrap();
+    assert!(matches!(
+        uninstall(false, true),
+        Err(shell::plugin::UninstallError::NeedsConfirm { total: 2, .. })
+    ));
+    assert!(fixture.old_artifact.is_dir());
+    assert_eq!(std::fs::read(&fixture.registry_path).unwrap(), before);
+
+    let fault = SaveFault::new();
+    let error = uninstall_error(uninstall(true, true));
+    drop(fault);
+    assert!(!fixture.old_artifact.exists());
+    assert!(data.is_dir());
+    assert_eq!(std::fs::read(&fixture.registry_path).unwrap(), before);
+    assert!(
+        error.contains("was removed")
+            && error.contains("incomplete")
+            && error.contains("test-injected registry save failure"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&key) && error.contains(fixture.old_artifact.to_str().unwrap()),
+        "{error}"
+    );
+    // Retrying an already removed path can finish deregistration without touching data.
+    let outcome = uninstall(true, true).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(outcome.removed_plugins.len(), 2);
+    assert!(
+        InstallRegistry::try_load_from(fixture.install_dir.clone())
+            .unwrap()
+            .get_repo(&key)
+            .is_none()
+    );
+    assert!(data.is_dir());
+    // Existing keep_data=false policy still removes the exact plugin data directory.
+    std::fs::write(&fixture.registry_path, &fixture.registry_bytes).unwrap();
+    std::fs::create_dir(&fixture.old_artifact).unwrap();
+    uninstall(false, false).unwrap_or_else(|error| panic!("{error}"));
+    assert!(!data.exists());
+    assert_eq!(
+        std::fs::read(&fixture.config_path).unwrap(),
+        fixture.config_bytes
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_uninstall_retains_record_on_actual_remove_error() {
+    let Some(home) = isolated("shared_uninstall_retains_record_on_actual_remove_error") else {
+        return;
+    };
+    let fixture = Fixture::new(home);
+    let mut registry = InstallRegistry::try_load_from(fixture.install_dir.clone()).unwrap();
+    let key = registry.find_plugin("existing").unwrap().0.to_owned();
+    // unlinkat cannot remove a final dot component, independently of chmod/root privileges.
+    registry.get_repo_mut(&key).unwrap().path = fixture.old_artifact.join(".");
+    registry.save().unwrap();
+    let before = std::fs::read(&fixture.registry_path).unwrap();
+    let error = uninstall_error(shell::plugin::uninstall_plugin("existing", true, false));
+    assert!(
+        error.contains("failed to remove") && error.contains("partially removed"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&fixture.registry_path).unwrap(), before);
+    assert!(fixture.old_artifact.is_dir());
+}
+
+async fn uninstall(
+    conn: &acp_transport::ClientSideConnection,
+    sid: &acp::SessionId,
+    plugin: &str,
+    confirmed: bool,
+) -> Value {
+    let response = ext(conn, "grow/plugins/action", json!({"sessionId": sid.0.as_ref(), "action": {"type": "uninstall", "plugin_id": plugin, "confirmed": confirmed}})).await;
+    assert!(response.get("error").is_none(), "{response}");
+    response["result"].clone()
+}
+
+#[test]
+fn acp_uninstall_reports_persistence_failures() {
+    let Some(home) = isolated("acp_uninstall_reports_persistence_failures") else {
+        return;
+    };
+    diagnostics::tls::install_ring_provider_once();
+    let fixture = Fixture::new(home);
+    let data = plugin_data(&fixture);
+    let mock_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let server = mock_rt.block_on(MockInferenceServer::start()).unwrap();
+    unsafe {
+        std::env::set_var("GROW_CLI_CHAT_PROXY_BASE_URL", server.url());
+        std::env::set_var("GROW_INFERENCE_BASE_URL", server.url());
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+    rt.block_on(local.run_until(async {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let conn = connect(&server.url()).await;
+            let sid = conn
+                .new_session(
+                    acp::NewSessionRequest::new(fixture.home.clone())
+                        .meta(json!({"modelId": "test-model"}).as_object().cloned()),
+                )
+                .await
+                .unwrap()
+                .session_id;
+            assert_eq!(
+                uninstall(&conn, &sid, "", false).await["status"],
+                "validation_error"
+            );
+            assert_eq!(
+                uninstall(&conn, &sid, "missing", false).await["status"],
+                "not_found"
+            );
+            std::fs::write(&fixture.registry_path, "{ broken registry").unwrap();
+            failed(&uninstall(&conn, &sid, "existing", false).await);
+            assert!(fixture.old_artifact.is_dir());
+            assert_eq!(
+                std::fs::read_to_string(&fixture.registry_path).unwrap(),
+                "{ broken registry"
+            );
+            std::fs::remove_file(&fixture.registry_path).unwrap();
+            std::fs::create_dir(&fixture.registry_path).unwrap();
+            failed(&uninstall(&conn, &sid, "existing", false).await);
+            assert!(fixture.registry_path.is_dir());
+            assert!(fixture.old_artifact.is_dir());
+            std::fs::remove_dir(&fixture.registry_path).unwrap();
+            std::fs::write(&fixture.registry_path, &fixture.registry_bytes).unwrap();
+            std::fs::remove_dir_all(&fixture.old_artifact).unwrap();
+            std::fs::write(&fixture.old_artifact, "unexpected file").unwrap();
+            let remaining = uninstall(&conn, &sid, "existing", false).await;
+            failed(&remaining);
+            assert!(
+                remaining["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("still exists")
+            );
+            assert_eq!(
+                std::fs::read(&fixture.registry_path).unwrap(),
+                fixture.registry_bytes
+            );
+            std::fs::remove_file(&fixture.old_artifact).unwrap();
+            std::fs::create_dir(&fixture.old_artifact).unwrap();
+            let mut registry = InstallRegistry::try_load_from(fixture.install_dir.clone()).unwrap();
+            let key = registry.find_plugin("existing").unwrap().0.to_owned();
+            let repo = registry.get_repo_mut(&key).unwrap();
+            repo.plugins
+                .insert("sibling".into(), repo.plugins["existing"].clone());
+            registry.save().unwrap();
+            let before = std::fs::read(&fixture.registry_path).unwrap();
+            let confirm = uninstall(&conn, &sid, "user/unused/existing", false).await;
+            assert_eq!(confirm["status"], "confirmation_required", "{confirm}");
+            assert_eq!(confirm["requiresReload"], false);
+            assert!(fixture.old_artifact.is_dir());
+            let fault = SaveFault::new();
+            let result = uninstall(&conn, &sid, "user/unused/existing", true).await;
+            drop(fault);
+            failed(&result);
+            let message = result["message"].as_str().unwrap();
+            assert!(
+                message.contains("was removed")
+                    && message.contains("incomplete")
+                    && message.contains("test-injected registry save failure"),
+                "{result}"
+            );
+            assert!(!fixture.old_artifact.exists());
+            assert_eq!(std::fs::read(&fixture.registry_path).unwrap(), before);
+            assert!(data.is_dir(), "ACP always preserves plugin data");
+            let retry = uninstall(&conn, &sid, "existing", true).await;
+            assert_eq!(retry["status"], "success", "{retry}");
+            assert_eq!(retry["requiresReload"], true, "{retry}");
+            assert!(
+                InstallRegistry::try_load_from(fixture.install_dir.clone())
+                    .unwrap()
+                    .get_repo(&key)
+                    .is_none()
+            );
+            assert!(data.is_dir());
+            assert_eq!(
+                std::fs::read(&fixture.config_path).unwrap(),
+                fixture.config_bytes
+            );
+            let close = ext(
+                &conn,
+                "grow/session/close",
+                json!({"sessionId": sid.0.as_ref()}),
+            )
+            .await;
+            assert_eq!(close["result"]["success"], true, "{close}");
+        })
+        .await
+        .expect("ACP uninstall test timeout");
     }));
     drop(local);
     drop(rt);

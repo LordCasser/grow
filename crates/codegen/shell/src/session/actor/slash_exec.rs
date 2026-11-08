@@ -1319,6 +1319,13 @@ impl SessionActor {
                             ))
                             .await;
                         }
+                        Err(error @ UninstallError::OperationFailed { .. }) => {
+                            self.send_host_turn_slash_command_error(
+                                "Plugin uninstall failed",
+                                error.to_string(),
+                            )
+                            .await;
+                        }
                         Err(UninstallError::NotFound { name }) => {
                             self.send_host_turn_slash_command_warning(&format!(
                                 "Plugin \"{name}\" not found in install registry.\n\
@@ -1368,6 +1375,13 @@ impl SessionActor {
                             .collect();
                         self.send_host_turn_slash_command_output(&messages.join("\n"))
                             .await;
+                    }
+                    Err(error @ crate::plugin::UpdateError::OperationFailed { .. }) => {
+                        self.send_host_turn_slash_command_error(
+                            "Plugin update failed",
+                            error.to_string(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         self.send_host_turn_slash_command_output(&format!("{e}"))

@@ -1785,25 +1785,21 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let mut rx = rx;
         let mut persist_ack_rx = persist_ack_rx;
         let mut working_published = false;
-        let stop_result = loop {
-            tokio::select! {
-                biased;
-                stop = &mut rx => {
-                    break stop;
+        let stop_result = tokio::select! {
+            biased;
+            stop = &mut rx => stop,
+            ack = &mut persist_ack_rx => {
+                if ack.is_ok() {
+                    working_published = true;
+                    self.push_roster_activity_delta(
+                        &arguments.session_id,
+                        crate::agent::roster::RosterActivity::Working,
+                    );
                 }
-                ack = &mut persist_ack_rx => {
-                    if ack.is_ok() {
-                        working_published = true;
-                        self.push_roster_activity_delta(
-                            &arguments.session_id,
-                            crate::agent::roster::RosterActivity::Working,
-                        );
-                    }
-                    // After the persist acknowledgement (or its drop on an
-                    // admission error) the completion reply is the only
-                    // remaining event.
-                    break rx.await;
-                }
+                // After the persist acknowledgement (or its drop on an
+                // admission error) the completion reply is the only
+                // remaining event.
+                rx.await
             }
         };
         let stop_result = stop_result.map_err(|_| {

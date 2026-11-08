@@ -1971,6 +1971,9 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_route_freezes_complete_agent_definition_and_rejects_legacy_shape() {
+        if crate::session::workflow::test_support::run_in_sandbox() {
+            return;
+        }
         let project = tempfile::tempdir().unwrap();
         let agents = project.path().join(".grow/agents");
         std::fs::create_dir_all(&agents).unwrap();

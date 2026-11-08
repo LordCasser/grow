@@ -1,5 +1,5 @@
 - [x] 核固定上游差异、官方原始name与Grow qualified策略区别、实际catalog/search/use_tool及public Agent sampling消费者，冻结两个owner且不增依赖/公共helper。
-- [ ] Agent公开采样投影保现64共同格式，完整ToolBridge目录保持，64/65/256及相同前缀与原builtin定义测试通过。
-- [ ] MCP registration只放宽qualified目录长度至256，保现语法/歧义/visibility，64/65/256/257控制通过。
+- [x] Agent公开采样投影保现64共同格式，完整ToolBridge目录保持，64/65/256及相同前缀与原builtin定义测试通过。
+- [x] MCP registration只放宽qualified目录长度至256，保现语法/歧义/visibility，64/65/256/257控制通过。
 - [ ] 用同一长名真实注册→snapshot/search schema→use_tool内部调用原raw name，核权限/禁用/app-only与公开Agent投影；父完成模块和跨层验收。
 - [ ] 同步开发说明、上游评审/backlog与验证记录，strict/archive并复查all/archived。

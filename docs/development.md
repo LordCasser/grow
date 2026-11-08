@@ -80,6 +80,8 @@ canonical 完成事实仍会将尚在 Running 的同一任务推进终态；已�
 
 MCP 工具调用的原始 deadline 与取消通知派发分别归属：drop guard只向原 service/request ID 尝试一次通知，后台 Grow 派发等待最多三秒，不延长工具返回期限。超时表示发送未确认；锁定 SDK 已入队的发送仍可能继续，不能据此声称 wire 撤回或远端副作用已取消。见 [取消派发所有权](../openspec/specs/extension-runtime/spec.md#requirement-mcp-cancellation-dispatch-has-a-bounded-grow-owner) 与 [真实受阻传输验证](../openspec/changes/archive/2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。
 
+MCP 完整 `server__tool` 目录身份允许最多 256 个 ASCII 字符，原分段、字符集、app-only、禁用和权限门禁保持；`search_tool` 的 schema 和 `use_tool` 内部调用保留完整名字。公开 `Agent::tool_definitions` 只投影符合原 64 字符共同格式的直接 provider 声明，不截断或创建别名，完整 ToolBridge 目录不变。descriptor helper 保留普通 `<raw>.json` 路径；超出 255 字节组件的文件名改用 `tools/long-names/<完整 sanitized raw>/descriptor.json`。见 [目录身份契约](../openspec/changes/separate-mcp-catalog-name-bound/specs/extension-runtime/spec.md) 与 [采样投影契约](../openspec/changes/separate-mcp-catalog-name-bound/specs/model-sampling/spec.md)。
+
 空闲会话通过 `PendingInteractions` 的既有 watch 重新进入 `arbitrate_idle_wake`，使 whole-work wait 的人类依赖解除后无需额外输入即可检查 Goal 接续。它沿用 controls、compaction、用户 FIFO、通知和 Goal 的仲裁顺序；有 foreground 的普通 ask 继续由 turn 内等待负责。见 [人类依赖解除唤醒](../openspec/specs/behavior-goal/spec.md#requirement-human-dependency-changes-wake-idle-goal-arbitration) 与 [验收边界](../openspec/changes/archive/2026-11-06-repair-goal-turn-continuation/verification.md)。
 
 `rg --pre` 与 `rg --hostname-bin` 能启动指定外部程序，即使关闭 hyperlink/color 输出也不能按普通搜索自动放行。Workspace 权限模块的共享判定同时约束 safe list、Auto、普通 `rg` 前缀 grant 和子 Agent RX 投影；精确 invocation grant 与 deny 原策略保持。判定保守扫描全部参数，因为 `--glob --` 中的 `--` 是值而非选项终止符；带同形字面 pattern 可能进入普通复核。见 [rg 外部执行权限](../openspec/specs/tool-authorization/spec.md#requirement-ripgrep-external-programs-require-invocation-authority)。
@@ -335,6 +337,8 @@ Minimal 每帧从当前 root、选中子 Agent 和 root 权限队列解析唯一
 Minimal 新会话欢迎卡在 root Agent 绑定 session ID 后才提交，因为绑定会改变可见视图归属并清空 placeholder epoch 的当前屏幕。卡片会在该会话首批对话条目之前写入原生终端历史；行为以 [Minimal 欢迎卡](../openspec/specs/client-surfaces/spec.md#requirement-minimal-welcome-card-belongs-to-a-bound-session-epoch) 为准。
 
 ## Rust 验证入口
+
+Workflow 的 live discovery 单元测试在运行时复用 `TestSandbox` 和 `TestProcess`，以精确测试名在独立子进程中执行。普通 `cargo test --locked -p shell --lib session::workflow:: -- --test-threads=4` 不需要手工覆盖 HOME；Unix 的用户 Agent、Skill、Workflow 和 workspace-user 来源不会混入夹具，项目内显式资源仍走真实发现路径。Windows 的 `dirs` 依赖从系统 Known Folder 取得用户目录，不遵循 USERPROFILE，故这里不宣称 Windows Agent/Skill 用户源已被隔离；GROW_HOME 与子进程环境仍由 sandbox 持有。父进程不修改环境，子进程有超时、输出上限与清理 owner，原 512 KiB manifest 上限和超限回归保持。
 
 `spawn_subagent` 的可选 `effort` 与 `model` 一起进入既有子 Agent runtime；fresh call
 不传 model 时对原有解析出的模型生效，不传 effort 时保留 Agent/model 默认。`"none"`

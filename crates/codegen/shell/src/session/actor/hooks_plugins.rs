@@ -346,51 +346,34 @@ impl SessionActor {
                 }
                 // Extract plugin name from ID (last segment of "scope/hex8/name").
                 let plugin_name = plugin_id.rsplit('/').next().unwrap_or(&plugin_id);
-                let mut registry = agent::plugins::InstallRegistry::load();
-                match registry.find_plugin(plugin_name) {
-                    None => ActionOutcome {
-                        status: OutcomeStatus::NotFound,
-                        message: format!("Plugin \"{plugin_name}\" not found in install registry."),
+                match crate::plugin::uninstall_plugin(plugin_name, confirmed, true) {
+                    Ok(outcome) => ActionOutcome {
+                        status: OutcomeStatus::Success,
+                        message: format!(
+                            "Uninstalled repo \"{}\" ({} plugin(s): {})",
+                            outcome.repo_key,
+                            outcome.removed_plugins.len(),
+                            outcome.removed_plugins.join(", "),
+                        ),
+                        requires_reload: true,
+                        requires_restart: false,
+                    },
+                    Err(error) => ActionOutcome {
+                        status: match &error {
+                            crate::plugin::UninstallError::NotFound { .. } => {
+                                OutcomeStatus::NotFound
+                            }
+                            crate::plugin::UninstallError::NeedsConfirm { .. } => {
+                                OutcomeStatus::ConfirmationRequired
+                            }
+                            crate::plugin::UninstallError::OperationFailed { .. } => {
+                                OutcomeStatus::InternalError
+                            }
+                        },
+                        message: error.to_string(),
                         requires_reload: false,
                         requires_restart: false,
                     },
-                    Some((repo_key, repo, _plugin)) => {
-                        let repo_key = repo_key.to_string();
-                        let repo_path = repo.path.clone();
-                        let plugin_names: Vec<String> = repo.plugins.keys().cloned().collect();
-                        let count = plugin_names.len();
-
-                        // Check multi-plugin repo — return ConfirmationRequired.
-                        if count > 1 && !confirmed {
-                            return ActionOutcome {
-                                status: OutcomeStatus::ConfirmationRequired,
-                                message: format!(
-                                    "Repo \"{repo_key}\" contains {count} plugin(s): {}. Uninstalling will remove all of them.",
-                                    plugin_names.join(", ")
-                                ),
-                                requires_reload: false,
-                                requires_restart: false,
-                            };
-                        }
-
-                        // Proceed with removal.
-                        if let Err(e) = agent::plugins::git_install::remove_repo_path(&repo_path) {
-                            tracing::warn!("Failed to remove repo path: {e}");
-                        }
-                        registry.remove(&repo_key);
-                        if let Err(e) = registry.save() {
-                            tracing::warn!("Failed to save install registry: {e}");
-                        }
-                        ActionOutcome {
-                            status: OutcomeStatus::Success,
-                            message: format!(
-                                "Uninstalled repo \"{repo_key}\" ({count} plugin(s): {})",
-                                plugin_names.join(", ")
-                            ),
-                            requires_reload: true,
-                            requires_restart: false,
-                        }
-                    }
                 }
             }
             PluginsAction::Update { plugin_id } => {
@@ -414,6 +397,14 @@ impl SessionActor {
                         return ActionOutcome {
                             status: OutcomeStatus::NotFound,
                             message: format!("Plugin \"{name}\" not found."),
+                            requires_reload: false,
+                            requires_restart: false,
+                        };
+                    }
+                    Err(error @ UpdateError::OperationFailed { .. }) => {
+                        return ActionOutcome {
+                            status: OutcomeStatus::InternalError,
+                            message: error.to_string(),
                             requires_reload: false,
                             requires_restart: false,
                         };

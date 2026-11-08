@@ -39,23 +39,15 @@ use tools::types::{
 use tty_utils::{ProcessGroup, ProcessScope};
 use workspace_types::MCP_TOOL_NAME_DELIMITER;
 
-/// Regex for strictest cross-provider tool name validation.
-///
-/// Requirements across providers:
-/// - Anthropic/OpenAI: `^[a-zA-Z0-9_-]{1,64}$` (allows starting with digit/hyphen)
-/// - Google Gemini: `^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$` (must start with letter/underscore, allows dots)
-///
-/// Strictest common denominator: must start with letter/underscore, only alphanumeric/_/- allowed, max 64 chars.
+/// Grow's qualified MCP catalog format. This is not a provider function-name
+/// limit: direct provider declarations are filtered by the Agent projection.
+/// The existing ASCII syntax is retained; the complete qualified identity may
+/// contain at most 256 characters, including its server/tool separator.
 static TOOL_NAME_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$").unwrap());
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,255}$").unwrap());
 
-/// Validate that a tool name matches the strictest cross-provider LLM API requirements.
-///
-/// Pattern: `^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$`
-/// - Must start with a letter or underscore (Gemini requirement)
-/// - Only letters, digits, underscores, hyphens allowed (no dots — Anthropic/OpenAI requirement)
-/// - Maximum 64 characters
-///
+/// Validate the Grow MCP catalog name syntax and 256-character length bound.
+/// Registration separately checks the unambiguous server/tool segmentation.
 /// Returns `Ok(())` if valid, or `Err(reason)` if invalid.
 pub fn validate_tool_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -63,7 +55,7 @@ pub fn validate_tool_name(name: &str) -> Result<(), String> {
     }
     if !TOOL_NAME_REGEX.is_match(name) {
         return Err(format!(
-            "tool name '{}' is invalid — must match ^[a-zA-Z_][a-zA-Z0-9_-]{{0,63}}$ (start with letter/underscore, max 64 chars)",
+            "tool name '{}' is invalid — must match ^[a-zA-Z_][a-zA-Z0-9_-]{{0,255}}$ (start with letter/underscore, max 256 catalog chars)",
             name
         ));
     }
@@ -86,6 +78,19 @@ pub fn sanitize_descriptor_segment(s: &str) -> String {
         out.push('_');
     }
     out
+}
+
+// The fallback namespace cannot collide with a flat `<name>.json` file.
+// Accepted catalog names leave at most 253 ASCII bytes for the raw tool name.
+fn descriptor_relative_path(raw_name: &str) -> std::path::PathBuf {
+    let segment = sanitize_descriptor_segment(raw_name);
+    if segment.len() <= 250 {
+        format!("{segment}.json").into()
+    } else {
+        std::path::Path::new("long-names")
+            .join(segment)
+            .join("descriptor.json")
+    }
 }
 
 /// Result of a diff-based MCP config update.
@@ -1736,7 +1741,7 @@ impl McpTool {
 
     /// Convert into the data needed for `ToolBridge::register_erased()`.
     ///
-    /// Invalid or ambiguous qualified IDs and provider-invalid names are logged
+    /// Invalid or ambiguous qualified IDs and catalog-invalid names are logged
     /// and skipped; the upstream connector must provide non-empty `server` and
     /// `tool` segments separated by exactly one `__` boundary.
     pub fn into_registration(self) -> Option<McpToolRegistration> {
@@ -4049,7 +4054,11 @@ impl McpClient {
     ///
     /// The model reads these before issuing an MCP tool call.
     /// Each tool becomes `<server_dir>/tools/<sanitized_tool_name>.json`
-    /// with `{name, description, inputSchema}`. Resources are intentionally
+    /// with `{name, description, inputSchema}`. If adding `.json` would exceed
+    /// a 255-byte filesystem component, the unchanged sanitized name is a
+    /// directory under `tools/long-names/` containing `descriptor.json` instead.
+    /// This supports every accepted qualified catalog identity without aliases.
+    /// Resources are intentionally
     /// not materialized: this harness exposes only MCP tool calls, so resource
     /// descriptors would advertise MCP-resource tools the model can't use.
     ///
@@ -4064,7 +4073,7 @@ impl McpClient {
         // Collect descriptors via the async MCP API, then defer all filesystem
         // work to a single `spawn_blocking` so the executor is never blocked on
         // `std::fs` (this runs on every MCP tool-set change, not just startup).
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut files: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
         for tool in list_all_tools(mcp_service.peer()).await? {
             let descriptor = serde_json::json!({
                 "name": tool.name.as_ref(),
@@ -4072,10 +4081,7 @@ impl McpClient {
                 "inputSchema": tool.input_schema.as_ref(),
             });
             match serde_json::to_vec_pretty(&descriptor) {
-                Ok(bytes) => files.push((
-                    format!("{}.json", sanitize_descriptor_segment(tool.name.as_ref())),
-                    bytes,
-                )),
+                Ok(bytes) => files.push((descriptor_relative_path(tool.name.as_ref()), bytes)),
                 Err(e) => tracing::warn!(
                     tool = %tool.name.as_ref(),
                     error = %e,
@@ -4098,11 +4104,13 @@ impl McpClient {
             let mut written = 0usize;
             for (file_name, bytes) in files {
                 let path = tools_dir.join(&file_name);
-                let write_result =
-                    tempfile::NamedTempFile::new_in(&tools_dir).and_then(|mut tmp| {
+                let parent = path.parent().expect("descriptor is under tools directory");
+                let write_result = std::fs::create_dir_all(parent).and_then(|()| {
+                    tempfile::NamedTempFile::new_in(parent).and_then(|mut tmp| {
                         std::io::Write::write_all(&mut tmp, &bytes)?;
                         tmp.persist(&path).map_err(|e| e.error)
-                    });
+                    })
+                });
                 match write_result {
                     Ok(_) => written += 1,
                     Err(e) => tracing::warn!(
@@ -6464,23 +6472,90 @@ mod tests {
     }
 
     #[test]
-    fn into_registration_preserves_provider_name_policy() {
-        for qualified in ["123__lookup", "server:scope__tool"] {
-            assert!(parse_mcp_qualified_name(qualified).is_some());
-            let (server, tool) = qualified.split_once("__").unwrap();
+    fn into_registration_preserves_catalog_syntax() {
+        for (server, tool) in [
+            ("123", "lookup"),
+            ("-server", "tool"),
+            ("server:scope", "tool"),
+            ("server", "bad.tool"),
+            ("server", "tóol"),
+            ("sérver", "tool"),
+        ] {
             assert!(make_mcp_tool(server, tool).into_registration().is_none());
         }
+    }
 
-        let server_61 = format!("a{}", "b".repeat(60));
-        let server_62 = format!("a{}", "b".repeat(61));
-        let valid_64 = format!("{server_61}__b");
-        let invalid_65 = format!("{server_62}__b");
-        assert_eq!(valid_64.len(), 64);
-        assert_eq!(invalid_65.len(), 65);
-        assert!(parse_mcp_qualified_name(&valid_64).is_some());
-        assert!(parse_mcp_qualified_name(&invalid_65).is_some());
-        assert!(make_mcp_tool(&server_61, "b").into_registration().is_some());
-        assert!(make_mcp_tool(&server_62, "b").into_registration().is_none());
+    #[test]
+    fn into_registration_enforces_qualified_catalog_length() {
+        for length in [64, 65, 256, 257] {
+            for (server, tool) in [
+                ("s".to_owned(), "t".repeat(length - 3)),
+                ("s".repeat(length - 3), "t".to_owned()),
+            ] {
+                let name = format!("{server}__{tool}");
+                assert_eq!(name.len(), length);
+                let registration = make_mcp_tool(&server, &tool).into_registration();
+                if length <= 256 {
+                    let registration = registration.expect("within catalog length");
+                    assert_eq!(registration.name, name);
+                    assert!(registration.model_visible);
+                } else {
+                    assert!(registration.is_none());
+                    assert!(
+                        validate_tool_name(&name)
+                            .unwrap_err()
+                            .contains("256 catalog chars")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_app_only_registration_remains_non_model_visible() {
+        let mut tool = make_mcp_tool("server", &"t".repeat(248));
+        tool.meta = Some(serde_json::json!({"ui": {"visibility": ["app"]}}));
+        let registration = tool
+            .into_registration()
+            .expect("256 character catalog name");
+        assert_eq!(registration.name.len(), 256);
+        assert!(!registration.model_visible);
+        assert_eq!(
+            registration.meta.unwrap()["ui"]["visibility"],
+            serde_json::json!(["app"])
+        );
+    }
+
+    #[test]
+    fn descriptor_paths_preserve_names_without_component_overflow_or_traversal() {
+        use std::path::{Component, Path};
+        let prefix = "t".repeat(250);
+        assert_eq!(
+            descriptor_relative_path(&prefix),
+            Path::new(&format!("{prefix}.json"))
+        );
+        for suffix in ["a", "b", "abc"] {
+            let raw = format!("{prefix}{suffix}");
+            assert_eq!(
+                descriptor_relative_path(&raw),
+                Path::new("long-names").join(&raw).join("descriptor.json")
+            );
+        }
+        for raw in [
+            "../escape".to_owned(),
+            format!("{prefix}/../escape"),
+            "long-names".to_owned(),
+        ] {
+            assert!(
+                descriptor_relative_path(&raw)
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            );
+        }
+        assert_eq!(
+            descriptor_relative_path("long-names"),
+            Path::new("long-names.json")
+        );
     }
 
     // ── is_retriable_transport_error tests ───────────────────────────
