@@ -670,8 +670,6 @@ impl MvpAgent {
             permission_prompt_timeout,
             subagent_permission_mode: self.cfg.borrow().subagent_permission_mode,
             parent_capability_ceiling: None,
-            auto_compact_threshold_tiers:
-                crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
             hunk_tracker_handle,
             hunk_tracking_enabled,
             fs,
@@ -746,7 +744,7 @@ impl MvpAgent {
                     None
                 }
             },
-            agent_config: Some(self.cfg.borrow().clone()),
+            agent_config: self.cfg.borrow().clone(),
             hook_registry: parent_hook_registry,
             permission_handle: {
                 let sessions = self.sessions.borrow();

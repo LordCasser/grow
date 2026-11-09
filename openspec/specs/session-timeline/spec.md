@@ -1764,6 +1764,14 @@ A Task resume_from child SHALL persist the selected source branch's historical u
 - **WHEN** source validation, history projection or staged child journal publication fails
 - **THEN** the requested derived epoch fails without exposing a partially initialized transcript or changing the immutable source lifecycle.
 
+#### Scenario: Derived context approaches the destination window
+- **WHEN** an authorized Task resume_from source has a large active Surface
+- **THEN** the derived child's first ordinary model request SHALL use the normal effective request projection, compaction policy and window admission. A raw estimate of the inherited Surface alone SHALL NOT reject the lineage. Any compaction operates on the derived child and retains inherited transcript presentation.
+
+#### Scenario: The derived request cannot fit
+- **WHEN** normal request projection and permitted recovery cannot fit the derived child's first request
+- **THEN** the child SHALL report failure through its normal terminal path without dispatching an ordinary request known to exceed the model window or modifying the source.
+
 ### Requirement: Plan approval restoration retains one exact candidate snapshot
 A restored Plan approval attempt SHALL bind its artifact lookup and user request to one exact pending Behavior snapshot. It SHALL reuse that validated content rather than rereading a mutable current candidate. Missing or invalid artifacts MAY normalize only that exact snapshot; a replacement Plan SHALL remain unchanged and SHALL NOT be approved or abandoned by the old attempt.
 

@@ -845,8 +845,14 @@ async fn run_shell_child_inner(
         )
         .await
         .map(|(sampling_config, model_id)| {
+            let model =
+                crate::agent::config::find_model_by_catalog_id(&ctx.available_models, &model_id.0);
             let auto_compact_threshold_percent =
-                ctx.resolve_auto_compact_threshold_percent(&model_id.0);
+                crate::util::config::resolve_auto_compact_threshold_percent(
+                    &ctx.agent_config,
+                    &model_id.0,
+                    model.map(|entry| &entry.info),
+                );
             let inference_idle_timeout = std::time::Duration::from_secs(
                 ctx.resolve_inference_idle_timeout_secs(&model_id.0),
             );
@@ -1685,9 +1691,9 @@ async fn run_shell_child_inner(
         ctx.permission_prompt_timeout,
         effective_route.auto_compact_threshold_percent,
         agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
-        ctx.resolve_compaction_verbatim_input(),
-        ctx.resolve_compaction_pre_prune(),
-        ctx.resolve_compaction_pre_prune_token_budget(),
+        ctx.agent_config.resolve_compaction_verbatim_input(),
+        ctx.agent_config.resolve_compaction_pre_prune(),
+        ctx.agent_config.resolve_compaction_pre_prune_token_budget(),
         None,
         None,
         std::sync::Arc::new(parking_lot::Mutex::new(
@@ -1750,14 +1756,8 @@ async fn run_shell_child_inner(
         ctx.client_hooks.clone(),
         None,
         ctx.subagent_toggle.clone(),
-        ctx.agent_config
-            .as_ref()
-            .map(|config| config.cli_agents.clone())
-            .unwrap_or_default(),
-        ctx.agent_config
-            .as_ref()
-            .map(|config| config.cli_agent_overrides.clone())
-            .unwrap_or_default(),
+        ctx.agent_config.cli_agents.clone(),
+        ctx.agent_config.cli_agent_overrides.clone(),
         ctx.file_tool_overrides.clone(),
         frozen_subagent_names,
         agent::prompt::context::PromptAudience::Subagent,

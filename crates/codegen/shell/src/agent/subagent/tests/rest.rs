@@ -257,7 +257,7 @@ fn subagent_worktree_snapshot_gate_local_overrides_remote() {
     let mut config = crate::agent::config::Config::default();
     config.features.subagent_worktree_snapshot = Some(false);
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
-    ctx.agent_config = Some(config);
+    ctx.agent_config = config;
     ctx.remote_settings = Some(crate::util::config::RemoteSettings {
         subagent_worktree_snapshot_enabled: Some(true),
         ..Default::default()
@@ -273,7 +273,7 @@ fn subagent_worktree_snapshot_gate_local_enables() {
     let mut config = crate::agent::config::Config::default();
     config.features.subagent_worktree_snapshot = Some(true);
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
-    ctx.agent_config = Some(config);
+    ctx.agent_config = config;
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
 }
 /// Subagent spawns carry concrete ask_user_question timeout params (the
@@ -833,22 +833,6 @@ fn resume_model_pinning_overrides_default_resolution() {
     let resolved_same = "grow-3";
     let no_pin = source_model.as_deref() == Some(resolved_same);
     assert!(no_pin, "same model — no pinning needed");
-}
-#[test]
-fn resume_window_safety_rejects_instead_of_swapping() {
-    let estimated_tokens: u64 = 100_000;
-    let child_window: u64 = 256_000;
-    const SAFE_RESUME_PERCENT: u64 = 80;
-    let threshold = child_window * SAFE_RESUME_PERCENT / 100;
-    assert!(
-            estimated_tokens <= threshold,
-            "100k tokens should be within 80% of 256k window"
-        );
-    let large_transcript: u64 = 210_000;
-    assert!(
-            large_transcript > threshold,
-            "210k tokens exceeds 80% of 256k window — resume should be rejected"
-        );
 }
 #[test]
 fn provenance_carries_resumed_from() {

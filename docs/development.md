@@ -351,6 +351,15 @@ Workflow 的 live discovery 单元测试在运行时复用 `TestSandbox` 和 `Te
 失败。普通派生 resume 与原身份 checkpoint restore 的路由约束分别处理。见
 [子 Agent effort 契约](../openspec/specs/model-sampling/spec.md#requirement-subagent-tool-calls-can-select-reasoning-effort)。
 
+`resume_from` 的首个模型请求由派生子 Agent 按实际请求投影、压缩策略和窗口准入处理。
+无本地 prompt 编号的继承用户提示可以提供压缩边界。压缩写入派生会话，来源历史及继承展示仍可读取。见
+[派生恢复契约](../openspec/specs/session-timeline/spec.md#requirement-derived-task-resumes-retain-inherited-transcript-presentation)和
+[压缩选区](../openspec/specs/context-compaction/spec.md#requirement-compaction-can-split-the-prompt-segment-retained-for-its-tail-budget)。
+
+主 Agent 与普通子 Agent 共用 SessionActor 的压缩链路和配置解析。阈值按各自实际
+模型解析，Workflow 子 Agent 的阈值来自其冻结路由。对照排查时，检查各自的有效请求、
+已选模型和 Timeline 中的压缩事务。见 [请求压力契约](../openspec/specs/context-compaction/spec.md#requirement-compaction-completion-and-admission-use-effective-context-pressure)。
+
 Grow 原生 `set_subagent_model` 通过 session-bound SubagentBackend 注入调用者身份，coordinator
 只向仍在运行的直属 child 转发 exact runtime；lifecycle root 的只读可见性不授予孙代控制权。
 Shell 复用用户模型控制的 catalog publication 顺序、模型限制和目标 actor Step gate。queued

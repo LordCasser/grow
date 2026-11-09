@@ -240,7 +240,7 @@ reasoning_efforts = ["none", "high"]
                 ("unknown", serde_json::json!({"model":"mock/unknown"}), "", "", Some("Unknown Task.model ID")),
                 ("hidden", serde_json::json!({"model":"mock/hidden"}), "", "", Some("Unknown Task.model ID")),
                 ("blocked", serde_json::json!({"model":"mock/blocked"}), "", "", Some("Unknown Task.model ID")),
-                ("small", serde_json::json!({"model":"mock/tiny"}), "", "", Some("source transcript")),
+                ("small", serde_json::json!({"model":"mock/tiny"}), "", "", Some("no closed Surface range")),
             ] {
                 let mut arguments = serde_json::json!({
                     "parent_step_id": "task-step",

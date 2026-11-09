@@ -93,6 +93,10 @@
 - **WHEN** 保留预算或最小来源阈值无法在任何合法边界同时满足
 - **THEN** 不创建压缩计划，不以缩短必需 tail 或拆开工具往返规避失败。
 
+#### Scenario: Inherited prompts have no local index
+- **WHEN** an inherited user message and its historical response precede the first locally indexed prompt
+- **THEN** an inherited prompt can anchor the range using its message boundary while retaining complete response groups and the recent tail. It does not receive a local prompt index or execution authority.
+
 ### Requirement: Manual compaction RPC preserves authoritative error outcomes
 手动压缩扩展接口 SHALL 保留 actor 错误的 ACP code 与结构化 data，包括已发布终态标记。Pager 收到已发布失败终态的错误 SHALL NOT 重新展示“结果未知”或重复终态；没有权威终态的传输失败仍使用未知结果反馈。
 

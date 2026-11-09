@@ -60,44 +60,6 @@ pub(crate) enum InitialContextSource {
     /// prompt context are freshly rendered from the current agent definition.
     Resumed,
 }
-/// Captured parent-side tier inputs for resolving
-/// `auto_compact_threshold_percent` once the subagent's actual model id is
-/// known. Stored on [`SubagentSpawnContext`] so the resolver can run at
-/// spawn time and the per-model lookup honors the SUBAGENT's model rather
-/// than the parent's.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct AutoCompactThresholdTiers {
-    /// `cfg.session.auto_compact_threshold_percent` (user global TOML).
-    pub user_session: Option<u8>,
-    /// Subset of `cfg.config_models` whose `auto_compact_threshold_percent`
-    /// is set, keyed by the model entry's id (the table key in
-    /// `[provider.<id>.models.<model>]`). Looked up by the subagent's resolved model id at
-    /// spawn time so user per-model overrides for the subagent's model are
-    /// honored (not just the parent's).
-    pub user_per_model: std::collections::HashMap<String, u8>,
-    /// `cfg.remote_settings.auto_compact_threshold_percent` (GB global).
-    pub remote_global: Option<u8>,
-}
-impl AutoCompactThresholdTiers {
-    /// Slice the parent's `Config` into the four tier inputs we'll resolve
-    /// against later. Only fields relevant to the auto-compact threshold
-    /// are captured; the parent's `Config` is not held by reference.
-    pub fn capture(cfg: &crate::agent::config::Config) -> Self {
-        let user_per_model = cfg
-            .config_models
-            .iter()
-            .filter_map(|(k, v)| v.auto_compact_threshold_percent.map(|t| (k.clone(), t)))
-            .collect();
-        Self {
-            user_session: cfg.session.auto_compact_threshold_percent,
-            user_per_model,
-            remote_global: cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|r| r.auto_compact_threshold_percent),
-        }
-    }
-}
 /// Everything the coordinator needs from MvpAgent to spawn a child session.
 /// Avoids passing `&MvpAgent` (which would require the coordinator to know
 /// about the full agent struct). Built by `MvpAgent::build_subagent_spawn_context()`.
@@ -150,15 +112,6 @@ pub(crate) struct SubagentSpawnContext {
     /// this value before any worktree/session side effect is created.
     pub parent_capability_ceiling:
         Option<crate::session::subagent_capability::DelegableCapabilityCeiling>,
-    /// Tier inputs for resolving `auto_compact_threshold_percent` at
-    /// spawn time — once the subagent's actual model id is known.
-    /// Lazy because the subagent may be assigned a different model from
-    /// the parent (via `[subagents.models]`);
-    /// we want the resolver's per-model
-    /// tiers to be looked up against the SUBAGENT's model, not the
-    /// parent's. Call [`Self::resolve_auto_compact_threshold_percent`]
-    /// once the subagent's `effective_sampling_config.model` is known.
-    pub auto_compact_threshold_tiers: AutoCompactThresholdTiers,
     /// Parent's hunk tracker handle — cheap Clone, backed by an mpsc channel
     /// to the parent's HunkTrackerActor. Subagent edits are attributed to
     /// the same hunk tracker so the parent sees all file changes.
@@ -270,7 +223,7 @@ pub(crate) struct SubagentSpawnContext {
     /// `None` means use the standard (default) file tools.
     pub file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
     /// Parent session's agent config snapshot.
-    pub agent_config: Option<crate::agent::config::Config>,
+    pub agent_config: crate::agent::config::Config,
     pub hook_registry: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     pub permission_handle: Option<workspace::permission::PermissionHandle>,
     pub worktree_type: crate::util::config::WorktreeType,
@@ -311,98 +264,20 @@ impl SubagentSpawnContext {
         per_model.or(remote).unwrap_or(600).max(10)
     }
 
-    /// Resolve `auto_compact_threshold_percent` for the subagent's actual
-    /// model id (the one selected by `resolve_subagent_sampling_config`,
-    /// not the parent's). Walks the same precedence as the main session's
-    /// resolver: env > provider model > user [session] > GB per-model > GB
-    /// global > 85.
-    ///
-    /// The GB per-model tier is read from `available_models` (the same
-    /// catalog used to pick the subagent's `SamplerConfig`); user TOML and
-    /// GB global tiers are sourced from the parent's snapshot captured at
-    /// spawn-context build time.
-    pub fn resolve_auto_compact_threshold_percent(&self, subagent_model_id: &str) -> u8 {
-        let gb_per_model = crate::agent::config::find_model_by_catalog_id(
-            &self.available_models,
-            subagent_model_id,
-        )
-        .and_then(|e| e.info.auto_compact_threshold_percent);
-        crate::util::config::resolve_auto_compact_threshold_percent_from_tiers(
-            self.auto_compact_threshold_tiers
-                .user_per_model
-                .get(subagent_model_id)
-                .copied(),
-            self.auto_compact_threshold_tiers.user_session,
-            gb_per_model,
-            self.auto_compact_threshold_tiers.remote_global,
-        )
-    }
     /// Bind a spawned subagent by the parent session's `--tools` and
     /// `--disallowed-tools` restrictions. Permission ownership remains in the
     /// shared session PermissionManager.
     fn apply_session_cli_overrides(&self, def: &mut agent::config::AgentDefinition) {
-        if let Some(ref cfg) = self.agent_config {
-            cfg.cli_agent_overrides.apply_to_subagent_definition(def);
-        }
-    }
-    /// Subagent verbatim-input flag, mirroring `Config::resolve_compaction_verbatim_input` (env > config > remote settings > default `true`).
-    pub fn resolve_compaction_verbatim_input(&self) -> bool {
-        crate::agent::config::BoolFlag::env("GROW_COMPACTION_VERBATIM_INPUT")
-            .config(
-                self.agent_config
-                    .as_ref()
-                    .and_then(|c| c.features.compaction_verbatim_input),
-            )
-            .feature_flag(
-                self.remote_settings
-                    .as_ref()
-                    .and_then(|r| r.compaction_verbatim_input),
-            )
-            .default(true)
-            .resolve()
-            .value
-    }
-    /// Subagent pre-prune flag, mirroring `Config::resolve_compaction_pre_prune`
-    /// (env > config `[compaction] pre_prune` > remote settings > default `true`).
-    pub fn resolve_compaction_pre_prune(&self) -> bool {
-        crate::util::config::resolve_compaction_pre_prune_from(
-            crate::agent::config::env_string(crate::util::config::ENV_COMPACTION_PRE_PRUNE)
-                .as_deref(),
-            self.agent_config
-                .as_ref()
-                .and_then(|c| c.compaction.pre_prune),
-            self.remote_settings
-                .as_ref()
-                .and_then(|r| r.compaction_pre_prune),
-        )
-    }
-    /// Subagent pre-prune per-item token budget, mirroring
-    /// `Config::resolve_compaction_pre_prune_token_budget`; `None` derives the
-    /// budget from the context window.
-    pub fn resolve_compaction_pre_prune_token_budget(&self) -> Option<u64> {
-        crate::util::config::resolve_compaction_pre_prune_token_budget_from(
-            crate::agent::config::env_string(
-                crate::util::config::ENV_COMPACTION_PRE_PRUNE_TOKEN_BUDGET,
-            )
-            .as_deref(),
-            self.agent_config
-                .as_ref()
-                .and_then(|c| c.compaction.pre_prune_token_budget),
-            self.remote_settings
-                .as_ref()
-                .and_then(|r| r.compaction_pre_prune_token_budget),
-        )
+        self.agent_config
+            .cli_agent_overrides
+            .apply_to_subagent_definition(def);
     }
     /// Whether a completed subagent's worktree is snapshotted into a durable ref
     /// and its directory deleted. Resolution mirrors the other subagent gates
     /// (env > config > remote settings > default). Default `false` so it ships dark.
     pub fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
         crate::agent::config::BoolFlag::env("GROW_SUBAGENT_WORKTREE_SNAPSHOT")
-            .config(
-                self.agent_config
-                    .as_ref()
-                    .and_then(|c| c.features.subagent_worktree_snapshot),
-            )
+            .config(self.agent_config.features.subagent_worktree_snapshot)
             .feature_flag(
                 self.remote_settings
                     .as_ref()
@@ -1243,7 +1118,7 @@ fn conversation_tail_is_complete(items: &[sampling_types::conversation::Conversa
 /// Decide the live-fork context.
 ///
 /// Verbatim mirror (the cache-preserving path): when the parent fits the child
-/// window (same 80% guard as resume) AND ends at a clean turn boundary, keep the
+/// window (at most 80%) AND ends at a clean turn boundary, keep the
 /// items BYTE-FOR-BYTE. We deliberately do NOT run `fork_filter_surface` here — its
 /// step 1 strips synthetic-reason user items (`<system-reminder>`s, drained
 /// monitor events, doom-loop warnings) that the parent actually sent and cached;
@@ -1415,23 +1290,12 @@ async fn bootstrap_initial_context(
                 ));
             }
         };
-        let estimated_tokens = chat_state::estimate_conversation_tokens(&conversation);
-        const SAFE_RESUME_PERCENT: u64 = 80;
-        let threshold = child_context_window * SAFE_RESUME_PERCENT / 100;
-        if estimated_tokens > threshold {
-            return BootstrapInitialContext::Abort(format!(
-                "Cannot resume from subagent '{}': source transcript (~{estimated_tokens} \
-                 tokens) exceeds {SAFE_RESUME_PERCENT}% of the model's context window \
-                 ({child_context_window} tokens). The source conversation is too large for \
-                 the current model.",
-                source.subagent_id,
-            ));
-        }
+        // The child turn owns context admission after projecting its actual
+        // request, including any compaction before sampling.
         tracing::info!(
             subagent_id = %request.id,
             source_subagent = %source.subagent_id,
             surface_items = conversation.len(),
-            estimated_tokens,
             "Materialized frozen resume source without publishing the child session"
         );
         let mut context = resume_initial_context_with_ref(conversation, source_ref);
@@ -1906,11 +1770,7 @@ fn resolve_agent_definition(
     subagent_type: &str,
     ctx: &SubagentSpawnContext,
 ) -> Option<agent::config::AgentDefinition> {
-    let cli_agents = ctx
-        .agent_config
-        .as_ref()
-        .map(|config| config.cli_agents.as_slice())
-        .unwrap_or_default();
+    let cli_agents = ctx.agent_config.cli_agents.as_slice();
     let subagent_toggle = ctx.subagent_toggle.read().clone();
     let resolution_context = crate::agent::subagent::resolution::DefinitionResolutionContext {
         cwd: &ctx.parent_cwd,
@@ -1926,11 +1786,7 @@ fn resolve_agent_definition(
     Some(def)
 }
 fn available_agent_names(ctx: &SubagentSpawnContext) -> Vec<String> {
-    let cli_agents = ctx
-        .agent_config
-        .as_ref()
-        .map(|config| config.cli_agents.as_slice())
-        .unwrap_or_default();
+    let cli_agents = ctx.agent_config.cli_agents.as_slice();
     let subagent_toggle = ctx.subagent_toggle.read().clone();
     crate::agent::subagent::resolution::available_agent_names(
         &crate::agent::subagent::resolution::DefinitionResolutionContext {
@@ -2009,11 +1865,7 @@ fn gate_subagent_type(
     subagent_type: &str,
     ctx: &SubagentSpawnContext,
 ) -> SubagentValidateTypeOutcome {
-    let cli_agents = ctx
-        .agent_config
-        .as_ref()
-        .map(|config| config.cli_agents.as_slice())
-        .unwrap_or_default();
+    let cli_agents = ctx.agent_config.cli_agents.as_slice();
     let validation_context = SubagentValidationContext {
         parent_cwd: ctx.parent_cwd.clone(),
         plugin_registry: ctx.plugin_registry.clone(),

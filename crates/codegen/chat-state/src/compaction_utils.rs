@@ -463,9 +463,9 @@ pub fn is_synthetic_extracted_query(text: &str) -> bool {
 /// they have no extractable text query.
 ///
 /// This is the single source of truth for human-authored query extraction and
-/// statistics. Compaction lifecycle boundaries use `UserItem::prompt_index`
-/// instead, because runtime-owned Goal/task/monitor turns are also causal
-/// prompt turns.
+/// statistics. Compaction uses prompt indices for local turns, including
+/// runtime-owned Goal/task/monitor turns, and this classification for
+/// inherited history without a local index.
 pub fn is_real_user_turn(item: &ConversationItem) -> bool {
     match item {
         ConversationItem::User(u) => {
@@ -607,16 +607,24 @@ pub fn plan_compaction_range(
             .then(|| range_plan(surface_ids, start, end, source_tokens))?
     };
     let mut previous_prompt_index = None;
-    let prompt_turns = surface
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            let prompt_index = item.prompt_index()?;
-            let is_new = previous_prompt_index != Some(prompt_index);
-            previous_prompt_index = Some(prompt_index);
-            is_new.then_some(index)
-        })
-        .collect::<Vec<_>>();
+    let mut inherited_prompt = None;
+    let mut prompt_turns = Vec::new();
+    for (index, item) in surface.iter().enumerate() {
+        if let Some(prompt_index) = item.prompt_index() {
+            if previous_prompt_index != Some(prompt_index) {
+                prompt_turns.push(index);
+                previous_prompt_index = Some(prompt_index);
+            }
+        } else if prompt_turns.is_empty() {
+            // An unnumbered user message followed by a response can anchor
+            // inherited history. A standalone runtime preamble cannot.
+            if matches!(item, ConversationItem::Assistant(_)) {
+                prompt_turns.extend(inherited_prompt.take());
+            } else if is_real_user_turn(item) {
+                inherited_prompt = Some(index);
+            }
+        }
+    }
     let first_prompt = *prompt_turns.first()?;
     let last_prompt = *prompt_turns.last()?;
     let source_start = surface[..first_prompt]

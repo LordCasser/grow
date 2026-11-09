@@ -98,7 +98,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         plugin_registry: None,
         models_manager: Default::default(),
         file_tool_overrides: None,
-        agent_config: None,
+        agent_config: Default::default(),
         hook_registry: None,
         parent_depth: 0,
         subagents_max_depth: tools::implementations::grow_build::task::MAX_SUBAGENT_DEPTH,
@@ -106,7 +106,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         permission_prompt_timeout: std::time::Duration::from_secs(
             crate::agent::config::DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECS,
         ),
-        auto_compact_threshold_tiers: crate::agent::subagent::AutoCompactThresholdTiers::default(),
         permission_handle: None,
         worktree_type: crate::util::config::WorktreeType::Linked,
         image_description_model: None,

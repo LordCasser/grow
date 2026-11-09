@@ -90,7 +90,7 @@ fn transcript(updates: Vec<acp::SessionUpdate>) -> Vec<String> {
 fn task_resume_inherits_completed_and_cancelled_transcripts_before_live_and_cold_view() {
     const HOME: &str = "GROW_TEST_RESUME_TRANSCRIPT_HOME";
     let Ok(home) = std::env::var(HOME) else {
-        for outcome in ["completed", "cancelled"] {
+        for outcome in ["completed", "cancelled", "compacted", "model-threshold"] {
             let home = tempfile::tempdir().unwrap();
             for phase in ["create", "cold"] {
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -165,16 +165,45 @@ fn task_resume_inherits_completed_and_cancelled_transcripts_before_live_and_cold
         std::fs::write(cwd.join(".grow/agents/resume-reader.md"), "---\nname: resume-reader\ndescription: Resume transcript fixture\ncapabilityMode: all\ntools: [run_terminal_cmd]\nagentsMd: false\ndiscoverSkills: false\ninheritSkills: false\n---\nFollow the task.\n").unwrap();
         let source_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let source_calls_seen = source_calls.clone();
+        let outcome = std::env::var("GROW_TEST_RESUME_TRANSCRIPT_OUTCOME").unwrap();
+        let resume_model = match outcome.as_str() {
+            "compacted" => Some("narrow"),
+            "model-threshold" => Some("threshold"),
+            _ => None,
+        };
+        let compacted = resume_model.is_some();
         let provider = axum::Router::new().route("/v1/chat/completions", axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
             let source_calls = source_calls_seen.clone();
             async move {
                 let is_task = body["tools"].as_array().is_some_and(|tools| !tools.is_empty());
-                let derived = body["messages"].to_string().contains("DERIVED_TASK_PROMPT");
+                let messages = body["messages"].to_string();
+                let derived = messages.contains("DERIVED_TASK_PROMPT");
+                let summary = compacted && body["model"].as_str() == resume_model
+                    && messages.contains("Your task is to produce a faithful, concise summary");
                 let first = is_task && (derived || source_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0);
-                let delta = if first {
+                let delta = if summary {
+                    assert!(messages.contains("SOURCE_VISIBLE_INTRO"));
+                    assert!(!messages.contains("SOURCE_FINAL"));
+                    let content = format!("SOURCE_SUMMARY. {}", "Earlier evidence and the completed tool step are recorded here. ".repeat(12));
+                    serde_json::json!({"role":"assistant","content":content})
+                } else if first {
                     let id = if derived { "derived-tool" } else { "source-tool" };
-                    serde_json::json!({"role":"assistant", "reasoning_content": if derived { "DERIVED_THOUGHT" } else { "SOURCE_THOUGHT" }, "content": if derived { "DERIVED_VISIBLE_INTRO" } else { "SOURCE_VISIBLE_INTRO" }, "tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"run_terminal_command","arguments":"{\"command\":\"sh -c 'echo SOURCE_TOOL_RESULT'\",\"description\":\"fixture shell\",\"background\":false}"}}]})
-                } else { serde_json::json!({"role":"assistant","content": if is_task { "SOURCE_FINAL" } else { "metadata" }}) };
+                    let mut content = if derived { "DERIVED_VISIBLE_INTRO" } else { "SOURCE_VISIBLE_INTRO" }.to_owned();
+                    if compacted && derived {
+                        assert!(messages.contains("SOURCE_SUMMARY"), "first derived request must use the summary");
+                        assert!(!messages.contains("SOURCE_VISIBLE_INTRO"), "replaced history must stay out of the model request");
+                        assert!(messages.contains("SOURCE_FINAL"), "recent source output must stay in the model request");
+                    } else if compacted {
+                        content.push_str(&" Evidence from a closed tool step.".repeat(3000));
+                    }
+                    serde_json::json!({"role":"assistant", "reasoning_content": if derived { "DERIVED_THOUGHT" } else { "SOURCE_THOUGHT" }, "content": content, "tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"run_terminal_command","arguments":"{\"command\":\"sh -c 'echo SOURCE_TOOL_RESULT'\",\"description\":\"fixture shell\",\"background\":false}"}}]})
+                } else {
+                    let mut content = if is_task { "SOURCE_FINAL" } else { "metadata" }.to_owned();
+                    if compacted && is_task {
+                        content.push_str(&" Retained source result.".repeat(2500));
+                    }
+                    serde_json::json!({"role":"assistant","content":content})
+                };
                 let part = serde_json::json!({"id":"resume-response","object":"chat.completion.chunk","created":1,"model":"default","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
                 let done = serde_json::json!({"id":"resume-response","object":"chat.completion.chunk","created":1,"model":"default","choices":[{"index":0,"delta":{},"finish_reason":if first { "tool_calls" } else { "stop" }}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}});
                 ([("content-type","text/event-stream")], format!("data: {part}\n\ndata: {done}\n\ndata: [DONE]\n\n"))
@@ -186,7 +215,24 @@ fn task_resume_inherits_completed_and_cancelled_transcripts_before_live_and_cold
             axum::serve(listener, provider).await.unwrap();
         });
         let raw = format!(
-            "[models]\ndefault = \"test/default\"\n[provider.test]\napi_backend = \"chat_completions\"\n[provider.test.options]\nbase_url = \"http://{address}/v1\"\napi_key = \"fixture-only\"\n[provider.test.models.default]\ncontext_window = 128000\n[subagents]\npermission_mode = \"ask\"\n"
+            r#"
+[models]
+default = "test/default"
+[provider.test]
+api_backend = "chat_completions"
+[provider.test.options]
+base_url = "http://{address}/v1"
+api_key = "fixture-only"
+[provider.test.models.default]
+context_window = 128000
+[provider.test.models.narrow]
+context_window = 44000
+[provider.test.models.threshold]
+context_window = 64000
+auto_compact_threshold_percent = 60
+[subagents]
+permission_mode = "ask"
+"#
         );
         std::fs::write(home.join("config.toml"), &raw).unwrap();
         let mut cfg =
@@ -249,8 +295,7 @@ fn task_resume_inherits_completed_and_cancelled_transcripts_before_live_and_cold
             .await
             .unwrap();
         assert_eq!(source_wait.request.session_id.0.as_ref(), "source-child");
-        let cancelled =
-            std::env::var("GROW_TEST_RESUME_TRANSCRIPT_OUTCOME").unwrap() == "cancelled";
+        let cancelled = outcome == "cancelled";
         let mut held_wait = None;
         if cancelled {
             let (respond_to, acknowledged) = tokio::sync::oneshot::channel();
@@ -321,17 +366,24 @@ fn task_resume_inherits_completed_and_cancelled_transcripts_before_live_and_cold
         })
         .join("timeline.jsonl");
         let source_bytes = std::fs::read(&source_path).unwrap();
-        let _derived = launch(
+        let mut derived = launch_with_selection(
             &agent,
             &root,
             "derived-child",
             true,
+            SubagentRuntimeOverrides {
+                model: resume_model.map(|model| format!("test/{model}")),
+                ..Default::default()
+            },
             tokio_util::sync::CancellationToken::new(),
         );
-        let derived_wait =
-            cold_recovery_stage("transcript.derived_permission", permission_rx.recv())
-                .await
-                .unwrap();
+        let derived_wait = cold_recovery_stage("transcript.derived_permission", async {
+            tokio::select! {
+                permission = permission_rx.recv() => permission.unwrap(),
+                result = &mut derived => panic!("derived task ended before its tool call: {result:?}"),
+            }
+        })
+        .await;
         assert_eq!(derived_wait.request.session_id.0.as_ref(), "derived-child");
         assert!(
             eager_history
@@ -747,7 +799,7 @@ permission_mode = "ask"
                 "small",
                 Some("replacement/tiny"),
                 None,
-                Some("source transcript"),
+                Some("no closed Surface range"),
             ),
         ] {
             let before = requests.lock().unwrap().len();

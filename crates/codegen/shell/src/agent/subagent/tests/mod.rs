@@ -544,7 +544,7 @@ async fn subagent_inherits_session_cli_overrides() {
         ..Default::default()
     };
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
-    ctx.agent_config = Some(config);
+    ctx.agent_config = config;
     let def = resolve_agent_definition("session-override-probe", &ctx)
         .expect("cli agent resolves");
     assert_eq!(
