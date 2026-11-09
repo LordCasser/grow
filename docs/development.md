@@ -509,6 +509,8 @@ Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗
 
 普通模型委派（含 `resume_from`）先由 TaskTool 等待当前 SessionActor 的 Link durable ACK；有效 TODO 的 session、scope、身份和状态由同一 step gate 内的 canonical plan 判断。内部 Workflow owner 的委派语义单独保留。原生 `todo_read` 只读 self 或经 session-bound backend 解析的直属 parent，分页 cursor 绑定实际 planning event seq，不能用整个 Timeline 的尾 seq 或资源投影代替。请求上下文在 `actor/planning` 观察当前计划与真实工具别名，再通过 ChatState 的独立 runtime-context 参数构造，计入预算但不写入 MemoryContext、Surface 或任务 prompt。首次请求与 resume 走同一入口；核对实际 provider 请求及本次 Spawn/Seed，不能靠旧 prompt 中出现父项正文证明上下文正确。行为见 [任务计划契约](../openspec/specs/task-planning/spec.md) 与 [请求投影契约](../openspec/specs/session-timeline/spec.md)。
 
+父计划在回合首个请求构造时观察一次，后续请求复用该背景快照。本地计划仍随每次请求刷新。父项的目标变更通过持久通知交付有界的目标与验收要求，子 Agent 仅在缺少决策所需事实时读取计划。处理结果用已有结构化动作确认精确变更。待办与进行中的进度切换只更新计划，停止通知仍在安全边界生效。见 [重规划触发](../openspec/specs/task-planning/spec.md#requirement-effective-non-completion-edits-request-replanning)。
+
 规划控制沿既有 notification receipt 和 LocalPlan：runner 校验已 claim 的不可变父 change，child 在同 gate 先确认完整 Received 责任，再确认 typed `PlanGuidance` receipt，最后发送软中断。排查失败前缀时分别核对这两次 durable 提交，重投须复用原 identity/payload。处理证明使用 exact source/version 的 `consumed_notification_turn`；按 message_id 查询普通消息消费不能代替控制。单条历史 Handled 缺少该证明时保留错误和重试责任，扫描仍处理后续独立合法 ACK 和直属 child 控制。stop 的 Stopping 仅确认进入收尾，命令、后代、wait、结果与必需 review 仍按各自 owner 结算。live/cold 展示只在通知和通信历史投影边界按 typed 来源隐藏，内部模型输入与取证事实保留；普通同正文消息仍可见。
 
 真实委派调用链回归使用 Shell integration tests `test_subagent_todo_context` 与 `test_subagent_todo_control`。先构建当前默认 CLI，再通过显式 `GROW_BINARY` 运行其 `--ignored` 场景；测试只使用隔离存储与 loopback provider，分别覆盖 fresh/resume 首请求的当前绑定，以及编辑、删除、typed 消费、Stopping、正常 Result 和精确父级 review。模块测试通过不能代替当前二进制的调用链验证。

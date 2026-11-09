@@ -10,7 +10,7 @@ use tools::implementations::grow_build::task::parent_planning::ParentPlanningRea
 use tools::implementations::grow_build::todo::review_binding;
 
 const MAX_CONTEXT_BYTES: usize = 8 * 1024;
-const GUIDANCE: &str = "Current planning context (summary; guidance, not permission). Omitted facts remain obligations. When read_entry is available, use its resolved tool with target self or parent and optional step_id; follow next_cursor for complete facts and restart on stale_cursor. Do not use a write to inspect. Copy complete review_binding fields for a review and add a decision and evidence; never guess resultId. A stop ends the original delegation even after reopening. Receipt alone does not acknowledge handling a change.\n";
+const GUIDANCE: &str = "Current planning context (summary; guidance, not permission). Treat the initial parent snapshot as background and continue the assigned work without a routine check or confirmation. Use newly delivered parent-change notices to decide what needs to change. Existing wait and delivery obligations still apply. Use read_entry with target self or parent only when a missing fact affects your task. Follow next_cursor if more facts are needed and restart on stale_cursor. Use the local plan action to record handling once for each exact received change; reserve replies for substantive questions, progress, and results. Copy complete review_binding fields for a review and add a decision and evidence; never guess resultId. A stop ends the original delegation even after reopening.\n";
 
 /// One observation, never retained as runtime state or a second relationship graph.
 #[derive(Clone, Copy)]
@@ -127,7 +127,7 @@ pub(super) fn render_planning_context(
                 "control_summary": {
                     "directive": if step.removed || step.status == PlanStepStatus::Cancelled || plan.link_stop_requested(&binding.task_id) {
                         "stop_and_wrap_up"
-                    } else if unhandled > 0 { "inspect_replan" } else { "none" },
+                    } else { "none" },
                     "unhandled_count": unhandled,
                     "unhandled_stop_count": changes.iter().filter(|change| is_unhandled(change) && change.is_stop()).count(),
                     "stop_record_count": stop_records,

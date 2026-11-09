@@ -24,6 +24,11 @@ use tools::implementations::grow_build::todo::{
     TodoPriority, TodoStatus, TodoWriteInput, review_binding,
 };
 
+pub(crate) type ParentPlanObservation = Result<
+    Option<tool_types::planning::PlanningReadSnapshot>,
+    tools::implementations::grow_build::task::parent_planning::ParentPlanningReadError,
+>;
+
 const PLANNING_DELIVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const PLANNING_DELIVERY_MAX_BACKOFF: Duration = Duration::from_secs(2);
 
@@ -34,9 +39,12 @@ pub(crate) enum PlannedDependenciesOutcome {
 }
 
 impl SessionActor {
-    /// Request-only, bounded view of the latest owner facts. It goes through
-    /// normal request construction, so token accounting includes the view.
-    pub(crate) async fn local_planning_context(&self) -> Result<Option<String>, String> {
+    /// Project current local facts and the turn's initial parent observation.
+    /// Parent changes during the turn arrive through typed notifications.
+    pub(crate) async fn local_planning_context(
+        &self,
+        parent_observation: &mut Option<ParentPlanObservation>,
+    ) -> Result<Option<String>, String> {
         use tool_types::planning::PlanningReadSnapshot;
         use tools::implementations::grow_build::task::{
             backend::SubagentBackendResource, parent_planning::ParentPlanningReadError,
@@ -64,12 +72,13 @@ impl SessionActor {
         // Registration is a separate observation from the parent read. Retain a
         // resolved name locally even if that read exhausts the shared deadline.
         let mut read_tool_name = None;
+        let needs_parent_observation = binding.is_some() && parent_observation.is_none();
         let observation = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => binding.map(|_| Err(ParentPlanningReadError::Unavailable)),
+            _ = cancellation.cancelled() => needs_parent_observation.then_some(Err(ParentPlanningReadError::Unavailable)),
             result = tokio::time::timeout_at(deadline, async {
                 read_tool_name = bridge.tool_for_kind(tools::types::tool::ToolKind::PlanRead).await;
-                if binding.is_some() {
+                if needs_parent_observation {
                     // The clone leaves Resources before waiting on the backend.
                     // Its own read deadline remains in force inside this budget.
                     Some(match bridge.read_resource::<SubagentBackendResource>().await {
@@ -81,11 +90,14 @@ impl SessionActor {
                 }
             }) => match result {
                 Ok(observed) => observed,
-                Err(_) => binding.map(|_| Err(ParentPlanningReadError::TimedOut)),
+                Err(_) => needs_parent_observation.then_some(Err(ParentPlanningReadError::TimedOut)),
             },
         };
+        if observation.is_some() {
+            *parent_observation = observation;
+        }
         let parent = binding
-            .zip(observation.as_ref())
+            .zip(parent_observation.as_ref())
             .map(|(binding, observation)| {
                 context::ParentPlanContext::from_observation(
                     binding,
@@ -473,7 +485,7 @@ impl SessionActor {
         let body = control::guidance_body(&parent_session_id, &change)
             .map_err(|error| AgentMessageDeliveryError::rejected("invalid_replan", error))?;
         let source = chat_state::NotificationSource::PlanGuidance {
-            parent_session_id,
+            parent_session_id: parent_session_id.clone(),
             message_id: replan_message_id(&change.id),
         };
         let receipts = self
@@ -486,7 +498,16 @@ impl SessionActor {
                     "Receipt history is unavailable",
                 )
             })?;
-        let receipt = agent_message_receipt(&receipts, child_session_id, &source, &body)?;
+        let receipt = agent_message_receipt(&receipts, child_session_id, &source, &body).or_else(
+            |error| {
+                if inserted || change.is_stop() {
+                    return Err(error);
+                }
+                let previous = control::previous_replan_body(&parent_session_id, &change)
+                    .map_err(|_| error)?;
+                agent_message_receipt(&receipts, child_session_id, &source, &previous)
+            },
+        )?;
         if !inserted && let Some(id) = receipt.as_ref() {
             return Ok(id.clone());
         }

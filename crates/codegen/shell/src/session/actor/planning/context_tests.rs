@@ -309,6 +309,23 @@ fn max_text_fields_and_4096_steps_keep_last_tombstone_identity_and_stop() {
 }
 
 #[test]
+fn parent_replan_projection_is_background_until_the_notification_arrives() {
+    let (binding, mut snapshot) = parent_fixture(2);
+    snapshot.plan.replans.push(change(&snapshot, 20, false));
+    snapshot.plan.links[0].pending_source_revision = Some(20);
+    snapshot.plan.validate().unwrap();
+    let (text, value) = render_parent(&binding, &Ok(Some(snapshot)));
+    assert!(text.contains("without a routine check or confirmation"));
+    assert!(text.contains("Use newly delivered parent-change notices"));
+    assert_eq!(value["parent"]["control_summary"]["directive"], "none");
+    assert_eq!(value["parent"]["control_summary"]["unhandled_count"], 1);
+    assert_eq!(
+        value["parent"]["control_summary"]["records"][0]["progress"],
+        "pending"
+    );
+}
+
+#[test]
 fn historical_stop_is_visible_after_the_step_reopens() {
     for progress in [
         ReplanProgress::Received,

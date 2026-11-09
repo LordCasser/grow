@@ -58,14 +58,17 @@ fn context_item(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn first_and_later_turn_requests_refresh_parent_context_without_storing_it() {
+async fn later_requests_reuse_the_initial_parent_observation_without_storing_it() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (mut child, mut child_gateway) = build_actor().await;
             let (mut parent, mut parent_gateway) = build_actor().await;
             Arc::get_mut(&mut child).unwrap().session_info.id = acp::SessionId::new(CHILD);
             Arc::get_mut(&mut parent).unwrap().session_info.id = acp::SessionId::new(PARENT);
-            let initial = child.build_turn_request(vec![], None, None).await.unwrap();
+            let initial = child
+                .build_turn_request(vec![], None, None, &mut None)
+                .await
+                .unwrap();
             child.chat_state_handle.record_provider_context_anchor(
                 chat_state::estimate_request_input_tokens(&initial),
             );
@@ -119,7 +122,7 @@ async fn first_and_later_turn_requests_refresh_parent_context_without_storing_it
                 .await
                 .unwrap();
             let mut plan = plan();
-            let mut seq = parent
+            let seq = parent
                 .chat_state_handle
                 .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
                     chat_state::timeline::PlanningEvent {
@@ -136,12 +139,13 @@ async fn first_and_later_turn_requests_refresh_parent_context_without_storing_it
                 .materialize_timeline(CHILD.into())
                 .await
                 .unwrap();
+            let mut parent_observation = None;
             for pass in 0..2 {
                 let parent_before = parent.chat_state_handle.timeline_events().await.unwrap();
                 let parent_gate = parent.step_control_gate.lock().await;
                 let request = tokio::time::timeout(
                     Duration::from_secs(2),
-                    child.build_turn_request(vec![], None, None),
+                    child.build_turn_request(vec![], None, None, &mut parent_observation),
                 )
                 .await
                 .unwrap()
@@ -149,23 +153,17 @@ async fn first_and_later_turn_requests_refresh_parent_context_without_storing_it
                 drop(parent_gate);
                 assert_eq!(request.items.len(), surface_before.surface.len() + 1);
                 let text = context_item(&request).text_content();
-                assert!(text.contains(if pass == 0 {
-                    "initial delegated objective"
-                } else {
-                    "latest delegated objective"
-                }));
+                assert!(text.contains("initial delegated objective"));
+                assert!(!text.contains("latest delegated objective"));
                 assert!(!text.contains("lifecycle-ROOT-decoy"));
                 assert!(!text.contains("sibling body is private"));
-                if pass == 1 {
-                    assert!(!text.contains("initial delegated objective"));
-                }
                 let json_start = text.find("Current planning context").unwrap();
                 let payload = text[json_start..].split_once('\n').unwrap().1;
                 // ChatState wraps request-only context in its synthetic reminder.
                 let end = payload.rfind('}').unwrap() + 1;
                 let context: serde_json::Value = serde_json::from_str(&payload[..end]).unwrap();
                 assert_eq!(context["parent"]["source"]["timeline_seq"], seq.get());
-                assert_eq!(context["parent"]["source"]["revision"], plan.revision);
+                assert_eq!(context["parent"]["source"]["revision"], 1);
                 assert_eq!(context["parent"]["associated_step"]["position"], 17);
                 assert_eq!(context["read_entry"]["tool"], "read_alias_for_turn");
                 assert!(context["self"].is_null());
@@ -206,7 +204,7 @@ async fn first_and_later_turn_requests_refresh_parent_context_without_storing_it
                     updated.content = "latest delegated objective".into();
                     plan.update_steps(PlanUpdateMode::Merge, vec![updated])
                         .unwrap();
-                    seq = parent
+                    parent
                         .chat_state_handle
                         .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
                             chat_state::timeline::PlanningEvent {
@@ -215,8 +213,7 @@ async fn first_and_later_turn_requests_refresh_parent_context_without_storing_it
                             },
                         ))
                         .await
-                        .unwrap()
-                        .seq;
+                        .unwrap();
                 }
             }
             assert!(child_gateway.try_recv().is_err());
@@ -250,7 +247,11 @@ async fn turn_parent_observation_happens_before_the_child_step_gate() {
             let gate = actor.step_control_gate.lock().await;
             let request = tokio::task::spawn_local({
                 let actor = actor.clone();
-                async move { actor.build_turn_request(vec![], None, None).await }
+                async move {
+                    actor
+                        .build_turn_request(vec![], None, None, &mut None)
+                        .await
+                }
             });
             let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
                 .await

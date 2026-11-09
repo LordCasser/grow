@@ -44,7 +44,7 @@ const REPORT: &str = "Completed: read the real parent plan, clarified its accept
 const PARENT_REPORT: &str =
     "Accepted the isolated child's exact canonical result after its normal settlement report.";
 const GUIDANCE: &str = "Current planning context (summary; guidance, not permission).";
-const REPLAN_PREFIX: &str = "The parent TODO changed. Pause work that depends on the previous objective, inspect the latest parent TODO with todo_read, and adjust only affected work. Ask the parent with ask_parent if the changed objective is unclear. Preserve valid completed work and acknowledge this exact change.";
+const REPLAN_PREFIX: &str = "The parent TODO changed. Use the revised objective and requirements below to adjust affected work. Preserve valid completed work. Read the parent TODO or ask for clarification only if you need a missing detail to decide what to do. Record handling once in todo_write with the handle_replans action and this change_id. If your work already covers the update, supply a short no_change_reason in that action. Keep routine confirmations out of replies to the user or parent.";
 const STOP_PREFIX: &str = "The parent TODO was removed or cancelled. This delegation is terminated. Stop advancing its objective now, preserve existing work, perform only necessary cleanup and settlement, then report completed work, remaining work, artifacts, and unresolved outcomes to the parent. Do not resume this delegation because the TODO is later reopened.";
 
 fn tool_response(call_id: &str, name: &str, arguments: Value) -> ScriptedResponse {
@@ -1194,7 +1194,11 @@ agent_type = "grow-build"
 
                 let parent_edit = expect_tool(&parent_server, "call_parent_edit", "todo_write", json!({"todos":[{"id":STEP,"content":EDITED_OBJECTIVE,"requirements":EDITED_REQUIREMENTS}]}));
                 let mut after_edit = hold_tool(&parent_server, "call_parent_after_edit", "todo_read", json!({"target":"self","limit":50}));
-                let mut edit_request = hold_tool(&child_server, "call_child_edit_parent_read", "todo_read", json!({"target":"parent","limit":50}));
+                let expected_edit_id = format!("{task_id}:{STEP}:{}", parent.plan().revision + 1);
+                let mut edit_request = hold_tool(&child_server, "call_child_handle_edit", "todo_write", json!({
+                    "todos":[{"id":AFFECTED,"content":"Verify the edited acceptance.","requirements":EDITED_REQUIREMENTS}],
+                    "actions":[{"handle_replans":{"ids":[expected_edit_id]}}]
+                }));
                 before_edit.release();
                 let (_, edit_body) = tokio::join!(blocked(&mut after_edit, &parent_server, &client), blocked(&mut edit_request, &child_server, &client));
                 before_edit.assert_satisfied(); parent_edit.assert_satisfied();
@@ -1202,6 +1206,7 @@ agent_type = "grow-build"
                 let child = journal(&grow_home, child_id);
                 assert_eq!(parent.plan().replans.len(), 1);
                 let edit = parent.plan().replans[0].clone();
+                assert_eq!(edit.id, expected_edit_id);
                 assert!(!edit.is_stop());
                 assert_eq!(edit.link_id, task_id);
                 assert_eq!(edit.child_session_id, child_id);
@@ -1211,9 +1216,9 @@ agent_type = "grow-build"
                 assert_eq!(edit.source_revision, parent.plan().revision);
                 let edit_control = control_evidence(&child, parent_id, &edit);
                 assert_wire_control(&edit_body, &edit_control);
-                let edit_context = assert_context(&edit_body, &parent, &actual_spawn, EDITED_OBJECTIVE, false);
-                assert_eq!(edit_context["parent"]["control_summary"]["directive"], "inspect_replan");
-                assert!(edit_context["parent"]["source"]["revision"].as_u64().unwrap() > first_context["parent"]["source"]["revision"].as_u64().unwrap());
+                let edit_context = assert_context(&edit_body, &parent, &actual_spawn, OBJECTIVE, false);
+                assert_eq!(edit_context["parent"]["control_summary"]["directive"], "none");
+                assert_eq!(edit_context["parent"]["source"], first_context["parent"]["source"]);
                 assert_unfinished(&parent, &child, task_id);
                 // The soft interrupt abandoned this old sample. Only the NEW
                 // request above proves input consumption; release is cleanup.
@@ -1221,27 +1226,11 @@ agent_type = "grow-build"
                 assert_not_dispatched(&child, "call_abandoned_before_edit");
                 eprintln!("EDIT request evidence={}", json!({"runtime":edit_context,"typed_source":edit_control.source,"source_version":edit_control.version,"source_change":edit}));
 
-                let edit_self_read = expect_tool(&child_server, "call_child_edit_self_read", "todo_read", json!({"target":"self","limit":50}));
-                let mut edit_reads = hold_tool(&child_server, "call_child_after_edit_reads", "todo_read", json!({"target":"self","limit":50}));
-                edit_request.release();
-                let edit_reads_body = blocked(&mut edit_reads, &child_server, &client).await;
-                edit_request.assert_satisfied(); edit_self_read.assert_satisfied();
-                let parent = journal(&grow_home, parent_id);
-                let child = journal(&grow_home, child_id);
-                let parent_read = read_output(&edit_reads_body, "call_child_edit_parent_read", &parent, "parent", true);
-                let self_read = read_output(&edit_reads_body, "call_child_edit_self_read", &child, "self", false);
-                let native_edit = self_read.plan.as_ref().unwrap().replans.iter().find(|change| change.id == edit.id).unwrap();
-                same_change(&edit, native_edit);
-                same_change(native_edit, &parent_read.plan.as_ref().unwrap().replans[0]);
-                eprintln!("EDIT native read evidence={}", json!({"parent":parent_read,"self":self_read,"source_planning_event":parent.timeline.events().iter().find(|event| event.seq.get() == change_seq(&parent, &edit, &ReplanProgress::Pending)).unwrap()}));
-                let handle_edit = expect_tool(&child_server, "call_child_handle_edit", "todo_write", json!({
-                    "todos":[{"id":AFFECTED,"content":"Verify the edited acceptance.","requirements":EDITED_REQUIREMENTS}],
-                    "actions":[{"handle_replans":{"ids":[native_edit.id]}}]
-                }));
                 let mut abandoned_stop = hold_tool(&child_server, "call_abandoned_before_stop", "todo_read", json!({"target":"parent","limit":50}));
-                edit_reads.release();
+                // Apply the exact notification directly, without a plan read.
+                edit_request.release();
                 let _ = blocked(&mut abandoned_stop, &child_server, &client).await;
-                edit_reads.assert_satisfied(); handle_edit.assert_satisfied();
+                edit_request.assert_satisfied();
                 let child = journal(&grow_home, child_id);
                 assert_local_work(&child, "Verify the edited acceptance.", PlanStepStatus::InProgress);
                 let edit_outcome = match &child.plan().replans.iter().find(|change| change.id == edit.id).unwrap().progress {
@@ -1275,8 +1264,10 @@ agent_type = "grow-build"
                 assert_ne!(stop_control.message.message_id, edit_control.message.message_id);
                 assert_wire_control(&stop_body, &stop_control);
                 assert_wire_control(&stop_body, &edit_control);
-                let stop_context = assert_context(&stop_body, &parent, &actual_spawn, EDITED_OBJECTIVE, true);
-                assert_eq!(stop_context["parent"]["control_summary"]["directive"], "stop_and_wrap_up");
+                let stop_context = assert_context(&stop_body, &parent, &actual_spawn, OBJECTIVE, false);
+                assert_eq!(stop_context["parent"]["source"], first_context["parent"]["source"]);
+                assert_eq!(stop_context["self"]["replans_summary"][0]["id"], stop.id);
+                assert_eq!(stop_context["self"]["replans_summary"][0]["directive"], "stop_and_wrap_up");
                 assert_unfinished(&parent, &child, task_id);
                 abandoned_stop.release();
                 assert_not_dispatched(&child, "call_abandoned_before_stop");

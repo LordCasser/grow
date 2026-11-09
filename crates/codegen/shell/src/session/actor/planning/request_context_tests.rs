@@ -74,7 +74,7 @@ async fn parent_failure_keeps_binding_without_plan_gate_resource_lock_or_publica
             let gate = actor.step_control_gate.lock().await;
             let read = tokio::task::spawn_local({
                 let actor = actor.clone();
-                async move { actor.local_planning_context().await }
+                async move { actor.local_planning_context(&mut None).await }
             });
             let request = next_read(&mut events).await;
             assert_eq!(request.source_session_id, actor.session_id_string());
@@ -123,7 +123,7 @@ async fn parent_observation_uses_the_backend_five_second_deadline() {
             let start = tokio::time::Instant::now();
             let read = tokio::task::spawn_local({
                 let actor = actor.clone();
-                async move { actor.local_planning_context().await }
+                async move { actor.local_planning_context(&mut None).await }
             });
             let request = next_read(&mut events).await;
             let text = tokio::time::timeout(Duration::from_secs(6), read)
@@ -156,7 +156,7 @@ async fn dropped_context_cancels_only_its_read_and_the_next_request_reads_again(
             let (actor, _gateway, mut events) = fixture().await;
             let read = tokio::task::spawn_local({
                 let actor = actor.clone();
-                async move { actor.local_planning_context().await }
+                async move { actor.local_planning_context(&mut None).await }
             });
             let first = next_read(&mut events).await;
             read.abort();
@@ -166,7 +166,7 @@ async fn dropped_context_cancels_only_its_read_and_the_next_request_reads_again(
             assert!(!actor.background_service_shutdown.is_cancelled());
             let read = tokio::task::spawn_local({
                 let actor = actor.clone();
-                async move { actor.local_planning_context().await }
+                async move { actor.local_planning_context(&mut None).await }
             });
             let second = next_read(&mut events).await;
             assert!(!second.cancellation.is_cancelled());
@@ -192,7 +192,7 @@ async fn self_owner_error_propagates_before_any_parent_observation() {
             Arc::get_mut(&mut actor).unwrap().chat_state_handle =
                 chat_state::ChatStateHandle::noop();
             let expected = actor.chat_state_handle.planning_state().await.unwrap_err();
-            assert_eq!(actor.local_planning_context().await, Err(expected));
+            assert_eq!(actor.local_planning_context(&mut None).await, Err(expected));
             assert!(matches!(
                 events.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)
@@ -210,7 +210,7 @@ async fn no_birth_binding_and_no_local_plan_does_not_read_the_lifecycle_root() {
                 .unwrap()
                 .startup_hints
                 .delegated_parent_plan = None;
-            assert_eq!(actor.local_planning_context().await.unwrap(), None);
+            assert_eq!(actor.local_planning_context(&mut None).await.unwrap(), None);
             assert!(matches!(
                 events.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)
@@ -244,11 +244,14 @@ async fn held_resources_times_out_before_dispatch_and_keeps_the_parent_binding()
             let resources = bridge.shared_resources().await;
             let locked = resources.lock().await;
             let start = tokio::time::Instant::now();
-            let text = tokio::time::timeout(Duration::from_secs(6), actor.local_planning_context())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            let text = tokio::time::timeout(
+                Duration::from_secs(6),
+                actor.local_planning_context(&mut None),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
             assert!(start.elapsed() >= Duration::from_secs(5));
             let value = json_context(&text);
             assert_eq!(value["parent"]["error_code"], "timed_out");
@@ -308,11 +311,14 @@ async fn held_resources_also_bounds_a_self_only_context_without_dispatching_pare
             let resources = bridge.shared_resources().await;
             let locked = resources.lock().await;
             let start = tokio::time::Instant::now();
-            let text = tokio::time::timeout(Duration::from_secs(6), actor.local_planning_context())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            let text = tokio::time::timeout(
+                Duration::from_secs(6),
+                actor.local_planning_context(&mut None),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
             assert!(start.elapsed() >= Duration::from_secs(5));
             let value = json_context(&text);
             assert!(value["parent"].is_null());
@@ -360,7 +366,7 @@ async fn assert_timeout_keeps_resolved_read_alias(reply: Option<ParentPlanningRe
     let started = tokio::time::Instant::now();
     let read = tokio::task::spawn_local({
         let actor = actor.clone();
-        async move { actor.local_planning_context().await }
+        async move { actor.local_planning_context(&mut None).await }
     });
     let ParentPlanningRequest {
         source_session_id,

@@ -876,7 +876,15 @@ fn compare_step(old: &PlanStep, new: &PlanStep) -> Option<StepChange> {
     (!fields.is_empty()).then(|| StepChange {
         step_id: old.id.clone(),
         replans: fields.iter().any(|field| {
-            !matches!(field, StepField::Status) || new.status != PlanStepStatus::Completed
+            !matches!(field, StepField::Status)
+                || new.status == PlanStepStatus::Cancelled
+                || (matches!(
+                    old.status,
+                    PlanStepStatus::Completed | PlanStepStatus::Cancelled
+                ) && matches!(
+                    new.status,
+                    PlanStepStatus::Pending | PlanStepStatus::InProgress
+                ))
         }),
         fields,
     })
@@ -1549,6 +1557,16 @@ mod tests {
     #[test]
     fn effective_diff_only_replans_for_intent_changes() {
         let mut plan = linked_plan();
+        let mut revision = plan.revision;
+        for status in [PlanStepStatus::InProgress, PlanStepStatus::Pending] {
+            let progress = plan
+                .update_steps(PlanUpdateMode::Merge, vec![step("s1", "first", status)])
+                .unwrap();
+            assert_eq!(progress.revision, revision + 1);
+            assert!(progress.source_changes.is_empty());
+            assert!(plan.replans.is_empty());
+            revision = progress.revision;
+        }
         let completion = plan
             .update_steps(
                 PlanUpdateMode::Merge,

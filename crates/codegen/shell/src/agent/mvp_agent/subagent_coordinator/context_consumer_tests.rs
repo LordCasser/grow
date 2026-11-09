@@ -206,19 +206,26 @@ fn context_follows_nested_coordinator_route_and_refreshes_current_owner_facts() 
         bridge
             .update_resource(ChannelBackend::for_session(events, "actual-child-B").into_resource())
             .await;
-        let initial = child.actor.local_planning_context().await.unwrap().unwrap();
+        let initial = child
+            .actor
+            .local_planning_context(&mut None)
+            .await
+            .unwrap()
+            .unwrap();
         for pass in 0..2 {
             let before = (
                 root.observables().await,
                 parent.observables().await,
                 child.observables().await,
             );
-            let text =
-                tokio::time::timeout(Duration::from_secs(2), child.actor.local_planning_context())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap();
+            let text = tokio::time::timeout(
+                Duration::from_secs(2),
+                child.actor.local_planning_context(&mut None),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
             let value = context_json(&text);
             assert_eq!(
                 value["parent"]["binding"]["parent_session_id"],
@@ -268,7 +275,12 @@ fn context_follows_nested_coordinator_route_and_refreshes_current_owner_facts() 
             .active_child_sessions
             .borrow_mut()
             .remove(&parent.handle.info.id);
-        let unavailable = child.actor.local_planning_context().await.unwrap().unwrap();
+        let unavailable = child
+            .actor
+            .local_planning_context(&mut None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             context_json(&unavailable)["parent"]["error_code"],
             "unavailable"

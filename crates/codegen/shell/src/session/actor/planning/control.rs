@@ -5,7 +5,8 @@ use tool_types::ReplanChange;
 
 const MAX_GUIDANCE_BYTES: usize = 16 * 1024;
 const MAX_REQUIREMENT_SUMMARIES: usize = 4;
-const REPLAN_PREFIX: &str = "The parent TODO changed. Pause work that depends on the previous objective, inspect the latest parent TODO with todo_read, and adjust only affected work. Ask the parent with ask_parent if the changed objective is unclear. Preserve valid completed work and acknowledge this exact change.";
+const REPLAN_PREFIX: &str = "The parent TODO changed. Use the revised objective and requirements below to adjust affected work. Preserve valid completed work. Read the parent TODO or ask for clarification only if you need a missing detail to decide what to do. Record handling once in todo_write with the handle_replans action and this change_id. If your work already covers the update, supply a short no_change_reason in that action. Keep routine confirmations out of replies to the user or parent.";
+const PREVIOUS_REPLAN_PREFIX: &str = "The parent TODO changed. Pause work that depends on the previous objective, inspect the latest parent TODO with todo_read, and adjust only affected work. Ask the parent with ask_parent if the changed objective is unclear. Preserve valid completed work and acknowledge this exact change.";
 const STOP_PREFIX: &str = "The parent TODO was removed or cancelled. This delegation is terminated. Stop advancing its objective now, preserve existing work, perform only necessary cleanup and settlement, then report completed work, remaining work, artifacts, and unresolved outcomes to the parent. Do not resume this delegation because the TODO is later reopened.";
 
 pub(super) fn guidance_body(
@@ -17,6 +18,22 @@ pub(super) fn guidance_body(
     } else {
         REPLAN_PREFIX
     };
+    render_guidance(parent_session_id, change, prefix)
+}
+
+/// Match receipts committed before the guidance wording changed.
+pub(super) fn previous_replan_body(
+    parent_session_id: &str,
+    change: &ReplanChange,
+) -> Result<String, String> {
+    render_guidance(parent_session_id, change, PREVIOUS_REPLAN_PREFIX)
+}
+
+fn render_guidance(
+    parent_session_id: &str,
+    change: &ReplanChange,
+    prefix: &str,
+) -> Result<String, String> {
     let requirements = change.requirements.as_deref().unwrap_or_default();
     let shown = requirements.len().min(MAX_REQUIREMENT_SUMMARIES);
     let mut details = json!({

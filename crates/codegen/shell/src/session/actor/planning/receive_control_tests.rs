@@ -537,6 +537,50 @@ async fn persisted_receipt_with_lost_ack_confirms_after_cold_stop_without_new_in
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn previous_guidance_receipt_confirms_without_republication_after_cold_restore() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut fixture = Fixture::new().await;
+            fixture.auto_ack();
+            let mut change = control(&fixture.actor, false);
+            change.progress = ReplanProgress::Received;
+            let mut plan = LocalPlan::new(fixture.actor.session_id_string(), "work:control-turn");
+            plan.receive_replan(change.clone()).unwrap();
+            fixture.actor.commit_local_plan(None, plan).await.unwrap();
+            let id = fixture
+                .actor
+                .receive_notification_detailed(
+                    chat_state::NotificationSource::PlanGuidance {
+                        parent_session_id: "direct-parent".into(),
+                        message_id: replan_message_id(&change.id),
+                    },
+                    chat_state::NotificationSourceVersion::Ordinal {
+                        value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+                    },
+                    control::previous_replan_body("direct-parent", &change).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            fixture.cold_restore().await;
+            fixture.actor.state.lock().await.termination = TerminationState::Graceful;
+            fixture.actor.parent_message_interrupt.send_replace(false);
+            let before = serde_json::to_value(fixture.events()).unwrap();
+            assert_eq!(
+                fixture
+                    .actor
+                    .receive_plan_guidance("direct-parent".into(), change)
+                    .await
+                    .unwrap(),
+                id
+            );
+            assert_eq!(serde_json::to_value(fixture.events()).unwrap(), before);
+            assert!(!*fixture.actor.parent_message_interrupt.borrow());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn exact_duplicates_keep_received_consumed_and_handled_progress_without_reinterrupting() {
     tokio::task::LocalSet::new()
         .run_until(async {
