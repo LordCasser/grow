@@ -1,0 +1,3 @@
+- [x] Persist and restore frozen coverage for displayed recaps.
+- [x] Add cold-load, later-turn, manual, legacy and fresh/seeded regressions.
+- [x] Pass Core CI library and Settings tests and strict OpenSpec validation.

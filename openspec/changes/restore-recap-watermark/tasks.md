@@ -1,3 +1,0 @@
-- [ ] Persist and restore frozen coverage for displayed recaps.
-- [ ] Test cold load, later turns, manual, legacy and fresh/seeded cases.
-- [ ] Run Rust checks and strict OpenSpec validation.

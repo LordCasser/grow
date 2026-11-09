@@ -840,4 +840,4 @@ Prompt cache key 的 rewind 锚点由 Timeline accepted-event fold 派生；prep
 
 冷恢复在冻结 child 当前 MCP client-ID grant 前，通过 actor 的 initialized-pool snapshot 等待直接父的初始握手收尾；等待由可取消的 session activity 承担，command executor 继续处理即时 snapshot。普通新 Task 仍取即时池。出生名字、当前 profile、父 ceiling 和后续 live authority 继续求交，不从当前配置补造出生事实。见 [冷恢复 MCP 初始化边界](../openspec/changes/archive/2026-11-04-await-parent-mcp-before-cold-child-grant/design.md)。
 
-Recap 的冷恢复只采用成功展示事实中明确记录的冻结主轮次计数，不根据通知落盘顺序推断覆盖范围。旧记录缺少计数时保守保留原自动请求资格；参见 [冻结 recap 覆盖变更](../openspec/changes/restore-recap-watermark/design.md)。
+Recap 的冷恢复只采用成功展示事实中明确记录的冻结主轮次计数，不根据通知落盘顺序推断覆盖范围。旧记录缺少计数时保守保留原自动请求资格；参见 [冻结 recap 覆盖变更](../openspec/changes/archive/2026-11-09-restore-recap-watermark/design.md)。
