@@ -491,12 +491,126 @@ impl TimelineBootstrap {
         }
     }
 
+    /// Restore only explicit frozen coverage. Notification order is not input
+    /// order: a new prompt can arrive while the recap notification is persisted.
+    pub(super) fn last_recap_main_turn(&self) -> usize {
+        use crate::session::history::{GrowHistoryFact, HistoryContent, HistorySource};
+        let Self::Existing { history, .. } = self else {
+            return 0;
+        };
+        history
+            .sources
+            .iter()
+            .rev()
+            .find_map(|source| {
+                let HistorySource::Presentation { fact, .. } = source else {
+                    return None;
+                };
+                if !matches!(
+                    &fact.content,
+                    HistoryContent::Grow(value)
+                        if matches!(value.as_ref(), GrowHistoryFact::SessionRecap { .. })
+                ) {
+                    return None;
+                }
+                usize::try_from(
+                    fact.meta
+                        .as_ref()?
+                        .get("recapCoveredMainTurns")?
+                        .as_u64()?,
+                )
+                .ok()
+            })
+            .unwrap_or(0)
+    }
+
     fn label(&self) -> &'static str {
         match self {
             Self::Fresh { .. } => "fresh",
             Self::Seeded { .. } => "seeded",
             Self::Existing { .. } => "existing",
         }
+    }
+}
+
+#[cfg(test)]
+mod restored_recap_coverage_tests {
+    use super::TimelineBootstrap;
+    use crate::session::history::{GrowHistoryFact, HistoryContent, HistoryFact, HistorySnapshot, HistorySource};
+    use crate::session::helpers::session_recap::{main_turn_count, recap_gate};
+    use sampling_types::ConversationItem;
+
+    fn recap(coverage: Option<usize>, auto: bool) -> HistorySource {
+        HistorySource::Presentation {
+            at_ms: 1,
+            fact: Box::new(HistoryFact {
+                meta: coverage.map(|count| serde_json::Map::from_iter([(
+                    "recapCoveredMainTurns".into(), serde_json::json!(count),
+                )])),
+                content: HistoryContent::Grow(Box::new(GrowHistoryFact::SessionRecap {
+                    summary: "Completed work".into(),
+                    auto,
+                    away_period_id: None,
+                })),
+            }),
+        }
+    }
+
+    fn existing(turns: usize, sources: Vec<HistorySource>) -> TimelineBootstrap {
+        TimelineBootstrap::Existing {
+            timeline: Box::new(chat_state::Timeline::from_seed(
+                (0..turns).map(|_| ConversationItem::user("real prompt")).collect(),
+            ).unwrap()),
+            history: HistorySnapshot { sources, ..Default::default() },
+        }
+    }
+
+    #[test]
+    fn cold_load_uses_frozen_coverage_not_later_notification_position() {
+        for auto in [false, true] {
+            // The notification landed after a fourth prompt, but covered only three.
+            let bootstrap = existing(4, vec![recap(Some(3), auto)]);
+            let coverage = bootstrap.last_recap_main_turn();
+            assert_eq!(coverage, 3);
+            assert!(recap_gate(3, coverage, true, true).is_err());
+            assert!(recap_gate(4, coverage, true, true).is_ok());
+            assert!(recap_gate(3, coverage, false, true).is_ok());
+            let TimelineBootstrap::Existing { timeline, .. } = bootstrap else { unreachable!() };
+            assert_eq!(main_turn_count(timeline.surface()), 4);
+        }
+    }
+
+    #[test]
+    fn fresh_seeded_and_legacy_recaps_do_not_invent_coverage() {
+        assert_eq!(existing(3, vec![recap(None, true)]).last_recap_main_turn(), 0);
+        assert_eq!(existing(3, vec![]).last_recap_main_turn(), 0);
+        assert_eq!(TimelineBootstrap::Fresh { session_rules: None }.last_recap_main_turn(), 0);
+        let TimelineBootstrap::Existing { timeline, history } =
+            existing(3, vec![recap(Some(3), true)]) else { unreachable!() };
+        assert_eq!(TimelineBootstrap::Seeded { timeline, history }.last_recap_main_turn(), 0);
+    }
+
+    #[test]
+    fn coverage_round_trips_through_existing_history_metadata() {
+        let HistorySource::Presentation { fact, .. } = recap(Some(3), true) else { unreachable!() };
+        let encoded = serde_json::to_vec(&fact).unwrap();
+        let restored: HistoryFact = serde_json::from_slice(&encoded).unwrap();
+        let update = restored.into_update(&acp_transport::protocol::SessionId::new("test")).unwrap().unwrap();
+        let restored = HistoryFact::from_update(&update).unwrap().unwrap();
+        assert_eq!(restored.meta.unwrap()["recapCoveredMainTurns"], 3);
+    }
+
+    #[test]
+    fn latest_successful_coverage_is_restored_without_counting_unavailable() {
+        let unavailable = HistorySource::Presentation {
+            at_ms: 2,
+            fact: Box::new(HistoryFact {
+                meta: None,
+                content: HistoryContent::Grow(Box::new(GrowHistoryFact::SessionRecapUnavailable)),
+            }),
+        };
+        assert_eq!(existing(4, vec![recap(Some(3), true), recap(Some(4), false), unavailable])
+            .last_recap_main_turn(), 4);
     }
 }
 
@@ -989,6 +1103,7 @@ pub(crate) async fn spawn_session_actor(
     };
     let is_new_seed = matches!(&timeline_bootstrap, TimelineBootstrap::Seeded { .. });
     let restored_last_api_request_at = timeline_bootstrap.last_api_request_at();
+    let restored_last_recap_main_turn = timeline_bootstrap.last_recap_main_turn();
     let (
         validated_timeline,
         mut conversation,
@@ -2886,7 +3001,7 @@ pub(crate) async fn spawn_session_actor(
         plugin_registry_handle,
         events: crate::session::events::EventTracker::new(chat_state_handle.clone()),
         current_turn_number: std::cell::Cell::new(0),
-        last_recap_main_turn: std::cell::Cell::new(0),
+        last_recap_main_turn: std::cell::Cell::new(restored_last_recap_main_turn),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),

@@ -667,11 +667,12 @@ fn drained_session_recap(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Persisten
     let mut saw = false;
     while let Ok(msg) = rx.try_recv() {
         if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n)) = msg
-            && matches!(
-                n.update,
-                crate::extensions::notification::SessionUpdate::SessionRecap { .. }
-            )
+            && matches!(n.update, crate::extensions::notification::SessionUpdate::SessionRecap { .. })
         {
+            assert!(
+                n.meta.as_ref().and_then(|meta| meta.get("recapCoveredMainTurns")).and_then(serde_json::Value::as_u64).is_some(),
+                "generated recaps must persist their frozen coverage"
+            );
             saw = true;
         }
     }
@@ -1536,4 +1537,76 @@ async fn assert_sideband_prepared_route(side_question: bool) {
             );
         })
         .await;
+}
+
+/// Exercise generation, the persisted HistoryFact encoding, restored coverage,
+/// and the real actor's automatic gate with a loopback provider.
+#[tokio::test(flavor = "current_thread")]
+async fn generated_recap_coverage_blocks_repeat_after_history_round_trip() {
+    use crate::session::actor::spawn::TimelineBootstrap;
+    use crate::session::history::{HistoryFact, HistorySnapshot, HistorySource};
+    use test_support::MockInferenceServer;
+
+    tokio::task::LocalSet::new().run_until(async {
+        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence_tx, mut persistence_rx, _events) = sideband_persistence_harness();
+        let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+        let server = MockInferenceServer::start().await.unwrap();
+        server.set_response("We completed the three requested tasks.");
+        let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+        cfg.base_url = server.url();
+        cfg.api_backend = sampling_types::ApiBackend::Responses;
+        actor.chat_state_handle.replace_sampling_route(cfg);
+        let items = vec![
+            ConversationItem::user("first"),
+            ConversationItem::assistant("done"),
+            ConversationItem::user("second"),
+            ConversationItem::assistant("done"),
+            ConversationItem::user("third"),
+            ConversationItem::assistant("done"),
+        ];
+        replace_test_surface(&actor.chat_state_handle, items.clone()).await;
+        actor.handle_recap(false, None).await;
+        let fact = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(message) = persistence_rx.recv().await {
+                if let PersistenceMsg::Update(update) = message
+                    && let crate::session::storage::SessionUpdate::Grow(notification) = &update
+                    && matches!(notification.update,
+                        crate::extensions::notification::SessionUpdate::SessionRecap { .. })
+                {
+                    return HistoryFact::from_update(&update).unwrap().unwrap();
+                }
+            }
+            panic!("recap persistence channel closed");
+        }).await.unwrap();
+        assert_eq!(fact.meta.as_ref().unwrap()["recapCoveredMainTurns"], 3);
+        let bytes = serde_json::to_vec(&fact).unwrap();
+        let fact: HistoryFact = serde_json::from_slice(&bytes).unwrap();
+        let bootstrap = TimelineBootstrap::Existing {
+            timeline: Box::new(chat_state::Timeline::from_seed(items.clone()).unwrap()),
+            history: HistorySnapshot {
+                sources: vec![HistorySource::Presentation { at_ms: 1, fact: Box::new(fact) }],
+                ..Default::default()
+            },
+        };
+
+        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence_tx, _persistence_rx, _events) = sideband_persistence_harness();
+        let restored = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+        replace_test_surface(&restored.chat_state_handle, items).await;
+        restored.last_recap_main_turn.set(bootstrap.last_recap_main_turn());
+        restored.last_api_request_at.store(
+            chrono::Utc::now().timestamp_millis() - 4 * 60 * 1000,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let mut cfg = restored.chat_state_handle.get_sampling_config().await.unwrap();
+        cfg.base_url = server.url();
+        cfg.api_backend = sampling_types::ApiBackend::Responses;
+        restored.chat_state_handle.replace_sampling_route(cfg);
+        let before = server.requests().len();
+        restored.handle_recap(true, Some(uuid::Uuid::new_v4())).await;
+        assert_eq!(server.requests().len(), before, "unchanged history must not call the provider");
+        restored.handle_recap(false, None).await;
+        assert!(server.requests().len() > before, "explicit manual recap remains repeatable");
+    }).await;
 }
