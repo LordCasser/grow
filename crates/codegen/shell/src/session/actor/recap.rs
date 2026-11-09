@@ -536,12 +536,16 @@ impl SessionActor {
             }
             return;
         }
-        self.send_grow_notification(
+        self.send_grow_notification_with_extra_meta(
             crate::extensions::notification::SessionUpdate::SessionRecap {
                 summary,
                 auto,
                 away_period_id,
             },
+            Some(serde_json::Map::from_iter([(
+                "recapCoveredMainTurns".into(),
+                serde_json::json!(main_turns),
+            )])),
         )
         .await;
     }
