@@ -1,0 +1,2 @@
+- [x] 核对基线和已合入 PR，提交子 Agent 修复。
+- [x] 同步 Cargo 版本及发布说明，验证 Cargo metadata 和 OpenSpec。
