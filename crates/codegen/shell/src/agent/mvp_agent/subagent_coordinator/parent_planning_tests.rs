@@ -832,7 +832,3 @@ fn losing_the_parent_chat_state_during_a_query_returns_unavailable() {
         child.assert_no_publication();
     });
 }
-
-#[cfg(test)]
-#[path = "context_consumer_tests.rs"]
-mod context_consumer_tests;

@@ -331,23 +331,27 @@ The native todo_read tool SHALL provide self and immediate-parent plan snapshots
 
 ### Requirement: Planning context is constructed by Grow without user-chat insertion
 
-Grow SHALL inject bounded planning and delegation context into the provider request using the current local plan and one initial direct-parent observation per foreground turn. It SHALL include the linked step even when it lies outside the initial summary window, its location in the overall plan, relevant child associations and access to todo_read for specific missing facts. The initial parent snapshot SHALL be presented as background and SHALL NOT instruct the child to poll, confirm or report on the plan. Ordinary change obligations SHALL be actionable from delivered guidance. A child without a local TODO SHALL still receive its delegation context. The context SHALL be counted in the effective request budget and SHALL NOT be appended to the authored task prompt, durable Messages, Surface, ordinary chat history or unsolicited user-facing notifications.
+Grow SHALL restrict automatic request-only planning summaries to the primary Agent's own committed plan. The summary SHALL be bounded and counted in effective request pressure without becoming an authored prompt or persisted chat row. Subagent request assembly SHALL NOT automatically query or project the parent or local plan. Effective parent TODO changes SHALL be appended to the receiving subagent's context at its next safe sampling boundary through the existing typed delivery path. Explicit authorized plan reads remain available.
 
 #### Scenario: First child request locates its parent step
-- **WHEN** a newly admitted or resumed child makes its first provider request
-- **THEN** the request contains the current delegated step and overall position, while its user prompt remains authored text and no synthetic plan chat row is published.
+- **WHEN** a newly admitted or resumed child makes its first provider request without a parent change event
+- **THEN** it uses its authored task with the canonical delegation binding retained by the runtime and no automatic planning snapshot or parent query.
 
 #### Scenario: Repeated requests refresh plan context
-- **WHEN** the parent edits its plan after the child has built its first request in that foreground turn
-- **THEN** subsequent request builds reuse the same parent observation without a new parent query. The child receives effective changes through typed notifications and the request still projects the current local plan. No planning MemoryContext items are accumulated and retrieved-memory persistence remains independent.
+- **WHEN** a primary Agent makes repeated requests after its local plan changes
+- **THEN** its bounded local summary reflects the committed local plan without accumulating synthetic history or altering retrieved-memory persistence.
 
 #### Scenario: Parent is unavailable
-- **WHEN** a bound child cannot read the current parent owner
-- **THEN** Grow identifies the unavailable source and retained delegation identity rather than presenting a fabricated empty plan.
+- **WHEN** a bound child explicitly reads its parent plan and the owner is unavailable
+- **THEN** the existing read tool reports the unavailable owner. Ordinary sampling has no dependency on that read.
 
 #### Scenario: Repeated snapshots during unchanged work
-- **WHEN** the child makes multiple requests without a new parent change notification
-- **THEN** each snapshot provides background only. A parent progress or delivery field does not create a read, acknowledgement or reporting instruction.
+- **WHEN** a child makes multiple requests without a new parent TODO change
+- **THEN** no automatic planning snapshot or new planning notification is added.
+
+#### Scenario: Linked parent TODO changes
+- **WHEN** an effective objective change or stop for a directly linked child is durably received
+- **THEN** the existing typed notification is appended at the child's safe sampling boundary with the exact change identity and its guidance. Later requests may retain that item as history without repeating delivery.
 
 ### Requirement: Planning controls have internal runtime provenance and durable receipt
 

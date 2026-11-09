@@ -1,6 +1,6 @@
 //! Real CLI TODO -> spawn/resume -> first child request, using only loopback providers.
 //! Requires an explicit current GROW_BINARY; the harness must never build a fallback.
-//! Authored Task prompts remain unchanged; runtime context is checked separately.
+//! Authored Task prompts and canonical delegation bindings are verified without plan injection.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,10 +13,6 @@ use serde_json::{Value, json};
 use test_support::mock_server::LogEntry;
 use test_support::sse::chat_completions_reasoning_then_tool_call_events;
 use test_support::*;
-use tool_types::planning::PlanReadInput;
-use tools::implementations::grow_build::todo::TodoReadTool;
-use tools::registry::types::generate_schema;
-use tools::types::tool_metadata::ToolMetadata;
 
 const GUIDANCE: &str = "Current planning context (summary; guidance, not permission).";
 const TASK_PROMPT: &str = "Return a short completion. Use only this test's scripted provider; no tools or external effects.";
@@ -155,180 +151,33 @@ fn spawn_for_call<'a>(parent: &'a Timeline, call_id: &str) -> (u64, &'a Subagent
     spawns[0]
 }
 
-fn runtime_context(body: &Value) -> (String, Value) {
-    let mut blocks = Vec::new();
-    for message in body["messages"].as_array().unwrap() {
-        let texts: Vec<_> = match &message["content"] {
-            Value::String(text) => vec![text.as_str()],
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(|part| part["text"].as_str())
-                .collect(),
-            _ => Vec::new(),
-        };
-        for text in texts {
-            let Some(start) = text.find(GUIDANCE) else {
-                continue;
-            };
-            assert_eq!(
-                message["role"], "user",
-                "runtime context is a synthetic reminder"
-            );
-            assert_eq!(text.matches(GUIDANCE).count(), 1);
-            let context = &text[start..];
-            let (guidance, payload) = context.split_once('\n').expect("GUIDANCE then JSON");
-            assert!(guidance.starts_with(GUIDANCE));
-            let mut stream = serde_json::Deserializer::from_str(payload).into_iter::<Value>();
-            let value = stream
-                .next()
-                .expect("runtime JSON")
-                .expect("valid runtime JSON");
-            let json_end = stream.byte_offset();
-            let suffix = payload[json_end..].trim();
-            assert!(
-                suffix.is_empty() || suffix == "</system-reminder>",
-                "unexpected runtime suffix: {suffix}"
-            );
-            // This decoded string still includes JSON's escapes inside field values.
-            // Measure the exact runtime block, excluding the provider envelope/wrapper.
-            let actual = &context[..guidance.len() + 1 + json_end];
-            assert!(
-                actual.len() <= 8192,
-                "runtime block is {} UTF-8 bytes",
-                actual.len()
-            );
-            assert_eq!(value["summary"], true);
-            blocks.push((actual.to_owned(), value));
-        }
-    }
-    assert_eq!(
-        blocks.len(),
-        1,
-        "the FIRST request must have exactly one new runtime block"
-    );
-    blocks.pop().unwrap()
-}
-
-fn assert_read_entry(body: &Value, context: &Value) {
-    assert_eq!(context["read_entry"]["availability"], "available");
-    let alias = context["read_entry"]["tool"]
-        .as_str()
-        .expect("resolved tool alias");
-    let definitions: Vec<_> = body["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|tool| tool["function"]["name"] == alias)
-        .collect();
-    assert_eq!(
-        definitions.len(),
-        1,
-        "the resolved reader must be callable in THIS request"
-    );
-    let function = &definitions[0]["function"];
-    assert_eq!(function["parameters"], generate_schema::<PlanReadInput>());
-    assert_eq!(
-        function["description"],
-        TodoReadTool.description_template(),
-        "the alias must identify the native todo_read, not merely an arbitrary exposed tool"
-    );
-}
-
-fn assert_first_context(
+fn assert_first_request(
     body: &Value,
     parent_id: &str,
     parent: &Timeline,
     child: &Timeline,
     spawn_seq: u64,
     spawn: &SubagentSpawnEvent,
-    expected_step: (&str, &str, &[&str]),
-) -> (String, Value) {
-    let (step_id, objective, requirements) = expected_step;
+    step_id: &str,
+) {
     assert_eq!(body["model"], "child-wire");
-    let (text, context) = runtime_context(body);
-    assert_read_entry(body, &context);
-    assert_eq!(context["child_session_id"], spawn.child_session_id);
+    assert_no_runtime_value(body);
+    let messages = body["messages"].as_array().unwrap();
     assert!(
-        context["self"].is_null(),
-        "a child without its own TODO still needs its parent"
+        messages
+            .iter()
+            .any(|message| message["content"].to_string().contains(TASK_PROMPT))
+    );
+    assert!(
+        !body["messages"]
+            .to_string()
+            .contains(sampling_types::RECEIVE_AGENT_MESSAGE_TOOL_NAME)
     );
     assert!(child.planning_snapshot().is_none());
-    assert_eq!(context["parent"]["observation"], "available");
-    assert_eq!(spawn.security_parent_session_id, parent_id);
     assert_eq!(spawn.parent_step_id.as_deref(), Some(step_id));
-    assert_eq!(
-        context["parent"]["binding"],
-        json!({
-            "parent_session_id": parent_id,
-            "task_id": spawn.subagent_id,
-            "parent_step_id": step_id,
-        })
-    );
-
-    // Resolve the seq reported by THIS blocked request to its exact Planning event.
-    // The physical journal seq and the eventual Timeline tail are different coordinates.
-    let source = &context["parent"]["source"];
-    let seq = source["timeline_seq"].as_u64().expect("planning event seq");
-    let event = parent
-        .events()
-        .iter()
-        .find(|event| event.seq.get() == seq)
-        .unwrap();
-    let TimelineEventKind::Planning(planning) = &event.kind else {
-        panic!("runtime source must name an actual Planning event: {source}");
-    };
-    let plan = planning.plan.as_ref();
-    assert_eq!(
-        parent.planning_snapshot().unwrap().seq.get(),
-        seq,
-        "the parent is stable at the first-request barrier, before child finalization"
-    );
-    assert_eq!(
-        source,
-        &json!({"session_id": parent_id, "scope_id": plan.scope_id,
-        "revision": plan.revision, "timeline_seq": event.seq.get()})
-    );
-    assert_eq!(plan.session_id, parent_id);
-    let (position, step) = plan
-        .steps
-        .iter()
-        .enumerate()
-        .find(|(_, step)| step.id == step_id)
-        .unwrap();
-    assert!(
-        position >= 12,
-        "the linked item must be beyond the initial summary window"
-    );
-    assert_eq!(
-        step.content, objective,
-        "native todo_write must commit the requested objective"
-    );
-    assert_eq!(step.requirements.as_deref().unwrap(), requirements);
-    let associated = &context["parent"]["associated_step"];
-    assert_eq!(associated["id"], step.id);
-    assert_eq!(associated["position"], position + 1);
-    assert_eq!(context["parent"]["counts"]["steps"], plan.steps.len());
-    assert_eq!(
-        associated["status"],
-        serde_json::to_value(step.status).unwrap()
-    );
-    assert_eq!(
-        associated["priority"],
-        serde_json::to_value(step.priority).unwrap()
-    );
-    assert_eq!(associated["removed"], false);
-    assert_eq!(
-        associated["content_summary"],
-        json!({"text":objective,"omitted_bytes":0})
-    );
-    assert_eq!(
-        associated["requirements_summary"],
-        json!({
-            "count": requirements.len(), "omitted_count":0,
-            "items":requirements.iter().map(|text| json!({"text":text,"omitted_bytes":0})).collect::<Vec<_>>()
-        })
-    );
-    let link = plan
+    let snapshot = parent.planning_snapshot().unwrap();
+    let link = snapshot
+        .plan
         .links
         .iter()
         .find(|link| link.id == spawn.subagent_id)
@@ -336,15 +185,6 @@ fn assert_first_context(
     assert_eq!(link.parent_step_id, step_id);
     assert_eq!(link.child_session_id, spawn.child_session_id);
     assert!(!link.required && !link.terminal);
-    assert!(link.result_id.is_none() && link.dispatch_failure.is_none());
-    assert_eq!(
-        context["parent"]["associated_link"],
-        json!({
-            "terminal":link.terminal,"required":link.required,
-            "pending_source_revision":link.pending_source_revision,
-            "review_required_revision":link.review_required_revision,
-        })
-    );
     let first_link_seq = parent
         .events()
         .iter()
@@ -365,7 +205,6 @@ fn assert_first_context(
         first_link_seq < spawn_seq,
         "Link must be durable before the actual Spawn"
     );
-    assert!(first_link_seq <= seq);
     let seeds: Vec<_> = child
         .events()
         .iter()
@@ -387,7 +226,6 @@ fn assert_first_context(
         "the first request is captured before its canonical result exists"
     );
     assert_no_runtime_persistence(child);
-    (text, context)
 }
 
 fn assert_no_runtime_value(value: &Value) {
@@ -494,7 +332,7 @@ fn assert_completed(parent: &Timeline, child: &Timeline, spawn: &SubagentSpawnEv
 
 #[tokio::test]
 #[ignore = "requires the current GROW_BINARY; only loopback providers and test-owned state"]
-async fn native_todo_spawn_and_resume_first_requests_use_current_request_only_parent_binding() {
+async fn native_todo_spawn_and_resume_keep_binding_without_injecting_plan_context() {
     tokio::task::LocalSet::new().run_until(async {
         // Fail before the shared harness can choose or build any fallback binary.
         let binary = std::env::var("GROW_BINARY").expect("set GROW_BINARY to the current build");
@@ -538,7 +376,7 @@ agent_type = "grow-build"
         client.initialize_with_timeout().await;
         let session = client.create_session_with_model_timeout(&workspace, "mock/parent").await;
         let parent_id = session.0.as_ref();
-        let mut source: Option<(SubagentSpawnEvent, PathBuf, Vec<u8>, Value)> = None;
+        let mut source: Option<(SubagentSpawnEvent, PathBuf, Vec<u8>)> = None;
         let mut completed_spawns = Vec::new();
         for (index, (case, step_id, objective, requirements)) in [
             ("fresh", STEP_A, OBJECTIVE_A, REQUIREMENTS_A),
@@ -563,7 +401,7 @@ agent_type = "grow-build"
                 "prompt":TASK_PROMPT,
                 "subagent_type":"general-purpose","background":false,"required_deliverable":false,"isolation":"none"
             });
-            if let Some((source_spawn, _, _, _)) = &source {
+            if let Some((source_spawn, _, _)) = &source {
                 arguments["resume_from"] = json!(source_spawn.subagent_id);
             } else {
                 arguments["model"] = json!("child/context");
@@ -576,7 +414,7 @@ agent_type = "grow-build"
                 child_completion(),
             );
             let prompt = format!("Run the isolated {case} delegation.");
-            let (reply, (captured_spawn, context)) = tokio::join!(
+            let (reply, captured_spawn) = tokio::join!(
                 client.prompt_with_timeout(&session, &prompt),
                 async {
                     tokio::time::timeout(scaled(Duration::from_secs(30)), first.wait_blocked()).await
@@ -590,31 +428,17 @@ agent_type = "grow-build"
                     let (spawn_seq, current_spawn) = spawn_for_call(&parent, &spawn_call);
                     assert_eq!(current_spawn.prompt, TASK_PROMPT);
                     assert!(!current_spawn.prompt.contains("Current delegated parent step"));
-                    assert_eq!(current_spawn.resumed_from.as_deref(), source.as_ref().map(|(spawn, _, _, _)| spawn.subagent_id.as_str()));
+                    assert_eq!(current_spawn.resumed_from.as_deref(), source.as_ref().map(|(spawn, _, _)| spawn.subagent_id.as_str()));
                     let (_, child) = timeline(&grow_home, &current_spawn.child_session_id);
-                    let (text, context) = assert_first_context(body, parent_id, &parent, &child,
-                        spawn_seq, current_spawn, (step_id, objective, requirements));
-                    if let Some((source_spawn, source_path, source_bytes, source_context)) = &source {
+                    assert_first_request(body, parent_id, &parent, &child, spawn_seq, current_spawn, step_id);
+                    if let Some((source_spawn, source_path, source_bytes)) = &source {
                         assert_ne!(current_spawn.subagent_id, source_spawn.subagent_id);
-                        assert_ne!(current_spawn.child_session_id, source_spawn.child_session_id);
-                        assert_ne!(context["parent"]["binding"], source_context["parent"]["binding"]);
-                        assert_ne!(context["parent"]["associated_step"]["id"], source_context["parent"]["associated_step"]["id"]);
-                        assert!(context["parent"]["source"]["revision"].as_u64().unwrap() > source_context["parent"]["source"]["revision"].as_u64().unwrap());
+                        assert_ne!(current_spawn.parent_step_id, source_spawn.parent_step_id);
                         assert_eq!(std::fs::read(source_path).unwrap(), *source_bytes, "resume cannot mutate its completed source");
                     }
-                    eprintln!("{case} FIRST foreground ordinal={} request_id={:?} canonical Spawn seq={} task={} child={}\nruntime({} UTF-8 bytes)={text}",
-                        index + 1, request.header("x-grow-req-id"), spawn_seq, current_spawn.subagent_id, current_spawn.child_session_id, text.len());
-                    // --nocapture retains the actual wire body and canonical facts
-                    // for the parent/reviewer after the disposable sandbox is gone.
-                    let planning_seq = context["parent"]["source"]["timeline_seq"].as_u64().unwrap();
-                    eprintln!("{case} FIRST evidence={}", json!({
-                        "wire":body, "spawn_seq":spawn_seq, "spawn":current_spawn,
-                        "planning_event":parent.events().iter().find(|event| event.seq.get() == planning_seq).unwrap(),
-                        "child_seed":child.events().iter().filter(|event| matches!(&event.kind, TimelineEventKind::SubagentSeed(_))).collect::<Vec<_>>(),
-                    }));
                     let captured_spawn = current_spawn.clone();
                     first.release();
-                    (captured_spawn, context)
+                    captured_spawn
                 }
             );
             assert_eq!(reply.unwrap().stop_reason, acp::StopReason::EndTurn);
@@ -626,11 +450,11 @@ agent_type = "grow-build"
             let (_, parent) = timeline(&grow_home, parent_id);
             let (child_path, child) = timeline(&grow_home, &captured_spawn.child_session_id);
             assert_completed(&parent, &child, &captured_spawn);
-            if let Some((source_spawn, source_path, source_bytes, _)) = &source {
+            if let Some((source_spawn, source_path, source_bytes)) = &source {
                 assert_eq!(std::fs::read(source_path).unwrap(), *source_bytes);
                 assert_eq!(spawn_for_call(&parent, "call_fresh_spawn").1, source_spawn);
             } else {
-                source = Some((captured_spawn.clone(), child_path.clone(), std::fs::read(child_path).unwrap(), context));
+                source = Some((captured_spawn.clone(), child_path.clone(), std::fs::read(child_path).unwrap()));
             }
             completed_spawns.push(captured_spawn);
         }
@@ -642,7 +466,7 @@ agent_type = "grow-build"
             let (_, child) = timeline(&grow_home, &spawn.child_session_id);
             assert_completed(&cold_parent, &child, spawn);
         }
-        let (_, source_path, source_bytes, _) = source.unwrap();
+        let (_, source_path, source_bytes) = source.unwrap();
         assert_eq!(std::fs::read(source_path).unwrap(), source_bytes);
         assert!(foreground_requests(&parent_server).iter().all(|entry| entry.body.as_ref().unwrap()["model"] == "parent-wire"));
     }).await;

@@ -215,7 +215,7 @@ When ordinary authority invalidation cancels a background compaction generation,
 
 ### Requirement: Planning context projects current local obligations
 
-模型上下文 SHALL 从权威投影提供当前局部计划、直接相关变化、有效等待与未验收交付的有界摘要及必要引用，不在每轮复制整棵 Agent 树。完成细节 MAY 压缩；继承 transcript 或旧 summary SHALL NOT 覆盖当前 owner 和计划。压缩自身 SHALL NOT 触发额外模型续跑。Pager 收到 compaction 完成通知 SHALL 保留当前 TODO 投影；只有明确的 Planning/Plan 更新可替换该投影。
+压缩与恢复上下文 SHALL 从权威投影提供当前局部计划、直接相关变化、有效等待与未验收交付的有界摘要及必要引用，不在每轮复制整棵 Agent 树。完成细节 MAY 压缩；继承 transcript 或旧 summary SHALL NOT 覆盖当前 owner 和计划。压缩自身 SHALL NOT 触发额外模型续跑。Pager 收到 compaction 完成通知 SHALL 保留当前 TODO 投影；只有明确的 Planning/Plan 更新可替换该投影。普通子 Agent 请求的规划输入沿任务计划契约的事件交付。
 
 #### Scenario: CC-01 Large child tree has a small local context
 - **WHEN** root 有多个 child 和大量已完成步骤，当前只等待一个必需结果

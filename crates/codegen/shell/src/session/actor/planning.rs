@@ -24,11 +24,6 @@ use tools::implementations::grow_build::todo::{
     TodoPriority, TodoStatus, TodoWriteInput, review_binding,
 };
 
-pub(crate) type ParentPlanObservation = Result<
-    Option<tool_types::planning::PlanningReadSnapshot>,
-    tools::implementations::grow_build::task::parent_planning::ParentPlanningReadError,
->;
-
 const PLANNING_DELIVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const PLANNING_DELIVERY_MAX_BACKOFF: Duration = Duration::from_secs(2);
 
@@ -39,78 +34,30 @@ pub(crate) enum PlannedDependenciesOutcome {
 }
 
 impl SessionActor {
-    /// Project current local facts and the turn's initial parent observation.
-    /// Parent changes during the turn arrive through typed notifications.
-    pub(crate) async fn local_planning_context(
-        &self,
-        parent_observation: &mut Option<ParentPlanObservation>,
-    ) -> Result<Option<String>, String> {
-        use tool_types::planning::PlanningReadSnapshot;
-        use tools::implementations::grow_build::task::{
-            backend::SubagentBackendResource, parent_planning::ParentPlanningReadError,
-        };
-
-        let own = self
-            .chat_state_handle
-            .planning_state()
-            .await?
-            .map(|snapshot| PlanningReadSnapshot {
-                timeline_seq: snapshot.seq.get(),
-                plan: snapshot.plan,
-                delegation: None,
-            });
-        let binding = self.startup_hints.delegated_parent_plan.as_ref();
-        if own.is_none() && binding.is_none() {
+    /// Only primary sessions project a routine plan summary. Children receive
+    /// planning guidance from the durable notification stream.
+    pub(crate) async fn local_planning_context(&self) -> Result<Option<String>, String> {
+        if self.startup_hints.is_subagent {
             return Ok(None);
         }
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        // Tool-name resolution and backend lookup also wait on Resources. One
-        // absolute deadline bounds that preparation and the parent read together.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let cancellation = self.background_service_shutdown.child_token();
-        let _cancel_on_drop = cancellation.clone().drop_guard();
-        // Registration is a separate observation from the parent read. Retain a
-        // resolved name locally even if that read exhausts the shared deadline.
-        let mut read_tool_name = None;
-        let needs_parent_observation = binding.is_some() && parent_observation.is_none();
-        let observation = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => needs_parent_observation.then_some(Err(ParentPlanningReadError::Unavailable)),
-            result = tokio::time::timeout_at(deadline, async {
-                read_tool_name = bridge.tool_for_kind(tools::types::tool::ToolKind::PlanRead).await;
-                if needs_parent_observation {
-                    // The clone leaves Resources before waiting on the backend.
-                    // Its own read deadline remains in force inside this budget.
-                    Some(match bridge.read_resource::<SubagentBackendResource>().await {
-                        Some(backend) => backend.backend().read_parent_plan(cancellation.clone()).await,
-                        None => Err(ParentPlanningReadError::Unavailable),
-                    })
-                } else {
-                    None
-                }
-            }) => match result {
-                Ok(observed) => observed,
-                Err(_) => needs_parent_observation.then_some(Err(ParentPlanningReadError::TimedOut)),
-            },
+        let Some(snapshot) = self.chat_state_handle.planning_state().await? else {
+            return Ok(None);
         };
-        if observation.is_some() {
-            *parent_observation = observation;
-        }
-        let parent = binding
-            .zip(parent_observation.as_ref())
-            .map(|(binding, observation)| {
-                context::ParentPlanContext::from_observation(
-                    binding,
-                    self.session_info.id.0.as_ref(),
-                    observation,
-                )
-            });
-        context::render_planning_context(
-            self.session_info.id.0.as_ref(),
-            own.as_ref(),
-            parent,
-            read_tool_name.as_deref(),
-        )
+        let own = tool_types::planning::PlanningReadSnapshot {
+            timeline_seq: snapshot.seq.get(),
+            plan: snapshot.plan,
+            delegation: None,
+        };
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let read_tool_name = tokio::select! {
+            biased;
+            _ = self.background_service_shutdown.cancelled() => None,
+            result = tokio::time::timeout(
+                Duration::from_secs(5),
+                bridge.tool_for_kind(tools::types::tool::ToolKind::PlanRead),
+            ) => result.ok().flatten(),
+        };
+        context::render_planning_context(&own, read_tool_name.as_deref()).map(Some)
     }
     pub(crate) async fn accept_planning_task_result(
         &self,

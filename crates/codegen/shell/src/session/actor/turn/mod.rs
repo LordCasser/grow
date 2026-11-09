@@ -98,10 +98,7 @@ mod runtime_context_tests {
                 let (actor, _gateway_rx) = build_actor().await;
                 // The shared fixture starts with a zero-token provider anchor.
                 // Align it to this request before comparing exact local costs.
-                let initial = actor
-                    .build_turn_request(vec![], None, None, &mut None)
-                    .await
-                    .unwrap();
+                let initial = actor.build_turn_request(vec![], None, None).await.unwrap();
                 actor.chat_state_handle.record_provider_context_anchor(
                     chat_state::estimate_request_input_tokens(&initial),
                 );
@@ -136,10 +133,7 @@ mod runtime_context_tests {
                     .await
                     .unwrap();
                 for _ in 0..2 {
-                    let request = actor
-                        .build_turn_request(vec![], None, None, &mut None)
-                        .await
-                        .unwrap();
+                    let request = actor.build_turn_request(vec![], None, None).await.unwrap();
                     assert_eq!(request.items.len(), before.surface.len() + 1);
                     assert!(
                         request
@@ -1118,10 +1112,9 @@ impl SessionActor {
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         json_output: Option<sampling_types::JsonOutputFormat>,
-        parent_observation: &mut Option<super::planning::ParentPlanObservation>,
     ) -> Result<sampling_types::ConversationRequest, acp::Error> {
         let runtime_context = self
-            .local_planning_context(parent_observation)
+            .local_planning_context()
             .await
             .map_err(|error| acp::Error::internal_error().data(error))?;
         // A control commit and request preparation share authority.
@@ -1518,7 +1511,6 @@ impl SessionActor {
         };
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut previous_planning_blockers = None;
-        let mut parent_plan_observation = None;
         let mut auth_retry_schedule = AuthRetrySchedule::new();
         let mut sampling_recovery = self
             .sampling_continuation
@@ -1929,7 +1921,6 @@ impl SessionActor {
                 self.drain_pending_interjections().await;
                 self.drain_deferred_completions().await;
                 self.flush_pending_system_reminders().await;
-                self.drain_active_notifications().await?;
                 let memory_reminder = self.first_turn_memory_reminder().await;
                 if memory_reminder.is_some() {
                     self.memory
@@ -1972,14 +1963,10 @@ impl SessionActor {
                             .map(sampling_types::JsonOutputFormat::JsonSchema)
                     })
                     .flatten();
+                self.drain_active_notifications().await?;
                 let build_req_start = std::time::Instant::now();
                 let mut request = self
-                    .build_turn_request(
-                        effective_tools,
-                        memory_reminder,
-                        request_json_output,
-                        &mut parent_plan_observation,
-                    )
+                    .build_turn_request(effective_tools, memory_reminder, request_json_output)
                     .await?;
                 ::diagnostics::unified_log::debug(
                     "shell.turn.build_request_done",

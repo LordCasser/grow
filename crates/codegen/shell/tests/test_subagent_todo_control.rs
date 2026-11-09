@@ -24,9 +24,8 @@ use tool_types::{
 use tools::implementations::grow_build::task::interaction::{
     AgentInteractionOutput, AskParentInput,
 };
-use tools::implementations::grow_build::todo::{TodoReadTool, TodoWriteInput};
+use tools::implementations::grow_build::todo::TodoWriteInput;
 use tools::registry::types::generate_schema;
-use tools::types::tool_metadata::ToolMetadata;
 
 const STEP: &str = "delegated-control-step";
 const INVESTIGATION: &str = "valid-investigation";
@@ -288,121 +287,6 @@ fn schema(body: &Value, name: &str, mut expected: Value) -> Value {
         "actual native schema for {name}"
     );
     definition.clone()
-}
-
-fn runtime(body: &Value) -> Value {
-    let mut blocks = Vec::new();
-    for message in body["messages"].as_array().unwrap() {
-        let texts: Vec<_> = match &message["content"] {
-            Value::String(text) => vec![text.as_str()],
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(|part| part["text"].as_str())
-                .collect(),
-            _ => Vec::new(),
-        };
-        for text in texts {
-            let Some(start) = text.find(GUIDANCE) else {
-                continue;
-            };
-            assert_eq!(message["role"], "user");
-            assert_eq!(text.matches(GUIDANCE).count(), 1);
-            let context = &text[start..];
-            let (guidance, payload) = context
-                .split_once('\n')
-                .expect("runtime GUIDANCE then JSON");
-            let mut stream = serde_json::Deserializer::from_str(payload).into_iter::<Value>();
-            let value = stream.next().unwrap().unwrap();
-            let end = stream.byte_offset();
-            assert!(matches!(payload[end..].trim(), "" | "</system-reminder>"));
-            assert!(
-                guidance.len() + 1 + end <= 8192,
-                "runtime's final escaped UTF-8 budget"
-            );
-            assert_eq!(value["summary"], true);
-            blocks.push(value);
-        }
-    }
-    assert_eq!(blocks.len(), 1, "one fresh request-only planning context");
-    blocks.pop().unwrap()
-}
-
-fn assert_context(
-    body: &Value,
-    parent: &Journal,
-    spawn: &SubagentSpawnEvent,
-    objective: &str,
-    removed: bool,
-) -> Value {
-    let context = runtime(body);
-    assert_eq!(body["model"], "child-wire");
-    assert_eq!(context["child_session_id"], spawn.child_session_id);
-    assert_eq!(context["read_entry"]["availability"], "available");
-    let read = context["read_entry"]["tool"].as_str().unwrap();
-    assert_eq!(
-        read, "todo_read",
-        "this fixture uses the default native aliases"
-    );
-    let definition = schema(body, read, generate_schema::<PlanReadInput>());
-    assert_eq!(
-        definition["description"],
-        TodoReadTool.description_template()
-    );
-    assert_eq!(context["parent"]["observation"], "available");
-    assert_eq!(
-        context["parent"]["binding"],
-        json!({
-            "parent_session_id":parent.plan().session_id,"task_id":spawn.subagent_id,"parent_step_id":STEP
-        })
-    );
-    let source = &context["parent"]["source"];
-    let plan = planning_at(parent, source["timeline_seq"].as_u64().unwrap());
-    assert_eq!(
-        source,
-        &json!({"session_id":plan.session_id,"scope_id":plan.scope_id,"revision":plan.revision,"timeline_seq":source["timeline_seq"]})
-    );
-    assert_eq!(plan.session_id, spawn.security_parent_session_id);
-    let (index, step) = plan
-        .steps
-        .iter()
-        .enumerate()
-        .find(|(_, step)| step.id == STEP)
-        .unwrap();
-    assert_eq!(step.content, objective);
-    assert_eq!(step.removed, removed);
-    assert_eq!(context["parent"]["associated_step"]["id"], step.id);
-    assert_eq!(context["parent"]["associated_step"]["position"], index + 1);
-    assert_eq!(context["parent"]["associated_step"]["removed"], removed);
-    assert_eq!(
-        context["parent"]["associated_step"]["status"],
-        serde_json::to_value(step.status).unwrap()
-    );
-    assert_eq!(
-        context["parent"]["associated_step"]["priority"],
-        serde_json::to_value(step.priority).unwrap()
-    );
-    let requirements = step.requirements.as_deref().unwrap_or_default();
-    assert_eq!(
-        context["parent"]["associated_step"]["requirements_summary"],
-        json!({
-            "count":requirements.len(),"omitted_count":0,
-            "items":requirements.iter().map(|text| json!({"text":text,"omitted_bytes":0})).collect::<Vec<_>>()
-        })
-    );
-    assert_eq!(
-        context["parent"]["associated_step"]["content_summary"],
-        json!({"text":objective,"omitted_bytes":0})
-    );
-    assert_eq!(context["parent"]["counts"]["steps"], plan.steps.len());
-    let link = plan
-        .links
-        .iter()
-        .find(|link| link.id == spawn.subagent_id)
-        .unwrap();
-    assert_eq!(link.parent_step_id, STEP);
-    assert_eq!(link.child_session_id, spawn.child_session_id);
-    assert!(link.required && !link.terminal && link.result_id.is_none());
-    context
 }
 
 fn read_output(
@@ -696,6 +580,17 @@ fn assert_wire_control(body: &Value, evidence: &ControlEvidence) {
                 }
             )),
         "ordinary user text cannot stand in for typed control"
+    );
+}
+
+fn assert_tail_control(body: &Value, evidence: &ControlEvidence) {
+    assert_no_runtime(body);
+    assert_wire_control(body, evidence);
+    let last = body["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["role"], "tool");
+    assert_eq!(
+        last["tool_call_id"],
+        sampling_types::agent_message_call_id(&evidence.message.receipt_id)
     );
 }
 
@@ -1143,11 +1038,8 @@ agent_type = "grow-build"
                 assert_eq!(seeds[0].parent_spawn_seq, spawn_seq);
                 assert_eq!(seeds[0].subagent_id, task_id);
                 assert!(child.timeline.planning_snapshot().is_none());
-                let first_context = assert_context(&first_body, &parent, &actual_spawn, OBJECTIVE, false);
-                assert!(first_context["self"].is_null());
-                assert_eq!(first_context["parent"]["associated_step"]["position"], 2);
-                assert_eq!(first_context["parent"]["counts"]["steps"], 3);
-                assert_eq!(first_context["parent"]["control_summary"]["directive"], "none");
+                assert_no_runtime(&first_body);
+                assert!(!first_body["messages"].to_string().contains(sampling_types::RECEIVE_AGENT_MESSAGE_TOOL_NAME));
                 assert_unfinished(&parent, &child, task_id);
                 // The standard Agent exposes Task's canonical parameter through
                 // the registry's configured model-facing name (agent/config.rs).
@@ -1163,7 +1055,7 @@ agent_type = "grow-build"
                     "wait_subagent":schema(&parent_body,"wait_subagent",generate_schema::<WaitSubagentInput>())
                 });
                 assert!(native_schemas["spawn_subagent"]["parameters"]["required"].as_array().unwrap().iter().any(|field| field == "parent_step_id"));
-                eprintln!("FIRST evidence={}", json!({"request_id":foreground(&child_server)[0].header("x-grow-req-id"),"runtime":first_context,"schemas":native_schemas,"link_event":first_link,"spawn_seq":spawn_seq,"spawn":actual_spawn,"seed":seeds[0]}));
+                eprintln!("FIRST evidence={}", json!({"request_id":foreground(&child_server)[0].header("x-grow-req-id"),"schemas":native_schemas,"link_event":first_link,"spawn_seq":spawn_seq,"spawn":actual_spawn,"seed":seeds[0]}));
 
                 let ask = expect_tool(&child_server, "call_child_ask_parent", "ask_parent", json!({"question":QUESTION}));
                 let local = expect_tool(&child_server, "call_child_local_plan", "todo_write", json!({"todos":[
@@ -1173,6 +1065,8 @@ agent_type = "grow-build"
                 let mut abandoned_edit = hold_tool(&child_server, "call_abandoned_before_edit", "todo_read", json!({"target":"self","limit":50}));
                 first.release();
                 let ready_body = blocked(&mut abandoned_edit, &child_server, &client).await;
+                assert_no_runtime(&ready_body);
+                assert!(!ready_body["messages"].to_string().contains(sampling_types::RECEIVE_AGENT_MESSAGE_TOOL_NAME));
                 first.assert_satisfied(); ask.assert_satisfied(); local.assert_satisfied();
                 let parent = journal(&grow_home, parent_id);
                 let child = journal(&grow_home, child_id);
@@ -1215,16 +1109,13 @@ agent_type = "grow-build"
                 assert_eq!(edit.requirements.as_deref().unwrap(), EDITED_REQUIREMENTS);
                 assert_eq!(edit.source_revision, parent.plan().revision);
                 let edit_control = control_evidence(&child, parent_id, &edit);
-                assert_wire_control(&edit_body, &edit_control);
-                let edit_context = assert_context(&edit_body, &parent, &actual_spawn, OBJECTIVE, false);
-                assert_eq!(edit_context["parent"]["control_summary"]["directive"], "none");
-                assert_eq!(edit_context["parent"]["source"], first_context["parent"]["source"]);
+                assert_tail_control(&edit_body, &edit_control);
                 assert_unfinished(&parent, &child, task_id);
                 // The soft interrupt abandoned this old sample. Only the NEW
                 // request above proves input consumption; release is cleanup.
                 abandoned_edit.release();
                 assert_not_dispatched(&child, "call_abandoned_before_edit");
-                eprintln!("EDIT request evidence={}", json!({"runtime":edit_context,"typed_source":edit_control.source,"source_version":edit_control.version,"source_change":edit}));
+                eprintln!("EDIT request evidence={}", json!({"typed_source":edit_control.source,"source_version":edit_control.version,"source_change":edit}));
 
                 let mut abandoned_stop = hold_tool(&child_server, "call_abandoned_before_stop", "todo_read", json!({"target":"parent","limit":50}));
                 // Apply the exact notification directly, without a plan read.
@@ -1262,16 +1153,12 @@ agent_type = "grow-build"
                 assert!(parent.plan().link_stop_requested(task_id));
                 let stop_control = control_evidence(&child, parent_id, &stop);
                 assert_ne!(stop_control.message.message_id, edit_control.message.message_id);
-                assert_wire_control(&stop_body, &stop_control);
+                assert_tail_control(&stop_body, &stop_control);
                 assert_wire_control(&stop_body, &edit_control);
-                let stop_context = assert_context(&stop_body, &parent, &actual_spawn, OBJECTIVE, false);
-                assert_eq!(stop_context["parent"]["source"], first_context["parent"]["source"]);
-                assert_eq!(stop_context["self"]["replans_summary"][0]["id"], stop.id);
-                assert_eq!(stop_context["self"]["replans_summary"][0]["directive"], "stop_and_wrap_up");
                 assert_unfinished(&parent, &child, task_id);
                 abandoned_stop.release();
                 assert_not_dispatched(&child, "call_abandoned_before_stop");
-                eprintln!("STOP request evidence={}", json!({"runtime":stop_context,"typed_source":stop_control.source,"source_version":stop_control.version,"source_change":stop}));
+                eprintln!("STOP request evidence={}", json!({"typed_source":stop_control.source,"source_version":stop_control.version,"source_change":stop}));
 
                 let stop_self_read = expect_tool(&child_server, "call_child_stop_self_read", "todo_read", json!({"target":"self","limit":50}));
                 let mut stop_reads = hold_tool(&child_server, "call_child_after_stop_reads", "todo_read", json!({"target":"self","limit":50}));
