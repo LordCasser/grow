@@ -23,7 +23,7 @@
 
 **跨层里程碑**由父在两者接受后核：同一长server/tool经真实MCP注册、Shell snapshot与search/schema、use_tool内部terminal，实际fake server收到原raw tool name和arguments；完整qualified identity不变。至少一个>64通常长度和256边界覆盖目录/路径实际消费者，不能只以ToolId接受宣称artifact路径也可用。若现消费者在256触发真实文件名/存储边界，带实际失败回报父，不能改名、截断或删256场景掩盖；父决定属于本次既有消费者适配还是独立缺口。modelvisibility与disabled/permission用现实际入口控制，主Agent public projection需同时保持64结果。
 
-单一Rust/Cargo窗口串行，各coder只拥有当前模块承诺。MCP-F1/F2写同一邻区时先完成候选review与退役，不并发编辑。无需重跑无关GUI、全provider或全workspace；针对实际改变的public projection/registration/内部调用覆盖后即可结束。父亲读实际diff、计数/identity证据和产物限制，同步开发说明、上游候选状态与backlog，strict归档。当前只有已冻结设计，未计实现/验收。
+单一Rust/Cargo窗口串行，各coder只拥有当前模块承诺。MCP-F1/F2写同一邻区时先完成候选review与退役，不并发编辑。无需重跑无关GUI、全provider或全workspace；针对实际改变的public projection/registration/内部调用覆盖后即可结束。父亲读实际diff、计数/identity证据和产物限制，同步开发说明、上游候选状态与backlog，strict归档。实现与验收已完成，实际入口、旧实现对照与验证范围见 [verification.md](verification.md)。归档不扩大既有工具权限、可见性或 descriptor helper 的职责。
 
 
 ## 256 字符的 descriptor 文件边界

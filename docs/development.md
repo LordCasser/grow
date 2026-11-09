@@ -80,7 +80,7 @@ canonical 完成事实仍会将尚在 Running 的同一任务推进终态；已�
 
 MCP 工具调用的原始 deadline 与取消通知派发分别归属：drop guard只向原 service/request ID 尝试一次通知，后台 Grow 派发等待最多三秒，不延长工具返回期限。超时表示发送未确认；锁定 SDK 已入队的发送仍可能继续，不能据此声称 wire 撤回或远端副作用已取消。见 [取消派发所有权](../openspec/specs/extension-runtime/spec.md#requirement-mcp-cancellation-dispatch-has-a-bounded-grow-owner) 与 [真实受阻传输验证](../openspec/changes/archive/2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。
 
-MCP 完整 `server__tool` 目录身份允许最多 256 个 ASCII 字符，原分段、字符集、app-only、禁用和权限门禁保持；`search_tool` 的 schema 和 `use_tool` 内部调用保留完整名字。公开 `Agent::tool_definitions` 只投影符合原 64 字符共同格式的直接 provider 声明，不截断或创建别名，完整 ToolBridge 目录不变。descriptor helper 保留普通 `<raw>.json` 路径；超出 255 字节组件的文件名改用 `tools/long-names/<完整 sanitized raw>/descriptor.json`。见 [目录身份契约](../openspec/changes/separate-mcp-catalog-name-bound/specs/extension-runtime/spec.md) 与 [采样投影契约](../openspec/changes/separate-mcp-catalog-name-bound/specs/model-sampling/spec.md)。
+MCP 完整 `server__tool` 目录身份允许最多 256 个 ASCII 字符，原分段、字符集、app-only、禁用和权限门禁保持；`search_tool` 的 schema 和 `use_tool` 内部调用保留完整名字。公开 `Agent::tool_definitions` 只投影符合原 64 字符共同格式的直接 provider 声明，不截断或创建别名，完整 ToolBridge 目录不变。descriptor helper 保留普通 `<raw>.json` 路径；超出 255 字节组件的文件名改用 `tools/long-names/<完整 sanitized raw>/descriptor.json`。见 [目录身份契约](../openspec/specs/extension-runtime/spec.md#requirement-mcp-catalog-identities-have-their-own-length-bound) 与 [采样投影契约](../openspec/specs/model-sampling/spec.md#requirement-direct-agent-tool-definitions-preserve-provider-name-constraints)。
 
 空闲会话通过 `PendingInteractions` 的既有 watch 重新进入 `arbitrate_idle_wake`，使 whole-work wait 的人类依赖解除后无需额外输入即可检查 Goal 接续。它沿用 controls、compaction、用户 FIFO、通知和 Goal 的仲裁顺序；有 foreground 的普通 ask 继续由 turn 内等待负责。见 [人类依赖解除唤醒](../openspec/specs/behavior-goal/spec.md#requirement-human-dependency-changes-wake-idle-goal-arbitration) 与 [验收边界](../openspec/changes/archive/2026-11-06-repair-goal-turn-continuation/verification.md)。
 
@@ -97,6 +97,10 @@ Skills 配置的 disabled/ignore/paths 变更在 leader 与 in-process 入口都
 SDK MCP reverse invoker 在声明注册时绑定实际 session 与注册连接。leader 从真实已接纳连接覆盖注入身份，SDK reverse target 优先于当前 driver，owner 断线不 fallback 到其他 driver 或同 serverId。resident load 复用原 invoker，cold load 用新连接重绑，SharedMcpPool 继承的 SDK Arc 保原 transport；内层 MCP message/id 原样传递。见[SDK 注册连接契约](../openspec/specs/extension-runtime/spec.md#requirement-sdk-mcp-reverse-requests-retain-their-registration-connection)。
 
 普通 plugin Install 在发布 artifact 前以 fallible loader 读取既有 registry；读取/解析失败不当空 registry 写入。发布后必须保存安装记录成功才运行 post-install enablement；保存失败向 CLI/ACP 返回包含剩余 artifact 和未完整登记事实的错误，保留已发布文件供处理，不伪报成功或要求 reload。此项不替代卸载与普通更新的独立错误传播修复。见[安装提交契约](../openspec/specs/configuration-rules/spec.md#requirement-plugin-installation-reports-incomplete-registry-publication)。
+
+普通 plugin Uninstall 与 Update 在副作用前使用同一 fallible registry loader，CLI、ACP 和旧 slash 入口均传播操作错误。卸载只有确认 repo path 已不存在且注销保存成功才报告成功；失败保原登记，已删除后保存失败明确部分完成，ACP 不要求 reload/restart。原多插件确认和 keep-data 政策保持。见[卸载结果契约](../openspec/specs/configuration-rules/spec.md#requirement-plugin-uninstall-reports-incomplete-removal-and-deregistration)。
+
+普通 Git 更新先保留完整 pending UpdateResult，待 marketplace 原事务结束再采用到最新 registry 并提交，避免 marketplace 顺带发布普通更新。末尾保存失败描述已推进 checkout 与未完整登记，不伪称回滚；显式重试从实际 HEAD/旧记录收敛，随后同 tip、pinned/local 不增加普通保存。见[更新发布契约](../openspec/specs/configuration-rules/spec.md#requirement-plugin-update-success-requires-its-registry-publication)与[CLI/ACP/混合批次验收](../openspec/changes/archive/2026-11-09-report-plugin-update-persistence-failures/verification.md)。
 
 Skills 管理的 session 入口以精确 primary session 的 cwd 和已确认插件快照为目录来源；无 session 的 cwd 入口在有界 worker 中纯构建目录。Pager 在请求及 success/error 回包中贯穿 sessionId 与 binding epoch，换绑后旧结果不能修改当前 Skills modal；toggle 的全局 disabled 配置及独立 baseline refresh 语义保持。契约见[会话 Skills 目录](../openspec/specs/configuration-rules/spec.md#requirement-session-skill-catalog-discovery-uses-the-named-owner)。
 
@@ -338,7 +342,7 @@ Minimal 新会话欢迎卡在 root Agent 绑定 session ID 后才提交，因为
 
 ## Rust 验证入口
 
-Workflow 的 live discovery 单元测试在运行时复用 `TestSandbox` 和 `TestProcess`，以精确测试名在独立子进程中执行。普通 `cargo test --locked -p shell --lib session::workflow:: -- --test-threads=4` 不需要手工覆盖 HOME；Unix 的用户 Agent、Skill、Workflow 和 workspace-user 来源不会混入夹具，项目内显式资源仍走真实发现路径。Windows 的 `dirs` 依赖从系统 Known Folder 取得用户目录，不遵循 USERPROFILE，故这里不宣称 Windows Agent/Skill 用户源已被隔离；GROW_HOME 与子进程环境仍由 sandbox 持有。父进程不修改环境，子进程有超时、输出上限与清理 owner，原 512 KiB manifest 上限和超限回归保持。
+Workflow 的 live discovery 单元测试在运行时复用 `TestSandbox` 和 `TestProcess`，以精确测试名在独立子进程中执行。普通 `cargo test --locked -p shell --lib session::workflow:: -- --test-threads=4` 不需要手工覆盖 HOME；Unix 的用户 Agent、Skill、Workflow 和 workspace-user 来源不会混入夹具，项目内显式资源仍走真实发现路径。Windows 的 `dirs` 依赖从系统 Known Folder 取得用户目录，不遵循 USERPROFILE，故这里不宣称 Windows Agent/Skill 用户源已被隔离；GROW_HOME 与子进程环境仍由 sandbox 持有。父进程不修改环境，子进程有超时、输出上限与清理 owner，原 512 KiB manifest 上限和超限回归保持。完整远端 Shell 与额外污染环境定向产物的独立验证范围见[隔离验收](../openspec/changes/archive/2026-11-09-isolate-workflow-test-discovery/verification.md)。
 
 `spawn_subagent` 的可选 `effort` 与 `model` 一起进入既有子 Agent runtime；fresh call
 不传 model 时对原有解析出的模型生效，不传 effort 时保留 Agent/model 默认。`"none"`
@@ -843,3 +847,5 @@ Prompt cache key 的 rewind 锚点由 Timeline accepted-event fold 派生；prep
 持久结果 reader 的 unwind 通过既有 coordinator observation owner 结算为 Unavailable，释放读取许可后可继续服务。该隔离仅适用于启用 unwind 的构建（如库测试）；release/release-dist 保留 `panic=abort`，不宣称能在进程 abort 后继续运行。
 
 冷恢复在冻结 child 当前 MCP client-ID grant 前，通过 actor 的 initialized-pool snapshot 等待直接父的初始握手收尾；等待由可取消的 session activity 承担，command executor 继续处理即时 snapshot。普通新 Task 仍取即时池。出生名字、当前 profile、父 ceiling 和后续 live authority 继续求交，不从当前配置补造出生事实。见 [冷恢复 MCP 初始化边界](../openspec/changes/archive/2026-11-04-await-parent-mcp-before-cold-child-grant/design.md)。
+
+Recap 的冷恢复只采用成功展示事实中明确记录的冻结主轮次计数，不根据通知落盘顺序推断覆盖范围。旧记录缺少计数时保守保留原自动请求资格；参见 [冻结 recap 覆盖变更](../openspec/changes/archive/2026-11-09-restore-recap-watermark/design.md)。

@@ -4,6 +4,6 @@
 - [x] 1.3 Add polluted ambient discovery and explicit project discovery controls.
 
 ## 2. Verification
-- [ ] 2.1 Run focused regression, full Workflow tests and affected actor tests, including polluted outer environment.
-- [ ] 2.2 Run formatting, strict OpenSpec validation and archived validation; record exact results and limitations.
-- [ ] 2.3 Archive the maintenance change and update the backlog closure reference.
+- [x] 2.1 Run focused regression, full Workflow tests and affected actor tests, including polluted outer environment.
+- [x] 2.2 Run formatting, strict OpenSpec validation and archived validation; record exact results and limitations.
+- [x] 2.3 Archive the maintenance change and update the backlog closure reference.

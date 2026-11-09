@@ -2,7 +2,7 @@
 
 ## Why
 
-2.6.2第四项上游候选已核实为两个不同边界。MCP `into_registration`目前对完整`server__tool`执行provider的64字符正则，导致较长但无歧义的目录身份在search/use_tool之前被丢弃。普通Shell采样用builtins-only，不直接暴露MCP目录；但公开`Agent::tool_definitions`承诺供采样API使用，放宽目录后仍须保直接provider名约束。详细官方来源与既有消费者核对见[固定来源评审](../archive/2026-11-07-complete-nondeferred-backlog/upstream-2-6-2-review.md#name-boundary-evidence)。
+2.6.2第四项上游候选已核实为两个不同边界。MCP `into_registration`目前对完整`server__tool`执行provider的64字符正则，导致较长但无歧义的目录身份在search/use_tool之前被丢弃。普通Shell采样用builtins-only，不直接暴露MCP目录；但公开`Agent::tool_definitions`承诺供采样API使用，放宽目录后仍须保直接provider名约束。详细官方来源与既有消费者核对见[固定来源评审](../2026-11-07-complete-nondeferred-backlog/upstream-2-6-2-review.md#name-boundary-evidence)。
 
 ## What changes
 

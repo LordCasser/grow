@@ -6,6 +6,8 @@
 
 用户最新要求只完成 P0、必要或已经进行的修复，然后准备 2.6.2。当前实施范围以[收拢记录](changes/archive/2026-11-07-complete-nondeferred-backlog/proposal.md#2026-11-07-范围收拢)为准；长历史双 Ctrl+D 五秒退出超时为发布主线。表中尚未启动的卸载/普通更新保存错误、Markdown 性能、Workflow 测试和 Agent 公共实体整理继续保留，不在本轮追加实施。ACP 容量实验尚未写源码，已停在[准备材料](changes/measure-acp-gateway-backlog/design.md)，没有运行结果，也没有容量政策改动。
 
+2026-11-08 后续完成其中的卸载/普通更新持久化错误传播，验收见下方 AC-08 闭合记录；上述 11-07 收拢文字保留为历史停止点。
+
 ## 本轮全仓审计发现，待独立修复
 
 用户于2026-11-05要求停止新增审查并把当前成果作为发布前里程碑。已接受修复逐项归档；下列未闭合项保留为后续工作，本里程碑不再启动新的调查或实施。状态、验证限制和原停止点见[里程碑记录](changes/archive/2026-11-05-coordinate-audit-backlog-repairs/milestone.md)，发布与验收见[2.6.1发布记录](changes/archive/2026-11-06-prepare-release-v2-6-1/verification.md)。
@@ -16,7 +18,7 @@
 
 原生子采样控制的自然收尾夹具已按已归档的child退休顺序修正，三个竞态场景保留；完整21个native和10个owner场景及独立actor拒绝控制已通过，见[阶段修正与最终回归](changes/archive/2026-11-07-align-native-control-retirement-fixture/verification.md)。父工具同一行 Dispatching→Queued/Failed、child普通控制反馈及启动发布顺序已验收，见[模块与真实终端链](changes/archive/2026-11-07-show-subagent-sampling-controls/verification.md)：保Queued≠Applied，child先建立control epoch，closed-Step后一次notice和实际目标model/effort请求；freshbuild v10原exact与正常退出均0。模型池仍遵循独立设计批准门槛。
 
-2.6.2候选中的 `rg --hostname-bin` 已按实际helper执行、Ask/Auto/grant和冻结RX投影完成修复，含`--glob --`反例，见[权限修复与21项最终回归](changes/archive/2026-11-06-guard-ripgrep-external-execution/verification.md)。MCP取消派发三秒Grow等待界见[真实受阻传输旧红新绿与16项回归](changes/archive/2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。Goal空闲人类依赖解除唤醒见[真实mailbox判别、Goal/planning回归与原报告限制](changes/archive/2026-11-06-repair-goal-turn-continuation/verification.md)。四项候选的实际采纳和未证边界见[固定来源对照](changes/archive/2026-11-07-complete-nondeferred-backlog/upstream-2-6-2-review.md)。
+2.6.2候选中的 `rg --hostname-bin` 已按实际helper执行、Ask/Auto/grant和冻结RX投影完成修复，含`--glob --`反例，见[权限修复与21项最终回归](changes/archive/2026-11-06-guard-ripgrep-external-execution/verification.md)。MCP取消派发三秒Grow等待界见[真实受阻传输旧红新绿与16项回归](changes/archive/2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。Goal空闲人类依赖解除唤醒见[真实mailbox判别、Goal/planning回归与原报告限制](changes/archive/2026-11-06-repair-goal-turn-continuation/verification.md)。四项候选的实际采纳和未证边界见[固定来源对照](changes/archive/2026-11-07-complete-nondeferred-backlog/upstream-2-6-2-review.md)。 MCP 目录名/provider 投影边界现已闭合：完整 identity 保留至 256，直接声明保持 64，真实 catalog 17/17 及 descriptor 完整源码旧红新绿通过；见[验证与存储边界](changes/archive/2026-11-09-separate-mcp-catalog-name-bound/verification.md)。
 
 MCP-F1初始化后调用资格已验收，见[真实握手旧红、16项资格矩阵与197/13项回归](changes/archive/2026-11-07-revalidate-mcp-call-eligibility/verification.md)：model/direct共用当前client/disabled及live上游ceiling复核，保原absolute deadline和no-replay；Shell真实显式endpoint控制保持。父审查发现的direct预算退还及测试received计数已修订；网络中已发请求不承诺回滚，远端生产/Windows未实测。
 
@@ -38,7 +40,7 @@ PB-05 多进程 crash capture 归属已闭合：live owner/并发同秒恢复/ex
 
 MCP-F2 SDK 注册者路由已闭合：实际 ingress覆盖身份/畸形早拒绝、A注册/Bdriver/同serverId及断线无fallback、真实new/resident/cold与SharedMcpPool Arc继承实际调用均通过。见[生命周期证据](changes/archive/2026-11-07-route-sdk-mcp-to-registration-owner/verification-sdk-lifecycle.md)及同目录leader验证，继承覆盖限SDK Arc/transport，不扩大为任意child启动全流程。
 
-AC-08 普通 Install 子项已闭合：共享 application/真实 ACP 两项有效保存失败旧红转绿，Pager public dispatch 的 save/parse/read/success 控制通过；不继续 post-install 或伪报 reload，已发布 artifact 保留并明确不完整状态。见[安装验证](changes/archive/2026-11-07-report-plugin-install-persistence-failures/verification.md)。卸载和普通更新保存错误继续独立保留。
+AC-08 普通 Install 子项已闭合：共享 application/真实 ACP 两项有效保存失败旧红转绿，Pager public dispatch 的 save/parse/read/success 控制通过；不继续 post-install 或伪报 reload，已发布 artifact 保留并明确不完整状态。见[安装验证](changes/archive/2026-11-07-report-plugin-install-persistence-failures/verification.md)。卸载和普通更新现已分别完成：坏登记早失败、真实删除失败保记录、保存部分完成不伪报成功、实际 ACP/CLI 及混合 marketplace 批次通过，见[卸载验收](changes/archive/2026-11-09-report-plugin-uninstall-failures/verification.md)与[更新验收](changes/archive/2026-11-09-report-plugin-update-persistence-failures/verification.md)。源码级差分控制三组旧红/新绿，最终独立 grow CLI 11 次调用通过；完整远端 CI 仍由整合任务确认。
 
 AC-03b 已完成 Shell 精确 session 插件快照与 Pager session/epoch 回包接线：真实 ACP 六方法入口回归与目录旧红/新绿、owner 3 项和既有 24 项通过，Pager 七项通过且独立 review 无发现。见[Shell](changes/archive/2026-11-07-bind-skill-catalogs-to-session-snapshots/shell-verification.md)与[Pager](changes/archive/2026-11-07-bind-skill-catalogs-to-session-snapshots/pager-verification.md)。全局 disabled 与目录热更新仍依各自契约，不复制额外目录 owner。
 
@@ -48,13 +50,13 @@ PB-03 PTY 生命周期已完成 Session→HTTP/WS→CLI 接线：真实 CLI 10 �
 
 AC-07 ACP 更新采用已通过真实 bare remote 的旧红新绿；checkout 与 registry commit/plugin map 一致，第二次同 tip 不产生更新，见[验证记录](changes/archive/2026-11-07-adopt-acp-plugin-update-results/verification.md)。保存错误的 AC-08 仍按安装、卸载、更新分别验收。
 
+Workflow 测试的已记录 Unix 用户发现污染已闭合：共享 sandbox 隔离 62 个既有测试入口，保留真实发现与原 manifest 上限。完整远端 Shell 有 4,794 项通过；额外固定产物在污染外层环境中复现非隔离的 524288 字节拒绝，隔离后 148 项 Workflow、3 项启动和 2 项恢复回归通过。来源哈希、精确测试裁剪边界与完整 CI 的独立性见[隔离验证](changes/archive/2026-11-09-isolate-workflow-test-discovery/verification.md)。Windows 的 Known Folder 用户 Agent/Skill 来源不遵循 USERPROFILE，本项未宣称该平台隔离完成；原历史资源字段字节占比仍未测。
+
 | 项目 | 独立 owner / 修复边界 | 当前证据与启动门槛 |
 | --- | --- | --- |
-| AC-08 · P2 · 卸载/普通更新I/O失败 | plugin application分别传播durable失败与部分完成 | 普通 Install 已独立验收归档；卸载 removal/save 与普通更新 save 的错误传播本轮未实施，继续按独立任务保留，不把installer重写成框架 |
 | macOS 文件监听退役抖动 · P2 · 现场待进一步复现 | 通用 fsnotify watcher 的 native Drop/join 与进程退出尾部 | 2.6.2 长历史 CLI 验证中，一轮 filesystem watcher 退役 4747ms，runtime 4845ms 已确认但进程 6019ms 仍活；其它同负载两轮 actual wait 225ms。慢段未采到动态栈，源码有同步 join，不能凭两轮成功宣称该 OS 抖动已修。保留 `/tmp/grow-complex-cli-acceptance-ready-8cf671e4/` 与 `/tmp/grow-complex-cli-slowwatch-8cf671e4/`，独立定位，不扩大本轮为通用 fsnotify backend 重写。 |
 | ACP-1 · 容量债务 | ACP transport明确queue/handler预算及过载语义 | [客户端报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/client-ui.md)；静态风险，先慢handler/生产者负载实验或证明现有外部上限，不预设正常CLI失效阈值 |
 | MD-1 · 已测量性能债务 | Markdown开放fence输出复用边界 | [优化构建测量](changes/archive/2026-11-09-measure-open-fence-copy-costs/verification.md)：502 项输出回归及显式测量通过；4096 行合成 YAML 的 warm clone 为 3.101ms，实际 Markdown 增长帧中位 7.772ms、最大 8.638ms。未超过默认 30FPS 动画间隔不等于全 UI 预算通过；累计复制仍为二次增长，未改生产表示或宣称债务已修复。 |
-| Workflow测试隔离 · 工具维护 | 复用测试sandbox隔离user discovery，不改产品manifest上限 | [固定产物隔离对照](changes/archive/2026-11-06-diagnose-workflow-manifest-capacity/analysis.md)：同产物非隔离25fail、隔离147pass；本轮集成已用隔离环境验证，用户资源字段的精确字节占比未测，不以假设提高512KiB上限 |
 | Agent公共实体用途核对 · 待用途核对 | Agent owner确认ToolExecConfig/Retry与preset public seam消费者 | [配置报告](changes/archive/2026-11-05-audit-grow-architecture-across-versions/reviews/agent-config.md)，无仓内消费不足以证明公开API可删；先确认受支持外部产品需求，再做窄删除/依赖收缩，不预建框架；announcements直接依赖config已独立[验收](changes/archive/2026-11-07-depend-on-config-for-announcements/verification.md)，原转发路径和状态语义保持 |
 
 | 交付释放/迟到结果 · 源码已修，现场待新构建恢复 | tool-types LocalPlan历史review绑定与Shell canonical结果提交 | [独立修复与实验](changes/archive/2026-11-05-audit-released-delivery-finalization/verification.md)：原公共API反例已在新生产库转为Ok，planning26/26、独立review和默认CLI check/build通过。只放宽历史Released(None)，其他review/canonical/终态门槛保持。当前旧宿主仍Receipt Unknown、link未terminal，需正常退出后用新项目构建恢复，再核对真实结果与replan；不能将源码验证当作现场闭合 |
