@@ -904,6 +904,9 @@ mod tests {
 
     #[test]
     fn inline_resolution_validates_name_and_size() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let ok = resolve_inline(script("valid-name"));
         assert_eq!(ok.unwrap().meta.name, "valid-name");
 
@@ -919,6 +922,9 @@ mod tests {
 
     #[test]
     fn deterministic_scan_uses_git_root_and_skips_invalid_filename() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         git2::Repository::init(dir.path()).unwrap();
         let cwd = dir.path().join("nested");
@@ -955,6 +961,9 @@ mod tests {
 
     #[test]
     fn session_run_projection_resolves_despite_generic_filename() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let cwd_dir = tempfile::tempdir().unwrap();
         git2::Repository::init(cwd_dir.path()).unwrap();
         let session_dir = tempfile::tempdir().unwrap();
@@ -972,6 +981,9 @@ mod tests {
 
     #[test]
     fn project_workflows_follow_folder_trust() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         git2::Repository::init(dir.path()).unwrap();
         let workflows = dir.path().join(".grow/workflows");
@@ -1001,6 +1013,9 @@ mod tests {
 
     #[test]
     fn overlapping_project_and_user_workflow_dir_is_user_only() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         git2::Repository::init(dir.path()).unwrap();
         let user_root = dir.path().join(".grow");
@@ -1027,6 +1042,9 @@ mod tests {
 
     #[test]
     fn same_name_definitions_in_different_scopes_keep_stable_ids() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let entries = vec![
             RegistryEntry {
                 definition_id: definition_id(WorkflowScope::Project, "same"),
@@ -1062,6 +1080,9 @@ mod tests {
 
     #[test]
     fn duplicate_same_scope_names_are_rejected() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let mut entries = vec![
             RegistryEntry {
                 definition_id: definition_id(WorkflowScope::Project, "dup"),
@@ -1104,6 +1125,9 @@ mod tests {
 
     #[test]
     fn explicit_paths_are_relative_to_session_cwd_and_contained() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         let outside = dir.path().join("outside.rhai");
@@ -1122,6 +1146,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn discovery_and_explicit_paths_reject_symlink_files() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1146,6 +1173,9 @@ mod tests {
 
     #[test]
     fn publish_is_validated_atomic_and_no_clobber() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = publish_workflow(
             dir.path(),
@@ -1182,6 +1212,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn save_through_symlinked_session_root_stays_in_canonical_project() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1206,6 +1239,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn save_rejects_symlinked_registry_directory() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();

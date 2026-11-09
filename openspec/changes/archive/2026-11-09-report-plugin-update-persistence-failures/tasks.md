@@ -1,0 +1,5 @@
+- [x] 核 ordinary/marketplace 保存所有权，冻结load/save与部分完成结果契约。
+- [x] 在 AC-07 及前序 plugin 写面释放后实施错误传播，取得共享 application 的有效源码级旧红/新绿；完整旧 ACP/CLI 二进制未重建，范围见 verification。
+- [x] 验证 ACP/CLI public dispatcher 实际入口、坏 registry、故障后显式重试与 no-op/marketplace 回归。
+- [x] 独立数据完整性 review、整合方运行回归与同次独立 grow CLI 的最终插件产品链验收。
+- [x] 同步开发说明/backlog，完成 strict/archive 及 all/archived 复核。

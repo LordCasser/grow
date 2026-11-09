@@ -7,7 +7,7 @@
 | rg hostname-bin | 已修、归档，纳入2.6.2工作树 | [真实helper执行、glob分隔符反例、19+2最终回归](../2026-11-06-guard-ripgrep-external-execution/verification.md)。safe/Auto/prefix和受限RX投影共用owner，exact invocation grant不改。 |
 | MCP取消写等待3秒 | 已修、归档，纳入2.6.2工作树 | [32B真实受阻transport、旧红新绿16项](../2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。只约束Grow任务，不承诺撤回SDK已入队发送或取消远端副作用。 |
 | Messages signature fragments | 当前不盲目吸收，先保留官方SDK一致语义 | Grow保留start初值、后每个SignatureDelta赋值；官方TS/Python SDK同样覆盖。正式文档描述stop前特殊signature_delta且omitted模式为single delta。未取得同一thinking block多个语义signature事件确为片段的实际路由证据，不能把TCP/SSE字节分片当多个语义事件。见下方来源。 |
-| MCP目录名256 / provider函数名64 | 已核实两个不同边界，已冻结[独立契约和顺序](../../separate-mcp-catalog-name-bound/design.md)，尚未实施验收 | 普通Shell采样只取builtins，search_tool把qualifiedname当JSON值、use_tool内部dispatch；公开Agent::tool_definitions仍须保provider共同格式。先实现私有Agent投影64，再放宽MCP目录256；完整bridge保留，不截断/alias、不增公共helper或Agent→MCP依赖。实际注册/发现/调用往返和256存储边界必须验证。 |
+| MCP目录名256 / provider函数名64 | 已按[独立契约](../2026-11-09-separate-mcp-catalog-name-bound/design.md)实现并通过[真实入口验收](../2026-11-09-separate-mcp-catalog-name-bound/verification.md) | 普通Shell采样只取builtins，search_tool把qualifiedname当JSON值、use_tool内部dispatch；公开Agent::tool_definitions仍须保provider共同格式。先实现私有Agent投影64，再放宽MCP目录256；完整bridge保留，不截断/alias、不增公共helper或Agent→MCP依赖。实际注册/发现/调用往返和256存储边界必须验证。 |
 
 ## Signature decision evidence
 
@@ -28,10 +28,14 @@
 
 父也补查metadata snapshot填充：`refresh_mcp_snapshot_and_schedule_reminder_with`直接以完整ToolBridge.tool_definitions生成qualified_name/schema并发布eligibility；因此长名目录保留应沿原snapshot路径自动进入search与权限，不应另建catalog。app-only仍由register_mcp_tool前的model_visible门闩控制，放宽不得把它纳入模型可调的bridge。
 
-最小实现边界应分别归MCP registration（目录identity合法、上限256，既有qualified分隔/语法不变）和Agent sampling projection（provider名仍64、长name仅可经meta工具）；无需截断、生成alias、复制新目录或替换权限来源。必须用同一长server/tool真实注册→search schema→use_tool原identity、以及公开Agent采样projection64/65/256/257控制来验收。当前仅分析，不计已实现。
+最小实现边界应分别归MCP registration（目录identity合法、上限256，既有qualified分隔/语法不变）和Agent sampling projection（provider名仍64、长name仅可经meta工具）；无需截断、生成alias、复制新目录或替换权限来源。必须用同一长server/tool真实注册→search schema→use_tool原identity、以及公开Agent采样projection64/65/256/257控制来验收。这是 2026-11-07 的冻结分析结论；后续实现及验收见下方闭合记录。
 
 2026-11-07补充官方边界：Context7实际读取[正式2026-07-28 tools规范](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/server/tools.mdx)，原server内tool name的SHOULD为1–128字符、区分大小写、ASCII字母/数字/underscore/hyphen/dot；聚合客户端SHOULD采用server identifier等消歧，serverInfo.name不保证唯一。返回资料另含旧SEP986的1–64建议，该提案不是同版正式工具契约，不能混成当前限制。**256是本候选的Grow qualified目录策略，不是官方MCP原始name上限；64是直接provider投影的现有跨provider约束。** 本次只放宽长度，既有ToolId/qualified唯一分隔等语法不变，官方可用dot不自动授权扩充当前产品ToolId字符集。
 
 ## Preserved prior decisions
 
 Plan递延review已按原范围闭合；MCP Form/URL的产品交互尚未完成，不因这里的transport修复改变状态。统一Dock、链式model/window/effort仍为已拒绝方向；Memory/Remote Control仍延期。本轮没有因此启动这些功能，也未发布2.6.2。
+
+## MCP name-boundary closure, 2026-11-09
+
+Agent 64 字符直接 provider 投影与 MCP 256 字符完整目录身份已经分离。真实 Shell catalog 模块 17/17、Agent 504/MCP 200 回归和 descriptor 完整源码旧红新绿控制通过；原名、schema、app-only、禁用、exact permission 与 live-parent 资格保持。普通 descriptor 路径不变，先前不可写的最长 raw name 使用有界组件子目录。证据和跨平台限制见[最终验证](../2026-11-09-separate-mcp-catalog-name-bound/verification.md)。签名拼接的既有证据门槛不因此改变。

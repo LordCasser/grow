@@ -18,3 +18,9 @@ Grow SHALL retain unambiguous qualified MCP tool identities up to 256 ASCII char
 
 - **WHEN** a valid declaration within the catalog bound is restricted to app visibility
 - **THEN** length acceptance does not make it model-callable or grant additional tool authority.
+
+
+#### Scenario: The longest raw tool name needs a descriptor file
+
+- **WHEN** an accepted qualified identity contains a raw name whose sanitized form plus `.json` exceeds a 255-byte filesystem component
+- **THEN** descriptor materialization writes `tools/long-names/<complete sanitized name>/descriptor.json`, preserves the original name and schema in the JSON, and keeps ordinary flat descriptor paths unchanged.

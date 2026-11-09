@@ -436,4 +436,107 @@ mod tests {
         }
         assert!(cache.closed_memo_bytes() <= CLOSED_MEMO_CAP_BYTES);
     }
+
+    /// Attribute a finite synthetic open fence before changing its output representation.
+    /// Times are observations, not CI thresholds or a full terminal frame budget.
+    #[test]
+    #[ignore = "open-fence performance measurement; run optimized with --nocapture"]
+    fn measure_open_fence_parse_and_copy_costs() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let syn = test_syntect();
+        for count in [256, 1024, 4096] {
+            let source: String = (0..count)
+                .map(|index| format!("entry_{index:06}: [true, 123, \"streamed value\"]\n"))
+                .collect();
+            let mut cache = OpenFenceHighlighter::new(syn);
+            let mut end = 0;
+            let mut returned_text_bytes = 0u64;
+            let started = Instant::now();
+            for line in LinesWithEndings::from(&source) {
+                end += line.len();
+                let output = cache.highlight(syn, "yaml", 0, &source[..end]).unwrap();
+                // Every return owns copies of all committed text. Count the
+                // logical copied bytes, not allocator capacity or RSS.
+                returned_text_bytes += end as u64;
+                assert_eq!(output.len(), cache.committed_lines.len());
+                black_box(output);
+            }
+            let incremental_us = started.elapsed().as_micros();
+            assert_eq!(cache.committed_lines, batch(syn, "yaml", &source));
+
+            // Isolate parsing and style/text allocation using the exact syntect
+            // operations used by highlight(), but without prefix verification
+            // or cloning old output. This is a mechanism-level attribution,
+            // not a subtraction of unlike end-to-end timings.
+            let highlighter = Highlighter::new(&syn.theme);
+            let mut parse = ParseState::new(syn.find_syntax_for_fence_info("yaml").unwrap());
+            let mut state = HighlightState::new(&highlighter, ScopeStack::new());
+            let mut parse_time = Duration::ZERO;
+            let mut style_time = Duration::ZERO;
+            let mut reference = Vec::new();
+            for line in LinesWithEndings::from(&source) {
+                let started = Instant::now();
+                let ops = parse.parse_line(line, &syn.syntax_set).unwrap();
+                parse_time += started.elapsed();
+                let started = Instant::now();
+                let highlighted: HlLine =
+                    HighlightIterator::new(&mut state, &ops, line, &highlighter)
+                        .map(|(style, text)| (style, text.to_owned()))
+                        .collect();
+                style_time += started.elapsed();
+                reference.push(highlighted);
+            }
+            assert_eq!(reference, cache.committed_lines);
+
+            const REPEATS: u32 = 16;
+            let started = Instant::now();
+            for _ in 0..REPEATS {
+                black_box(cache.committed_lines.clone());
+            }
+            let clone_us = started.elapsed().as_micros() / u128::from(REPEATS);
+            let started = Instant::now();
+            for _ in 0..REPEATS {
+                assert!(black_box(
+                    cache.committed_prefix_matches(black_box(&source))
+                ));
+            }
+            let prefix_us = started.elapsed().as_micros() / u128::from(REPEATS);
+
+            // A warmed final growth frame includes the real Markdown parser,
+            // styled output conversion and URL scanning, beyond this cache.
+            let last_line_start = source[..source.len() - 1].rfind('\n').unwrap() + 1;
+            let (batch_output, _) = crate::render_markdown_ratatui_full(
+                &format!("```yaml\n{source}"),
+                crate::style::test_style::STYLE,
+                true,
+                Some(syn),
+            );
+            let mut growth_frames_us = Vec::new();
+            for _ in 0..8 {
+                let mut renderer =
+                    crate::StreamingMarkdownRenderer::new(crate::style::test_style::STYLE, true);
+                renderer.push_and_render("```yaml\n", Some(syn));
+                renderer.push_and_render(&source[..last_line_start], Some(syn));
+                let started = Instant::now();
+                renderer.push_and_render(&source[last_line_start..], Some(syn));
+                growth_frames_us.push(started.elapsed().as_micros());
+                assert_eq!(renderer.view().lines, batch_output.lines);
+                assert_eq!(
+                    renderer.view().line_source_map,
+                    batch_output.line_source_map
+                );
+            }
+            growth_frames_us.sort_unstable();
+            let growth_frame_median_us = growth_frames_us[growth_frames_us.len() / 2];
+            let growth_frame_max_us = growth_frames_us.last().unwrap();
+            eprintln!(
+                "MD_MEASURE lines={count} source_bytes={} returned_text_bytes={returned_text_bytes} incremental_total_us={incremental_us} parse_total_us={} style_output_total_us={} warmed_clone_us={clone_us} prefix_check_us={prefix_us} growth_frame_median_us={growth_frame_median_us} growth_frame_max_us={growth_frame_max_us}",
+                source.len(),
+                parse_time.as_micros(),
+                style_time.as_micros(),
+            );
+        }
+    }
 }

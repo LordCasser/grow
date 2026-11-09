@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-08
+skip_specs: true
+reason: Isolate Workflow unit-test discovery with the existing test sandbox and subprocess owner; production discovery, snapshots, and manifest size limits are unchanged.

@@ -1067,3 +1067,43 @@ Both leader and in-process runtimes SHALL deliver accepted Skills configuration 
 #### Scenario: Failed replacement or runtime cancellation
 - **WHEN** replacement registration fails or runtime cancellation races registration
 - **THEN** failure preserves the previous valid watcher with visible diagnostics, cancellation retires all registrations owned by that runtime, and no unconfirmed replacement is reported as active.
+
+### Requirement: Plugin uninstall reports incomplete removal and deregistration
+
+CLI and ACP plugin uninstall SHALL use the shared application owner and propagate existing registry load failures before destructive work. Removal failure or a still-existing unexpected repository path SHALL prevent deregistration and SHALL return an error preserving the installed record. Success SHALL require both confirmed repository path removal and saved deregistration. Save failure after removal SHALL describe the actual partial completion without claiming rollback or complete uninstall. ACP failures SHALL not request reload or restart. Existing multi-plugin confirmation and caller data-retention policies SHALL remain in effect.
+
+#### Scenario: Repository removal fails
+- **WHEN** repository removal fails or the target remains present as an unexpected file type
+- **THEN** uninstall returns an error, retains its registry record, and does not report full removal.
+
+#### Scenario: Deregistration save fails
+- **WHEN** repository files were removed but the resulting registry cannot be saved
+- **THEN** CLI and ACP report incomplete uninstall with the known removed path and persistence error, preserving actual files/records rather than fabricating rollback.
+
+#### Scenario: Registry is unreadable or malformed
+- **WHEN** uninstall cannot load the existing registry
+- **THEN** it returns an error before removing files or changing registration.
+
+#### Scenario: Uninstall succeeds
+- **WHEN** confirmation, removal and registry save succeed
+- **THEN** callers report the removed plugins with the existing keep-data policy and successful reload behavior.
+
+### Requirement: Plugin update success requires its registry publication
+
+Shared CLI and ACP plugin updates SHALL propagate existing registry load failures before repository side effects. An ordinary Git update SHALL not report Updated when its resulting registry publication fails; the error SHALL identify known changed repositories and incomplete persistence without claiming that checkout or other successfully completed updates were rolled back. Marketplace transactions SHALL retain their existing save and rollback ownership. No-change updates SHALL not introduce a new registry publication requirement.
+
+#### Scenario: Ordinary update save fails
+- **WHEN** a Git checkout has advanced but its resulting registry save fails
+- **THEN** CLI returns an error and ACP returns InternalError without requesting reload or restart, describing the known checkout change and incomplete registry state.
+
+#### Scenario: Registry cannot be loaded
+- **WHEN** update encounters an existing registry read or parse failure
+- **THEN** it fails before changing any repository rather than treating the registry as empty.
+
+#### Scenario: Explicit retry after persistence recovers
+- **WHEN** the user explicitly retries the incomplete update after storage recovers
+- **THEN** actual checkout/registry facts determine adoption, the correct commit and plugin map can converge, and a subsequent same-tip update remains a no-op.
+
+#### Scenario: No ordinary registry change
+- **WHEN** selected repositories are unchanged, pinned, live-local or handled by their existing transactional publication
+- **THEN** their original outcomes and publication ownership remain, without an unnecessary ordinary registry save.

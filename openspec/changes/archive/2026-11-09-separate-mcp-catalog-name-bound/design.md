@@ -23,4 +23,11 @@
 
 **跨层里程碑**由父在两者接受后核：同一长server/tool经真实MCP注册、Shell snapshot与search/schema、use_tool内部terminal，实际fake server收到原raw tool name和arguments；完整qualified identity不变。至少一个>64通常长度和256边界覆盖目录/路径实际消费者，不能只以ToolId接受宣称artifact路径也可用。若现消费者在256触发真实文件名/存储边界，带实际失败回报父，不能改名、截断或删256场景掩盖；父决定属于本次既有消费者适配还是独立缺口。modelvisibility与disabled/permission用现实际入口控制，主Agent public projection需同时保持64结果。
 
-单一Rust/Cargo窗口串行，各coder只拥有当前模块承诺。MCP-F1/F2写同一邻区时先完成候选review与退役，不并发编辑。无需重跑无关GUI、全provider或全workspace；针对实际改变的public projection/registration/内部调用覆盖后即可结束。父亲读实际diff、计数/identity证据和产物限制，同步开发说明、上游候选状态与backlog，strict归档。当前只有已冻结设计，未计实现/验收。
+单一Rust/Cargo窗口串行，各coder只拥有当前模块承诺。MCP-F1/F2写同一邻区时先完成候选review与退役，不并发编辑。无需重跑无关GUI、全provider或全workspace；针对实际改变的public projection/registration/内部调用覆盖后即可结束。父亲读实际diff、计数/identity证据和产物限制，同步开发说明、上游候选状态与backlog，strict归档。实现与验收已完成，实际入口、旧实现对照与验证范围见 [verification.md](verification.md)。归档不扩大既有工具权限、可见性或 descriptor helper 的职责。
+
+
+## 256 字符的 descriptor 文件边界
+
+实际 Linux 文件系统验证：raw name 250 字节加 `.json` 可写，253 字节加 `.json` 返回 `ENAMETOOLONG`。后者仍是合法 `s__<raw>` 256 字符目录身份。`McpClient::materialize_descriptors` 是公开的 best-effort helper；全仓搜索未发现运行期调用方，但不能因没有仓内调用方忽略公共存储入口。
+
+保持全部既有可写 flat 路径；仅 sanitized name 超过 250 字节时写到 `tools/long-names/<完整 sanitized name>/descriptor.json`。合法目录身份的 raw name 最大 253 ASCII 字节，目录组件仍在 255 字节内。`long-names` 不以 `.json` 结尾，不会与 flat descriptor 文件冲突。文件仍由同目录 NamedTempFile 原子替换，重复发布不产生临时文件残留，整个 server directory 的树状清理自然包括新增子目录。sanitizer 继续去除路径分隔符；tool 的 wire name、qualified name 和 JSON name 都不改变。既有 sanitizer 同名碰撞策略及超出目录契约的任意上游名字不在本次扩张。

@@ -154,13 +154,95 @@ impl Agent {
         self.prompt_context.audience
     }
 
-    /// Tool definitions for the sampling API — delegates to ToolBridge.
+    /// Tool definitions valid for direct sampling API declarations.
+    /// The complete bridge catalog remains available to meta-tool discovery.
+    /// Long catalog identities are not truncated or aliased for providers.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tool_bridge.tool_definitions().await
+        self.tool_bridge
+            .tool_definitions()
+            .await
+            .into_iter()
+            .filter(|definition| provider_tool_name_valid(&definition.function.name))
+            .collect()
     }
 
     /// Built-in tool definitions only (excludes MCP tools).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.tool_bridge.tool_definitions_builtins_only().await
+    }
+}
+
+// Keep this projection local: MCP catalog names have a different length bound.
+fn provider_tool_name_valid(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tools::implementations::use_tool::UseTool;
+
+    #[tokio::test]
+    async fn sampling_definitions_preserve_provider_names_and_complete_bridge_catalog() {
+        let bridge = Arc::new(ToolBridge::for_test());
+        let prefix = format!("server__{}", "a".repeat(56));
+        assert_eq!(prefix.len(), 64);
+        let names = [
+            "use_tool".to_owned(),
+            "server__short".to_owned(),
+            prefix.clone(),
+            format!("{prefix}a"),
+            format!("{prefix}b"),
+            format!("{prefix}{}", "a".repeat(192)),
+            "1invalid".to_owned(),
+            "server:scope__tool".to_owned(),
+        ];
+        for (index, name) in names.iter().enumerate() {
+            bridge.toolset().register_tool(
+                name.clone(),
+                UseTool,
+                Some(serde_json::json!({"type": "object", "properties": {"value": {"const": index}}})),
+            ).unwrap();
+        }
+        let catalog = bridge.tool_definitions().await;
+        assert_eq!(catalog.len(), names.len());
+        let agent = Agent::new(
+            AgentDefinition::default_grow_build(),
+            PromptContext::default(),
+            String::new(),
+            None,
+            Arc::clone(&bridge),
+        );
+        let projection = agent.tool_definitions().await;
+        let expected: Vec<_> = catalog
+            .iter()
+            .filter(|definition| names[..3].contains(&definition.function.name))
+            .cloned()
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(projection.len(), 3);
+        assert_eq!(
+            serde_json::to_value(bridge.tool_definitions().await).unwrap(),
+            serde_json::to_value(catalog).unwrap()
+        );
+    }
+
+    #[test]
+    fn provider_name_format_remains_ascii_and_bounded() {
+        for name in ["", "1tool", "-tool", "a.b", "a:b", "é", "a\n"] {
+            assert!(!provider_tool_name_valid(name), "accepted {name:?}");
+        }
+        for name in ["_tool", "Tool_1-name", &"a".repeat(64)] {
+            assert!(provider_tool_name_valid(name), "rejected {name:?}");
+        }
+        assert!(!provider_tool_name_valid(&"a".repeat(65)));
     }
 }

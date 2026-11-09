@@ -1,4 +1,4 @@
-//! AC-07: exercise Update through the real ACP extension, session handle and actor.
+//! AC-07/AC-08: exercise Update through the real ACP extension, session handle and actor.
 //! One test owns HOME/GROW_HOME for every phase because grow_home() is cached.
 
 use std::path::{Path, PathBuf};
@@ -338,6 +338,46 @@ fn acp_update_adopts_branch_result_and_preserves_noops() {
         assert_eq!(missing["status"], "not_found", "{missing}");
         assert_eq!(missing["requiresReload"], false, "{missing}");
 
+        let registry_path = install_dir.join("registry.json");
+        let before = std::fs::read(&registry_path).unwrap();
+        let checkout = registry.get_repo(&selected_key).unwrap().path.clone();
+        std::fs::write(&registry_path, "{ broken registry").unwrap();
+        let corrupt = update(&conn, &sid, Some("user/unused/selected")).await;
+        assert_eq!(corrupt["status"], "internal_error", "{corrupt}");
+        assert_eq!(corrupt["requiresReload"], false, "{corrupt}");
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), selected.old_commit);
+        assert_eq!(
+            std::fs::read_to_string(&registry_path).unwrap(),
+            "{ broken registry"
+        );
+        std::fs::remove_file(&registry_path).unwrap();
+        std::fs::create_dir(&registry_path).unwrap();
+        let unreadable = update(&conn, &sid, Some("selected")).await;
+        assert_eq!(unreadable["status"], "internal_error", "{unreadable}");
+        assert_eq!(unreadable["requiresReload"], false, "{unreadable}");
+        assert!(registry_path.is_dir());
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), selected.old_commit);
+        std::fs::remove_dir(&registry_path).unwrap();
+        std::fs::write(&registry_path, &before).unwrap();
+        let fault = EnvGuard::set("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE", "1");
+        let incomplete = update(&conn, &sid, Some("user/unused/selected")).await;
+        drop(fault);
+        assert_eq!(incomplete["status"], "internal_error", "{incomplete}");
+        assert_eq!(incomplete["requiresReload"], false, "{incomplete}");
+        assert_eq!(incomplete["requiresRestart"], false, "{incomplete}");
+        let message = incomplete["message"].as_str().unwrap();
+        assert!(
+            message.contains("incomplete")
+                && message.contains("test-injected registry save failure"),
+            "{incomplete}"
+        );
+        assert!(
+            message.contains(&selected_key) && message.contains(checkout.to_str().unwrap()),
+            "{incomplete}"
+        );
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), new_commit);
+        assert_eq!(std::fs::read(&registry_path).unwrap(), before);
+        // The checkout already advanced. Explicit retry must adopt its actual tip and map.
         let changed = update(&conn, &sid, Some("user/unused/selected")).await;
         assert_eq!(changed["status"], "success", "{changed}");
         assert_eq!(changed["requiresReload"], true, "{changed}");
@@ -384,7 +424,12 @@ fn acp_update_adopts_branch_result_and_preserves_noops() {
         );
         assert_eq!(untouched.updated_at, OLD_TIMESTAMP);
 
+        let unchanged_bytes = std::fs::read(&registry_path).unwrap();
+        let fault = EnvGuard::set("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE", "1");
         let second = update(&conn, &sid, Some("user/unused/selected")).await;
+        drop(fault);
+        assert_eq!(second["status"], "success", "{second}");
+        assert_eq!(std::fs::read(&registry_path).unwrap(), unchanged_bytes);
         assert_eq!(second["requiresReload"], false, "{second}");
         assert_eq!(
             second["message"],
@@ -428,13 +473,17 @@ fn acp_update_adopts_branch_result_and_preserves_noops() {
         );
         registry.save().unwrap();
         let before_noops = serde_json::to_value(&registry).unwrap();
+        let fault = EnvGuard::set("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE", "1");
         let pinned = update(&conn, &sid, Some("user/unused/pinned-plugin")).await;
+        assert_eq!(pinned["status"], "success", "{pinned}");
         assert_eq!(pinned["requiresReload"], false, "{pinned}");
         assert_eq!(
             pinned["message"],
             format!("{pinned_key}: pinned to {}", pinned_source.old_commit)
         );
         let local_outcome = update(&conn, &sid, Some("user/unused/local-plugin")).await;
+        drop(fault);
+        assert_eq!(local_outcome["status"], "success", "{local_outcome}");
         assert_eq!(local_outcome["requiresReload"], false, "{local_outcome}");
         assert!(
             local_outcome["message"]
@@ -470,4 +519,140 @@ fn acp_update_adopts_branch_result_and_preserves_noops() {
     drop(rt);
     drop(server);
     drop(mock_rt);
+}
+
+#[cfg(unix)]
+#[test]
+fn mixed_update_keeps_marketplace_publication_separate_from_pending_git_results() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const TEST: &str =
+        "mixed_update_keeps_marketplace_publication_separate_from_pending_git_results";
+    const CHILD: &str = "GROW_TEST_MIXED_UPDATE_CHILD";
+    let Some(home) = std::env::var_os(CHILD).map(PathBuf::from) else {
+        let temp = TempDir::new().unwrap();
+        let home = dunce::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir_all(home.join(".grow")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, &home)
+            .env("HOME", &home)
+            .env("GROW_HOME", home.join(".grow"))
+            .env("GROW_MARKETPLACE_REQUIRE_SHA", "0")
+            .env_remove("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE")
+            .current_dir(&home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    };
+    let install_dir = home.join(".grow/installed-plugins");
+    let mut registry = InstallRegistry::empty(install_dir.clone());
+    let first = BranchFixture::new(&home, "aaa-ordinary");
+    let last = BranchFixture::new(&home, "zzz-ordinary");
+    let first_key = install(&mut registry, &first.source("main"));
+    let last_key = install(&mut registry, &last.source("main"));
+    let marketplace = home.join("marketplace");
+    write_plugin(&marketplace, "plugins/mmm-market", "mmm-market", "1.0.0");
+    std::fs::create_dir_all(marketplace.join(".grow-plugin")).unwrap();
+    std::fs::write(marketplace.join(".grow-plugin/marketplace.json"), json!({"version": 1, "name": "test", "plugins": [{"name": "mmm-market", "source": {"type": "local", "path": "plugins/mmm-market"}}]}).to_string()).unwrap();
+    let market_key = match plugin_marketplace::installer::install_from_marketplace(
+        &marketplace,
+        "plugins/mmm-market",
+        agent::plugins::install_registry::MarketplaceProvenance {
+            source_url_or_path: marketplace.to_string_lossy().into_owned(),
+            source_display_name: "test".into(),
+            plugin_subdir: "plugins/mmm-market".into(),
+        },
+        &mut registry,
+    )
+    .unwrap()
+    {
+        plugin_marketplace::installer::MarketplaceInstallResult::Installed { repo_key } => repo_key,
+        _ => panic!("expected new marketplace installation"),
+    };
+    assert!(
+        first_key < market_key && market_key < last_key,
+        "fixture must exercise ordinary before marketplace publication"
+    );
+    let new_commit = first.advance();
+    write_plugin(&marketplace, "plugins/mmm-market", "mmm-market", "2.0.0");
+
+    // The last ordinary repo's real pull is after the marketplace transaction.
+    // Preserve its published registry, then obstruct only the final rename. This
+    // uses the existing hermetic Git seam and does not add a production fault hook.
+    let wrapper = home.join("git-fault-wrapper");
+    std::fs::write(&wrapper, r#"#!/bin/sh
+if [ "$PWD" = "$GROW_TEST_LATE_REPO" ] && [ "$2" = "pull" ]; then
+    mv "$GROW_TEST_INSTALL_DIR/registry.json" "$GROW_TEST_INSTALL_DIR/published-registry.json" || exit 90
+    mkdir "$GROW_TEST_INSTALL_DIR/registry.json" || exit 91
+fi
+exec git "$@"
+"#).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fault = [
+        EnvGuard::set("GIT_BIN_PATH", &wrapper),
+        EnvGuard::set(
+            "GROW_TEST_LATE_REPO",
+            &registry.get_repo(&last_key).unwrap().path,
+        ),
+        EnvGuard::set("GROW_TEST_INSTALL_DIR", &install_dir),
+    ];
+    let error = match shell::plugin::update_plugins(None) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("final ordinary publication must fail"),
+    };
+    drop(fault);
+    assert!(
+        error.contains("incomplete") && error.contains(&first_key),
+        "{error}"
+    );
+    assert!(install_dir.join("registry.json").is_dir());
+    std::fs::remove_dir(install_dir.join("registry.json")).unwrap();
+    std::fs::rename(
+        install_dir.join("published-registry.json"),
+        install_dir.join("registry.json"),
+    )
+    .unwrap();
+    let published = InstallRegistry::try_load_from(install_dir.clone()).unwrap();
+    let ordinary = published.get_repo(&first_key).unwrap();
+    assert_eq!(git(&ordinary.path, &["rev-parse", "HEAD"]), new_commit);
+    assert_eq!(
+        commit(ordinary),
+        first.old_commit,
+        "marketplace must not publish pending ordinary adoption"
+    );
+    assert_eq!(ordinary.plugins.len(), 1);
+    let market = published.get_repo(&market_key).unwrap();
+    assert_eq!(
+        market.plugins["mmm-market"].version.as_deref(),
+        Some("2.0.0")
+    );
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(market.path.join("plugin.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["version"], "2.0.0",
+        "completed marketplace update must stay committed"
+    );
+
+    // Explicit retry adopts the already advanced ordinary checkout while retaining
+    // the marketplace record and its independently committed contents.
+    let outcomes = shell::plugin::update_plugins(None).unwrap_or_else(|error| panic!("{error}"));
+    assert!(outcomes.iter().any(|outcome| matches!(outcome, shell::plugin::RepoUpdateOutcome::Updated { repo_key, .. } if repo_key == &first_key)));
+    let complete = InstallRegistry::try_load_from(install_dir).unwrap();
+    let ordinary = complete.get_repo(&first_key).unwrap();
+    assert_eq!(commit(ordinary), new_commit);
+    assert_eq!(ordinary.plugins.len(), 2);
+    assert_eq!(
+        complete.get_repo(&market_key).unwrap().plugins["mmm-market"]
+            .version
+            .as_deref(),
+        Some("2.0.0")
+    );
 }

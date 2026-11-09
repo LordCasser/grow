@@ -1,0 +1,5 @@
+- [x] 核共享/ACP/CLI卸载路径，冻结副作用、确认与失败语义。
+- [x] 隔离共享 application 的源码级旧红/新绿，实施共享 application 与 ACP/CLI 错误消费；完整旧 ACP/CLI 二进制未重建，范围见 verification。
+- [x] 完成删除失败、坏 registry、save 部分完成及正常/确认/keep-data 回归。
+- [x] 独立数据完整性 review、整合方运行回归与同次独立 grow CLI 的最终插件产品链验收。
+- [x] 同步开发说明/backlog，完成 strict/archive 及 all/archived 复核。

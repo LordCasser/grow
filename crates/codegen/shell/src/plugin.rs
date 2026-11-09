@@ -1,7 +1,6 @@
 //! Shared plugin lifecycle operations (output-agnostic).
 //!
-//! Called by the CLI (`plugin_cmd.rs`). The in-session slash commands
-//! (the session actor) currently inline similar logic and should migrate here.
+//! Called by the CLI (`plugin_cmd.rs`) and in-session plugin actions.
 //!
 //! Callers own output formatting and diagnostics.
 
@@ -83,9 +82,13 @@ pub struct UninstallOutcome {
     pub removed_plugins: Vec<String>,
 }
 
+#[derive(Debug)]
 pub enum UninstallError {
     NotFound {
         name: String,
+    },
+    OperationFailed {
+        detail: String,
     },
     NeedsConfirm {
         name: String,
@@ -105,6 +108,7 @@ impl std::fmt::Display for UninstallError {
                      Run `grow plugin list` to see installed plugins."
                 )
             }
+            Self::OperationFailed { detail } => f.write_str(detail),
             Self::NeedsConfirm {
                 name,
                 repo_key,
@@ -132,7 +136,15 @@ pub fn uninstall_plugin(
     confirm: bool,
     keep_data: bool,
 ) -> Result<UninstallOutcome, UninstallError> {
-    let mut registry = InstallRegistry::load();
+    let install_dir = InstallRegistry::resolve_install_dir();
+    let mut registry = InstallRegistry::try_load_from(install_dir.clone()).map_err(|error| {
+        UninstallError::OperationFailed {
+            detail: format!(
+                "Cannot uninstall plugin: failed to load registry at {}: {error}",
+                install_dir.join("registry.json").display(),
+            ),
+        }
+    })?;
     let (repo_key, repo) = match registry.find_plugin(name) {
         Some((k, r, _)) => (k.to_string(), r.clone()),
         None => {
@@ -158,8 +170,26 @@ pub fn uninstall_plugin(
         });
     }
 
-    if let Err(e) = git_install::remove_repo_path(&repo.path) {
-        tracing::warn!("failed to remove repo path: {e}");
+    git_install::remove_repo_path(&repo.path).map_err(|error| UninstallError::OperationFailed {
+        detail: format!(
+            "Uninstall of repo \"{repo_key}\" is incomplete: failed to remove {}: {error}. The installed record has been retained; repository files may have been partially removed",
+            repo.path.display(),
+        ),
+    })?;
+    match std::fs::symlink_metadata(&repo.path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        result => {
+            let reason = match result {
+                Ok(_) => "repository path still exists (unexpected file type)".to_string(),
+                Err(error) => format!("cannot confirm repository path removal: {error}"),
+            };
+            return Err(UninstallError::OperationFailed {
+                detail: format!(
+                    "Uninstall of repo \"{repo_key}\" is incomplete at {}: {reason}. The installed record has been retained",
+                    repo.path.display(),
+                ),
+            });
+        }
     }
 
     if !keep_data {
@@ -172,7 +202,13 @@ pub fn uninstall_plugin(
     }
 
     registry.remove(&repo_key);
-    save_registry_or_warn(&registry);
+    registry.save().map_err(|error| UninstallError::OperationFailed {
+        detail: format!(
+            "Uninstall of repo \"{repo_key}\" is incomplete: repository path {} was removed, but deregistration could not be saved at {}: {error}. The installed record may remain; repository removal has not been rolled back",
+            repo.path.display(),
+            registry.install_dir().join("registry.json").display(),
+        ),
+    })?;
 
     Ok(UninstallOutcome {
         repo_key,
@@ -204,8 +240,10 @@ pub enum RepoUpdateOutcome {
     },
 }
 
+#[derive(Debug)]
 pub enum UpdateError {
     NotFound { name: String },
+    OperationFailed { detail: String },
 }
 
 pub enum PluginUpdateSelector {
@@ -220,6 +258,7 @@ pub fn repo_update_requires_reload(outcome: &RepoUpdateOutcome) -> bool {
 impl std::fmt::Display for UpdateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::OperationFailed { detail } => f.write_str(detail),
             Self::NotFound { name } => {
                 write!(
                     f,
@@ -350,7 +389,8 @@ fn configured_marketplace_git_source(source_url_or_path: &str) -> Option<(String
         })
 }
 
-/// Update one or all installed plugins. Saves the registry once at the end.
+/// Update one or all installed plugins. Publish ordinary changes at the end;
+/// marketplace updates retain their own transactional publication.
 pub fn update_plugins(name: Option<&str>) -> Result<Vec<RepoUpdateOutcome>, UpdateError> {
     update_plugins_by_selector(name.map(|name| PluginUpdateSelector::PluginName(name.to_string())))
 }
@@ -358,7 +398,15 @@ pub fn update_plugins(name: Option<&str>) -> Result<Vec<RepoUpdateOutcome>, Upda
 pub fn update_plugins_by_selector(
     selector: Option<PluginUpdateSelector>,
 ) -> Result<Vec<RepoUpdateOutcome>, UpdateError> {
-    let mut registry = InstallRegistry::load();
+    let install_dir = InstallRegistry::resolve_install_dir();
+    let mut registry = InstallRegistry::try_load_from(install_dir.clone()).map_err(|error| {
+        UpdateError::OperationFailed {
+            detail: format!(
+                "Cannot update plugins: failed to load registry at {}: {error}",
+                install_dir.join("registry.json").display(),
+            ),
+        }
+    })?;
     let repos_to_update: Vec<(String, InstalledRepo)> = match selector {
         Some(PluginUpdateSelector::PluginName(plugin_name)) => {
             match registry.find_plugin(&plugin_name) {
@@ -387,6 +435,7 @@ pub fn update_plugins_by_selector(
 
     let mut outcomes = Vec::with_capacity(repos_to_update.len());
     let mut source_cache = std::collections::HashMap::new();
+    let mut ordinary_changes = Vec::new();
 
     for (repo_key, repo) in &repos_to_update {
         let outcome = if repo.marketplace.is_some() {
@@ -412,12 +461,15 @@ pub fn update_plugins_by_selector(
         } else {
             match git_install::update_repo(repo_key, repo, marketplace_require_sha()) {
                 Ok(UpdateStatus::Updated(result)) if result.changed => {
-                    apply_update_to_registry(&mut registry, repo_key, &result);
-                    RepoUpdateOutcome::Updated {
+                    let outcome = RepoUpdateOutcome::Updated {
                         repo_key: repo_key.clone(),
-                        old_commit: result.old_commit,
-                        new_commit: result.new_commit,
-                    }
+                        old_commit: result.old_commit.clone(),
+                        new_commit: result.new_commit.clone(),
+                    };
+                    // Marketplace transactions save the whole registry. Keep ordinary
+                    // adoption pending so their publication/rollback cannot commit it.
+                    ordinary_changes.push((repo_key.clone(), repo.path.clone(), result));
+                    outcome
                 }
                 Ok(UpdateStatus::Updated(_)) => RepoUpdateOutcome::AlreadyUpToDate {
                     repo_key: repo_key.clone(),
@@ -438,7 +490,18 @@ pub fn update_plugins_by_selector(
         outcomes.push(outcome);
     }
 
-    save_registry_or_warn(&registry);
+    if !ordinary_changes.is_empty() {
+        for (repo_key, _, result) in &ordinary_changes {
+            apply_update_to_registry(&mut registry, repo_key, result);
+        }
+        registry.save().map_err(|error| UpdateError::OperationFailed {
+            detail: format!(
+                "Plugin update registration is incomplete: checkouts updated relative to their installed records: {}. Failed to save registry at {}: {error}. Checkout changes and any completed marketplace updates have not been rolled back; inspect actual state before retrying",
+                ordinary_changes.iter().map(|(key, path, _)| format!("\"{key}\" at {}", path.display())).collect::<Vec<_>>().join(", "),
+                registry.install_dir().join("registry.json").display(),
+            ),
+        })?;
+    }
 
     Ok(outcomes)
 }

@@ -10,6 +10,7 @@ use std::sync::{
 #[derive(Default)]
 struct CatalogServer {
     tools: Mutex<Vec<String>>,
+    app_only: Mutex<std::collections::HashSet<String>>,
     calls: AtomicUsize,
     block_list: AtomicBool,
     fail_list: AtomicBool,
@@ -47,11 +48,15 @@ impl ::mcp::acp_transport::AcpReverseInvoker for CatalogServer {
                         "required":["value"]
                     });
                     input_schema["properties"][name] = json!({"type":"string"});
-                    json!({
+                    let mut declaration = json!({
                         "name":name,
                         "description":format!("catalog {name}"),
-                        "inputSchema":input_schema
-                    })
+                        "inputSchema":input_schema,
+                    });
+                    if self.app_only.lock().unwrap().contains(name) {
+                        declaration["_meta"] = json!({"ui": {"visibility": ["app"], "resourceUri": "ui://fixture"}});
+                    }
+                    declaration
                 }).collect::<Vec<_>>()})
             }
             "tools/call" => {
@@ -970,6 +975,299 @@ async fn mcp_snapshot_refresh_waits_for_publication_boundary() {
                 .await
                 .unwrap();
             assert!(listed(&actor).await.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn long_mcp_catalog_names_survive_search_dispatch_and_descriptors() {
+    tokio::task::LocalSet::new().run_until(async {
+        let actor = fixture().await;
+        let server = Arc::new(CatalogServer::default());
+        let short = "a".repeat(58);
+        let long_a = format!("{short}a");
+        let long_b = format!("{short}b");
+        let boundary = "b".repeat(250);
+        let rejected = "c".repeat(251);
+        let app_only = "app".repeat(24);
+        let accepted = [&short, &long_a, &long_b, &boundary];
+        *server.tools.lock().unwrap() = accepted.iter().map(|s| (*s).clone())
+            .chain([rejected.clone(), app_only.clone()]).collect();
+        server.app_only.lock().unwrap().insert(app_only.clone());
+        let (client, episode) = install(&actor, &server).await;
+        actor.refresh_mcp_server_tools("demo", episode).await;
+        let bridge = actor.agent.borrow().tool_bridge().clone();
+        assert_eq!(listed(&actor).await, accepted.iter().map(|s| (*s).clone()).collect::<Vec<_>>());
+        bridge.toolset().register_tool("search_tool".into(), tools::implementations::search_tool::SearchTool, None).unwrap();
+        bridge.toolset().register_tool("use_tool".into(), tools::implementations::use_tool::UseTool, None).unwrap();
+        bridge.toolset().resources.lock().await.insert(tools::types::tool_index::ToolIndex(Arc::new(
+            crate::session::tool_index::Bm25ToolSearchIndex::new(actor.mcp.tool_metadata_snapshot.clone())
+        )));
+        let projection = actor.agent.borrow().tool_definitions().await;
+        assert!(projection.iter().any(|d| d.function.name == format!("demo__{short}")));
+        for raw in [&long_a, &long_b, &boundary, &app_only, &rejected] {
+            assert!(!projection.iter().any(|d| d.function.name == format!("demo__{raw}")));
+        }
+        let descriptors = tempfile::tempdir().unwrap();
+        // The accepted 256-character qualified name has a 255-byte filename.
+        // Rejected or app-only upstream descriptors do not grant model access.
+        client.materialize_descriptors(descriptors.path()).await.unwrap();
+        for (ordinal, raw) in accepted.into_iter().enumerate() {
+            let qualified = format!("demo__{raw}");
+            let search = bridge.call("search_tool", json!({"query":qualified}), "long-search").await.unwrap();
+            let tools::types::output::ToolOutput::SearchTool(result) = search.output else { panic!("search result"); };
+            let result: Value = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(result["results"][0]["tools"][0]["tool_name"], qualified);
+            assert_eq!(result["results"][0]["tools"][0]["input_schema"], catalog_schema(raw));
+            let value = format!("argument-{ordinal}");
+            let called = bridge.call("use_tool", json!({"tool_name":qualified,"tool_input":{"value":value}}), "long-call").await.unwrap();
+            assert!(called.prompt_text.contains(&format!("{raw}:{value}")));
+            let bytes = std::fs::read(descriptors.path().join("tools").join(format!("{raw}.json"))).unwrap();
+            let descriptor: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(descriptor["name"], *raw);
+            assert_eq!(descriptor["inputSchema"], catalog_schema(raw));
+        }
+        assert_eq!(server.calls.load(Ordering::SeqCst), 4);
+        for raw in [&app_only, &rejected] {
+            assert!(bridge.call("use_tool", json!({"tool_name":format!("demo__{raw}"),"tool_input":{"value":"blocked"}}), "invalid-call").await.is_err());
+        }
+        actor.mcp_state.lock().await.disabled_tools.insert("demo".into(), [boundary.clone()].into_iter().collect());
+        assert!(bridge.call("use_tool", json!({"tool_name":format!("demo__{boundary}"),"tool_input":{"value":"disabled"}}), "disabled-call").await.is_err());
+        actor.refresh_mcp_server_tools("demo", episode).await;
+        assert!(!listed(&actor).await.contains(&boundary));
+        assert_eq!(server.calls.load(Ordering::SeqCst), 4);
+    }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn long_mcp_catalog_names_remain_subject_to_live_parent_eligibility() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let parent = fixture().await;
+            let server = Arc::new(CatalogServer::default());
+            let raw = "t".repeat(250);
+            let qualified = format!("demo__{raw}");
+            *server.tools.lock().unwrap() = vec![raw.clone()];
+            let (_, episode) = install(&parent, &server).await;
+            parent.refresh_mcp_server_tools("demo", episode).await;
+            let pool = ::mcp::servers::SharedMcpPool::from_state(&*parent.mcp_state.lock().await);
+            let child = fixture().await;
+            child.mcp_state.lock().await.import_shared_clients(&pool);
+            child.register_shared_client_tools().await;
+            assert_eq!(listed(&child).await, [raw.clone()]);
+            let bridge = child.agent.borrow().tool_bridge().clone();
+            bridge
+                .toolset()
+                .register_tool(
+                    "use_tool".into(),
+                    tools::implementations::use_tool::UseTool,
+                    None,
+                )
+                .unwrap();
+            bridge
+                .call(
+                    "use_tool",
+                    json!({"tool_name":qualified,"tool_input":{"value":"allowed"}}),
+                    "inherited-call",
+                )
+                .await
+                .unwrap();
+            parent
+                .mcp_state
+                .lock()
+                .await
+                .disabled_tools
+                .insert("demo".into(), [raw].into_iter().collect());
+            parent.refresh_mcp_server_tools("demo", episode).await;
+            assert!(
+                bridge
+                    .call(
+                        "use_tool",
+                        json!({"tool_name":qualified,"tool_input":{"value":"revoked"}}),
+                        "revoked-call"
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn catalog_descriptor_handles_maximal_raw_name_without_aliasing() {
+    let server = Arc::new(CatalogServer::default());
+    let raw = "t".repeat(253);
+    let other = format!("{}b", "t".repeat(252));
+    assert_eq!(format!("s__{raw}").len(), 256);
+    *server.tools.lock().unwrap() = vec![raw.clone(), other.clone(), "long-names".into()];
+    let client = McpClient::new_acp("s".into(), "fixture".into(), server.clone(), None, None);
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        client
+            .materialize_descriptors(directory.path())
+            .await
+            .unwrap(),
+        3
+    );
+    for name in [&raw, &other] {
+        let path = directory
+            .path()
+            .join("tools/long-names")
+            .join(name)
+            .join("descriptor.json");
+        let descriptor: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(descriptor["name"], *name);
+        assert_eq!(descriptor["inputSchema"], catalog_schema(name));
+    }
+    assert!(directory.path().join("tools/long-names.json").is_file());
+    // Repeated atomic publication retains distinct names, without temp-file debris.
+    assert_eq!(
+        client
+            .materialize_descriptors(directory.path())
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        std::fs::read_dir(directory.path().join("tools/long-names").join(&raw))
+            .unwrap()
+            .count(),
+        1
+    );
+    directory.close().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn long_mcp_catalog_names_use_exact_actor_permission_rules() {
+    if run_isolated_policy_test(concat!(
+        module_path!(),
+        "::long_mcp_catalog_names_use_exact_actor_permission_rules"
+    )) {
+        return;
+    }
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use workspace::permission::types::{PermissionConfig, PromptPolicy, RuleAction};
+            let (gateway, _notifications) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence, mut records) = tokio::sync::mpsc::unbounded_channel();
+            tokio::task::spawn_local(async move {
+                while let Some(message) = records.recv().await {
+                    if let PersistenceMsg::AppendUpdateBufferedAndAck { respond_to, .. } = message {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                }
+            });
+            let mut actor = create_test_actor(0, 128000, 80, gateway.clone(), persistence).await;
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::use_tool::UseTool,
+                >()])
+                .await;
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            *actor.mcp.publication_bridge.lock().await = bridge.clone();
+            actor
+                .workspace_ops
+                .bind_local_session(
+                    &actor.session_id_string(),
+                    actor.tool_context.cwd.as_path().to_path_buf(),
+                    actor.tool_context.hunk_tracker_handle.clone(),
+                    bridge.toolset(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let prefix = "t".repeat(249);
+            let allowed_raw = format!("{prefix}a");
+            let denied_raw = format!("{prefix}b");
+            let allowed = format!("demo__{allowed_raw}");
+            let denied = format!("demo__{denied_raw}");
+            assert_eq!(allowed.len(), 256);
+            assert_eq!(&allowed[..64], &denied[..64]);
+            let server = Arc::new(CatalogServer::default());
+            *server.tools.lock().unwrap() = vec![allowed_raw, denied_raw];
+            let (_, episode) = install(&actor, &server).await;
+            actor.refresh_mcp_server_tools("demo", episode).await;
+            let provider_definitions = actor.agent.borrow().tool_definitions().await;
+            let builtin_definitions = actor.agent.borrow().tool_definitions_builtins_only().await;
+            assert_eq!(
+                serde_json::to_value(&provider_definitions).unwrap(),
+                serde_json::to_value(&builtin_definitions).unwrap()
+            );
+            assert!(
+                provider_definitions
+                    .iter()
+                    .any(|d| d.function.name == "use_tool")
+            );
+            let cwd = tempfile::tempdir().unwrap();
+            let config = PermissionConfig {
+                rules: vec![
+                    workspace::permission::rules::parse_permission_rule(
+                        &format!("MCPTool({allowed})"),
+                        RuleAction::Allow,
+                    )
+                    .unwrap(),
+                    workspace::permission::rules::parse_permission_rule(
+                        &format!("MCPTool({denied})"),
+                        RuleAction::Deny,
+                    )
+                    .unwrap(),
+                ],
+                prompt_policy: PromptPolicy::Deny,
+            };
+            let (permissions, mut events) = workspace::permission::spawn_permission_manager(
+                actor.session_info.id.clone(),
+                acp_transport::AcpAgentGatewaySender::new(gateway),
+                paths::AbsPathBuf::new(cwd.path().to_path_buf()).unwrap(),
+                workspace::permission::ClientType::Generic,
+                std::time::Duration::from_secs(5),
+                Some(config),
+                vec![],
+                vec![],
+                ::diagnostics::enums::PermissionMode::Ask,
+                None,
+                false,
+            );
+            actor.permissions = permissions;
+            begin_test_causal_turn(&actor).await;
+            for (id, qualified, expected_calls) in
+                [("long-allowed", &allowed, 1), ("long-denied", &denied, 1)]
+            {
+                let call = ToolCallResponse {
+                    id: id.into(),
+                    kind: "function".into(),
+                    function: crate::sampling::types::ToolCallFunction::new(
+                        "use_tool",
+                        json!({
+                            "tool_name": qualified, "tool_input": {"value": id}
+                        })
+                        .to_string(),
+                    ),
+                };
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    actor.execute_tool_calls(vec![call]),
+                )
+                .await
+                .expect("permission pipeline must settle")
+                .expect("valid permission result");
+                assert_eq!(server.calls.load(Ordering::SeqCst), expected_calls, "{id}");
+            }
+            let mut decisions = std::collections::BTreeMap::new();
+            while let Ok(event) = events.try_recv() {
+                decisions.insert(event.tool_id.clone(), event);
+            }
+            let allowed_event = decisions.get("long-allowed").unwrap();
+            assert_eq!(allowed_event.decision, "allow");
+            assert_eq!(
+                allowed_event.decision_reason.as_deref(),
+                Some("policy_allow")
+            );
+            let denied_event = decisions.get("long-denied").unwrap();
+            assert_eq!(denied_event.decision, "reject");
+            assert_eq!(denied_event.decision_reason.as_deref(), Some("policy_deny"));
+            actor.permissions.shutdown_and_drain().await;
         })
         .await;
 }

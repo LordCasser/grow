@@ -2078,6 +2078,9 @@ mod tests {
 
     #[tokio::test]
     async fn suspended_restore_reuses_run_source_route_budget_and_epoch() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = r#"let meta = #{ name: "restore-test", description: "d" };
@@ -2198,6 +2201,9 @@ complete("restored");"#;
 
     #[tokio::test]
     async fn suspended_restore_preflight_excludes_business_paused_runs() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let (manager, _rx) = test_manager(None);
         let script = r#"let meta = #{ name: "restore-test", description: "d" };
 complete("done");"#;
@@ -2215,6 +2221,9 @@ complete("done");"#;
 
     #[tokio::test]
     async fn released_root_cold_start_pauses_unstarted_workflow_for_explicit_same_run_resume() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let (mut manager, _rx) = test_manager(None);
         let script = r#"let meta = #{ name: "restore-test", description: "d" };
 complete("restored after explicit resume");"#;
@@ -2543,6 +2552,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn launch_completes_and_updates_tracker() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let resolved = resolve_inline(
@@ -2580,6 +2592,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn oversized_initial_projection_rolls_back_before_timeline_spawn() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let resolved = resolve_inline(
@@ -2620,6 +2635,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn acknowledged_spawn_with_lost_caller_reply_keeps_recovery_source() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let (persistence, mut records) =
@@ -2685,6 +2703,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn terminal_manifest_failure_still_closes_timeline_as_interrupted() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx, _cancels) =
             test_manager_with_persistence(Some(dir.path().to_path_buf()), true);
@@ -2714,6 +2735,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn executor_resource_failure_interrupts_the_durable_spawn_boundary() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let session_directory = test_session_directory(Some(dir.path().to_path_buf()));
         let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
@@ -2793,6 +2817,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn launch_persists_explicit_max_concurrency_independently_of_budget() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let (mut manager, _rx) = test_manager(None);
         let resolved = resolve_inline(
             "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
@@ -2817,6 +2844,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn plain_resume_uses_immutable_script_not_edited_projection() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = "let meta = #{ name: \"t\", description: \"d\" };\nawait_user(\"user\", \"pause\");\ncomplete(\"original\");";
@@ -2865,6 +2895,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn resume_waits_for_terminal_manifest_and_timeline_acknowledgment() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
@@ -2931,6 +2964,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn resume_propagates_terminal_ack_failure_without_advancing_epoch() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         for dropped in [false, true] {
             let (mut manager, _rx) = test_manager(None);
             let script =
@@ -2964,6 +3000,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn pause_waits_for_the_watcher_terminal_barrier() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let run_id = "wf_pause_eager".to_string();
@@ -3004,6 +3043,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn pause_marks_user_paused_and_resume_replays() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
@@ -3061,6 +3103,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn resume_reconciles_agents_used_from_journal_no_double_charge() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3126,6 +3171,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn failed_run_resumes_and_reexecutes_failed_host_call_live() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
@@ -3195,6 +3243,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn failed_inactive_run_can_be_permanently_cancelled() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
@@ -3234,6 +3285,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn completed_cancelled_and_interrupted_runs_are_not_resumable() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3300,6 +3354,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn shutdown_timeout_marks_active_run_interrupted() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let run_id = "wf_timeout".to_string();
@@ -3340,6 +3397,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn shutdown_drain_preserves_terminal_watcher_error() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let (mut manager, _rx) = test_manager(None);
         let run_id = "wf_done_error".to_string();
         let (done_tx, done_rx) = oneshot::channel();
@@ -3359,6 +3419,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn shutdown_drain_preserves_closed_terminal_watcher() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let (mut manager, _rx) = test_manager(None);
         let run_id = "wf_done_closed".to_string();
         let (done_tx, done_rx) = oneshot::channel::<Result<WorkflowRunState, String>>();
@@ -3375,6 +3438,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn closed_admission_rejects_new_workflow_before_workspace_mutation() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let generation = manager.close_admission();
@@ -3395,6 +3461,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn workflow_spawns_await_to_completion() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3463,6 +3532,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn workflow_run_snapshots_reasoning_disabled() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3507,6 +3579,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn session_route_changes_apply_only_to_future_workflow_runs() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
         let first_route = WorkflowRuntimeRoute::for_test(
@@ -3560,6 +3635,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn definition_model_override_does_not_inherit_run_effort() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3630,6 +3708,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn definition_model_added_after_launch_is_not_admitted_into_the_run() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
         manager.set_next_run_route(
@@ -3663,6 +3744,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn active_run_admission_is_bounded_per_session() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
@@ -3691,6 +3775,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn untrusted_workflow_cannot_fork_parent_context() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
         let resolved = resolve_inline(
@@ -3716,6 +3803,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn output_schema_stays_host_side_with_one_corrective_retry() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3808,6 +3898,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn children_spawn_without_output_clamp() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3836,6 +3929,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn cancellation_uses_run_owned_cancel_event_without_parent_detach() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{
             SubagentCancelTarget, SubagentEvent,
         };
@@ -3880,6 +3976,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn retired_workflow_child_response_cannot_complete_a_later_run() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();
@@ -3995,6 +4094,9 @@ complete("restored after explicit resume");"#;
 
     #[tokio::test]
     async fn backgrounded_stub_fails_loudly() {
+        if super::super::test_support::run_in_sandbox() {
+            return;
+        }
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
         let dir = tempfile::tempdir().unwrap();

@@ -11,6 +11,9 @@ pub(crate) mod workspace;
 mod deep_research_tests;
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod managed_workflow_tests {
     #[test]
     fn extracted_deep_research_uses_the_user_workflow_registry() {

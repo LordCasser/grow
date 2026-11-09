@@ -48,6 +48,9 @@ async fn workflow_behavior_and_commands_follow_runtime_not_agent_tools() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
+    if crate::session::workflow::test_support::run_in_sandbox() {
+        return;
+    }
     tokio::task::LocalSet::new()
         .run_until(async {
             let project = tempfile::tempdir().expect("create project");

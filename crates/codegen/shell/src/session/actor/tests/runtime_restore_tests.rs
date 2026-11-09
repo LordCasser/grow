@@ -3,6 +3,9 @@ use chat_state::{TimelineEventKind as K, session_runtime::*};
 
 #[test]
 fn accepted_final_response_resumes_original_turn_without_provider_or_prompt_replay() {
+    if crate::session::workflow::test_support::run_in_sandbox() {
+        return;
+    }
     std::thread::Builder::new().stack_size(48 * 1024 * 1024).spawn(|| {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
             tokio::task::LocalSet::new().run_until(async {
@@ -170,6 +173,9 @@ complete("restored workflow");"#;
 
 #[test]
 fn suspended_workflow_rebinds_the_same_open_child_before_original_turn_releases() {
+    if crate::session::workflow::test_support::run_in_sandbox() {
+        return;
+    }
     std::thread::Builder::new().stack_size(48 * 1024 * 1024).spawn(|| {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
             tokio::task::LocalSet::new().run_until(async {

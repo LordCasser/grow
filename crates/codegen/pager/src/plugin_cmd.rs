@@ -544,7 +544,7 @@ fn cmd_uninstall(name: &str, confirm: bool, keep_data: bool) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        Err(e @ UninstallError::NotFound { .. }) => bail!("{e}"),
+        Err(e) => bail!("{e}"),
     }
 }
 
@@ -1451,3 +1451,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_cmd/persistence_tests.rs"]
+mod persistence_tests;
