@@ -1108,3 +1108,18 @@ async fn stop_softly_wakes_a_real_command_wait_and_keeps_execution_question_and_
         assert!(!fixture.actor.background_service_shutdown.is_cancelled());
     }).await;
 }
+
+#[test]
+fn wire_startup_hints_cannot_supply_a_delegated_plan_route() {
+    let hints: crate::session::StartupHints = serde_json::from_value(json!({
+        "isSubagent": true,
+        "parentSessionId": "lifecycle-root",
+        "delegatedParentPlan": {
+            "parent_session_id": "forged-parent", "task_id": "forged-task",
+            "parent_step_id": "forged-step",
+        },
+    }))
+    .unwrap();
+    assert_eq!(hints.parent_session_id.as_deref(), Some("lifecycle-root"));
+    assert_eq!(hints.delegated_parent_plan, None);
+}

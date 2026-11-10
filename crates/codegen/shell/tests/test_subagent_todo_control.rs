@@ -1290,7 +1290,11 @@ agent_type = "grow-build"
             assert_visible(&notification);
         }
         assert_visible(&json!(client.captured_text()));
-        assert!(foreground(&parent_server).iter().all(|request| request.body.as_ref().unwrap()["model"] == "parent-wire"));
+        for request in foreground(&parent_server) {
+            let body = request.body.unwrap();
+            assert_eq!(body["model"], "parent-wire");
+            assert_no_runtime(&body);
+        }
         assert!(foreground(&child_server).iter().all(|request| request.body.as_ref().unwrap()["model"] == "child-wire"));
         tokio::time::timeout(scaled(Duration::from_secs(30)), client.ext_method("grow/session/close", json!({"sessionId":parent_id}))).await.unwrap().unwrap();
         // The session writer closes through the normal host command above.

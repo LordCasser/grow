@@ -1,6 +1,5 @@
 //! Session-owned local planning. Tool Resources are read-only projections.
 
-mod context;
 mod control;
 #[cfg(test)]
 #[path = "planning/handle_control_tests.rs"]
@@ -8,9 +7,6 @@ mod handle_control_tests;
 #[cfg(test)]
 #[path = "planning/receive_control_tests.rs"]
 mod receive_control_tests;
-#[cfg(test)]
-#[path = "planning/request_context_tests.rs"]
-mod request_context_tests;
 
 use super::*;
 use tool_types::planning::{
@@ -34,31 +30,6 @@ pub(crate) enum PlannedDependenciesOutcome {
 }
 
 impl SessionActor {
-    /// Only primary sessions project a routine plan summary. Children receive
-    /// planning guidance from the durable notification stream.
-    pub(crate) async fn local_planning_context(&self) -> Result<Option<String>, String> {
-        if self.startup_hints.is_subagent {
-            return Ok(None);
-        }
-        let Some(snapshot) = self.chat_state_handle.planning_state().await? else {
-            return Ok(None);
-        };
-        let own = tool_types::planning::PlanningReadSnapshot {
-            timeline_seq: snapshot.seq.get(),
-            plan: snapshot.plan,
-            delegation: None,
-        };
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        let read_tool_name = tokio::select! {
-            biased;
-            _ = self.background_service_shutdown.cancelled() => None,
-            result = tokio::time::timeout(
-                Duration::from_secs(5),
-                bridge.tool_for_kind(tools::types::tool::ToolKind::PlanRead),
-            ) => result.ok().flatten(),
-        };
-        context::render_planning_context(&own, read_tool_name.as_deref()).map(Some)
-    }
     pub(crate) async fn accept_planning_task_result(
         &self,
         task_id: &str,

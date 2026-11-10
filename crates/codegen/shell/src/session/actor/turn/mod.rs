@@ -92,7 +92,7 @@ mod runtime_context_tests {
     use tool_types::planning::{LocalPlan, PlanPriority, PlanStep, PlanStepStatus};
 
     #[tokio::test(flavor = "current_thread")]
-    async fn turn_request_keeps_local_planning_out_of_stored_messages() {
+    async fn repeated_primary_requests_do_not_inject_local_planning() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) = build_actor().await;
@@ -134,21 +134,10 @@ mod runtime_context_tests {
                     .unwrap();
                 for _ in 0..2 {
                     let request = actor.build_turn_request(vec![], None, None).await.unwrap();
-                    assert_eq!(request.items.len(), before.surface.len() + 1);
-                    assert!(
-                        request
-                            .items
-                            .last()
-                            .unwrap()
-                            .text_content()
-                            .contains("Build the isolated request context")
+                    assert_eq!(
+                        serde_json::to_value(&request.items).unwrap(),
+                        serde_json::to_value(&before.surface).unwrap()
                     );
-                    assert!(matches!(
-                        request.items.last(),
-                        Some(ConversationItem::User(user))
-                            if user.synthetic_reason
-                                == Some(sampling_types::SyntheticReason::SystemReminder)
-                    ));
                     assert_eq!(
                         actor.chat_state_handle.get_projected_tokens().await,
                         chat_state::estimate_request_input_tokens(&request)
@@ -1113,10 +1102,6 @@ impl SessionActor {
         memory_reminder: Option<String>,
         json_output: Option<sampling_types::JsonOutputFormat>,
     ) -> Result<sampling_types::ConversationRequest, acp::Error> {
-        let runtime_context = self
-            .local_planning_context()
-            .await
-            .map_err(|error| acp::Error::internal_error().data(error))?;
         // A control commit and request preparation share authority.
         // Keep a captured Goal tag from outliving a pause/clear
         // across the asynchronous image-mode query below.
@@ -1127,7 +1112,7 @@ impl SessionActor {
                 self.session_info.id.0.as_ref(),
                 tool_definitions,
                 memory_reminder,
-                runtime_context,
+                None,
                 active_goal,
                 json_output,
                 self.unsupported_current_model_for_images().await.is_some(),

@@ -1557,6 +1557,14 @@ mod tests {
     #[test]
     fn effective_diff_only_replans_for_intent_changes() {
         let mut plan = linked_plan();
+        plan.steps
+            .push(step("s2", "second", PlanStepStatus::Pending));
+        plan.links.push(PlanLink {
+            id: "l2".into(),
+            parent_step_id: "s2".into(),
+            child_session_id: "sibling".into(),
+            ..plan.links[0].clone()
+        });
         let mut revision = plan.revision;
         for status in [PlanStepStatus::InProgress, PlanStepStatus::Pending] {
             let progress = plan
@@ -1583,7 +1591,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(edit.source_changes.len(), 1);
+        assert_eq!(plan.replans.len(), 1);
+        assert_eq!(plan.replans[0].child_session_id, "child");
         assert_eq!(plan.links[0].pending_source_revision, Some(edit.revision));
+        assert_eq!(plan.links[1].pending_source_revision, None);
 
         let noop = plan
             .update_steps(
