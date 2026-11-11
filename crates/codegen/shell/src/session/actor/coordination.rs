@@ -1796,9 +1796,10 @@ mod tests {
             let surface = serde_json::to_value(&request.items).unwrap().to_string();
             assert!(surface.contains("question-7") && surface.contains("Use the existing interface."));
             assert!(surface.contains("Sideband") && surface.contains("not a foreground decision or human permission"));
-            assert!(request.items.iter().filter_map(|item| match item {
-                sampling_types::ConversationItem::User(message) if item.text_content().contains("Consultation record:") => Some(message), _ => None,
-            }).all(|message| message.permission_evidence.is_none()));
+            assert!(request.items.iter().any(|item| matches!(item,
+                sampling_types::ConversationItem::AgentMessage(batch)
+                    if batch.messages.iter().any(|message| message.receipt_id == pending[0].id && message.reply_to.is_none())
+            )));
             // The real provider adapter receives that same attributed context.
             let client = actor.prepare_chat_completion(false).await.unwrap();
             let response_future = client.conversation_collect(request);

@@ -304,7 +304,7 @@ impl SessionActor {
             .collect();
         let messages = selected
             .iter()
-            .filter(|notification| notification.source.agent_message().is_some())
+            .filter(|notification| notification.source.agent_context().is_some())
             .cloned()
             .collect::<Vec<_>>();
         if !messages.is_empty() {
@@ -318,8 +318,10 @@ impl SessionActor {
                     .iter()
                     .zip(bodies)
                     .map(|(receipt, body)| {
-                        let (source, operation, reply_to, _) =
-                            receipt.source.agent_message().expect("message receipt");
+                        let (source, operation, reply_to) = receipt
+                            .source
+                            .agent_context()
+                            .expect("agent context receipt");
                         sampling_types::AgentMessage {
                             receipt_id: receipt.id.clone(),
                             source_session_id: source.to_owned(),
@@ -994,7 +996,7 @@ impl SessionActor {
         if body.is_empty()
             && !notifications
                 .iter()
-                .any(|receipt| receipt.source.agent_message().is_some())
+                .any(|receipt| receipt.source.agent_context().is_some())
         {
             return Ok(false);
         }
@@ -1208,7 +1210,7 @@ impl SessionActor {
         if prompt_blocks.is_empty() {
             if !notifications
                 .iter()
-                .any(|receipt| receipt.source.agent_message().is_some())
+                .any(|receipt| receipt.source.agent_context().is_some())
             {
                 return;
             }
@@ -1454,15 +1456,15 @@ impl SessionActor {
                 | chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
-                | chat_state::NotificationSource::WorkflowHandoff { .. }
-                | chat_state::NotificationSource::InquiryAnswered { .. } => {
+                | chat_state::NotificationSource::WorkflowHandoff { .. } => {
                     sections.push(vec![acp::ContentBlock::Text(acp::TextContent::new(
                         payload.clone(),
                     ))]);
                 }
                 chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::PlanGuidance { .. }
-                | chat_state::NotificationSource::AgentReply { .. } => {}
+                | chat_state::NotificationSource::AgentReply { .. }
+                | chat_state::NotificationSource::InquiryAnswered { .. } => {}
             }
         }
         if let (Some(index), Some(batch)) = (

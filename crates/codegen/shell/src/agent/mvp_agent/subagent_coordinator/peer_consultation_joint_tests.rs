@@ -135,9 +135,37 @@ async fn peer_journey(external_api: bool) {
     foreground.release();
     target_turn.await.unwrap().unwrap();
     assert_eq!(target_server.requests().len(), 3);
-    let target_wire = target_server.request_bodies().last().unwrap().to_string();
-    assert!(target_wire.contains(question) && target_wire.contains(answer));
-    assert!(target_wire.contains("peer-source"));
+    let target_request = target_server.request_bodies().pop().unwrap();
+    let blocks = target_request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .collect::<Vec<_>>();
+    let call = blocks
+        .iter()
+        .find(|block| {
+            block["type"] == "tool_use"
+                && block["name"] == sampling_types::RECEIVE_AGENT_MESSAGE_TOOL_NAME
+                && block["input"]["message_id"] == inquiry_id
+        })
+        .expect("target request contains the host consultation call");
+    let results = blocks
+        .iter()
+        .filter(|block| block["type"] == "tool_result" && block["tool_use_id"] == call["id"])
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    let result: serde_json::Value =
+        serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["source_session_id"], "peer-source");
+    assert_eq!(result["target_session_id"], "peer-target");
+    assert!(result["reply_to"].is_null());
+    let body = result["message"].as_str().unwrap();
+    assert!(body.contains(question) && body.contains(answer));
+    assert!(
+        body.contains("Sideband") && body.contains("not a foreground decision or human permission")
+    );
     let source_surface = source.chat_state_handle.get_conversation().await;
     assert!(
         !source_surface
@@ -177,16 +205,14 @@ async fn peer_journey(external_api: bool) {
     let quoted = surface
         .iter()
         .filter_map(|item| match item {
-            sampling_types::ConversationItem::User(user)
-                if item.text_content().contains("Consultation record:") =>
-            {
-                Some(user)
-            }
+            sampling_types::ConversationItem::AgentMessage(batch) => Some(&batch.messages),
             _ => None,
         })
+        .flatten()
+        .filter(|message| message.message_id == inquiry_id)
         .collect::<Vec<_>>();
     assert_eq!(quoted.len(), 1);
-    assert!(quoted[0].permission_evidence.is_none());
+    assert_eq!(quoted[0].receipt_id, result["receipt_id"].as_str().unwrap());
 }
 
 #[test]

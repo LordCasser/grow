@@ -461,6 +461,8 @@ source 的 durable startup 与 runtime 登记使用同一 admission 边界，查
 
 模型 `ask_session` 的空白 inquiry_id 会按未提供处理并生成新 ID，非空值与外部协议 ID 继续严格校验；详见 [询问身份契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-scoped-operations)。
 
+Sideband 成功回答后，回答方在下一次获准采样时，从同一条 `InquiryAnswered` 收件事实读取提问者、问题和自己的完整回答。Chat Completions 和 Messages 将这份记录投影为配对的 `receive_agent_message` 结果，Responses 沿用带来源的运行时上下文投影。见 [询问双方的上下文契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-context-visibility-is-scoped-to-each-participant)。
+
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。
 
 用量状态栏由 `ChatStateEvent::SessionUsageUpdated` 投影到账本变化时的 transient `SessionInfoUpdate.meta["grow/sessionUsage"]`，复用 `PromptUsage`，不增加周期查询或模型输入。主模型 attempt、子 Agent 终态结算、session incomplete 与冷恢复边界写入 Timeline；新 actor 按结算身份恢复 lifetime aggregate，resident reconnect 不新增分段。Pager 按累计值替换、丢弃倒退及历史 replay；normal 状态栏只显示 lifetime 总体，`/usage` 另外按 Initial run、Resume #N 展示分段。计费窗口和点击行为见 [会话用量契约](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。

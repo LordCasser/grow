@@ -181,6 +181,9 @@ fn held_user_fifo_blocks_passive_wake_then_saved_input_and_consultation_share_re
             assert_eq!(server.requests().len(), 2);
             let wire = server.request_bodies().last().unwrap().to_string();
             assert!(wire.contains("saved edited user input"));
+            assert!(wire.contains(sampling_types::RECEIVE_AGENT_MESSAGE_TOOL_NAME));
+            assert!(wire.contains("live-child-session"));
+            assert!(wire.contains("What should the saved user task know?"));
             assert!(wire.contains("The consultation completed while the FIFO head was held."));
             assert!(
                 actor

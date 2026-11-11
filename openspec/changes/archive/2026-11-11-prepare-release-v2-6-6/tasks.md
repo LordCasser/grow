@@ -1,0 +1,4 @@
+- [x] Set workspace and local package versions to 2.6.6 in Cargo metadata and lockfile.
+- [x] Add the dated Shell changelog entry and complete v2.6.6 release notes.
+- [x] Verify locked Cargo metadata with Rust 1.93.1 and validate this OpenSpec change.
+- [x] Review the consultation change and verify the candidate against local build and release checks.

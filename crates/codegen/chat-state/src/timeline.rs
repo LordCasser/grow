@@ -994,6 +994,20 @@ impl NotificationSource {
             _ => None,
         }
     }
+
+    /// Context projection also includes answered inquiries, which cannot authorize replies.
+    pub fn agent_context(&self) -> Option<(&str, &str, Option<&sampling_types::AgentMessageRef>)> {
+        match self {
+            Self::InquiryAnswered {
+                source_session_id,
+                inquiry_id,
+            } => Some((source_session_id, inquiry_id, None)),
+            _ => self
+                .agent_message()
+                .map(|(source, operation, reply_to, _)| (source, operation, reply_to)),
+        }
+    }
+
     fn subject_id(&self) -> &str {
         match self {
             Self::InquiryAnswered { inquiry_id, .. } => inquiry_id,
@@ -4859,7 +4873,7 @@ impl Timeline {
                     }
                     for (id, message) in notification_ids.iter().zip(&batch.messages) {
                         let receipt = &self.pending_notifications[id];
-                        let Some((source, operation, reply_to, _)) = receipt.source.agent_message()
+                        let Some((source, operation, reply_to)) = receipt.source.agent_context()
                         else {
                             return Err(TimelineError::InvalidNotification);
                         };
@@ -16818,6 +16832,54 @@ mod tests {
         assert_eq!(
             replayed.received_notification_id(&source, &version),
             Some(id.as_str())
+        );
+    }
+
+    #[test]
+    fn consultation_context_matches_its_receipt_without_becoming_a_reply_source() {
+        let mut timeline = Timeline::default();
+        let source = NotificationSource::InquiryAnswered {
+            source_session_id: "asking-session".into(),
+            inquiry_id: "inquiry".into(),
+        };
+        let version = NotificationSourceVersion::Opaque {
+            value: "session-1:7".into(),
+        };
+        let body = "Full consultation question and answer";
+        let id = receive_notification(&mut timeline, source.clone(), version, body);
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        let message = sampling_types::AgentMessage {
+            receipt_id: id.clone(),
+            source_session_id: "asking-session".into(),
+            target_session_id: "session-1".into(),
+            message_id: "inquiry".into(),
+            reply_to: None,
+            message: body.into(),
+        };
+        let consume = |message| {
+            let mut input = ConversationItem::received_agent_message(message);
+            input.set_prompt_index(0);
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                notification_ids: vec![id.clone()],
+                turn,
+                input: Some(input),
+            })
+        };
+        let mut tampered = message.clone();
+        tampered.source_session_id = "another-session".into();
+        assert!(timeline.record(consume(tampered)).is_err());
+        let mut tampered = message.clone();
+        tampered.message = "different answer".into();
+        assert!(timeline.record(consume(tampered)).is_err());
+        timeline.record(consume(message.clone())).unwrap();
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert!(replayed.pending_notifications().is_empty());
+        assert!(replayed.parent_message_receipts().is_empty());
+        assert!(
+            matches!(replayed.surface(), [ConversationItem::AgentMessage(batch)]
+            if batch.messages == [message])
         );
     }
 

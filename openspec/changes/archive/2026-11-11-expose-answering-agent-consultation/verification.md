@@ -1,0 +1,7 @@
+# Verification
+
+- Rust 1.93.1 with the coordination CI stack setting, `RUST_MIN_STACK=16777216`. The focused Shell, ChatState and SamplingTypes suites passed 24 tests. An additional 12 Shell coordination actor tests passed from the same compiled test executable. The default test stack overflowed in the existing joint consultation fixture.
+- The real peer and delegation fixtures covered source tool and external API calls. The peer test verified one correlated Messages call/result carrying the exact asker, answering session, inquiry, question and answer. Adapter tests covered Chat Completions, Messages and the Responses attributed context. The FIFO test covered delivery on the first eligible foreground request after idle.
+- Cancellation before a durable success, payload and IPC limits, lost receipt and consumption acknowledgements, and cold replay passed. Timeline rejected changed sender and body and preserved the prior User-form history. A consumed consultation is absent from the reply-authorizing receipt index.
+- `cargo build --locked -p cli --bin grow` passed. `python3 scripts/test_local_coordination.py --binary target/debug/grow` passed all 10 checks using the rebuilt binary and independent Grow processes. The receiving process's foreground request carried both questions, the source session ID and the Sideband answer.
+- `git diff --check`, Python parsing and Rust formatting for the changed files passed. The workspace-wide formatting check reported pre-existing differences in `actor/spawn.rs` and `actor/tests/recap_display_only_tests.rs`.

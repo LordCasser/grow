@@ -332,10 +332,13 @@ fn queued_consultation_reaches_same_turn_successor_without_preempting_foreground
                     if notification_ids.contains(&receipt_id))).count(), 1);
             let context = actor.chat_state_handle.get_conversation().await;
             let consultation_inputs = context.iter().filter_map(|item| match item {
-                sampling_types::ConversationItem::User(message) if item.text_content().contains("Consultation record:") => Some(message), _ => None,
-            }).collect::<Vec<_>>();
+                sampling_types::ConversationItem::AgentMessage(batch) => Some(&batch.messages),
+                _ => None,
+            }).flatten().filter(|message| message.receipt_id == receipt_id).collect::<Vec<_>>();
             assert_eq!(consultation_inputs.len(), 1);
-            assert!(consultation_inputs.iter().all(|message| message.permission_evidence.is_none()));
+            assert_eq!(consultation_inputs[0].source_session_id, "live-child-session");
+            assert_eq!(consultation_inputs[0].message_id, inquiry_id);
+            assert!(consultation_inputs[0].reply_to.is_none());
             assert!(actor.chat_state_handle.pending_notifications().await.unwrap().is_empty());
             let (retry, response) = make_inquiry();
             actor.enqueue_coordination_inquiry(retry).await;

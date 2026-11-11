@@ -321,8 +321,12 @@ context_window = 200000
         assert not foreground.done(), "target foreground unexpectedly completed"
         model.foreground_release.set()
         assert foreground.result(20)["stopReason"] == "end_turn"
+        target_context = json.dumps([body for sideband, body in model.requests if not sideband][-1])
+        assert "receive_agent_message" in target_context or "Runtime agent message" in target_context
+        assert sa in target_context and ask["question"] in target_context
+        assert "Next inquiry" in target_context and "COORDINATION_SIDE_ANSWER" in target_context
         assert not model.errors, model.errors
-        print("PASS busy foreground, running query, FIFO queue, same-ID dedup, tool-free sideband", flush=True)
+        print("PASS busy foreground, FIFO, same-ID dedup, tool-free sideband, attributed target context", flush=True)
 
         conflict = coord(a, "ask", **dict(ask, question="different payload"))
         assert conflict["error"]["code"] == "conflict", conflict

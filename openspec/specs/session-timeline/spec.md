@@ -1901,11 +1901,11 @@ list_running SHALL 保持原有 active 和来源权限范围，缺少 progress �
 - **THEN** 接口明确路由失败不证明目标已终态或已清理，调用方可按任务身份继续状态核对，不绕过直接父级权限。
 
 ### Requirement: Answering sessions consume consultation evidence durably
-A new-contract successful incoming inquiry's canonical terminal SHALL establish one context-synchronization obligation in its original answering Session. Its structured proof SHALL bind the asking Session, original target Session, inquiry, actual Sideband and its frozen source. Only that original target's runtime SHALL materialize the obligation through the existing Timeline notification receipt/consumption path, validating the Sideband owner against the proof. Receipt identity SHALL be derived from canonical inquiry identity, and source version SHALL bind the successful terminal. Consumption and its exact model input SHALL be committed together before a request may include that input. Historical Answered observations without this new proof and UI presentation SHALL NOT establish obligations.
+A new-contract successful incoming inquiry's canonical terminal SHALL establish one context-synchronization obligation in its original answering Session. Its structured proof SHALL bind the asking Session, original target Session, inquiry, actual Sideband and its frozen source. Only that original target's runtime SHALL materialize the obligation through the existing Timeline notification receipt/consumption path, validating the Sideband owner against the proof. Receipt identity SHALL be derived from canonical inquiry identity, and source version SHALL bind the successful terminal. Consumption and its exact model input SHALL be committed together before a request may include that input. New consumption SHALL use the runtime AgentMessage context item, with its receipt ID, requester and answering Session IDs, inquiry ID, and exact receipt body containing the complete question, answer and frozen Sideband result reference. The context projection SHALL preserve the receipt payload and confer no message reply authority. Historical Answered observations without this new proof and UI presentation SHALL NOT establish obligations.
 
 #### Scenario: Completed consultation is consumed
 - **WHEN** an answering Session reaches an eligible sampling boundary after a successful incoming inquiry
-- **THEN** it commits one consumed receipt with the exact attributed question and answer before building the request, without synthesizing a human permission or model-authored tool call.
+- **THEN** it commits the receipt and exact attributed AgentMessage together before building the request. The host projection carries the question and answer as context without synthesizing human permission or a model-authored tool call.
 
 #### Scenario: Consultation consumption omits model input
 - **WHEN** live append or strict replay encounters a Consumed event selecting an InquiryAnswered receipt with no materialized input
@@ -1930,6 +1930,10 @@ A new-contract successful incoming inquiry's canonical terminal SHALL establish 
 #### Scenario: Read-only observation encounters an incomplete synchronization
 - **WHEN** a session list, full/light observation, trajectory viewer or UI replay reads a valid success with a missing derived receipt
 - **THEN** it remains read-only without acquiring writer ownership or appending the missing receipt; reconciliation belongs to the legitimate runtime writer.
+
+#### Scenario: Previously consumed notification text is replayed
+- **WHEN** Timeline restores an inquiry already consumed as notification text before typed consultation context was introduced
+- **THEN** it retains that historical model input and creates no second receipt, consumption or Sideband execution.
 
 ### Requirement: Required notification consumption failures block dependent requests
 The shared sampling-boundary notification path SHALL distinguish an empty eligible set from failure to read required payloads or confirm their consumption. A first request, successor Step or final-response continuation that depends on that boundary SHALL NOT dispatch after such failure. The existing fatal storage-boundary error path SHALL preserve the cause rather than treating the failure as ordinary completion recovery. This applies to existing notification sources using the same required-consumption path as well as consultation evidence.

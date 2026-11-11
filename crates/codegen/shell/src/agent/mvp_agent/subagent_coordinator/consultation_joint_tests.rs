@@ -374,16 +374,15 @@ fn opposite_parent_child_tools_use_real_authority_routes_and_independent_sideban
             let quoted = surface
                 .iter()
                 .filter_map(|item| match item {
-                    sampling_types::ConversationItem::User(user)
-                        if item.text_content().contains("Consultation record:") =>
-                    {
-                        Some(user)
-                    }
+                    sampling_types::ConversationItem::AgentMessage(batch) => Some(&batch.messages),
                     _ => None,
                 })
+                .flatten()
+                .filter(|message| message.message.contains(question))
                 .collect::<Vec<_>>();
             assert_eq!(quoted.len(), 1);
-            assert!(quoted[0].permission_evidence.is_none());
+            assert!(quoted[0].message.contains(answer));
+            assert!(quoted[0].reply_to.is_none());
             assert!(
                 actor
                     .chat_state_handle
