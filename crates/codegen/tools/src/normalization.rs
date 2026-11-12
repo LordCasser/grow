@@ -107,6 +107,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::TaskOutput(_)
         | ToolInput::SubagentList(_)
         | ToolInput::SubagentStatus(_)
+        | ToolInput::SubagentResult(_)
         | ToolInput::SubagentWait(_)
         | ToolInput::KillTask(_)
         | ToolInput::Task(_)

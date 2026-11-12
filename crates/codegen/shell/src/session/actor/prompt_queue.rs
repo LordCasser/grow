@@ -826,8 +826,7 @@ impl SessionActor {
             json_schema: item.json_schema.clone(),
         };
         Self::respond_removed_prompt(item.respond_to);
-        self.queue_auto_promoted_follow_up(text.clone(), attachments, requeue);
-        self.broadcast_interjection(&text, Some(id));
+        self.queue_auto_promoted_follow_up(text, attachments, requeue);
         self.events
             .emit(crate::session::events::Event::Interjected {
                 source: crate::session::events::InterjectionSource::Queue,

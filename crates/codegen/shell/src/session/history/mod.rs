@@ -7,7 +7,7 @@
 mod grow_facts;
 pub(crate) use grow_facts::GrowHistoryFact;
 mod projector;
-pub(crate) use projector::{HISTORY_CURSOR_KEY, PreparedHistory};
+pub(crate) use projector::{HISTORY_CURSOR_KEY, PreparedHistory, background_command_settlements};
 mod seed;
 pub(crate) use seed::SeedPresentation;
 
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::io;
 
 pub(crate) const RECORD_VERSION: u8 = 1;
-pub(crate) const PROJECTOR_VERSION: u8 = 1;
+pub(crate) const PROJECTOR_VERSION: u8 = 3;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())

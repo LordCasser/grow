@@ -35,6 +35,8 @@ fn settled_command() -> RuntimeCommandSettlement {
         is_backgrounded: true,
         owner: chat_state::NotificationOwner::Session,
         task_kind: chat_state::NotificationTaskKind::Task,
+        start_time: None,
+        end_time: None,
     }
 }
 
@@ -89,7 +91,7 @@ async fn request_suspension_until(
         .request_node_suspension(
             OPERATION_ID.into(),
             actor.session_id_string(),
-            deadline,
+            Some(deadline),
             respond_to,
         )
         .await;

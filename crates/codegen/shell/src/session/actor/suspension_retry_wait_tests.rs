@@ -51,7 +51,7 @@ async fn request_suspension(
         .request_node_suspension(
             operation_id.to_owned(),
             actor.session_id_string(),
-            deadline,
+            Some(deadline),
             respond_to,
         )
         .await;

@@ -664,6 +664,12 @@ mod tests {
                         assert!(!head.contains(&format!("`{name}`")), "{head}");
                     }
                     assert!(role.contains("A wait ending is not proof"), "{role}");
+                    assert!(role.contains("as soon as any selected child"), "{role}");
+                    assert!(
+                        role.contains("analyze its status and result immediately"),
+                        "{role}"
+                    );
+                    assert!(role.contains("only the remaining IDs"), "{role}");
                     assert_eq!(ctx.render_with_renderer(&renderer).unwrap(), head);
                 }
 

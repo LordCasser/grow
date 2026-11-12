@@ -467,10 +467,10 @@ async fn auto_promoted_entry_drained_at_safe_point_is_consumed_not_requeued() {
 
 /// The `queue_input` promotion path steers exactly one interjection into the
 /// shared buffer, resolves the submitting client with `RemovedFromQueue`
-/// (the same completion a queue-steer emits), broadcasts the interjection
-/// with the prompt id, and never touches the FIFO or foreground.
+/// (the same completion a queue-steer emits) and publishes its transcript
+/// row only when the safe-point drain consumes the admitted input.
 #[tokio::test]
-async fn auto_promote_follow_up_uses_the_interjection_path_once() {
+async fn queue_promoted_steer_broadcasts_only_after_consumption() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -553,25 +553,27 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
             assert!(state.foreground.regular().is_some());
             drop(state);
 
-            // One interjection broadcast carrying the prompt id for pager
-            // dedup/adoption.
-            let mut broadcasts = Vec::new();
-            while let Ok(msg) = gateway_rx.try_recv() {
-                if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
-                    && args.request.method.as_ref() == "grow/session/interjection"
-                {
-                    broadcasts.push(
-                        serde_json::from_str::<serde_json::Value>(args.request.params.get()).ok(),
-                    );
-                }
-            }
-            assert_eq!(broadcasts.len(), 1, "exactly one interjection broadcast");
+            assert!(take_interjection_broadcasts(&mut gateway_rx).is_empty());
+            assert!(actor.drain_pending_interjections().await);
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let echo = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                        input_ids,
+                        display_echo,
+                        ..
+                    }) if input_ids == &auto.input_ids => display_echo.as_ref(),
+                    _ => None,
+                })
+                .expect("promoted steer must have a committed display echo");
             assert_eq!(
-                broadcasts[0]
-                    .as_ref()
-                    .and_then(|v| v.get("interjectionId"))
-                    .and_then(|v| v.as_str()),
-                Some("follow-up-1")
+                take_interjection_broadcasts(&mut gateway_rx),
+                vec![serde_json::json!({
+                    "sessionId": actor.session_info.id.0.as_ref(),
+                    "text": "text for follow-up-1",
+                    "messageId": echo.message_id,
+                })]
             );
         })
         .await;
@@ -607,64 +609,25 @@ mod interjection_format_tests {
     }
 }
 
-mod interjection_broadcast_tests {
-    use super::support::create_test_actor;
-    use super::*;
-
-    /// Multi-client fix: a mid-turn interjection must be broadcast to every
-    /// attached client (not just the originator) so all panes viewing the same
-    /// session render it. This locks the wire contract the pager's
-    /// `handle_interjection` depends on: method `grow/session/interjection`
-    /// carrying `sessionId` + `text`.
-    #[tokio::test]
-    async fn broadcast_interjection_emits_sessionid_and_text() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (gateway_tx, mut gateway_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, _prx) =
-                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-
-                actor.broadcast_interjection("please also add tests", Some("ij-1"));
-
-                let mut payload = None;
-                while let Ok(msg) = gateway_rx.try_recv() {
-                    if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
-                        && args.request.method.as_ref() == "grow/session/interjection"
-                    {
-                        payload =
-                            serde_json::from_str::<serde_json::Value>(args.request.params.get())
-                                .ok();
-                    }
-                }
-                let payload = payload.expect("an grow/session/interjection broadcast");
-                assert_eq!(
-                    payload.get("sessionId").and_then(|v| v.as_str()),
-                    Some("test-actor"),
-                    "broadcast must carry the session id"
-                );
-                assert_eq!(
-                    payload.get("text").and_then(|v| v.as_str()),
-                    Some("please also add tests"),
-                    "broadcast must carry the interjection text verbatim"
-                );
-                assert_eq!(
-                    payload.get("interjectionId").and_then(|v| v.as_str()),
-                    Some("ij-1"),
-                    "broadcast must echo the interjection id for originator dedup"
-                );
-            })
-            .await;
+fn take_interjection_broadcasts(
+    gateway: &mut tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+) -> Vec<serde_json::Value> {
+    let mut broadcasts = Vec::new();
+    while let Ok(message) = gateway.try_recv() {
+        if let acp_transport::AcpClientMessage::ExtNotification(args) = message
+            && args.request.method.as_ref() == "grow/session/interjection"
+        {
+            broadcasts.push(serde_json::from_str(args.request.params.get()).unwrap());
+        }
     }
+    broadcasts
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn long_utf8_steer_survives_admission_consumption_request_and_cold_replay() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (actor, _gateway_rx) = build_actor().await;
+            let (actor, mut gateway_rx) = build_actor().await;
             begin_test_active_causal_turn(&actor).await;
             let middle = "MIDDLE_GUIDANCE_KEEP_THIS";
             let tail = "TAIL_GUIDANCE_KEEP_THIS";
@@ -692,6 +655,7 @@ async fn long_utf8_steer_survives_admission_consumption_request_and_cold_replay(
                 })
                 .expect("steer admission has a durable input identity");
 
+            assert!(take_interjection_broadcasts(&mut gateway_rx).is_empty());
             assert!(actor.drain_pending_interjections().await);
             assert!(actor.pending_interjections.is_empty());
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
@@ -728,6 +692,14 @@ async fn long_utf8_steer_survives_admission_consumption_request_and_cold_replay(
                 &[acp::ContentBlock::Text(acp::TextContent::new(text.clone()))],
             );
             assert_eq!(echo.blake3, expected_echo.blake3);
+            assert_eq!(
+                take_interjection_broadcasts(&mut gateway_rx),
+                vec![serde_json::json!({
+                    "sessionId": actor.session_info.id.0.as_ref(),
+                    "text": text,
+                    "messageId": echo.message_id,
+                })]
+            );
 
             let request = actor
                 .chat_state_handle

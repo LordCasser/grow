@@ -246,7 +246,7 @@ impl MvpAgent {
             .cmd_tx
             .send(SessionCommand::RetireSuspendedRuntime {
                 operation_id,
-                deadline,
+                deadline: Some(deadline),
                 respond_to,
             })
             .map_err(|_| "temporary restore owner closed before retirement")?;

@@ -388,7 +388,7 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
         tools::types::tool_metadata::test_ctx(resources),
         tool_types::WaitSubagentInput { subagent_ids: vec!["cold-child".into()], timeout_ms: Some(1000) },
     ).await.unwrap();
-    assert_eq!(waited.reason, tool_types::SubagentWaitReason::AllFinished);
+    assert_eq!(waited.reason, tool_types::SubagentWaitReason::AnyFinished);
     assert_eq!(waited.subagents[0].status, tool_types::SubagentStatus::Cancelled);
     assert_eq!(tools::reminders::task_completion::consumed_completion_ids(&tools::types::output::ToolOutput::SubagentWait(waited)), ["cold-child"]);
 

@@ -89,6 +89,7 @@ impl ToolOutput for String {}
 impl ToolOutput for tool_types::TaskOutputOutput {}
 impl ToolOutput for tool_types::ListSubagentOutput {}
 impl ToolOutput for tool_types::GetSubagentStatusOutput {}
+impl ToolOutput for tool_types::SubagentWaitResult {}
 impl ToolOutput for tool_types::planning::PlanReadOutput {}
 
 /// Lets `tool_types::SubagentCompletedOutput` be used directly as a

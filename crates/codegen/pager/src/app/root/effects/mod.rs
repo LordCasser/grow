@@ -324,13 +324,8 @@ pub(crate) fn execute(
                         .expect("serialize session exit suspension request")
                         .into(),
                 );
-                let result = match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    acp_send(request, &tx),
-                )
-                .await
-                {
-                    Ok(Ok(response)) => {
+                let result = match acp_send(request, &tx).await {
+                    Ok(response) => {
                         match serde_json::from_str::<serde_json::Value>(response.0.get()) {
                             Ok(wrapper) => {
                                 let body = wrapper.get("result").unwrap_or(&wrapper);
@@ -351,10 +346,7 @@ pub(crate) fn execute(
                             )),
                         }
                     }
-                    Ok(Err(error)) => Err(sanitize_user_error(&error.to_string())),
-                    Err(_) => Err(
-                        "session suspension was not confirmed before the 5-second deadline; the writer may still be saving".into(),
-                    ),
+                    Err(error) => Err(sanitize_user_error(&error.to_string())),
                 };
                 TaskResult::ExitSuspensionResolved { exit_id, result }
             });

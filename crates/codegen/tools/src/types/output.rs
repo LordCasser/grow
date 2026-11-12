@@ -488,6 +488,7 @@ pub enum ToolOutput {
     TaskOutput(TaskOutputOutput),
     SubagentList(tool_types::ListSubagentOutput),
     SubagentStatus(tool_types::GetSubagentStatusOutput),
+    SubagentResult(tool_types::SubagentWaitResult),
     SubagentWait(tool_types::WaitSubagentOutput),
     KillTask(KillTaskOutput),
     SearchTool(SearchToolOutput),
@@ -647,6 +648,9 @@ impl ToolOutput {
             }
             ToolOutput::SubagentStatus(output) => {
                 serde_json::to_string_pretty(output).expect("subagent status is JSON data")
+            }
+            ToolOutput::SubagentResult(output) => {
+                serde_json::to_string_pretty(output).expect("subagent result is JSON data")
             }
             ToolOutput::SubagentList(output) => {
                 serde_json::to_string_pretty(output).expect("subagent list is JSON data")

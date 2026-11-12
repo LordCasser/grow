@@ -13617,7 +13617,22 @@ fn runtime_tree_test_spawn(subagent_id: &str, child_session_id: &str) -> crate::
 async fn runtime_tree_snapshot_preserves_canonical_facts_without_unrelated_bodies() {
     let unrelated_body = "unrelated-history-body".repeat(32 * 1024);
     let h = TestHarness::with_conversation(vec![ConversationItem::user(&unrelated_body)]);
-    let mut expected = Vec::new();
+    let mut expected = vec![
+        h.handle
+            .record_timeline_event_durably(crate::TimelineEventKind::SubagentSeed(
+                crate::SubagentSeedEvent {
+                    parent_timeline_id: "root-session".into(),
+                    parent_spawn_seq: 7,
+                    subagent_id: "source-task".into(),
+                    security_parent_session_id: "root-session".into(),
+                    context_source: crate::SubagentContextSource::New,
+                    source_ref: None,
+                    normalized: false,
+                },
+            ))
+            .await
+            .unwrap(),
+    ];
     for (subagent_id, child_session_id) in [("task-a", "child-a"), ("task-b", "child-b")] {
         expected.push(
             h.handle
@@ -13690,7 +13705,7 @@ async fn runtime_tree_snapshot_preserves_canonical_facts_without_unrelated_bodie
                 &event.kind,
                 crate::TimelineEventKind::Subagent(
                     crate::SubagentEvent::Spawned(_) | crate::SubagentEvent::Ended(_)
-                )
+                ) | crate::TimelineEventKind::SubagentSeed(_)
             )
         })
         .collect();
@@ -13711,7 +13726,7 @@ async fn runtime_tree_snapshot_preserves_canonical_facts_without_unrelated_bodie
     assert!(facts.windows(2).all(|pair| pair[0].seq < pair[1].seq));
     assert_eq!(
         facts_before.len(),
-        2,
+        3,
         "earlier snapshot keeps its original frontier"
     );
     let encoded = serde_json::to_string(&facts).unwrap();

@@ -355,10 +355,18 @@ pub(super) fn do_cancel_turn_with_pause(
     // the rewind when the in-flight block has already committed and fall back to
     // the standard cancel. `committed` is always false in alt-screen / inline, so
     // this is a no-op outside minimal.
-    let in_flight_committed = match agent.session.in_flight_prompt.as_ref() {
-        Some(stashed) => agent.scrollback.is_committed(stashed.scrollback_entry),
-        None => false,
-    };
+    // A server-queued submission may own the stash while a different
+    // prompt owns the foreground, even after steering empties the queue.
+    let can_restore_current_prompt =
+        agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .is_some_and(|stashed| {
+                stashed.prompt_id.is_some()
+                    && stashed.prompt_id == agent.session.current_prompt_id
+                    && !agent.scrollback.is_committed(stashed.scrollback_entry)
+            });
     // The rewind REPLACES the composer with the stashed in-flight prompt.
     // Esc (and the mouse stop / palette cancel) fire with the draft intact —
     // unlike keyboard Ctrl+C, which only cancels on an empty prompt — so a
@@ -367,9 +375,8 @@ pub(super) fn do_cancel_turn_with_pause(
     let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
     let rewinding = agent.session.shared_queue.is_empty()
         && app.cancel_rewind_enabled
-        && agent.session.in_flight_prompt.is_some()
+        && can_restore_current_prompt
         && agent.session.pending_prompts.is_empty()
-        && !in_flight_committed
         && !composer_has_draft;
     if rewinding && let Some(stashed) = agent.session.in_flight_prompt.take() {
         if let Some(pid) = agent.session.current_prompt_id.clone() {

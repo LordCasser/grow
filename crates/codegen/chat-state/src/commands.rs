@@ -140,12 +140,12 @@ pub enum ChatStateCommand {
         runtime_source_hash: String,
         turn: Option<crate::session_runtime::TurnContinuation>,
         step: Option<crate::StepId>,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
     SettleHooksForSuspension {
         operation_id: String,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         reply: oneshot::Sender<Result<Vec<crate::TimelineEvent>, TimelineWriteError>>,
     },
     GetPlanningState {

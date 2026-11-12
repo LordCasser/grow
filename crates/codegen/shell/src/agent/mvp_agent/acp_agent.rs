@@ -1190,7 +1190,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         }
         let reconcile_completions = if runtime_recovery_gated { Vec::new() } else {
             let _timer = crate::instrumentation_timer!("session.reconcile_stale_tasks");
-            self.repair_stale_background_task_projections(&session_id, &history)
+            self.repair_stale_background_task_projections(&session_id, &history, &timeline)
         };
         {
             let _timer = crate::instrumentation_timer!("session.stale_tasks_drain_completions");

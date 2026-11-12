@@ -277,8 +277,7 @@ fn transient_context_pressure_refreshes_state_without_scrollback() {
     );
     assert_eq!(app.agents[&id].scrollback.len(), scrollback_before);
 }
-/// A server-shape interjection broadcast (no `interjectionId`, like the
-/// shared-queue interject path — every pane renders it).
+/// A server-shape durable consumption broadcast.
 pub(super) fn interjection_broadcast(
     session_id: &str,
     text: &str,
@@ -290,6 +289,7 @@ pub(super) fn interjection_broadcast(
                     &serde_json::json!({
                     "sessionId": session_id,
                     "text": text,
+                    "messageId": format!("{session_id}-{text}"),
                 }),
                 )
                 .unwrap(),
@@ -775,21 +775,21 @@ pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
         })
         .collect()
 }
-/// Build an `grow/session/interjection` ext-notification (no id).
+/// Build an `grow/session/interjection` ext-notification with a stable test id.
 pub(super) fn interjection_ext(session_id: &str, text: &str) -> acp::ExtNotification {
     interjection_ext_with_id(session_id, text, None)
 }
 /// Build an `grow/session/interjection` ext-notification with an optional
-/// `interjectionId` (the originator-dedup key).
+/// message identity.
 pub(super) fn interjection_ext_with_id(
     session_id: &str,
     text: &str,
     interjection_id: Option<&str>,
 ) -> acp::ExtNotification {
     let mut payload = serde_json::json!({ "sessionId": session_id, "text": text });
-    if let Some(id) = interjection_id {
-        payload["interjectionId"] = serde_json::json!(id);
-    }
+    payload["messageId"] = serde_json::json!(
+        interjection_id.unwrap_or_else(|| "test-message-id")
+    );
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
     acp::ExtNotification::new("grow/session/interjection", std::sync::Arc::from(raw))
 }

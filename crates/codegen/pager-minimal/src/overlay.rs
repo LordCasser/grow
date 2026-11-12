@@ -1170,7 +1170,6 @@ mod tests {
                 error: "writer has not exited".into(),
             },
             restart_for_update: false,
-            deadline: std::time::Instant::now(),
         });
 
         assert_eq!(
@@ -1197,6 +1196,40 @@ mod tests {
         };
         assert!(line(2).contains("r retry"));
         assert!(line(3).contains("f force"));
+    }
+
+    #[test]
+    fn pending_exit_reserves_shared_notice_rows_and_paints_force_warning() {
+        use pager::app::root::{ExitSuspension, ExitSuspensionPhase};
+
+        let mut app = minimal_api::test_minimal_app();
+        app.appearance.minimal_live_rows = 3;
+        app.exit_suspension = Some(ExitSuspension {
+            exit_id: "exit".into(),
+            phase: ExitSuspensionPhase::Pending,
+            restart_for_update: false,
+        });
+
+        assert_eq!(
+            compute_target(&mut app, 12, 12, pager::motion::FrameStamp::default()),
+            3
+        );
+        let area = Rect::new(0, 0, 12, 3);
+        let mut buffer = Buffer::empty(area);
+        minimal_api::paint_exit_suspension_notice(
+            &mut buffer,
+            area,
+            app.exit_suspension.as_ref().unwrap(),
+        );
+        let line = |y| {
+            (0..area.width)
+                .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        assert!(line(0).contains("Saving"));
+        assert!(line(1).contains("f force quit"));
+        assert!(line(2).contains("Resume risk"));
     }
 
     #[test]

@@ -423,6 +423,12 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            ToolInput::SubagentResult(input) => (
+                format!("Subagent result: {}", input.subagent_id),
+                acp::ToolKind::Read,
+                vec![],
+                vec![],
+            ),
             ToolInput::SubagentList(input) => (
                 format!("List subagents ({:?})", input.scope),
                 acp::ToolKind::Other,

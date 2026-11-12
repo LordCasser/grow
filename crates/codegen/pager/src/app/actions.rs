@@ -1796,8 +1796,9 @@ pub enum Effect {
         session_id: acp::SessionId,
         expected_turn_id: String,
         text: String,
-        /// Client-minted id echoed back on the `grow/session/interjection`
-        /// broadcast so the originator can dedup its optimistic local block.
+        /// Client-minted steering request id used by the Shell to correlate
+        /// admission and fallback. The committed row gets its display message
+        /// identity at durable consumption.
         interjection_id: String,
         /// Structured text + image content blocks. `None` for text-only
         /// interjections — the wire shape stays byte-identical to legacy.

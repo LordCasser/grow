@@ -1,6 +1,14 @@
 use super::*;
+use crate::extensions::notification::{
+    SessionNotification as GrowNotification, SessionUpdate as GrowUpdate,
+};
 use crate::session::storage::SessionUpdate;
+use chat_state::session_runtime::{
+    CommandSettlementStatus, RuntimeCommandSettlement, SessionRuntimeEvent,
+};
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
 
 pub(crate) const HISTORY_CURSOR_KEY: &str = "grow/historyCursor";
 
@@ -32,6 +40,39 @@ fn meta_mut(update: &mut SessionUpdate) -> &mut acp::Meta {
         }
         #[cfg(any(test, feature = "test-support"))]
         SessionUpdate::ResponseReplayProjection(_) => unreachable!("not a presentation fact"),
+    }
+}
+
+fn cursor_from_update(update: &SessionUpdate) -> Option<Cursor> {
+    let meta = match update {
+        SessionUpdate::Acp(value) => value.meta.as_ref(),
+        SessionUpdate::Grow(value) => value.meta.as_ref().and_then(serde_json::Value::as_object),
+        #[cfg(any(test, feature = "test-support"))]
+        SessionUpdate::ResponseReplayProjection(_) => None,
+    };
+    let raw = meta?.get(HISTORY_CURSOR_KEY)?.as_str()?;
+    serde_json::from_str(raw).ok()
+}
+
+pub(crate) fn background_command_settlements(
+    event: &chat_state::TimelineEvent,
+) -> impl Iterator<Item = &RuntimeCommandSettlement> {
+    let commands = match &event.kind {
+        chat_state::TimelineEventKind::Runtime(SessionRuntimeEvent::CommandsSettled {
+            commands,
+            ..
+        }) => commands.as_slice(),
+        _ => &[],
+    };
+    commands.iter().filter(|command| command.is_backgrounded)
+}
+
+fn time_from_ms(at_ms: i64) -> SystemTime {
+    let duration = Duration::from_millis(at_ms.unsigned_abs());
+    if at_ms < 0 {
+        SystemTime::UNIX_EPOCH - duration
+    } else {
+        SystemTime::UNIX_EPOCH + duration
     }
 }
 
@@ -146,6 +187,7 @@ impl HistorySnapshot {
             })
             .collect::<std::collections::BTreeSet<_>>();
         let mut updates = Vec::new();
+        let mut settlement_sources = Vec::new();
         for (position, row) in sources.into_iter().enumerate() {
             let source = row.as_ref();
             let at_ms = match source {
@@ -242,6 +284,10 @@ impl HistorySnapshot {
                 continue;
             }
             if let HistorySource::Domain { event, .. } = source {
+                let domain = &timeline.events()[*event as usize];
+                if background_command_settlements(domain).next().is_some() {
+                    settlement_sources.push((position, domain));
+                }
                 if !notice_refs.contains(event)
                     && let Some(notice) = self.notices.get(event)
                 {
@@ -357,7 +403,9 @@ impl HistorySnapshot {
                 updates.push(update);
             }
         }
-        let mut updates = crate::session::storage::filter_rewind_updates(updates);
+        let updates = crate::session::storage::filter_rewind_updates(updates);
+        let mut updates =
+            self.project_command_terminals(session, cut, updates, settlement_sources)?;
         // A proof refers to both authority cut and completed expanded row.
         // A newer cut or a half-response never authorizes skipping history.
         let cursor = cursor.and_then(|raw| {
@@ -373,20 +421,9 @@ impl HistorySnapshot {
                 && cursor.hash == self.prefix_hash
                 && cursor.complete
         }) && let Some(index) = updates.iter().position(|update| {
-            let meta = match update {
-                SessionUpdate::Acp(value) => value.meta.as_ref(),
-                SessionUpdate::Grow(value) => {
-                    value.meta.as_ref().and_then(serde_json::Value::as_object)
-                }
-                #[cfg(any(test, feature = "test-support"))]
-                SessionUpdate::ResponseReplayProjection(_) => None,
-            };
-            meta.and_then(|meta| meta.get(HISTORY_CURSOR_KEY))
-                .and_then(serde_json::Value::as_str)
-                .and_then(|raw| serde_json::from_str::<Cursor>(raw).ok())
-                .is_some_and(|row| {
-                    row.complete && row.record == cursor.record && row.part == cursor.part
-                })
+            cursor_from_update(update).is_some_and(|row| {
+                row.complete && row.record == cursor.record && row.part == cursor.part
+            })
         }) {
             updates.drain(..=index);
             mark_replay = false;
@@ -395,6 +432,158 @@ impl HistorySnapshot {
             updates,
             mark_replay,
         })
+    }
+
+    fn project_command_terminals(
+        &self,
+        session: &acp::SessionId,
+        cut: u64,
+        updates: Vec<SessionUpdate>,
+        settlements: Vec<(u64, &chat_state::TimelineEvent)>,
+    ) -> io::Result<Vec<SessionUpdate>> {
+        if settlements.is_empty() {
+            return Ok(updates);
+        }
+        // Match against visible starts after rewind. A rewind can hide a start
+        // or its ordinary completion, but it cannot restart a settled process.
+        let mut starts = HashMap::new();
+        for update in &updates {
+            let SessionUpdate::Grow(notification) = update else {
+                continue;
+            };
+            match &notification.update {
+                GrowUpdate::TaskBackgrounded { task_id, .. } => {
+                    starts.insert(task_id.as_str(), (update, notification));
+                }
+                GrowUpdate::TaskCompleted { task_snapshot } => {
+                    starts.remove(task_snapshot.task_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        let mut insertions = Vec::new();
+        for (position, event) in settlements {
+            let mut completions = Vec::new();
+            for settlement in background_command_settlements(event) {
+                let Some(&(start, notification)) = starts.get(settlement.command_id.as_str())
+                else {
+                    continue;
+                };
+                let GrowUpdate::TaskBackgrounded {
+                    tool_call_id,
+                    command,
+                    cwd,
+                    description,
+                    monitor_description,
+                    ..
+                } = &notification.update
+                else {
+                    unreachable!("indexed task start")
+                };
+                if tool_call_id != &settlement.call_id
+                    || cursor_from_update(start).is_none_or(|cursor| cursor.record >= position)
+                {
+                    continue;
+                }
+                starts.remove(settlement.command_id.as_str());
+                let start_ms = notification
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("grow/historyTimestampMs"))
+                    .and_then(serde_json::Value::as_i64)
+                    .expect("stamped task start");
+                let interrupted = settlement.outcome == CommandSettlementStatus::Interrupted;
+                let (goal_id, goal_definition_revision) = match &settlement.owner {
+                    chat_state::NotificationOwner::Session
+                    | chat_state::NotificationOwner::Plan { .. } => (None, None),
+                    chat_state::NotificationOwner::Goal {
+                        goal_id,
+                        definition_revision,
+                    } => (Some(goal_id.clone()), Some(*definition_revision)),
+                };
+                completions.push(SessionUpdate::Grow(Box::new(GrowNotification {
+                    session_id: session.clone(),
+                    update: GrowUpdate::TaskCompleted {
+                        task_snapshot: tools::types::TaskSnapshot {
+                            task_id: settlement.command_id.clone(),
+                            command: command.clone(),
+                            display_command: None,
+                            cwd: cwd.clone(),
+                            start_time: settlement
+                                .start_time
+                                .unwrap_or_else(|| time_from_ms(start_ms)),
+                            end_time: settlement
+                                .end_time
+                                .or_else(|| Some(time_from_ms(event.at_ms))),
+                            output: String::new(),
+                            output_file: settlement.output_file.clone().into(),
+                            truncated: false,
+                            exit_code: settlement
+                                .exit_code
+                                .filter(|code| !interrupted || *code != 0),
+                            signal: settlement
+                                .signal
+                                .clone()
+                                .or_else(|| interrupted.then(|| "interrupted".into())),
+                            completed: true,
+                            kind: match settlement.task_kind {
+                                chat_state::NotificationTaskKind::Task => {
+                                    tools::computer::types::TaskKind::Bash
+                                }
+                                chat_state::NotificationTaskKind::Monitor => {
+                                    tools::computer::types::TaskKind::Monitor
+                                }
+                            },
+                            block_waited: false,
+                            explicitly_killed: false,
+                            owner_session_id: Some(session.0.to_string()),
+                            goal_id,
+                            goal_definition_revision,
+                            description: description
+                                .clone()
+                                .or_else(|| monitor_description.clone()),
+                            is_backgrounded: true,
+                        },
+                    },
+                    meta: None,
+                })));
+            }
+            if completions.is_empty() {
+                continue;
+            }
+            let index = updates.partition_point(|update| {
+                cursor_from_update(update)
+                    .expect("stamped history update")
+                    .record
+                    < position
+            });
+            let count = completions.len();
+            for (part, mut update) in completions.into_iter().enumerate() {
+                self.stamp_cursor(
+                    session,
+                    cut,
+                    Some(event.at_ms),
+                    position,
+                    part,
+                    part + 1 == count,
+                    &mut update,
+                )?;
+                insertions.push((index, update));
+            }
+        }
+        if insertions.is_empty() {
+            return Ok(updates);
+        }
+        let mut merged = Vec::with_capacity(updates.len() + insertions.len());
+        let mut original = updates.into_iter();
+        let mut consumed = 0;
+        for (index, update) in insertions {
+            merged.extend(original.by_ref().take(index - consumed));
+            merged.push(update);
+            consumed = index;
+        }
+        merged.extend(original);
+        Ok(merged)
     }
 
     fn stamp_cursor(

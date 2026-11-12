@@ -224,12 +224,12 @@ async fn durable_history_observation_uses_authorized_parent_facts_read_only() {
     );
     let read =
         |source: &str, id: &str| super::super::observation::read_history(&storage, source, id);
-    let list = super::super::observation::read_history_list(&storage, "history-root").unwrap();
+    let list = super::super::observation::read_history_list(&storage, "history-root", tool_types::SubagentListScope::All).unwrap();
     let ids = list.iter().map(|row| row.subagent_id.as_str()).collect::<std::collections::HashSet<_>>();
     assert_eq!(ids, std::collections::HashSet::from(["nested", "cancelled", "open"]));
     assert!(list.iter().any(|row| row.subagent_id == "cancelled" && row.status == tool_types::SubagentStatus::Cancelled));
     assert!(list.iter().any(|row| row.subagent_id == "open" && row.status == tool_types::SubagentStatus::ObservationUnavailable));
-    let direct = super::super::observation::read_history_list(&storage, "history-nested").unwrap();
+    let direct = super::super::observation::read_history_list(&storage, "history-nested", tool_types::SubagentListScope::All).unwrap();
     assert_eq!(direct.len(), 1);
     assert_eq!(direct[0].subagent_id, "cancelled");
     let value = serde_json::to_value(&list).unwrap();
@@ -356,8 +356,14 @@ async fn durable_history_observation_validates_result_links_and_output() {
         };
         if case == "invalid-link" {
             assert_eq!(query().unwrap_err().kind(), std::io::ErrorKind::InvalidData);
-            let rows = super::super::observation::read_history_list(&storage, root.id.0.as_ref()).unwrap();
+            let rows = super::super::observation::read_history_list(&storage, root.id.0.as_ref(), tool_types::SubagentListScope::All).unwrap();
             assert_eq!(rows[0].status, tool_types::SubagentStatus::ObservationInvalidEvidence);
+            let active_merge_rows = super::super::observation::read_history_list(
+                &storage,
+                root.id.0.as_ref(),
+                tool_types::SubagentListScope::Active,
+            ).unwrap();
+            assert!(active_merge_rows[0].status.is_terminal(), "active inventory uses the parent Ended fact to suppress the historical row without following its invalid child link");
 
             let error = crate::extensions::session_admin::read_durable_subagent_lifecycle(
                 &storage, child.id.0.to_string(), true,
@@ -386,7 +392,7 @@ async fn durable_history_observation_validates_result_links_and_output() {
                 query().unwrap().unwrap().unwrap().status,
                 SubagentSnapshotStatus::CompletedOutputUnavailable { .. }
             ));
-            let rows = super::super::observation::read_history_list(&storage, root.id.0.as_ref()).unwrap();
+            let rows = super::super::observation::read_history_list(&storage, root.id.0.as_ref(), tool_types::SubagentListScope::All).unwrap();
             assert_eq!(rows[0].status, tool_types::SubagentStatus::Completed, "listing must not depend on answer artifact availability");
             let detail = super::super::observation::read_statuses(&storage, root.id.0.as_ref(), &["cancelled".into()]).unwrap();
             assert_eq!(detail[0].status, tool_types::SubagentStatus::Completed);

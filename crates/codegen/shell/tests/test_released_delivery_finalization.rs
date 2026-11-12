@@ -502,7 +502,7 @@ agent_type = "grow-build"
         let killed = tool_result(&parent_server, "call_kill");
         assert_eq!(killed, "killed: Subagent cancellation initiated");
         let waited: Value = serde_json::from_str(&tool_result(&parent_server, "call_wait")).unwrap();
-        assert_eq!(waited["reason"], "all_finished", "wait must observe actual terminal delivery: {waited}");
+        assert_eq!(waited["reason"], "any_finished", "wait must observe actual terminal delivery: {waited}");
         assert_eq!(waited["subagents"].as_array().unwrap().len(), 1);
         assert_eq!(waited["subagents"][0]["subagent_id"], child_id);
         let terminal_parent = timeline(&grow_home, session.0.as_ref());

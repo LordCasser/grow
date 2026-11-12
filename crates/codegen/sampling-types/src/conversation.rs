@@ -543,6 +543,9 @@ pub struct ToolResultItem {
     /// separate follow-up user message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ContentPart>,
+    /// Canonical inbox delivery evidence for an answer read through get_subagent_result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_subagent_id: Option<String>,
 }
 
 /// Provider-neutral display fact for a server-executed tool call.
@@ -3058,6 +3061,7 @@ impl ConversationItem {
         Self::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
+            delivered_subagent_id: None,
             images: Vec::new(),
         })
     }
@@ -3074,6 +3078,7 @@ impl ConversationItem {
         Self::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
+            delivered_subagent_id: None,
             images,
         })
     }
@@ -3386,6 +3391,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                 ConversationItem::ToolResult(ToolResultItem {
                     tool_call_id: msg.tool_call_id.unwrap_or_default(),
                     content: Arc::<str>::from(content),
+                    delivered_subagent_id: None,
                     images: Vec::new(),
                 })
             }

@@ -937,18 +937,12 @@ fn handle_leader_resync_required(notif: &acp::ExtNotification, app: &mut AppView
 }
 
 /// Handle `grow/session/interjection` — the leader broadcasts this
-/// sessionId-bearing notification to every attached client when a mid-turn
-/// interjection is queued (emitted from the session actor's `Interject`
-/// command handler). Each client renders the interjection as a scrollback
-/// block.
+/// sessionId-bearing notification to every attached client after an
+/// interjection is durably consumed. Each client renders the interjection as a
+/// scrollback block.
 ///
-/// The originating pager renders an optimistic block immediately in
-/// `dispatch_interject` and records the interjection id in
-/// `self_interjection_ids`; when its own broadcast echoes back here it is
-/// deduped (dropped) by that id. Other panes (which never minted the id) render
-/// the block — fixing the multi-client bug where an interjection typed in one
-/// pane was invisible in the others. A `null`/absent id (older shell) always
-/// renders, so legacy shells degrade to "render everywhere" rather than drop.
+/// The message identity is required so every pane can reconcile the live row
+/// with the matching user-message chunk from history replay.
 fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
         tracing::warn!("Failed to parse grow/session/interjection");
@@ -960,7 +954,9 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
     let Some(text) = parsed.get("text").and_then(|v| v.as_str()) else {
         return false;
     };
-    let interjection_id = parsed.get("interjectionId").and_then(|v| v.as_str());
+    let Some(message_id) = parsed.get("messageId").and_then(|v| v.as_str()) else {
+        return false;
+    };
 
     let sid = acp::SessionId::new(session_id.to_string());
     let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
@@ -971,17 +967,19 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
         return false;
     };
 
-    // Dedup our own optimistic echo: if we minted this id we already rendered
-    // the block locally — drop the broadcast copy (and forget the id).
-    if let Some(iid) = interjection_id
-        && agent.session.consume_self_interjection(iid)
-    {
+    // A replay echo may have arrived first; either ordering produces one row.
+    if (0..agent.scrollback.len()).rev().any(|index| {
+        matches!(
+            agent.scrollback.get(index).map(|entry| &entry.block),
+            Some(RenderBlock::UserPrompt(block)) if block.message_id.as_deref() == Some(message_id)
+        )
+    }) {
         return false;
     }
 
-    agent
-        .scrollback
-        .push_block(RenderBlock::interjection_prompt(text));
+    agent.scrollback.push_block(RenderBlock::UserPrompt(
+        crate::scrollback::blocks::UserPromptBlock::interjection(text).with_message_id(message_id),
+    ));
     is_active
 }
 

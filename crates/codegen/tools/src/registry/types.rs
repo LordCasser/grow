@@ -764,6 +764,7 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::WorkflowTool>();
         b.register::<grow_build::ListSubagentTool>();
         b.register::<grow_build::GetSubagentStatusTool>();
+        b.register::<grow_build::GetSubagentResultTool>();
         b.register::<grow_build::GetCommandOutputTool>();
         b.register::<grow_build::WaitSubagentTool>();
         b.register::<grow_build::TaskTool>();

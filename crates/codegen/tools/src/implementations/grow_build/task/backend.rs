@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::future::Future;
 
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tool_types::planning::PlanningReadSnapshot;
@@ -147,6 +148,66 @@ fn query_deadlines(block: bool, timeout_ms: Option<u64>) -> (std::time::Duration
     (total, Some(coordinator_wait_ms))
 }
 
+async fn race_observation_with_history<T, Runtime, History, IsTerminal>(
+    runtime: Runtime,
+    history: History,
+    history_enabled: bool,
+    is_terminal: IsTerminal,
+) -> Result<Option<T>, SubagentObservationError>
+where
+    Runtime: Future<Output = Result<Option<T>, SubagentObservationError>>,
+    History: Future<Output = Result<Option<T>, SubagentObservationError>>,
+    IsTerminal: Fn(&T) -> bool,
+{
+    tokio::pin!(runtime, history);
+    let first = tokio::select! {
+        biased;
+        result = &mut runtime => futures::future::Either::Left(result),
+        result = &mut history => futures::future::Either::Right(result),
+    };
+
+    match first {
+        futures::future::Either::Left(Ok(Some(snapshot))) => Ok(Some(snapshot)),
+        futures::future::Either::Left(result @ Err(SubagentObservationError::InvalidEvidence)) => {
+            result
+        }
+        futures::future::Either::Left(runtime_result) => {
+            resolve_observation(runtime_result, history.await, history_enabled, &is_terminal)
+        }
+        futures::future::Either::Right(Ok(Some(snapshot))) if is_terminal(&snapshot) => {
+            Ok(Some(snapshot))
+        }
+        futures::future::Either::Right(history_result) => {
+            resolve_observation(runtime.await, history_result, history_enabled, &is_terminal)
+        }
+    }
+}
+
+fn resolve_observation<T, IsTerminal>(
+    runtime_result: Result<Option<T>, SubagentObservationError>,
+    history_result: Result<Option<T>, SubagentObservationError>,
+    history_enabled: bool,
+    is_terminal: &IsTerminal,
+) -> Result<Option<T>, SubagentObservationError>
+where
+    IsTerminal: Fn(&T) -> bool,
+{
+    match runtime_result {
+        Ok(Some(snapshot)) => Ok(Some(snapshot)),
+        Ok(None) if history_enabled => history_result,
+        Err(SubagentObservationError::Unauthorized | SubagentObservationError::Unavailable)
+            if history_enabled =>
+        {
+            history_result
+        }
+        Err(SubagentObservationError::TimedOut) if history_enabled => match history_result {
+            Ok(Some(snapshot)) if is_terminal(&snapshot) => Ok(Some(snapshot)),
+            _ => Err(SubagentObservationError::TimedOut),
+        },
+        runtime_result => runtime_result,
+    }
+}
+
 /// Resource wrapper injected into every session's `Resources`.
 ///
 /// Wraps an `Arc<dyn SubagentBackend>` so the backend can be shared across
@@ -192,7 +253,7 @@ type HistoryQuery = dyn Fn(
         Result<Option<SubagentInspection>, SubagentObservationError>,
     > + Send
     + Sync;
-type HistoryList = dyn Fn()
+type HistoryList = dyn Fn(SubagentListScope)
         -> super::coordinator::SendBoxFuture<Result<Vec<SubagentSummary>, SubagentObservationError>>
     + Send
     + Sync;
@@ -252,12 +313,12 @@ impl ChannelBackend {
     /// Read the bound source's complete durable subagent inventory.
     pub fn with_history_list<F, Fut>(mut self, list: F) -> Self
     where
-        F: Fn() -> Fut + Send + Sync + 'static,
+        F: Fn(SubagentListScope) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<Vec<SubagentSummary>, SubagentObservationError>>
             + Send
             + 'static,
     {
-        self.history_list = Some(Arc::new(move || Box::pin(list())));
+        self.history_list = Some(Arc::new(move |scope| Box::pin(list(scope))));
         self
     }
 
@@ -346,46 +407,33 @@ impl ChannelBackend {
         id: &str,
     ) -> Result<Option<SubagentInspection>, SubagentObservationError> {
         let deadline = tokio::time::Instant::now() + OBSERVATION_DEADLINE;
-        let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
-            .await
-            .map_err(|_| SubagentObservationError::TimedOut)?
-            .map_err(|_| SubagentObservationError::Unavailable)?;
-        let (respond_to, response_rx) = oneshot::channel();
-        let sent = self.tx.send(SubagentEvent::Inspect(SubagentInspectRequest {
-            subagent_id: id.to_owned(),
-            parent_session_id: self.parent_session_id(),
-            respond_to,
-        }));
-        let result = if sent.is_err() {
-            Err(SubagentObservationError::Unavailable)
-        } else {
+        let runtime = async {
+            let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
+                .await
+                .map_err(|_| SubagentObservationError::TimedOut)?
+                .map_err(|_| SubagentObservationError::Unavailable)?;
+            let (respond_to, response_rx) = oneshot::channel();
+            self.tx
+                .send(SubagentEvent::Inspect(SubagentInspectRequest {
+                    subagent_id: id.to_owned(),
+                    parent_session_id: self.parent_session_id(),
+                    respond_to,
+                }))
+                .map_err(|_| SubagentObservationError::Unavailable)?;
             match tokio::time::timeout_at(deadline, response_rx).await {
                 Err(_) => Err(SubagentObservationError::TimedOut),
                 Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
                 Ok(Ok(result)) => result,
             }
         };
-        match result {
-            Ok(Some(inspection)) => Ok(Some(inspection)),
-            Ok(None) if self.history_query.is_some() => {
-                self.read_history_inspection(id, deadline).await
-            }
-            Ok(None) => Ok(None),
-            Err(error) if self.should_read_history(&error) => {
-                self.read_history_inspection(id, deadline).await
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn should_read_history(&self, error: &SubagentObservationError) -> bool {
-        self.history_query.is_some()
-            && matches!(
-                error,
-                SubagentObservationError::Unauthorized
-                    | SubagentObservationError::Unavailable
-                    | SubagentObservationError::TimedOut
-            )
+        let history = self.read_history_inspection(id, deadline);
+        race_observation_with_history(
+            runtime,
+            history,
+            self.history_query.is_some(),
+            |inspection| inspection.snapshot.status.is_terminal(),
+        )
+        .await
     }
 
     async fn read_history_inspection(
@@ -605,7 +653,7 @@ impl SubagentBackend for ChannelBackend {
 
         let (runtime, history) = tokio::join!(
             tokio::time::timeout_at(deadline, runtime),
-            tokio::time::timeout_at(deadline, history_list()),
+            tokio::time::timeout_at(deadline, history_list(scope)),
         );
         let runtime = runtime.unwrap_or(Err(SubagentObservationError::TimedOut));
         let history = history.unwrap_or(Err(SubagentObservationError::TimedOut));
@@ -863,40 +911,36 @@ impl SubagentBackend for ChannelBackend {
     ) -> Result<Option<SubagentSnapshot>, SubagentObservationError> {
         let (budget, coordinator_timeout_ms) = query_deadlines(block, timeout_ms);
         let deadline = tokio::time::Instant::now() + budget;
-        let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
-            .await
-            .map_err(|_| SubagentObservationError::TimedOut)?
-            .map_err(|_| SubagentObservationError::Unavailable)?;
-        let (respond_to, response_rx) = oneshot::channel();
-        let sent = self.tx.send(SubagentEvent::Query(SubagentQueryRequest {
-            subagent_id: id.to_string(),
-            parent_session_id: self.parent_session_id(),
-            block,
-            timeout_ms: coordinator_timeout_ms,
-            respond_to,
-        }));
-        let result = if sent.is_err() {
-            Err(SubagentObservationError::Unavailable)
-        } else {
+        let runtime = async {
+            let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
+                .await
+                .map_err(|_| SubagentObservationError::TimedOut)?
+                .map_err(|_| SubagentObservationError::Unavailable)?;
+            let (respond_to, response_rx) = oneshot::channel();
+            self.tx
+                .send(SubagentEvent::Query(SubagentQueryRequest {
+                    subagent_id: id.to_string(),
+                    parent_session_id: self.parent_session_id(),
+                    block,
+                    timeout_ms: coordinator_timeout_ms,
+                    respond_to,
+                }))
+                .map_err(|_| SubagentObservationError::Unavailable)?;
             match tokio::time::timeout_at(deadline, response_rx).await {
                 Err(_) => Err(SubagentObservationError::TimedOut),
                 Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
                 Ok(Ok(result)) => result,
             }
         };
-        match result {
-            Ok(Some(snapshot)) => Ok(Some(snapshot)),
-            Ok(None) if self.history_query.is_some() => self
-                .read_history_inspection(id, deadline)
+        let history = async {
+            self.read_history_inspection(id, deadline)
                 .await
-                .map(|inspection| inspection.map(|inspection| inspection.snapshot)),
-            Err(error) if self.should_read_history(&error) => self
-                .read_history_inspection(id, deadline)
-                .await
-                .map(|inspection| inspection.map(|inspection| inspection.snapshot)),
-            Ok(None) => Ok(None),
-            Err(error) => Err(error),
-        }
+                .map(|inspection| inspection.map(|inspection| inspection.snapshot))
+        };
+        race_observation_with_history(runtime, history, self.history_query.is_some(), |snapshot| {
+            snapshot.status.is_terminal()
+        })
+        .await
     }
 
     async fn cancel(&self, id: &str) -> Result<SubagentCancelOutcome, SubagentObservationError> {

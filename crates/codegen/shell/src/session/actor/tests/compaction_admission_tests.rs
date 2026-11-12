@@ -384,7 +384,7 @@ fn async_generation_cancellation_at_ack(after_replacement: bool) {
 }
 
 #[test]
-fn suspension_retires_foreground_after_compaction_drains() {
+fn exit_suspension_retires_foreground_after_late_compaction_ack() {
     suspension_at_summary_ack(false);
 }
 
@@ -510,13 +510,13 @@ fn suspension_at_summary_ack(expire_first: bool) {
                 .await
                 .unwrap();
             assert!(actor.compaction.lease.is_in_flight());
-            let suspend = |actor: std::sync::Arc<SessionActor>, millis| async move {
+            let suspend = |actor: std::sync::Arc<SessionActor>, deadline| async move {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 actor
                     .request_node_suspension(
                         "suspend-compaction-op".into(),
                         actor.session_id_string(),
-                        tokio::time::Instant::now() + std::time::Duration::from_millis(millis),
+                        deadline,
                         tx,
                     )
                     .await;
@@ -524,7 +524,8 @@ fn suspension_at_summary_ack(expire_first: bool) {
             };
             let first = tokio::task::spawn_local(suspend(
                 actor.clone(),
-                if expire_first { 100 } else { 2000 },
+                expire_first
+                    .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(100)),
             ));
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 while !actor.compaction.cancel.is_cancelled() {
@@ -561,10 +562,18 @@ fn suspension_at_summary_ack(expire_first: bool) {
                     !turn.is_finished(),
                     "handle_prompt is parked for runtime handoff"
                 );
-                suspend(actor.clone(), 2000)
-                    .await
-                    .expect("same operation retry must finish");
+                suspend(
+                    actor.clone(),
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(2)),
+                )
+                .await
+                .expect("same operation retry must finish");
             } else {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(6)).await;
+                assert!(!first.is_finished(), "the same exit must still be waiting");
+                assert!(actor.compaction.lease.is_in_flight());
+                tokio::time::resume();
                 ack.send(Ok(())).unwrap();
                 first
                     .await

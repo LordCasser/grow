@@ -1,23 +1,14 @@
-//! Mid-turn interjection dispatch: optimistic local echo, the
+//! Mid-turn interjection dispatch:
 //! `grow/steer` effect, and prompt-history recording. Split out of
 //! `dispatch.rs` verbatim (pure code motion).
 
 use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;
 use crate::app::root::{ActiveView, AppView};
-use crate::scrollback::block::RenderBlock;
 
-/// Send a mid-turn interjection. Pushes a standard user prompt block locally
-/// for instant feedback, records the text in prompt history, clears the
-/// prompt, and fires the `grow/steer` ext method carrying a client-minted
-/// id.
-///
-/// The shell broadcasts `grow/session/interjection` to every attached pane so
-/// other clients viewing the same session render it too (multi-client /
-/// dashboard mode). Our own broadcast echoes back carrying the same id; the id
-/// is recorded in `self_interjection_ids` so `handle_interjection` drops the
-/// echo instead of rendering a duplicate. Other panes lack the id and render
-/// it. (Optimistic-echo + reconcile-by-id, mirroring the shared prompt queue.)
+/// Send a mid-turn interjection. Records the text in prompt history and fires
+/// `grow/steer`. The durable consumption broadcast supplies the transcript
+/// row to every attached pane.
 pub(super) fn dispatch_interject(
     app: &mut AppView,
     text: String,
@@ -59,25 +50,12 @@ pub(super) fn dispatch_interject_with_identity(
 
     record_interject_prompt_history(agent, &text);
 
-    // Push a standard user prompt block locally for instant feedback, and
-    // record its id so the broadcast echo (`grow/session/interjection`) is
-    // deduped instead of rendering a second copy on this pane.
     let interjection_id = requested_prompt_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if !agent.session.has_self_interjection(&interjection_id) {
-        agent
-            .session
-            .remember_self_interjection(interjection_id.clone());
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt(&text));
-    }
 
     // The composer is NOT touched here: the producer that consumed composer
     // text (the InterjectPrompt registry arm) clears it at the call site;
     // every other producer (Send now, edit-interject, plan review comments)
     // carries non-composer text and must keep the user's draft/stash.
-    agent.show_toast("Interjection sent");
-
     vec![Effect::SendInterject {
         agent_id: id,
         session_id,

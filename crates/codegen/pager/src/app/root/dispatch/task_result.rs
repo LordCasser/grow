@@ -2158,7 +2158,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             minimal_request_id,
         } => handle_btw_response(app, agent_id, result, minimal_request_id),
-        TaskResult::InterjectQueued { .. } => vec![],
+        TaskResult::InterjectQueued { agent_id } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.show_toast("Interjection sent");
+            }
+            vec![]
+        }
         TaskResult::RecapRequested {
             session_id,
             auto,

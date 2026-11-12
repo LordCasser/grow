@@ -1655,6 +1655,7 @@ mod tests {
             ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: "call-bg".into(),
                 content: "backgrounded, task_id=task-123".into(),
+                delivered_subagent_id: None,
                 images: vec![],
             }),
         ];

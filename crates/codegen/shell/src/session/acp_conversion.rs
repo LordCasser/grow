@@ -379,6 +379,12 @@ pub fn acp_tool_update(
                 .raw_output(raw_output_json(output, rewriter))
                 .title(Some(format!("Subagent status: {}", status.subagents.len()))),
         )),
+        ToolOutput::SubagentResult(_) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(raw_output_json(output, rewriter)),
+        )),
         ToolOutput::SubagentList(list) => Some(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from(tool_call_id)),
             acp::ToolCallUpdateFields::new()

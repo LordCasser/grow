@@ -293,7 +293,7 @@ Grow SHALL 指导 primary 在任务启动、结果返回、出现阻塞或关键
 
 #### Scenario: Multiple task wait is selected
 - **WHEN** 工具说明介绍多 subagent ID 配合等待预算
-- **THEN** 保持 wait-all 说明，并指导仅在下一步需要全部结果时使用该方式，不把它描述成 wait-any。
+- **THEN** 明确任一目标进入终态即返回，并要求按 subagent ID 分析该目标的状态与结果，及时推进其解锁的工作；仅在后续步骤仍依赖剩余目标时对剩余 ID 继续等待，不因同批尚未完成而推迟分析，也不把失败或取消当作成功验收。
 
 #### Scenario: Wait returns without a successful child result
 - **WHEN** 等待到期、被用户消息打断，或返回失败、取消、仍运行或观察未知
@@ -497,3 +497,11 @@ Peer inquiry success SHALL be admitted only when its actual serialized Inquiry r
 #### Scenario: JSON escaping exceeds the Peer result frame
 - **WHEN** a completed answer fits the notification byte limit but its actual JSON Inquiry response exceeds the IPC frame limit due to escaping or response overhead
 - **THEN** the Peer inquiry fails before success admission and creates no success proof or context receipt; the same answer may succeed through direct delegation when its own delivery limit fits.
+
+### Requirement: Model session discovery lists online primary peers
+
+主 Agent 的 `list_active_sessions` SHALL 只枚举同一 OS 用户和 GROW_HOME 下协调运行时可发现的其他在线 primary session。
+
+#### Scenario: Primary session discovery with default arguments
+- **WHEN** 主 Agent 调用 `list_active_sessions({})`
+- **THEN** 返回当前可发现的其他在线 primary session，不枚举磁盘历史或 child session。

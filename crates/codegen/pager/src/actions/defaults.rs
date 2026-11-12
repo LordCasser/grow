@@ -680,7 +680,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             hint_key_display: None,
             requires_confirmation: true,
             long_help: Some(
-                "Press Ctrl+D twice within one second to suspend owned session trees and exit.\nThe first press preserves drafts and running work. Repeated Quit during suspension joins the same request.\nIf saving is unconfirmed, choose retry or explicitly force quit. Ctrl+Q remains an alias outside VS Code.",
+                "Press Ctrl+D twice within one second to suspend owned session trees and exit.\nThe first press preserves drafts and running work. Repeated Quit during suspension joins the same request.\nSaving continues automatically. Press f to force quit at the risk of losing resume. If suspension fails, press r to retry. Ctrl+Q remains an alias outside VS Code.",
             ),
         },
         ActionDef {

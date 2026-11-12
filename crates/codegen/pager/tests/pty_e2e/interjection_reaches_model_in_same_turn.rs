@@ -9,6 +9,7 @@ use super::common::*;
 #[ignore]
 async fn interjection_reaches_model_in_same_turn() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
     content.seed_llm_config().expect("seed mock LLM config");
     // Gate turn 1's terminal event so the typed text + chord provably land
     // mid-turn regardless of suite load. Chunk delay widens the mid-stream

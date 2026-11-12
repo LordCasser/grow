@@ -266,6 +266,30 @@ impl SessionActor {
         }
     }
 
+    /// Commit the answer and retire its receipt at the same Timeline boundary.
+    pub(super) async fn commit_delivered_subagent_answer(
+        &self,
+        item: sampling_types::ConversationItem,
+        subagent_id: &str,
+    ) -> Result<(), chat_state::TimelineWriteError> {
+        let artifact_guard = self.notification_artifact_gate.lock().await;
+        let payloads = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?
+            .into_iter()
+            .filter(|receipt| matches!(&receipt.source,
+                chat_state::NotificationSource::SubagentCompleted { subagent_id: subject, .. }
+                if subject == subagent_id))
+            .map(|receipt| receipt.payload_ref)
+            .collect();
+        self.chat_state_handle.push_tool_result_durably(item).await?;
+        self.cleanup_notification_payloads_under_gate(&artifact_guard, payloads)
+            .await;
+        Ok(())
+    }
+
     /// Commit receipt consumption and reclaim its shell-owned payloads. The
     /// Timeline remains the sole delivery state; artifact deletion is a
     /// post-commit garbage-collection side effect.

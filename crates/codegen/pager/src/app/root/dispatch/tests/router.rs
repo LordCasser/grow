@@ -48,13 +48,11 @@ fn repeated_quit_coalesces_while_exit_suspension_is_pending() {
         [Effect::SuspendForExit { exit_id }] => exit_id.clone(),
         _ => panic!("expected a single suspension request, got {first:?}"),
     };
-    let deadline = app.exit_suspension.as_ref().unwrap().deadline;
 
     assert!(dispatch(Action::Quit, &mut app).is_empty());
 
     let pending = app.exit_suspension.as_ref().unwrap();
     assert_eq!(pending.exit_id, first_id);
-    assert_eq!(pending.deadline, deadline);
 }
 
 #[test]

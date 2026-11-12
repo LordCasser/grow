@@ -423,7 +423,6 @@ pub struct ExitSuspension {
     pub exit_id: String,
     pub phase: ExitSuspensionPhase,
     pub restart_for_update: bool,
-    pub deadline: Instant,
 }
 
 /// Root view component — owns all application state.
@@ -868,20 +867,25 @@ pub(crate) fn paint_exit_suspension_notice(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (tone, text) = match &suspension.phase {
-        ExitSuspensionPhase::Pending => (
-            crate::scrollback::blocks::NoticeTone::Info,
-            "Suspending session tree…".to_owned(),
-        ),
-        ExitSuspensionPhase::Unconfirmed { error } => (
-            crate::scrollback::blocks::NoticeTone::Error,
-            format!("Exit not confirmed: {error}"),
-        ),
-    };
-    let theme = crate::theme::Theme::current();
-    let (height, controls) = match &suspension.phase {
-        ExitSuspensionPhase::Pending => (1, None),
-        ExitSuspensionPhase::Unconfirmed { .. } => {
+    let (tone, text, controls) = match &suspension.phase {
+        ExitSuspensionPhase::Pending => {
+            let (text, controls): (&str, &[&str]) = match area.width {
+                42.. => (
+                    "Saving continues automatically",
+                    &["f force quit (recovery may be impossible)"],
+                ),
+                30..=41 => ("Saving… please wait", &["f force quit · recovery risk"]),
+                12..=29 => ("Saving…", &["f force quit", "Resume risk"]),
+                7..=11 => ("Saving…", &["f force", "Risk"]),
+                _ => ("Saving", &["f", "Risk"]),
+            };
+            (
+                crate::scrollback::blocks::NoticeTone::Info,
+                text.to_owned(),
+                controls,
+            )
+        }
+        ExitSuspensionPhase::Unconfirmed { error } => {
             let controls: &[&str] = if area.width >= 64 {
                 &["Ctrl+D twice/r retry · f force quit (may be unrecoverable)"]
             } else if area.width >= 22 {
@@ -891,10 +895,15 @@ pub(crate) fn paint_exit_suspension_notice(
             } else {
                 &["r/f"]
             };
-            (2 + controls.len() as u16, Some(controls))
+            (
+                crate::scrollback::blocks::NoticeTone::Error,
+                format!("Exit not confirmed: {error}"),
+                controls,
+            )
         }
     };
-    let height = height.min(area.height);
+    let theme = crate::theme::Theme::current();
+    let height = exit_suspension_notice_rows(suspension, area.width).min(area.height);
     let rect = ratatui::layout::Rect {
         x: area.x,
         y: area.bottom().saturating_sub(height),
@@ -905,40 +914,34 @@ pub(crate) fn paint_exit_suspension_notice(
     let style = ratatui::style::Style::default()
         .fg(tone.color(&theme))
         .bg(theme.bg_base);
-    if let Some(controls) = controls {
-        let control_rows = (controls.len() as u16).min(height);
-        let text_rows = height.saturating_sub(control_rows);
-        if text_rows > 0 {
-            let text_rect = ratatui::layout::Rect {
-                height: text_rows,
-                ..rect
-            };
-            Paragraph::new(text)
-                .style(style)
-                .wrap(Wrap { trim: true })
-                .render(text_rect, buf);
-        }
-        for (index, control) in controls.iter().take(control_rows as usize).enumerate() {
-            let control_rect = ratatui::layout::Rect {
-                y: rect.y + text_rows + index as u16,
-                height: 1,
-                ..rect
-            };
-            Paragraph::new(*control)
-                .style(style)
-                .render(control_rect, buf);
-        }
-    } else {
+    let control_rows = (controls.len() as u16).min(height);
+    let text_rows = height.saturating_sub(control_rows);
+    if text_rows > 0 {
+        let text_rect = ratatui::layout::Rect {
+            height: text_rows,
+            ..rect
+        };
         Paragraph::new(text)
             .style(style)
             .wrap(Wrap { trim: true })
-            .render(rect, buf);
+            .render(text_rect, buf);
+    }
+    for (index, control) in controls.iter().take(control_rows as usize).enumerate() {
+        let control_rect = ratatui::layout::Rect {
+            y: rect.y + text_rows + index as u16,
+            height: 1,
+            ..rect
+        };
+        Paragraph::new(*control)
+            .style(style)
+            .render(control_rect, buf);
     }
 }
 
 pub(crate) fn exit_suspension_notice_rows(suspension: &ExitSuspension, width: u16) -> u16 {
     match &suspension.phase {
-        ExitSuspensionPhase::Pending => 1,
+        ExitSuspensionPhase::Pending if width < 30 => 3,
+        ExitSuspensionPhase::Pending => 2,
         ExitSuspensionPhase::Unconfirmed { .. } if (7..22).contains(&width) => 4,
         ExitSuspensionPhase::Unconfirmed { .. } => 3,
     }
@@ -1932,9 +1935,10 @@ impl AppView {
         }
         if let Some(key) = key_event
             && let Some(exit) = self.exit_suspension.as_ref()
-            && matches!(&exit.phase, ExitSuspensionPhase::Unconfirmed { .. })
         {
-            if key!('r').matches(key) {
+            if matches!(&exit.phase, ExitSuspensionPhase::Unconfirmed { .. })
+                && key!('r').matches(key)
+            {
                 self.pending_action = None;
                 return InputOutcome::Action(Action::RetryExitSuspension);
             }
@@ -7220,7 +7224,6 @@ pub(crate) mod tests {
                     error: "deadline".into(),
                 },
                 restart_for_update: false,
-                deadline: Instant::now(),
             });
             assert!(matches!(app.handle_input(&ctrl_d()), InputOutcome::Changed));
             assert!(app.pending_action.is_some());
@@ -7249,7 +7252,6 @@ pub(crate) mod tests {
                     error: "writer failure: ".repeat(30),
                 },
                 restart_for_update: false,
-                deadline: Instant::now(),
             },
         );
 
@@ -7262,6 +7264,43 @@ pub(crate) mod tests {
         assert!(line(3).contains("r retry"));
         assert!(line(4).contains("f force"));
         assert!(line(1).contains("Exit not"));
+    }
+    #[test]
+    fn pending_exit_notice_offers_force_quit_with_recovery_warning() {
+        let area = ratatui::layout::Rect::new(0, 0, 64, 2);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        paint_exit_suspension_notice(
+            &mut buffer,
+            area,
+            &ExitSuspension {
+                exit_id: "exit".into(),
+                phase: ExitSuspensionPhase::Pending,
+                restart_for_update: false,
+            },
+        );
+        let line = |y| {
+            (0..area.width)
+                .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        assert!(line(0).contains("Saving continues automatically"));
+        assert!(line(1).contains("f force quit"));
+        assert!(line(1).contains("recovery may be impossible"));
+
+        let mut app = test_app_with_agent();
+        app.exit_suspension = Some(ExitSuspension {
+            exit_id: "exit".into(),
+            phase: ExitSuspensionPhase::Pending,
+            restart_for_update: false,
+        });
+        let InputOutcome::Action(action @ Action::ForceQuit) =
+            app.handle_input(&key_event(KeyCode::Char('f'), KeyModifiers::NONE))
+        else {
+            panic!("explicit force key must work during saving");
+        };
+        let effects = crate::app::root::dispatch::dispatch(action, &mut app);
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::Quit)));
     }
     #[test]
     fn app_draw_keeps_unconfirmed_exit_notice_in_every_fullscreen_view() {
@@ -7301,7 +7340,6 @@ pub(crate) mod tests {
                         error: error.to_owned(),
                     },
                     restart_for_update: false,
-                    deadline: Instant::now(),
                 });
             }
 

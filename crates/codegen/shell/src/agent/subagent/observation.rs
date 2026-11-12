@@ -3,6 +3,7 @@
 use super::*;
 use crate::extensions::session_admin::{BoundedSharedReadError, bounded_shared_read};
 use crate::session::storage::jsonl::JsonlStorageAdapter;
+use tool_types::SubagentListScope;
 
 pub(crate) fn backend(
     tx: mpsc::UnboundedSender<SubagentEvent>,
@@ -20,7 +21,7 @@ pub(crate) fn backend(
     .with_history_query(move |id| {
         inspect_history(source_session_id.clone(), source_state.clone(), id)
     })
-    .with_history_list(move || list_history(history_source.clone(), history_state.clone()))
+    .with_history_list(move |scope| list_history(history_source.clone(), history_state.clone(), scope))
     .with_history_status(move |ids| {
         read_source(
             status_source.clone(),
@@ -50,11 +51,14 @@ async fn inspect_history(
 async fn list_history(
     source_session_id: String,
     source_state: Option<chat_state::ChatStateHandle>,
+    scope: SubagentListScope,
 ) -> Result<Vec<tool_types::SubagentSummary>, SubagentObservationError> {
     read_source(
         source_session_id,
         source_state,
-        read_history_list_from_source,
+        move |storage, id, source, events| {
+            read_history_list_from_source(storage, id, source, events, scope)
+        },
     )
     .await
 }
@@ -79,9 +83,10 @@ where
     let events = match source_state {
         Some(state) => Some(
             state
-                .timeline_events()
+                .runtime_tree_snapshot()
                 .await
-                .ok_or(SubagentObservationError::Unavailable)?,
+                .map_err(|_| SubagentObservationError::Unavailable)?
+                .1,
         ),
         None => None,
     };
@@ -244,7 +249,10 @@ fn lifecycle_root(
         TimelineEventKind::SubagentSeed(seed) => Some(seed),
         _ => None,
     });
-    let root_id = seed.map_or(source_session_id, |seed| seed.parent_timeline_id.as_str());
+    let Some(seed) = seed else {
+        return Ok((source_session_id.to_owned(), None));
+    };
+    let root_id = seed.parent_timeline_id.as_str();
     if root_id == source_session_id {
         return Ok((root_id.to_owned(), None));
     }
@@ -257,7 +265,7 @@ fn lifecycle_root(
         .iter()
         .find_map(|event| match &event.kind {
             TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn))
-                if Some(event.seq.get()) == seed.map(|seed| seed.parent_spawn_seq) =>
+                if event.seq.get() == seed.parent_spawn_seq =>
             {
                 Some((event.seq, spawn))
             }
@@ -268,9 +276,8 @@ fn lifecycle_root(
         })?;
     validate_child_session_identity(&source, root_id, source_spawn.1)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    chat_state::Timeline::from_events(source_events.to_vec())
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
-        .validate_subagent_seed_link(root_id, source_spawn.0, source_spawn.1)
+    seed
+        .validate_spawn_link(root_id, source_spawn.0, source_spawn.1)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     Ok((root_id.to_owned(), Some(root)))
 }
@@ -316,6 +323,7 @@ fn read_history_list_from_source(
     source_session_id: &str,
     source: &crate::session::storage::jsonl::OpenedSession,
     source_events: &[chat_state::TimelineEvent],
+    scope: SubagentListScope,
 ) -> std::io::Result<Vec<tool_types::SubagentSummary>> {
     use chat_state::{SubagentEvent, SubagentOutcome, TimelineEventKind};
     use tool_types::{SubagentStatus, SubagentSummary};
@@ -349,7 +357,13 @@ fn read_history_list_from_source(
             error: Some("No current runtime observation or verified terminal".into()),
         };
         if let Some(terminal) = terminals.get(spawn.subagent_id.as_str()) {
-            match terminal_result(storage, &root_id, event.seq, spawn, terminal) {
+            // Active scope drops these rows after merging. The parent's Ended
+            // fact is enough to suppress a stale nonterminal runtime row.
+            let evidence = match scope {
+                SubagentListScope::Active => Ok(None),
+                SubagentListScope::All => terminal_result(storage, &root_id, event.seq, spawn, terminal),
+            };
+            match evidence {
                 Ok(_) => {
                     row.status = match terminal.outcome {
                         SubagentOutcome::Completed => SubagentStatus::Completed,
@@ -378,12 +392,14 @@ fn read_history_list_from_source(
 pub(super) fn read_history_list(
     storage: &JsonlStorageAdapter,
     source_id: &str,
+    scope: SubagentListScope,
 ) -> std::io::Result<Vec<tool_types::SubagentSummary>> {
     let source = storage
         .open_session_by_id_shared_read(source_id)?
         .expect("fixture source");
     let timeline = source.reference_timeline()?;
-    read_history_list_from_source(storage, source_id, &source, timeline.events())
+    let facts: Vec<_> = timeline.subagent_lifecycle_events().cloned().collect();
+    read_history_list_from_source(storage, source_id, &source, &facts, scope)
 }
 
 fn visible_spawn(spawn: &chat_state::SubagentSpawnEvent, root_id: &str, source_id: &str) -> bool {

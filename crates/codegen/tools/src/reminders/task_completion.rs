@@ -319,8 +319,15 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
                 ids.push(id);
             }
         }
+        ToolOutput::SubagentResult(result)
+            if result.status == tool_types::SubagentStatus::Completed
+                && result.output.is_some() =>
+        {
+            ids.push(result.subagent_id.as_str());
+        }
         ToolOutput::SubagentList(_)
         | ToolOutput::SubagentStatus(_)
+        | ToolOutput::SubagentResult(_)
         | ToolOutput::Bash(_)
         | ToolOutput::BackgroundTaskStarted(_)
         | ToolOutput::GrepSearch(_)
@@ -400,6 +407,31 @@ mod tests {
             consumed_completion_task_id: None,
         });
         assert_eq!(consumed_completion_ids(&output), vec!["subagent-1"]);
+    }
+
+    #[test]
+    fn subagent_result_acknowledges_only_a_completed_answer() {
+        use tool_types::{SubagentStatus, SubagentWaitResult};
+
+        let result = |status, output| {
+            ToolOutput::SubagentResult(SubagentWaitResult {
+                subagent_id: "child-1".into(),
+                status,
+                started_at_epoch_ms: Some(1),
+                duration_ms: Some(2),
+                output,
+                error: None,
+            })
+        };
+
+        let completed = result(SubagentStatus::Completed, Some("answer".into()));
+        assert_eq!(consumed_completion_ids(&completed), ["child-1"]);
+        let unavailable = result(SubagentStatus::OutputUnavailable, None);
+        assert!(consumed_completion_ids(&unavailable).is_empty());
+        let running = result(SubagentStatus::Running, None);
+        assert!(consumed_completion_ids(&running).is_empty());
+        let malformed_completed = result(SubagentStatus::Completed, None);
+        assert!(consumed_completion_ids(&malformed_completed).is_empty());
     }
 
     #[test]

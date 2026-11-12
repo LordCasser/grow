@@ -274,3 +274,15 @@ pub(crate) mod wire_tags;
 pub(crate) mod workflow;
 pub mod worktree;
 pub mod worktree_pool;
+
+// Interactive exit has no overall deadline. Explicitly bounded callers still
+// share their original absolute deadline across suspension stages.
+pub(crate) async fn wait_before<F: std::future::Future>(
+    deadline: Option<tokio::time::Instant>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future).await,
+        None => Ok(future.await),
+    }
+}

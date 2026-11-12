@@ -108,3 +108,8 @@ Workflow 测试的已记录 Unix 用户发现污染已闭合：共享 sandbox �
 - **MCP 多轮 elicitation（现有独立提案）**：宿主 SDK 接点仍未通过既定门槛，保留 [提案与任务](changes/add-mcp-multi-round-elicitation/tasks.md)，不把未实现功能列为本轮缺陷。
 
 - **ProcessScope supervisor 与 leader reap 的身份同步（待受控 PID/PGID 复用证据）**：terminal 已在最终组信号后、reap 前撤销自身强引用；全局 `kill_all` 若更早 upgrade Weak，仍有独立的跨线程收尾交错。先在可控制 PID 复用的隔离环境验证，不凭假设引入全局 owner/锁协议。范围和当前证明边界见[命令组审查](changes/archive/2026-11-04-finish-command-groups-before-leader-reap/review.md)。
+
+
+## 2026-11-12 子任务观察与 Tasks 恢复审查
+
+四项 P2 已修复。触发条件见[原审查](changes/archive/2026-11-12-wake-on-any-subagent-result/audit.md)，实现范围与测试见[修复验证](changes/archive/2026-11-12-close-observation-and-resume-gaps/verification.md)。

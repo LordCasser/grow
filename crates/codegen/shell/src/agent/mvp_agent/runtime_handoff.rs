@@ -1,5 +1,6 @@
 //! Physical session-tree handoff. No business cancellation is issued here.
 use super::*;
+use crate::session::wait_before;
 use chat_state::session_runtime::{RuntimeNodeRef, RuntimePhase, SessionRuntimeEvent};
 use tools::implementations::grow_build::task::types::{FrozenChildRef, SubagentEvent};
 
@@ -300,12 +301,9 @@ impl MvpAgent {
                 task_id,
                 &root_handle.chat_state_handle,
             );
-            let operation = match deadline {
-                Some(deadline) => tokio::time::timeout_at(deadline, operation)
-                    .await
-                    .map_err(|_| "child terminal verification exceeded suspension deadline")??,
-                None => operation.await?,
-            };
+            let operation = wait_before(deadline, operation)
+                .await
+                .map_err(|_| "child terminal verification exceeded suspension deadline")??;
             match operation {
                 crate::agent::subagent::DurableChildOperation::Completed(result)
                     if result.child_session_id == spawn.child_session_id =>
@@ -333,23 +331,16 @@ impl MvpAgent {
         root_handle: &SessionHandle,
         root_session_id: &str,
         task_id: &str,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, String> {
-        let events =
-            tokio::time::timeout_at(deadline, root_handle.chat_state_handle.timeline_events())
-                .await
-                .map_err(|_| "root Timeline query exceeded suspension deadline")?
-                .ok_or("root Timeline unavailable while reconciling child completion")?;
+        let events = wait_before(deadline, root_handle.chat_state_handle.timeline_events())
+            .await
+            .map_err(|_| "root Timeline query exceeded suspension deadline")?
+            .ok_or("root Timeline unavailable while reconciling child completion")?;
         let facts = CanonicalChildFacts::read(events)?;
         let candidates = std::collections::BTreeSet::from([task_id.to_owned()]);
         Ok(self
-            .verify_ended_children(
-                root_handle,
-                root_session_id,
-                &facts,
-                &candidates,
-                Some(deadline),
-            )
+            .verify_ended_children(root_handle, root_session_id, &facts, &candidates, deadline)
             .await?
             .contains(task_id))
     }
@@ -490,10 +481,10 @@ impl MvpAgent {
     pub(super) async fn runtime_state_before(
         &self,
         handle: &SessionHandle,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Option<tokio::time::Instant>>,
     ) -> Result<chat_state::session_runtime::RuntimeLifecycle, String> {
         // Root selection and retired-node checks need no event payload copies.
-        tokio::time::timeout_at(deadline, async {
+        wait_before(deadline.into(), async {
             if !handle.cmd_tx.is_closed() {
                 return handle.chat_state_handle.runtime_state().await;
             }
@@ -515,7 +506,7 @@ impl MvpAgent {
     async fn runtime_snapshot_before(
         &self,
         handle: &SessionHandle,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<
         (
             chat_state::session_runtime::RuntimeLifecycle,
@@ -523,7 +514,7 @@ impl MvpAgent {
         ),
         String,
     > {
-        tokio::time::timeout_at(deadline, self.runtime_snapshot(handle))
+        wait_before(deadline, self.runtime_snapshot(handle))
             .await
             .map_err(|_| "runtime snapshot exceeded suspension deadline".to_string())?
     }
@@ -567,9 +558,8 @@ impl MvpAgent {
             .borrow_mut()
             .insert(owner, (exit_id, response.clone()));
         let agent = LocalRef::new(self);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        // Register this owner with MvpAgent, not with the transport waiter.
-        // An RPC timeout cannot detach writer or sampler settlement ownership.
+        // Keep writer and sampler settlement owned by MvpAgent even if
+        // the transport disconnects while the operation is still running.
         self.spawn_owned_local(async move {
             let agent = agent.get();
             let roots = match scope {
@@ -586,14 +576,8 @@ impl MvpAgent {
             }
             let mut failure = None;
             for root in roots {
-                if tokio::time::Instant::now() >= deadline {
-                    failure = Some(
-                        "exit deadline elapsed; one or more roots remain unconfirmed".to_string(),
-                    );
-                    break;
-                }
                 let started = std::time::Instant::now();
-                if let Err(error) = agent.suspend_exit_root(&root, deadline).await {
+                if let Err(error) = agent.suspend_exit_root(&root).await {
                     tracing::warn!(root_session_id = %root, elapsed_ms = started.elapsed().as_millis() as u64, %error, "session tree suspension remains unconfirmed");
                     failure = Some(error);
                     break;
@@ -794,7 +778,7 @@ impl MvpAgent {
         self.freeze_tree_admission(
             root,
             &operation_id,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(5)),
         )
         .await?;
         let (respond_to, response) = oneshot::channel();
@@ -1018,7 +1002,7 @@ impl MvpAgent {
         &self,
         root: &acp::SessionId,
         operation_id: &str,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Vec<FrozenChildRef>, String> {
         let (respond_to, response) = oneshot::channel();
         self.subagent_event_tx
@@ -1028,12 +1012,13 @@ impl MvpAgent {
                 respond_to,
             })
             .map_err(|_| "child coordinator is unavailable".to_string())?;
-        tokio::time::timeout_at(deadline, response)
+        wait_before(deadline, response)
             .await
             .map_err(|_| "child admission freeze is not confirmed".to_string())?
             .map_err(|_| "child admission freeze acknowledgement was lost".to_string())?
     }
 
+    #[cfg(test)]
     pub(super) async fn suspend_session_tree(
         &self,
         requested: &acp::SessionId,
@@ -1052,29 +1037,21 @@ impl MvpAgent {
                 .unwrap_or(&requested.0)
                 .to_owned(),
         );
-        let _owner = tokio::time::timeout_at(deadline, self.lock_session_lifecycle(&root))
+        let _owner = wait_before(Some(deadline), self.lock_session_lifecycle(&root))
             .await
             .map_err(|_| "session lifecycle ownership is not confirmed".to_string())?;
-        self.suspend_root_tree_locked(&root, deadline).await
+        self.suspend_root_tree_locked(&root, Some(deadline)).await
     }
 
-    async fn suspend_exit_root(
-        &self,
-        root: &acp::SessionId,
-        deadline: tokio::time::Instant,
-    ) -> Result<(), String> {
-        let _owner = tokio::time::timeout_at(deadline, self.lock_session_lifecycle(root))
-            .await
-            .map_err(|_| "session lifecycle ownership is not confirmed".to_string())?;
+    async fn suspend_exit_root(&self, root: &acp::SessionId) -> Result<(), String> {
+        let _owner = self.lock_session_lifecycle(root).await;
         if self.control_session_handle(root).is_some() {
-            self.suspend_root_tree_locked(root, deadline).await?;
+            self.suspend_root_tree_locked(root, None).await?;
         } else {
             // Explicit close may already have removed the actor while retaining
             // its writer. The same lifecycle guard must prove drain completion.
             let draining = self.session_threads.borrow().contains_key(root);
-            let exit = tokio::time::timeout_at(deadline, self.drain_old_session_thread(root))
-                .await
-                .map_err(|_| "closing session writer is still retiring".to_string())??;
+            let exit = self.drain_old_session_thread_before(root, None).await?;
             if draining {
                 let state = if exit == SessionThreadExit::Panicked {
                     SessionLiveState::DeadFailed
@@ -1090,7 +1067,7 @@ impl MvpAgent {
     async fn suspend_root_tree_locked(
         &self,
         root: &acp::SessionId,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(String, Vec<RuntimeNodeRef>), String> {
         let started = std::time::Instant::now();
         let root = root.clone();
@@ -1141,7 +1118,7 @@ impl MvpAgent {
             }
             // Already-admitted initializers still own their write-ahead Spawn.
             // Their Started ACK closes the child gate before its first prompt.
-            tokio::time::timeout_at(
+            wait_before(
                 deadline,
                 tokio::time::sleep(std::time::Duration::from_millis(20)),
             )
@@ -1163,7 +1140,7 @@ impl MvpAgent {
                 root.0.as_ref(),
                 &canonical,
                 &terminal_candidates,
-                Some(deadline),
+                deadline,
             )
             .await?;
         let open = canonical
@@ -1287,7 +1264,7 @@ impl MvpAgent {
                 }
                 return Err(format!("runtime {sid} closed before checkpoint: {error}"));
             }
-            let node = match tokio::time::timeout_at(deadline, response).await {
+            let node = match wait_before(deadline, response).await {
                 Ok(Ok(Ok(node))) => node,
                 response_result => {
                     let failure = match response_result {
@@ -1330,7 +1307,7 @@ impl MvpAgent {
                 .map_err(|_| {
                     "saved runtime closed before retirement acknowledgement".to_string()
                 })?;
-            tokio::time::timeout_at(deadline, response)
+            wait_before(deadline, response)
                 .await
                 .map_err(|_| "tree saved; runtime retirement remains unconfirmed".to_string())?
                 .map_err(|_| {
@@ -1347,14 +1324,14 @@ impl MvpAgent {
                     respond_to,
                 })
                 .map_err(|_| "child retirement owner is unavailable".to_string())?;
-            let child_retired = tokio::time::timeout_at(deadline, response)
+            let child_retired = wait_before(deadline, response)
                 .await
                 .map_err(|_| "child writer retirement remains unconfirmed".to_string())?
                 .map_err(|_| "child writer retirement acknowledgement was lost".to_string())??;
             if child_retired {
                 break;
             }
-            tokio::time::timeout_at(
+            wait_before(
                 deadline,
                 tokio::time::sleep(std::time::Duration::from_millis(20)),
             )
@@ -1374,7 +1351,7 @@ impl MvpAgent {
                 root.0.as_ref(),
                 &latest_facts,
                 &coordinator_task_ids,
-                Some(deadline),
+                deadline,
             )
             .await?;
         let latest_open = latest_facts
@@ -1425,26 +1402,27 @@ impl MvpAgent {
                     respond_to,
                 })
                 .map_err(|_| "saved root runtime closed before retirement acknowledgement")?;
-            tokio::time::timeout_at(deadline, response)
+            wait_before(deadline, response)
                 .await
                 .map_err(|_| "tree saved; root runtime retirement remains unconfirmed")?
                 .map_err(|_| "tree saved; root runtime retirement acknowledgement was lost")??;
         }
+        let root_thread = self
+            .session_threads
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or("tree saved; original root writer is unavailable")?;
         loop {
-            let root_thread = self.session_threads.borrow().get(&root).cloned();
-            if root_thread
-                .as_ref()
-                .is_some_and(crate::session::SessionThread::is_finished)
-            {
+            if root_thread.is_finished() {
                 root_thread
-                    .expect("checked root writer")
                     .join()
                     .map_err(|_| "tree saved; original root writer panicked".to_string())?;
                 self.session_threads.borrow_mut().remove(&root);
                 self.take_session(&root);
                 return Ok((operation_id, nodes));
             }
-            tokio::time::timeout_at(
+            wait_before(
                 deadline,
                 tokio::time::sleep(std::time::Duration::from_millis(20)),
             )
@@ -1640,12 +1618,12 @@ context_window = 128000
             let elapsed = started.elapsed();
             let result: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
             println!(
-                "exit_history result={result} elapsed_ms={} deadline_ms=5000",
+                "exit_history result={result} elapsed_ms={} former_deadline_ms=5000",
                 elapsed.as_millis()
             );
             assert_eq!(
                 result["status"], "suspended",
-                "actual five-second exit remained unconfirmed: {result}"
+                "actual long-history exit remained unconfirmed: {result}"
             );
             assert!(
                 agent.control_session_handle(&sid).is_none(),
@@ -1940,7 +1918,7 @@ context_window = 128000
     }
 
     #[test]
-    #[ignore = "real complex canonical history load and five-second ACP exit"]
+    #[ignore = "real complex canonical history load and ACP exit"]
     fn complex_history_exit_through_acp() {
         const TEST: &str =
             "agent::mvp_agent::runtime_handoff::tests::complex_history_exit_through_acp";
@@ -2124,7 +2102,7 @@ context_window = 128000
                 .unwrap();
             let result: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
             println!(
-                "complex_exit actual_acp_result={result} elapsed_ms={} deadline_ms=5000",
+                "complex_exit actual_acp_result={result} elapsed_ms={} former_deadline_ms=5000",
                 started.elapsed().as_millis()
             );
             assert_eq!(
@@ -2260,7 +2238,7 @@ context_window = 128000
             let new_started = std::time::Instant::now();
             let new_deadline = tokio::time::Instant::now() + budget;
             let (new_runtime, new) = agent
-                .runtime_snapshot_before(&handle, new_deadline)
+                .runtime_snapshot_before(&handle, Some(new_deadline))
                 .await
                 .unwrap();
             let new_elapsed = new_started.elapsed();

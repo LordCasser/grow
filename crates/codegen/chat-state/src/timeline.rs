@@ -835,6 +835,28 @@ pub struct SubagentSeedEvent {
     pub normalized: bool,
 }
 
+impl SubagentSeedEvent {
+    /// Verify this admitted child seed against the exact parent spawn.
+    pub fn validate_spawn_link(
+        &self,
+        parent_timeline_id: &str,
+        parent_spawn_seq: EventSeq,
+        spawn: &SubagentSpawnEvent,
+    ) -> Result<(), TimelineError> {
+        if self.parent_timeline_id != parent_timeline_id
+            || self.parent_spawn_seq != parent_spawn_seq.get()
+            || self.subagent_id != spawn.subagent_id
+            || self.security_parent_session_id != spawn.security_parent_session_id
+            || self.context_source != spawn.context_source
+            || self.source_ref != spawn.source_ref
+            || self.normalized != spawn.context_normalized
+        {
+            return Err(TimelineError::InvalidSubagentSeedLink);
+        }
+        Ok(())
+    }
+}
+
 /// Terminal fact owned by the child entity. The parent closes its spawn only
 /// by referencing this exact event; result content lives in an immutable
 /// content-addressed artifact referenced by `output_ref`.
@@ -1869,6 +1891,7 @@ pub struct Timeline {
     runtime: crate::session_runtime::RuntimeLifecycle,
     planning: Option<PlanningSnapshot>,
     events: Vec<TimelineEvent>,
+    subagent_lifecycle_positions: Vec<usize>,
     last_rewind_seq: Option<EventSeq>,
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
@@ -1885,6 +1908,7 @@ pub struct Timeline {
     terminal_monitors: BTreeSet<String>,
     terminal_tasks: BTreeSet<String>,
     subagent_result_recorded: bool,
+    delivered_subagent_answers: BTreeMap<String, TurnId>,
     lifecycle: LifecycleFold,
     latest_completed_attempts: HashMap<String, u32>,
     response_admission_identities: HashSet<ResponseAdmissionIdentity>,
@@ -2210,6 +2234,13 @@ impl Timeline {
         Ok(timeline)
     }
 
+    /// Original lifecycle facts in ledger order, without traversing conversation events.
+    pub fn subagent_lifecycle_events(&self) -> impl Iterator<Item = &TimelineEvent> {
+        self.subagent_lifecycle_positions
+            .iter()
+            .map(|&position| &self.events[position])
+    }
+
     pub fn events(&self) -> &[TimelineEvent] {
         &self.events
     }
@@ -2457,6 +2488,12 @@ impl Timeline {
                 }) if notification_ids.contains(id) => Some(*turn),
                 _ => None,
             })
+            .or_else(|| match source {
+                NotificationSource::SubagentCompleted { subagent_id, .. } => {
+                    self.delivered_subagent_answers.get(subagent_id).copied()
+                }
+                _ => None,
+            })
     }
 
     pub(crate) fn received_notification_event(
@@ -2622,24 +2659,14 @@ impl Timeline {
         parent_spawn_seq: EventSeq,
         spawn: &SubagentSpawnEvent,
     ) -> Result<(), TimelineError> {
-        let seed = self.events.iter().find_map(|event| match &event.kind {
+        let seed = self.subagent_lifecycle_events().find_map(|event| match &event.kind {
             TimelineEventKind::SubagentSeed(seed) => Some(seed),
             _ => None,
         });
         let Some(seed) = seed else {
             return Err(TimelineError::MissingSubagentSeed);
         };
-        if seed.parent_timeline_id != parent_timeline_id
-            || seed.parent_spawn_seq != parent_spawn_seq.get()
-            || seed.subagent_id != spawn.subagent_id
-            || seed.security_parent_session_id != spawn.security_parent_session_id
-            || seed.context_source != spawn.context_source
-            || seed.source_ref != spawn.source_ref
-            || seed.normalized != spawn.context_normalized
-        {
-            return Err(TimelineError::InvalidSubagentSeedLink);
-        }
-        Ok(())
+        seed.validate_spawn_link(parent_timeline_id, parent_spawn_seq, spawn)
     }
 
     /// Resolve and validate the child result referenced by a parent terminal.
@@ -3790,8 +3817,8 @@ impl Timeline {
         let lifecycle = self.validate(&event)?;
         let active_turn = self.lifecycle.active_turn.is_some();
         let active_step = self.lifecycle.active_step.is_some();
-        self.apply_validated_event(event, active_turn, active_step);
         self.lifecycle = lifecycle;
+        self.apply_validated_event(event, active_turn, active_step);
         Ok(())
     }
 
@@ -4021,6 +4048,12 @@ impl Timeline {
         ) {
             self.last_rewind_seq = Some(event.seq);
         }
+        if matches!(
+            &event.kind,
+            TimelineEventKind::Subagent(_) | TimelineEventKind::SubagentSeed(_)
+        ) {
+            self.subagent_lifecycle_positions.push(self.events.len());
+        }
         self.events.push(event);
     }
 
@@ -4099,6 +4132,11 @@ impl Timeline {
                             return;
                         }
                         self.pending_notifications.insert(id.clone(), notification);
+                    }
+                    NotificationSource::SubagentCompleted { subagent_id, .. }
+                        if self.delivered_subagent_answers.contains_key(subagent_id) =>
+                    {
+                        self.lifecycle.pending_notifications.remove(id);
                     }
                     NotificationSource::ParentMessage { .. }
                     | NotificationSource::PlanGuidance { .. }
@@ -4727,8 +4765,7 @@ impl Timeline {
         }
         if let TimelineEventKind::SubagentSeed(seed) = &event.kind {
             let already_seeded = self
-                .events
-                .iter()
+                .subagent_lifecycle_events()
                 .any(|event| matches!(event.kind, TimelineEventKind::SubagentSeed(_)));
             if already_seeded {
                 return Err(TimelineError::DuplicateSubagentSeed);
@@ -4744,7 +4781,7 @@ impl Timeline {
             }
         }
         if let TimelineEventKind::SubagentResult(result) = &event.kind {
-            let seed = self.events.iter().find_map(|event| match &event.kind {
+            let seed = self.subagent_lifecycle_events().find_map(|event| match &event.kind {
                 TimelineEventKind::SubagentSeed(seed) => Some(seed),
                 _ => None,
             });
@@ -5505,6 +5542,35 @@ impl Timeline {
     }
 
     fn apply_messages(&mut self, event_seq: EventSeq, messages: &MessageEvent) {
+        if messages.cause == MessageCause::ToolResult
+            && matches!(messages.surface, SurfaceOp::Append)
+            && let Some(turn) = self.lifecycle.active_turn
+        {
+            for item in &messages.items {
+                let ConversationItem::ToolResult(result) = item else {
+                    continue;
+                };
+                let Some(subagent_id) = &result.delivered_subagent_id else {
+                    continue;
+                };
+                if let std::collections::btree_map::Entry::Vacant(delivery) =
+                    self.delivered_subagent_answers.entry(subagent_id.clone())
+                {
+                    delivery.insert(turn);
+                    let pending_lifecycle = &mut self.lifecycle.pending_notifications;
+                    self.pending_notifications.retain(|id, receipt| {
+                        if matches!(&receipt.source, NotificationSource::SubagentCompleted {
+                            subagent_id: subject, ..
+                        } if subject == subagent_id) {
+                            pending_lifecycle.remove(id);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+            }
+        }
         let item_count = u32::try_from(messages.items.len())
             .expect("message item capacity was checked during validation");
         match &messages.surface {

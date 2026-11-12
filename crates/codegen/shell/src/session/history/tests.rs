@@ -828,3 +828,173 @@ fn writer_counter_floor_covers_derived_receipts_and_hidden_physical_positions() 
         "a stored identity above the physical cut remains reserved"
     );
 }
+
+#[test]
+fn history_restores_distinct_command_terminals_across_suspensions() {
+    use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+    use chat_state::session_runtime::{
+        CommandSettlementStatus, RuntimeCheckpoint, RuntimeCommandSettlement, SessionRuntimeEvent,
+    };
+    use std::time::{Duration, SystemTime};
+
+    fn record(
+        history: &mut HistorySnapshot,
+        timeline: &mut chat_state::Timeline,
+        event: SessionRuntimeEvent,
+    ) -> chat_state::TimelineEvent {
+        let event = timeline
+            .record(chat_state::TimelineEventKind::Runtime(event))
+            .unwrap();
+        history.sources.push(HistorySource::Domain {
+            event: event.seq.get(),
+            response_anchor: None,
+        });
+        event
+    }
+
+    let session = acp::SessionId::new("command-history");
+    let mut history = HistorySnapshot::default();
+    let mut timeline = chat_state::Timeline::default();
+    let mut settlement_times = Vec::new();
+    for (index, id) in ["first-task", "second-task"].into_iter().enumerate() {
+        let call_id = format!("call-{id}");
+        let operation_id = format!("operation-{id}");
+        let start = SessionUpdate::Grow(Box::new(SessionNotification {
+            session_id: session.clone(),
+            update: GrowUpdate::TaskBackgrounded {
+                task_id: id.into(),
+                tool_call_id: call_id.clone(),
+                command: "sleep 120".into(),
+                cwd: "/workspace".into(),
+                output_file: "/tmp/command.log".into(),
+                monitor_description: None,
+                description: Some("same task label".into()),
+            },
+            meta: None,
+        }));
+        history.sources.push(HistorySource::Presentation {
+            at_ms: if index == 0 { 60_000 } else { 1_001 },
+            fact: Box::new(HistoryFact::from_update(&start).unwrap().unwrap()),
+        });
+        record(
+            &mut history,
+            &mut timeline,
+            SessionRuntimeEvent::SuspendRequested {
+                operation_id: operation_id.clone(),
+                root_session_id: session.0.to_string(),
+            },
+        );
+        let settled = record(
+            &mut history,
+            &mut timeline,
+            SessionRuntimeEvent::CommandsSettled {
+                operation_id: operation_id.clone(),
+                commands: vec![RuntimeCommandSettlement {
+                    command_id: id.into(),
+                    call_id,
+                    outcome: CommandSettlementStatus::Interrupted,
+                    output_file: "/tmp/command.log".into(),
+                    exit_code: None,
+                    signal: Some("signal 9".into()),
+                    output: "private task output".into(),
+                    is_backgrounded: true,
+                    owner: chat_state::NotificationOwner::Session,
+                    task_kind: chat_state::NotificationTaskKind::Task,
+                    start_time: (index == 0)
+                        .then_some(SystemTime::UNIX_EPOCH),
+                    end_time: (index == 0)
+                        .then_some(SystemTime::UNIX_EPOCH + Duration::from_millis(70_000)),
+                }],
+            },
+        );
+        settlement_times.push(settled.at_ms);
+        record(
+            &mut history,
+            &mut timeline,
+            SessionRuntimeEvent::Checkpoint {
+                operation_id: operation_id.clone(),
+                checkpoint: Box::new(RuntimeCheckpoint {
+                    frontier: settled.seq,
+                    runtime_source_hash: "b".repeat(64),
+                    turn: None,
+                    step: None,
+                }),
+            },
+        );
+        for event in [
+            SessionRuntimeEvent::RestorePrepared {
+                operation_id: operation_id.clone(),
+                instance_id: "instance".into(),
+            },
+            SessionRuntimeEvent::Resumed {
+                operation_id: operation_id.clone(),
+                instance_id: "instance".into(),
+            },
+            SessionRuntimeEvent::ExecutionReleased {
+                operation_id,
+                instance_id: "instance".into(),
+            },
+        ] {
+            record(&mut history, &mut timeline, event);
+        }
+    }
+
+    let prepared = history.prepare(&session, &timeline, None).unwrap();
+    assert_eq!(prepared.updates.len(), 4);
+    for (index, id) in ["first-task", "second-task"].into_iter().enumerate() {
+        let SessionUpdate::Grow(completion) = &prepared.updates[index * 2 + 1] else {
+            panic!("expected Grow completion");
+        };
+        let GrowUpdate::TaskCompleted { task_snapshot } = &completion.update else {
+            panic!("expected task completion");
+        };
+        assert_eq!(task_snapshot.task_id, id);
+        assert_eq!(task_snapshot.signal.as_deref(), Some("signal 9"));
+        if index == 0 {
+            assert_eq!(task_snapshot.start_time, SystemTime::UNIX_EPOCH);
+            assert_eq!(
+                task_snapshot.end_time,
+                Some(SystemTime::UNIX_EPOCH + Duration::from_millis(70_000))
+            );
+            assert_eq!(task_snapshot.duration_secs(), 70.0);
+        } else {
+            assert_eq!(
+                task_snapshot.start_time,
+                SystemTime::UNIX_EPOCH + Duration::from_millis(1_001)
+            );
+            assert_eq!(
+                task_snapshot.end_time,
+                Some(SystemTime::UNIX_EPOCH + Duration::from_millis(settlement_times[index] as u64))
+            );
+        }
+        assert!(task_snapshot.completed);
+        assert!(task_snapshot.output.is_empty());
+    }
+    let first_completion = &prepared.updates[1];
+    let SessionUpdate::Grow(first) = first_completion else {
+        unreachable!()
+    };
+    let cursor = first.meta.as_ref().unwrap()[super::HISTORY_CURSOR_KEY]
+        .as_str()
+        .unwrap();
+    let tail = history.prepare(&session, &timeline, Some(cursor)).unwrap();
+    assert!(!tail.mark_replay);
+    assert_eq!(tail.updates.len(), 2);
+
+    let mut ordinary = first.as_ref().clone();
+    ordinary.meta = None;
+    history.sources.push(HistorySource::Presentation {
+        at_ms: settlement_times[0],
+        fact: Box::new(
+            HistoryFact::from_update(&SessionUpdate::Grow(Box::new(ordinary)))
+                .unwrap()
+                .unwrap(),
+        ),
+    });
+    let prepared = history.prepare(&session, &timeline, None).unwrap();
+    assert_eq!(
+        prepared.updates.len(),
+        4,
+        "existing completion must be emitted once"
+    );
+}

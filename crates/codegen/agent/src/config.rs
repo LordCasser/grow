@@ -105,10 +105,11 @@ fn task_tool_config() -> ToolConfig {
 fn command_output_tool_config() -> ToolConfig {
     ToolConfig::from(&grow_build::GetCommandOutputTool)
 }
-fn subagent_tools() -> [ToolConfig; 3] {
+fn subagent_tools() -> [ToolConfig; 4] {
     [
         (&grow_build::ListSubagentTool).into(),
         (&grow_build::GetSubagentStatusTool).into(),
+        (&grow_build::GetSubagentResultTool).into(),
         (&grow_build::WaitSubagentTool).into(),
     ]
 }
@@ -1549,6 +1550,7 @@ mod tests {
             )
         );
         assert!(!ids.contains(ToolConfig::from(&grow_build::WaitSubagentTool).id.as_str()));
+        assert!(!ids.contains(ToolConfig::from(&grow_build::GetSubagentResultTool).id.as_str()));
         assert!(!ids.contains(ToolConfig::from(&grow_build::KillTaskTool).id.as_str()));
         assert!(!ids.contains(ToolConfig::from(&grow_build::TaskTool).id.as_str()));
         for t in &gc.tools {
@@ -1565,6 +1567,7 @@ mod tests {
         let subagent_tools = [
             ToolConfig::from(&grow_build::ListSubagentTool).id,
             ToolConfig::from(&grow_build::GetSubagentStatusTool).id,
+            ToolConfig::from(&grow_build::GetSubagentResultTool).id,
             ToolConfig::from(&grow_build::WaitSubagentTool).id,
         ];
         for preset in ["grow-build", "grow-build-concise"] {

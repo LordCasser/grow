@@ -3,6 +3,7 @@ use crate::implementations::grow_build::task::{
     backend::SubagentBackend,
     types::{SubagentObservationError, SubagentSnapshot, SubagentSnapshotStatus},
 };
+use futures::{StreamExt, stream::FuturesUnordered};
 use tool_types::{
     SubagentStatus, SubagentWaitReason, SubagentWaitResult, WaitSubagentInput, WaitSubagentOutput,
 };
@@ -17,7 +18,7 @@ impl ToolMetadata for WaitSubagentTool {
         ToolNamespace::Grow
     }
     fn description_template(&self) -> &str {
-        "Wait for known subagents and retrieve their final results. Pass one or more subagent_ids. timeout_ms is a positive total call budget (default 30000, capped at {max_wait_ms}). Already finished children return immediately. Returns actual waited_ms, an end reason and every child's observed status; reaching the deadline or an observation error does not mean completion. Suspended or finalizing children remain unfinished. Interruption stops waiting without cancelling children. ${%- if tools.by_kind.subagent_list %} Use ${{ tools.by_kind.subagent_list }} to discover IDs.${%- endif %}${%- if tools.by_kind.subagent_status %} Use ${{ tools.by_kind.subagent_status }} for non-blocking details.${%- endif %} Does not inspect command tasks."
+        "Wait until any selected subagent reaches a terminal state and retrieve its result. Pass one or more subagent_ids. timeout_ms is a positive total call budget (default 30000, capped at {max_wait_ms}). An already finished child returns immediately even while others run. A terminal result uses reason=any_finished. Every return includes actual waited_ms and every selected ID with its latest observed state; unobserved siblings are observation_interrupted. Analyze each returned terminal child's status and result before waiting again on remaining dependencies. Failed or cancelled children also end the wait; reaching the deadline or an observation error does not mean completion. Suspended or finalizing children remain unfinished. Ending the wait does not cancel other children or consume their completion notifications. ${%- if tools.by_kind.subagent_list %} Use ${{ tools.by_kind.subagent_list }} to discover IDs.${%- endif %}${%- if tools.by_kind.subagent_status %} Use ${{ tools.by_kind.subagent_status }} for non-blocking details.${%- endif %} Does not inspect command tasks."
     }
 }
 impl tool_runtime::Tool for WaitSubagentTool {
@@ -70,11 +71,7 @@ impl tool_runtime::Tool for WaitSubagentTool {
                 ));
             }
         };
-        let subagents = futures::future::join_all(
-            ids.into_iter()
-                .map(|id| wait_one(backend.backend(), id, deadline)),
-        )
-        .await;
+        let subagents = wait_for_any(backend.backend(), ids, deadline).await;
         Ok(finish(
             start,
             subagents,
@@ -82,13 +79,51 @@ impl tool_runtime::Tool for WaitSubagentTool {
         ))
     }
 }
+
+async fn wait_for_any(
+    backend: &dyn SubagentBackend,
+    ids: Vec<String>,
+    deadline: tokio::time::Instant,
+) -> Vec<SubagentWaitResult> {
+    let mut observations = vec![None; ids.len()];
+    let mut waits = ids
+        .iter()
+        .zip(&mut observations)
+        .map(|(id, observation)| async move {
+            let row = wait_one(backend, id.clone(), deadline, observation).await;
+            let terminal = row.status.is_terminal();
+            *observation = Some(row);
+            terminal
+        })
+        .collect::<FuturesUnordered<_>>();
+    while let Some(terminal) = waits.next().await {
+        if terminal {
+            break;
+        }
+    }
+    // Drop only the remaining observations; the backend still owns child execution.
+    drop(waits);
+    ids.into_iter()
+        .zip(observations)
+        .map(|(id, observation)| {
+            observation.unwrap_or_else(|| {
+                SubagentWaitResult::unknown(
+                    id,
+                    SubagentStatus::ObservationInterrupted,
+                    "Observation stopped because another subagent reached a terminal state; this child's execution state is unconfirmed.".into(),
+                )
+            })
+        })
+        .collect()
+}
+
 fn finish(
     start: tokio::time::Instant,
     subagents: Vec<SubagentWaitResult>,
     deadline_elapsed: bool,
 ) -> WaitSubagentOutput {
-    let reason = if subagents.iter().all(|row| row.status.is_terminal()) {
-        SubagentWaitReason::AllFinished
+    let reason = if subagents.iter().any(|row| row.status.is_terminal()) {
+        SubagentWaitReason::AnyFinished
     } else if deadline_elapsed {
         SubagentWaitReason::DeadlineElapsed
     } else {
@@ -104,12 +139,14 @@ async fn wait_one(
     backend: &dyn SubagentBackend,
     id: String,
     deadline: tokio::time::Instant,
+    last: &mut Option<SubagentWaitResult>,
 ) -> SubagentWaitResult {
-    let mut last = None;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return last.unwrap_or_else(|| wait_error(id, SubagentObservationError::TimedOut));
+            return last
+                .take()
+                .unwrap_or_else(|| wait_error(id, SubagentObservationError::TimedOut));
         }
         let timeout_ms = remaining.as_millis().max(1) as u64;
         match tokio::time::timeout_at(deadline, backend.query(&id, true, Some(timeout_ms))).await {
@@ -118,19 +155,21 @@ async fn wait_one(
                 if row.status.is_terminal() {
                     return row;
                 }
-                last = Some(row);
+                *last = Some(row);
                 // The backend's bounded segment can expire before the call's budget.
                 // Continue all nonterminal phases under the original deadline.
             }
             Ok(Ok(None)) => return wait_error(id, SubagentObservationError::Unavailable),
             Ok(Err(error)) => return wait_error(id, error),
             Err(_) => {
-                return last.unwrap_or_else(|| wait_error(id, SubagentObservationError::TimedOut));
+                return last
+                    .take()
+                    .unwrap_or_else(|| wait_error(id, SubagentObservationError::TimedOut));
             }
         }
     }
 }
-fn wait_error(id: String, error: SubagentObservationError) -> SubagentWaitResult {
+pub(super) fn wait_error(id: String, error: SubagentObservationError) -> SubagentWaitResult {
     let status = match error {
         SubagentObservationError::Unavailable => SubagentStatus::ObservationUnavailable,
         SubagentObservationError::TimedOut => SubagentStatus::ObservationTimedOut,
@@ -139,7 +178,7 @@ fn wait_error(id: String, error: SubagentObservationError) -> SubagentWaitResult
     };
     SubagentWaitResult::unknown(id, status, error.to_string())
 }
-fn from_snapshot(snapshot: SubagentSnapshot) -> SubagentWaitResult {
+pub(super) fn from_snapshot(snapshot: SubagentSnapshot) -> SubagentWaitResult {
     use SubagentSnapshotStatus::*;
     let (status, output, error) = match snapshot.status {
         Initializing => (SubagentStatus::Initializing, None, None),

@@ -402,10 +402,7 @@ impl ChatStateActor {
                             },
                         );
                         match self.state.timeline.prepare(kind) {
-                            Ok(event) => {
-                                self.commit_timeline_event_before(event, Some(deadline))
-                                    .await
-                            }
+                            Ok(event) => self.commit_timeline_event_before(event, deadline).await,
                             Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
                         }
                     }
@@ -435,15 +432,14 @@ impl ChatStateActor {
                             let mut committed = Vec::with_capacity(events.len());
                             let mut failure = None;
                             for event in events {
-                                if tokio::time::Instant::now() >= deadline {
+                                if deadline
+                                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                                {
                                     failure =
                                         Some(crate::commands::TimelineWriteError::DeadlineExceeded);
                                     break;
                                 }
-                                match self
-                                    .commit_timeline_event_before(event, Some(deadline))
-                                    .await
-                                {
+                                match self.commit_timeline_event_before(event, deadline).await {
                                     Ok(event) => committed.push(event),
                                     Err(error) => {
                                         failure = Some(error);
@@ -1114,19 +1110,7 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetRuntimeTreeSnapshot { reply } => {
                 let timeline = &self.state.timeline;
-                let events = timeline
-                    .events()
-                    .iter()
-                    .filter(|event| {
-                        matches!(
-                            &event.kind,
-                            crate::TimelineEventKind::Subagent(
-                                crate::SubagentEvent::Spawned(_) | crate::SubagentEvent::Ended(_)
-                            )
-                        )
-                    })
-                    .cloned()
-                    .collect();
+                let events = timeline.subagent_lifecycle_events().cloned().collect();
                 let _ = reply.send((timeline.runtime_lifecycle().clone(), events));
             }
             ChatStateCommand::GetAdmittedResponse { identity, reply } => {

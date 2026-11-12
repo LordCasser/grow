@@ -298,14 +298,23 @@ async fn channel_backend_spawn_closed_channel() {
 #[tokio::test]
 async fn channel_backend_queries_history_after_registry_miss() {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let backend = ChannelBackend::for_session(tx, "parent").with_history_query(|id| async move {
-        assert_eq!(id, "original-child");
-        Ok(Some(durable_inspection(id)))
+    let registry_missed = Arc::new(tokio::sync::Notify::new());
+    let backend = ChannelBackend::for_session(tx, "parent").with_history_query({
+        let registry_missed = registry_missed.clone();
+        move |id| {
+            let registry_missed = registry_missed.clone();
+            async move {
+                registry_missed.notified().await;
+                assert_eq!(id, "original-child");
+                Ok(Some(durable_inspection(id)))
+            }
+        }
     });
     let responder = tokio::spawn(async move {
         let req = recv_event!(rx, Query);
         assert_eq!(req.parent_session_id.as_deref(), Some("parent"));
         req.respond_to.send(Ok(None)).unwrap();
+        registry_missed.notify_one();
     });
     let snapshot = backend
         .query("original-child", false, None)
@@ -353,10 +362,12 @@ async fn channel_backend_closed_sender_falls_back_for_query_and_inspect() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn channel_backend_inspect_falls_back_after_unauthorized_with_remaining_deadline() {
+async fn channel_backend_inspect_returns_history_terminal_before_runtime_wait_ends() {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let backend = ChannelBackend::for_session(tx, "parent")
-        .with_history_query(|id| async move { Ok(Some(durable_inspection(id))) });
+    let backend = ChannelBackend::for_session(tx, "parent").with_history_query(|id| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(4500)).await;
+        Ok(Some(durable_inspection(id)))
+    });
     let responder = tokio::spawn(async move {
         let req = recv_event!(rx, Inspect);
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;
@@ -367,13 +378,80 @@ async fn channel_backend_inspect_falls_back_after_unauthorized_with_remaining_de
 
     let started = tokio::time::Instant::now();
     let inspection = backend.inspect("original-child").await.unwrap().unwrap();
-    assert_eq!(started.elapsed(), std::time::Duration::from_secs(4));
+    assert_eq!(started.elapsed(), std::time::Duration::from_millis(4500));
     assert_eq!(inspection.child_session_id, "original-child");
     assert!(matches!(
         inspection.snapshot.status,
         SubagentSnapshotStatus::Cancelled { .. }
     ));
     responder.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn channel_backend_query_and_inspect_race_silent_runtime_with_durable_terminal() {
+    for inspect in [false, true] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let backend = ChannelBackend::for_session(tx, "parent").with_history_query(|id| async move {
+            tokio::task::yield_now().await;
+            Ok(Some(durable_inspection(id)))
+        });
+        let runtime = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            match event {
+                SubagentEvent::Inspect(request) => {
+                    let _request = request;
+                    std::future::pending::<()>().await;
+                }
+                SubagentEvent::Query(request) => {
+                    let _request = request;
+                    std::future::pending::<()>().await;
+                }
+                _ => panic!("expected an observation request"),
+            }
+        });
+        let started = tokio::time::Instant::now();
+        if inspect {
+            let result = backend.inspect("child").await.unwrap().unwrap();
+            assert_eq!(result.child_session_id, "child");
+            assert!(result.snapshot.status.is_terminal());
+        } else {
+            let result = backend.query("child", false, None).await.unwrap().unwrap();
+            assert!(result.status.is_terminal());
+        }
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+        runtime.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_backend_preserves_history_evidence_errors_after_runtime_fallback() {
+    for inspect in [false, true] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let backend = ChannelBackend::for_session(tx, "parent")
+            .with_history_query(|_| async { Err(SubagentObservationError::InvalidEvidence) });
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.unwrap() {
+                SubagentEvent::Inspect(request) if inspect => {
+                    request
+                        .respond_to
+                        .send(Err(SubagentObservationError::Unavailable))
+                        .unwrap();
+                }
+                SubagentEvent::Query(request) if !inspect => {
+                    request.respond_to.send(Ok(None)).unwrap();
+                }
+                _ => panic!("unexpected observation request"),
+            }
+        });
+
+        let result = if inspect {
+            backend.inspect("child").await.map(|_| ())
+        } else {
+            backend.query("child", false, None).await.map(|_| ())
+        };
+        assert_eq!(result, Err(SubagentObservationError::InvalidEvidence));
+        responder.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -841,7 +919,7 @@ async fn list_subagents_merges_history_and_runtime_without_output_payloads() {
     use tool_types::{SubagentListScope, SubagentStatus};
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let backend = ChannelBackend::for_session(tx, "parent").with_history_list(|| async {
+    let backend = ChannelBackend::for_session(tx, "parent").with_history_list(|_| async {
         Ok(vec![
             listed_subagent("completed", SubagentStatus::Completed),
             listed_subagent(
@@ -919,7 +997,7 @@ async fn list_scopes_propagate_bound_history_failure() {
     for scope in [SubagentListScope::Active, SubagentListScope::All] {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let backend = ChannelBackend::for_session(tx, "parent")
-            .with_history_list(|| async { Err(SubagentObservationError::Unavailable) });
+            .with_history_list(|_| async { Err(SubagentObservationError::Unavailable) });
         let call = tokio::spawn(async move {
             backend
                 .list_subagents(
@@ -977,7 +1055,7 @@ async fn list_active_does_not_mask_invalid_or_unauthorized_history() {
     ] {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let backend = ChannelBackend::for_session(tx, "parent")
-            .with_history_list(move || async move { Err(error) });
+            .with_history_list(move |_| async move { Err(error) });
         let call = tokio::spawn(async move {
             backend
                 .list_subagents(
@@ -1003,7 +1081,7 @@ async fn list_subagents_history_and_runtime_share_one_observation_deadline() {
     use tool_types::SubagentListScope;
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let backend = ChannelBackend::for_session(tx, "parent").with_history_list(|| async {
+    let backend = ChannelBackend::for_session(tx, "parent").with_history_list(|_| async {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         Ok(Vec::new())
     });
@@ -1032,7 +1110,7 @@ async fn list_subagents_uses_the_callers_remaining_deadline() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     tokio::time::advance(std::time::Duration::from_secs(4)).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let backend = ChannelBackend::for_session(tx, "parent").with_history_list(|| async {
+    let backend = ChannelBackend::for_session(tx, "parent").with_history_list(|_| async {
         Ok(vec![listed_subagent(
             "durable-finished",
             SubagentStatus::Completed,

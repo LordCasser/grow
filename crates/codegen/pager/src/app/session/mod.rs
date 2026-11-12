@@ -975,11 +975,6 @@ pub struct AgentSession {
     send_now_awaiting_confirm: Option<String>,
     /// MCP server initialization progress owned by this ACP session.
     mcp_init_progress: Option<McpInitProgress>,
-    /// IDs of interjections this client sent and already rendered locally.
-    /// The shell broadcasts each interjection to every attached pane; the
-    /// originating session consumes its own id here to suppress the echoed
-    /// copy while other panes still render it.
-    self_interjection_ids: HashSet<String>,
     /// Running agent definition reported for this ACP session.
     session_agent_name: Option<String>,
     /// Local request correlation only. The Shell owns desired state and
@@ -1332,7 +1327,6 @@ impl AgentSession {
             optimistic_queue_ids: HashSet::new(),
             send_now_awaiting_confirm: None,
             mcp_init_progress: None,
-            self_interjection_ids: HashSet::new(),
             session_agent_name: None,
             controls: SessionControlState::default(),
             shell_controls: ShellControlState::default(),
@@ -1417,18 +1411,6 @@ impl AgentSession {
 
     pub(crate) fn mark_created_via_new(&mut self) {
         self.created_via_new = true;
-    }
-
-    pub(crate) fn remember_self_interjection(&mut self, id: impl Into<String>) {
-        self.self_interjection_ids.insert(id.into());
-    }
-
-    pub(crate) fn consume_self_interjection(&mut self, id: &str) -> bool {
-        self.self_interjection_ids.remove(id)
-    }
-
-    pub(crate) fn has_self_interjection(&self, id: &str) -> bool {
-        self.self_interjection_ids.contains(id)
     }
 
     pub(crate) fn agent_name(&self) -> Option<&str> {

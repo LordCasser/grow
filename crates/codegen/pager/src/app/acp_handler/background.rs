@@ -520,10 +520,10 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     let Some((matched, active, agent)) = resolve_notif_agent(app, &notification.session_id) else {
         return false;
     };
-    let replay =
-        NotificationMeta::from_json(notification.meta.as_ref().and_then(|meta| meta.as_object()))
-            .is_replay;
-    if !replay
+    let meta =
+        NotificationMeta::from_json(notification.meta.as_ref().and_then(|meta| meta.as_object()));
+    let from_history = meta.is_replay || meta.history_cursor.is_some();
+    if !meta.is_replay
         && matches!(&matched, SessionMatch::Child(_))
         && !crate::app::subagent::ensure_subagent_child_replayed(
             agent,
@@ -537,7 +537,7 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     else {
         return false;
     };
-    apply_task_completed(notification.update, false, session, scrollback) && active
+    apply_task_completed(notification.update, from_history, session, scrollback) && active
 }
 
 /// History may settle a running task, without replacing its retained output

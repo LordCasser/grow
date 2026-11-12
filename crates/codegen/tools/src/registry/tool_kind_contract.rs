@@ -81,6 +81,7 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         entry::<grow_build::GetCommandOutputTool>(ToolKind::BackgroundTaskAction, ToolAccess::Read),
         entry::<grow_build::ListSubagentTool>(ToolKind::SubagentList, ToolAccess::Read),
         entry::<grow_build::GetSubagentStatusTool>(ToolKind::SubagentStatus, ToolAccess::Read),
+        entry::<grow_build::GetSubagentResultTool>(ToolKind::Other, ToolAccess::Read),
         entry::<grow_build::WaitSubagentTool>(ToolKind::SubagentWait, ToolAccess::Read),
         entry::<grow_build::MonitorTool>(ToolKind::Monitor, ToolAccess::All),
         // ── Grow planning / meta ───────────────────────────────────────────

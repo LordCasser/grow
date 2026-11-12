@@ -1,6 +1,46 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn exit_suspension_request_remains_live_past_five_seconds() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::SuspendForExit {
+            exit_id: "exit-test".into(),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+    );
+
+    let request = rx.recv().await.expect("suspension request");
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(tasks.try_join_next().is_none(), "request must remain pending");
+
+    let acp_transport::AcpAgentMessage::ExtMethod(args) = request else {
+        panic!("expected the exit suspension extension request");
+    };
+    assert_eq!(args.request.method.as_ref(), "grow/session/suspend_for_exit");
+    args.response_tx
+        .send(Ok(acp::ExtResponse::new(
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "result": { "status": "suspended" }
+            }))
+            .unwrap()
+            .into(),
+        )))
+        .unwrap();
+    assert!(matches!(
+        tasks.join_next().await.unwrap().unwrap(),
+        TaskResult::ExitSuspensionResolved {
+            exit_id,
+            result: Ok(())
+        } if exit_id == "exit-test"
+    ));
+}
+
 #[test]
 fn live_image_loader_memory_and_file_sources_preserve_the_same_payload() {
     let root = tempfile::tempdir().unwrap();

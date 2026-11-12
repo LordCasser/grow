@@ -2177,7 +2177,7 @@ fn cancel_rewind_removes_all_combined_segment_blocks() {
             .scrollback
             .push_block(RenderBlock::user_prompt("second"));
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
-            prompt_id: None,
+            prompt_id: Some("p-combo".into()),
             admission_resolved: None,
             frozen_skill_selection: None,
             expected_turn_id: None,
@@ -2225,7 +2225,7 @@ fn cancel_with_newer_draft_skips_pristine_rewind_and_keeps_draft() {
             .scrollback
             .push_block(RenderBlock::user_prompt("sent prompt"));
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
-            prompt_id: None,
+            prompt_id: Some("p-sent".into()),
             admission_resolved: None,
             frozen_skill_selection: None,
             expected_turn_id: None,

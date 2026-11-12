@@ -152,6 +152,8 @@ jobs:
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::ctrl_d_notification_turn_suspends_and_resumes_background_child
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::minimal_ctrl_d_notification_turn_suspends_and_resumes_background_child
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::ctrl_d_cold_resume_keeps_the_original_explicit_skill_snapshot
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::ctrl_d_resume_restores_interrupted_command_as_terminal_in_tasks
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::ctrl_d_cold_resume_restart_resumes_paused_goal
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::minimal_cold_resume_keeps_the_original_explicit_skill_snapshot
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume plan_approval_restored_after_resume
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume deferred_plan_reviewed_after_resume

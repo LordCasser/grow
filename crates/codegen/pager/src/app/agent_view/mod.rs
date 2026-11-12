@@ -706,13 +706,6 @@ pub struct AgentView {
     /// Toggled by `Action::ToggleGoalDetail`. Only shown when
     /// `session.goal_state` is `Some`.
     pub show_goal_detail: bool,
-    /// IDs of interjections this client sent and already rendered locally
-    /// (optimistic echo). The shell broadcasts `grow/session/interjection` to
-    /// every attached pane; when our own broadcast echoes back carrying an id
-    /// in this set, `handle_interjection` drops it (we already showed it) and
-    /// removes the id. Other panes (which lack the id) render it. This is the
-    /// queue's optimistic-echo + reconcile-by-id pattern, applied so the
-    /// originator gets instant feedback AND viewers stay in sync.
     pub current_branch: Option<String>,
     pub is_worktree: bool,
     pub main_repo: Option<String>,

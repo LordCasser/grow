@@ -121,6 +121,7 @@ fn flatten_truncates_long_fields() {
     let items = vec![ConversationItem::ToolResult(ToolResultItem {
         tool_call_id: "call-1".to_string(),
         content: long.into(),
+        delivered_subagent_id: None,
         images: vec![],
     })];
     let out = flatten_transcript_for_classifier(&items, true);

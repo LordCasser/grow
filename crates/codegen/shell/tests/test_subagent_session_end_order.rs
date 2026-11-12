@@ -584,7 +584,7 @@ async fn cancelled_child_session_end_precedes_cancelled_result_through_real_runn
                 serde_json::from_str(&tool_result_text(&providers.parent, "call_wait_child"))
                     .expect("wait_subagent returns JSON");
             assert_eq!(
-                waited["reason"], "all_finished",
+                waited["reason"], "any_finished",
                 "wait must observe the real terminal delivery: {waited}"
             );
             assert_eq!(waited["subagents"][0]["subagent_id"], child_id);

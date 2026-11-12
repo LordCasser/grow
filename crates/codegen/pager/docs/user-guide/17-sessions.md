@@ -61,13 +61,17 @@ Request session-tree suspension and quit Grow:
 /quit
 ```
 
-In the TUI, the default keyboard gesture is `Ctrl+D` twice within one second. The first press only arms confirmation; the second requests suspension of every session tree owned by this process. `Ctrl+C` keeps its input-clearing and current-turn cancellation behavior and never exits. If suspension cannot be confirmed, Grow offers retry or explicit force quit; repeated exit keys do not force it.
+In the TUI, the default keyboard gesture is `Ctrl+D` twice within one second. The first press only arms confirmation; the second requests suspension of every session tree owned by this process. `Ctrl+C` keeps its input-clearing and current-turn cancellation behavior and never exits. Grow keeps waiting for the session trees to finish saving. Press `f` to force quit if needed, at the risk of losing the ability to resume. If Grow reports a suspension failure, press `r` to retry.
 
 To leave the current session but stay in Grow, use `/home` to return to the welcome screen.
 
 ### Suspension and recovery
 
 A confirmed exit or update restart preserves the original session and child identities, admitted input, TODO/wait relationships, Turn limits, Goal state, and Workflow Run bindings. Resume validates the checkpoint, workspace, routes, and ownership before restoring the unfinished tree. It does not turn a stopped Goal back on or skip a user, permission, or Workflow business wait.
+
+When a paused Goal is ready to continue, use `/goal restart` after resume. Grow checks the restored Goal tool catalog before continuing.
+
+Open Tasks with `Ctrl+G`, then press `h` to see interrupted commands in completed history. The elapsed time includes the time a command ran in the foreground before `Ctrl+B`. Older records may display elapsed time based on the available history timestamps.
 
 New child Spawn facts record their birth MCP membership. A suspended child from
 an older version that lacks this fact cannot be cold-resumed for execution;
@@ -76,7 +80,7 @@ current configuration or copy old in-memory permits.
 
 Suspension is a durable execution boundary, not a copy of process memory. In-flight model transport and external commands may be interrupted. Their recorded output and outcome remain available; unknown side effects require inspection and commands are not automatically replayed. A forced exit or crash without a valid checkpoint cannot promise the same continuation.
 
-The [session-tree contract](../../../../../openspec/specs/session-timeline/spec.md#requirement-suspended-trees-resume-the-original-identities-automatically) defines recovery, and the [exit contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension) defines confirmation and failure handling.
+The [session-tree contract](../../../../../openspec/specs/session-timeline/spec.md#requirement-suspended-trees-resume-the-original-identities-automatically) defines recovery, and the [exit contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-waits-for-session-tree-suspension) defines confirmation and failure handling.
 
 ### Delete the current session
 

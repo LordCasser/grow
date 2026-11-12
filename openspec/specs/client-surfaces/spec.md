@@ -1499,6 +1499,16 @@ Pager SHALL show a diagnostic for the current content search when the index is d
 ### Requirement: Interjection display preserves user text across resume
 运行中用户输入 SHALL 将用户可见文本与模型专用插话指令分开持久化。显式技能正文 SHALL 来自关联的独立加载结果，不再追加到用户输入或其插话信封。恢复 SHALL 展示保存的用户文本；用户自己写入的标记 SHALL 保留，显示文本 SHALL NOT 通过解析模型提示标签恢复。
 
+The live transcript SHALL render a durable steer only after its input consumption is acknowledged, using the same message identity as history replay. Enqueue or admission MAY show transient feedback. When the target closes before consumption, an admitted steer SHALL retain its input identity through the existing FIFO fallback and appear in the transcript at its eventual delivery boundary. These rules SHALL apply to both a shared queue promotion and a local queued item sent through direct steering. On cancellation, Pager SHALL consider only the cancelled foreground prompt for a pristine rewind. A stashed submission for another input SHALL remain under its existing admission and delivery owner.
+
+#### Scenario: Foreground is cancelled before pending steering is consumed
+- **WHEN** the user promotes queued input into a running Turn while a tool blocks its steering boundary, then cancels the Turn before the input is consumed
+- **THEN** the live transcript shows no committed steer for the cancelled target and shows the input once when its original identity is consumed after rerouting. Pager does not restore the admitted steer to the composer as a draft.
+
+#### Scenario: Steering is consumed in the original Turn
+- **WHEN** a pending steer reaches its safe boundary and Shell durably consumes it
+- **THEN** all attached panes can render one committed message using the persisted display identity, and delivery of its matching history echo cannot add another row.
+
 #### Scenario: Resume after accepted steering
 - **WHEN** 运行中输入在加载前提满足后被消费，显示更新随后被回放
 - **THEN** 显示清理后的原始输入，模型上下文保留适用的插话指令与独立技能结果，不把 Runtime 信封显示为用户文字。
@@ -3827,7 +3837,7 @@ Workflow、Goal、Control、CurrentMode 的持久展示 SHALL 由捕获截点内
 
 ### Requirement: Resume displays and restores suspended work
 
-执行型 resume SHALL 自动恢复所选挂起 root 的任务树，显示恢复中、已运行或具体受阻原因。挂起的 child SHALL 显示为挂起而非取消；操作中断与 Agent 任务状态 SHALL 分别展示。普通历史浏览 SHALL 不启动 child、provider 或工具。恢复提示 SHALL 不冒充新的用户任务、授权或重复完成通知。
+执行型 resume SHALL 自动恢复所选挂起 root 的任务树，显示恢复中、已运行或具体受阻原因。挂起的 child SHALL 显示为挂起而非取消；操作中断与 Agent 任务状态 SHALL 分别展示。普通历史浏览 SHALL 不启动 child、provider 或工具。恢复提示 SHALL 不冒充新的用户任务、授权或重复完成通知。Tasks 面板 SHALL 从所选 Timeline 历史恢复已结算后台命令的终态。
 
 #### Scenario: Resume after terminal application update
 - **WHEN** 用户退出后更新 Terminal app，再通过 `grow resume` 打开挂起会话
@@ -3837,7 +3847,15 @@ Workflow、Goal、Control、CurrentMode 的持久展示 SHALL 由捕获截点内
 - **WHEN** 挂起记录包含 OutcomeUnknown 命令
 - **THEN** 同时显示任务可恢复与该操作结果未知，不用“已冻结”暗示外部命令已经停止。
 
+#### Scenario: Resume after a background command was settled during suspension
+- **WHEN** resume 所选历史保留后台命令的开始记录和同一 task ID、tool-call ID 的 `CommandsSettled` 终态，包括来自较早挂起操作的结算
+- **THEN** Tasks 面板恢复同一行的终态及记录时间，已中断命令不显示为 Running，已有普通完成记录时不重复投影，不重新执行命令或发送完成通知。
+
 目标入口：`crates/codegen/pager/src/app/acp_handler/`、`crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs::load_session`。
+
+#### Scenario: A foreground command moved to the background before suspension
+- **WHEN** 恢复已结算的命令且该命令曾在前台执行
+- **THEN** Tasks 按结算中的真实起止时间展示完整耗时。旧结算缺失时间时使用现有记录时间，仍恢复终态。
 
 ### Requirement: Plan presentation preserves actual progress and waiting
 
@@ -3958,11 +3976,11 @@ Workflow、Goal、Control、CurrentMode 的持久展示 SHALL 由捕获截点内
 
 证据入口：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs`、`crates/codegen/tools/src/implementations/skills/types.rs` 的 skill_name_from_path，以及现有 normal/minimal/headless 更新管线。
 
-### Requirement: Confirmed quit requests bounded session tree suspension
+### Requirement: Confirmed quit waits for session tree suspension
 
 Ctrl+C SHALL retain its existing composer/local-control behavior and cancel the current turn through the explicit cancellation path. It SHALL NOT request Quit, arm exit confirmation, suspend the tree, or escalate repeated cancellation into exit. At idle it SHALL remain local or a no-op. The default half-page-down shortcut SHALL be uppercase D so it does not conflict with Quit. The default global Quit shortcut SHALL be Ctrl+D, confirmed by a second press of the same shortcut within the existing one-second PendingAction window. The first press SHALL preserve drafts, admitted queues, current turn and Goal state without starting suspension. Expiry or another key SHALL clear the pending confirmation. Welcome, normal/minimal execution views and Dashboard SHALL use this same default confirmation; local scroll/input widgets SHALL NOT consume the registered global Quit key.
 
-Confirmed Quit SHALL request suspension of every session tree owned by the exiting process and exit only after the required durable boundaries and writer retirement. A child view SHALL resolve to its canonical root. Suspension SHALL retain the existing shared five-second absolute deadline, unconfirmed/retry/explicit-force UI, ownership and command interruption rules. Repeated Quit input while an exit operation is Pending SHALL coalesce without another request, deadline reset or force quit. While Unconfirmed, a newly confirmed Quit SHALL dispatch the existing explicit retry path with a fresh request deadline; r retry and explicit f force quit SHALL remain available. Error and recovery controls SHALL remain visible across Welcome, Agent, Dashboard and minimal rendering, with control space reserved even on a narrow terminal. Stale responses SHALL NOT settle a newer request. Cancel and emergency force quit SHALL remain distinct actions. Read-only surfaces SHALL not start execution.
+Confirmed Quit SHALL request suspension of every session tree owned by the exiting process and exit only after the required durable boundaries and writer retirement. A child view SHALL resolve to its canonical root. Confirmed exit SHALL wait for the same suspension request through durable completion and writer retirement without a fixed overall deadline. Pending UI SHALL show that waiting continues automatically and offer explicit force quit with a recovery warning. Suspension SHALL retain ownership and command interruption rules. Repeated Quit input while an exit operation is Pending SHALL coalesce without another request or force quit. While Unconfirmed, a newly confirmed Quit SHALL dispatch the existing explicit retry path with a fresh request identity; r retry and explicit f force quit SHALL remain available. Error and recovery controls SHALL remain visible across Welcome, Agent, Dashboard and minimal rendering, with control space reserved even on a narrow terminal. Stale responses SHALL NOT settle a newer request. Cancel and emergency force quit SHALL remain distinct actions. Read-only surfaces SHALL not start execution.
 
 #### Scenario: Ctrl C preserves composer behavior
 - **WHEN** the composer has a draft and the user presses Ctrl+C
@@ -3986,10 +4004,14 @@ Confirmed Quit SHALL request suspension of every session tree owned by the exiti
 
 #### Scenario: Repeated Quit while persistence is pending
 - **WHEN** the confirmed exit is waiting for persistence and another Quit key arrives
-- **THEN** the same request and deadline remain, with no additional cancellation or forced process exit.
+- **THEN** the same request remains, with no additional cancellation or forced process exit.
+
+#### Scenario: Saving takes longer than five seconds
+- **WHEN** a confirmed exit is still waiting for the checkpoint, tree barrier or writer retirement after five seconds
+- **THEN** Pager keeps waiting on the same request, shows the explicit force option and its recovery risk, and exits normally when the original request confirms suspension.
 
 #### Scenario: Suspension remains unconfirmed
-- **WHEN** the five-second caller deadline expires or a required confirmation fails
+- **WHEN** a required confirmation fails
 - **THEN** Pager reports unconfirmed and offers retry or explicit force quit without reporting successful suspension; repeated Ctrl+D does not select force quit.
 
 #### Scenario: Nested and multiple roots
@@ -3998,7 +4020,7 @@ Confirmed Quit SHALL request suspension of every session tree owned by the exiti
 
 #### Scenario: Quit is retried after failure
 - **WHEN** suspension is unconfirmed and the user presses the same configured Quit shortcut twice within one second
-- **THEN** the first press preserves the unconfirmed operation, the second starts the normal retry with a fresh request identity and deadline, and an old response cannot settle it.
+- **THEN** the first press preserves the unconfirmed operation, the second starts the normal retry with a fresh request identity, and an old response cannot settle it.
 
 #### Scenario: Error text is long or terminal is narrow
 - **WHEN** an unconfirmed exit error wraps beyond its available rows, including on Welcome
@@ -4710,7 +4732,7 @@ Confirmed close of a bound session SHALL use the existing terminal session-close
 
 ### Requirement: Exit suspension uses runtime ownership rather than visible pages
 
-Pager SHALL ask the runtime to confirm suspension before exit even when Welcome or only viewer pages remain. A startup without confirmed session identity SHALL retain its owner and show an actionable unconfirmed exit. A leader SHALL derive and overwrite the requesting connection's scope from its existing session drivers; one client's exit SHALL NOT suspend another client's roots or reuse another client's pending exit. Standalone process exit SHALL cover all its roots. Confirmation SHALL cover a concurrently closing root's writer through the existing lifecycle transaction and suspension deadline. Global Quit input SHALL cancel any interrupted command prefix. Pending exit SHALL block new user admission while retaining resize and the existing retry/force actions; startup replay SHALL NOT swallow those actions. Leader startup requests SHALL settle registration before that connection can confirm exit.
+Pager SHALL ask the runtime to confirm suspension before exit even when Welcome or only viewer pages remain. A startup without confirmed session identity SHALL retain its owner and show an actionable unconfirmed exit. A leader SHALL derive and overwrite the requesting connection's scope from its existing session drivers; one client's exit SHALL NOT suspend another client's roots or reuse another client's pending exit. Standalone process exit SHALL cover all its roots. Confirmation SHALL cover a concurrently closing root's writer through the existing lifecycle transaction even if the writer is still retiring after five seconds. Global Quit input SHALL cancel any interrupted command prefix. Pending exit SHALL block new user admission while retaining resize and explicit force quit; startup replay SHALL NOT swallow those actions. Leader startup requests SHALL settle registration before that connection can confirm exit.
 
 #### Scenario: Visible pages do not establish runtime emptiness
 - **WHEN** Quit is confirmed from Welcome or a viewer-only surface
@@ -5333,7 +5355,7 @@ When crash capture is enabled, each installation SHALL exclusively create its ow
 
 ### Requirement: Resident exit tree evidence reuses the canonical validated owner
 
-Resident session-tree suspension SHALL query the existing canonical owner for a coherent runtime lifecycle and complete Spawned/Ended projection, without copying unrelated history bodies or replaying the entire already-validated Timeline solely to reconstruct child facts. The projection SHALL retain original event identity, sequence and child/result references. Cold or otherwise unvalidated storage sources SHALL retain their complete existing validation. Suspension SHALL reobserve child facts after the existing retirement frontier and SHALL preserve the shared five-second deadline, durable checkpoints and physical writer retirement requirements.
+Resident session-tree suspension SHALL query the existing canonical owner for a coherent runtime lifecycle and complete Spawned/Ended projection, without copying unrelated history bodies or replaying the entire already-validated Timeline solely to reconstruct child facts. The projection SHALL retain original event identity, sequence and child/result references. Cold or otherwise unvalidated storage sources SHALL retain their complete existing validation. Suspension SHALL reobserve child facts after the existing retirement frontier and SHALL preserve durable checkpoints and physical writer retirement requirements.
 
 #### Scenario: Long unrelated history
 - **WHEN** a resident session with long ordinary history requests confirmed exit
@@ -5353,7 +5375,7 @@ Startup image-asset maintenance for a resident session SHALL obtain retained ima
 
 #### Scenario: Immediate exit after loading long history
 - **WHEN** a long-history session begins startup image maintenance and immediately requests exit
-- **THEN** image maintenance does not add another full-history disk decode and replay to the service retirement barrier, and the shared five-second confirmed-exit contract remains unchanged.
+- **THEN** image maintenance does not add another full-history disk decode and replay to the service retirement barrier, and exit still waits for all required confirmations.
 
 #### Scenario: Historical and orphan image batches
 - **WHEN** image assets include a committed historical batch removed from the current Surface and an unreferenced recognized batch

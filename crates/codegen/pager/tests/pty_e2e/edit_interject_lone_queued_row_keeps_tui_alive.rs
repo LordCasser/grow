@@ -186,6 +186,183 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
     harness.quit().expect("clean quit");
 }
 
+/// An explicit Enter promotion and a local image steer wait behind the same
+/// foreground tool. Cancelling the tool preserves both inputs in FIFO order.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; run the owning pty_e2e_queue test with --ignored"]
+async fn cancelling_blocked_foreground_displays_each_pending_steer_once() {
+    const SHARED: &str = "shared steering probe";
+    const LOCAL: &str = "local image steering probe";
+    let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock model");
+    let config = content.home().join(".grow/config.toml");
+    let mut settings = std::fs::read_to_string(&config).unwrap();
+    settings.push_str("\n[ui]\npage_flip_on_send = false\nfollow_up_behavior = \"queue\"\n");
+    std::fs::write(config, settings).unwrap();
+
+    let started = content.home().join("foreground-started");
+    let command = format!(
+        "printf started > '{}'; /bin/sleep 90",
+        started.to_string_lossy().replace('\'', "'\\''")
+    );
+    let _tool = expect_tool_turn(
+        &content,
+        "call_steering_block",
+        "run_terminal_command",
+        json!({
+            "command": command,
+            "description": "hold foreground for steering",
+            "timeout": 90_000
+        })
+        .to_string(),
+    );
+    let _shared = content.expect_agent_turn("shared FIFO delivery", "SHARED_AFTER_CANCEL");
+    let _local = content.expect_agent_turn("image FIFO delivery", "LOCAL_AFTER_CANCEL");
+    let png_path = content.home().join("steering-attachment.png");
+    std::fs::write(&png_path, PNG_32X32_GRAY).unwrap();
+
+    let mut harness = PtyHarness::spawn_with_content_in_dir(
+        &pager_binary().unwrap(),
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &["--permission-mode", "always-approve", "--trust"],
+        Some(content.home()),
+    )
+    .expect("spawn pager");
+    harness
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
+        .unwrap();
+    harness.inject_keys(b"s").unwrap();
+    harness
+        .wait_until_stable(
+            "ready composer after startup",
+            WELCOME_TIMEOUT,
+            Duration::from_millis(100),
+            |harness| harness.contains_text("grow · Mock") && harness.contains_text("❯ s"),
+        )
+        .unwrap();
+    harness.inject_keys(b"tart the foreground hold\r").unwrap();
+    assert!(
+        poll_for(Duration::from_secs(30), || {
+            harness.update(Duration::from_millis(50));
+            started.exists().then_some(())
+        })
+        .is_some(),
+        "foreground tool never started\nscreen:\n{}\nrequests:\n{}",
+        harness.screen_contents(),
+        dump_non_system_messages(&content.request_bodies())
+    );
+    let timeline_path = session_dir(&content, &mut harness).join("timeline.jsonl");
+
+    harness
+        .inject_keys(format!("{SHARED}\r").as_bytes())
+        .unwrap();
+    harness
+        .wait_for_text(&format!("#1 {SHARED}"), Duration::from_secs(10))
+        .unwrap();
+    harness
+        .inject_keys(b"\r")
+        .expect("promote shared queue row");
+    wait_for_pending_steers(&mut harness, &timeline_path, 1);
+
+    harness.inject_keys(format!("{LOCAL} ").as_bytes()).unwrap();
+    harness
+        .wait_for_text(LOCAL, Duration::from_secs(10))
+        .unwrap();
+    harness
+        .inject_keys(format!("\x1b[200~{}\x1b[201~", png_path.display()).as_bytes())
+        .unwrap();
+    harness
+        .wait_for_text("[Image #", Duration::from_secs(10))
+        .unwrap();
+    harness.inject_keys(b"\r").unwrap();
+    harness
+        .wait_for_text(&format!("#1 {LOCAL}"), Duration::from_secs(10))
+        .unwrap();
+    harness
+        .inject_keys(b"\r")
+        .expect("promote local image queue row");
+    wait_for_pending_steers(&mut harness, &timeline_path, 2);
+
+    harness
+        .inject_keys(keys::CTRL_C)
+        .expect("cancel the blocked foreground");
+    harness
+        .wait_for_text("LOCAL_AFTER_CANCEL", Duration::from_secs(30))
+        .unwrap();
+    let bodies = content.request_bodies();
+    let final_users = bodies.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .collect::<Vec<_>>();
+    for text in [SHARED, LOCAL] {
+        let delivered = final_users
+            .iter()
+            .filter(|message| message_text(message).contains(text))
+            .collect::<Vec<_>>();
+        assert_eq!(delivered.len(), 1, "{text} reaches the model once");
+        if text == LOCAL {
+            assert!(
+                contains_image_part(delivered[0]),
+                "the local steer keeps its attachment"
+            );
+        }
+    }
+    assert_eq!(
+        [SHARED, LOCAL].map(|text| block_lines_containing(&harness, text)),
+        [1, 1],
+        "each pending steer must render once after cancellation\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    assert!(
+        [SHARED, LOCAL]
+            .into_iter()
+            .all(|text| !composer_holds(&harness, text)),
+        "an admitted steer must not be restored into the composer\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    harness.quit().expect("clean quit");
+}
+
+#[cfg(unix)]
+fn wait_for_pending_steers(harness: &mut PtyHarness, timeline: &Path, count: usize) {
+    use chat_state::{InputEvent, InputRoute, TimelineEventKind};
+    assert!(
+        poll_for(Duration::from_secs(10), || {
+            harness.update(Duration::from_millis(50));
+            let contents = std::fs::read_to_string(timeline).ok()?;
+            let timeline = shell::session::testkit::decode_timeline_fixture(&contents).ok()?;
+            let steers = timeline
+                .events()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        TimelineEventKind::Input(
+                            InputEvent::Rerouted {
+                                route: InputRoute::Steer { .. },
+                                ..
+                            } | InputEvent::AdmissionResolved {
+                                route: Some(InputRoute::Steer { .. }),
+                                ..
+                            }
+                        )
+                    )
+                })
+                .count();
+            (steers == count).then_some(())
+        })
+        .is_some(),
+        "expected {count} accepted pending steers\nscreen:\n{}",
+        harness.screen_contents()
+    );
+}
+
 /// A user message's text: plain-string content verbatim, parts-array content
 /// (image-bearing messages) as the joined `text` parts.
 fn message_text(m: &serde_json::Value) -> String {

@@ -208,12 +208,11 @@ async fn public_list_subagent_discovers_active_children_without_widening_routes(
     let output = tool_runtime::Tool::run(
         &ListSubagentTool,
         test_ctx(resources.into_shared()),
-        ListSubagentInput {
-            scope: SubagentListScope::Active,
-        },
+        serde_json::from_value::<ListSubagentInput>(serde_json::json!({})).unwrap(),
     )
     .await
     .expect("public list tool should discover active subagents");
+    assert_eq!(output.scope, SubagentListScope::Active);
     let discovered_ids = output
         .subagents
         .iter()
@@ -363,7 +362,7 @@ async fn public_list_subagent_reports_runtime_states_without_terminal_resources(
         seen_requests.insert(harness.requests.recv().await.expect("spawn admitted").id);
     }
 
-    let backend = parent_backend(&harness).with_history_list(|| async { Ok(Vec::new()) });
+    let backend = parent_backend(&harness).with_history_list(|_| async { Ok(Vec::new()) });
     let mut resources = Resources::new();
     resources.insert(SubagentBackendResource(Arc::new(backend)));
     let resources = resources.into_shared();
@@ -2090,7 +2089,7 @@ async fn public_wait_subagent_receives_terminal_result_after_finalization() {
         .await
         .expect("wait receives canonical completion")
         .expect("public wait tool call");
-    assert_eq!(output.reason, SubagentWaitReason::AllFinished);
+    assert_eq!(output.reason, SubagentWaitReason::AnyFinished);
     assert_eq!(output.subagents.len(), 1);
     assert_eq!(output.subagents[0].status, SubagentStatus::Completed);
     assert_eq!(output.subagents[0].output.as_deref(), Some("work"));
@@ -2110,6 +2109,84 @@ async fn public_wait_subagent_receives_terminal_result_after_finalization() {
         .expect("completion callback after successful waiter delivery");
     assert!(disposition.waiter_delivered);
     assert!(!disposition.should_surface);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn public_wait_returns_completed_child_without_cancelling_active_sibling() {
+    use crate::implementations::grow_build::subagent::WaitSubagentTool;
+    use crate::implementations::grow_build::task::backend::SubagentBackendResource;
+    use crate::types::{resources::Resources, tool_metadata::test_ctx};
+    use tool_types::{SubagentStatus, WaitSubagentInput};
+
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let backend = parent_backend(&harness);
+    let first = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("finished-first", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("finished-first")
+    );
+    harness.finish.send(()).unwrap();
+    first.await.unwrap().unwrap();
+    harness.completions.recv().await.unwrap();
+
+    let sibling = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.spawn(request("still-active", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("still-active")
+    );
+    let mut resources = Resources::new();
+    resources.insert(SubagentBackendResource(Arc::new(backend.clone())));
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tool_runtime::Tool::run(
+            &WaitSubagentTool,
+            test_ctx(resources.into_shared()),
+            WaitSubagentInput {
+                subagent_ids: vec!["still-active".into(), "finished-first".into()],
+                timeout_ms: Some(10_000),
+            },
+        ),
+    )
+    .await
+    .expect("finished child must wake the wait without the active sibling")
+    .expect("public wait result");
+    assert_eq!(serde_json::to_value(output.reason).unwrap(), "any_finished");
+    assert_eq!(output.subagents[0].subagent_id, "still-active");
+    assert_eq!(
+        output.subagents[0].status,
+        SubagentStatus::ObservationInterrupted
+    );
+    assert_eq!(output.subagents[1].subagent_id, "finished-first");
+    assert_eq!(output.subagents[1].status, SubagentStatus::Completed);
+    assert_eq!(output.subagents[1].output.as_deref(), Some("work"));
+    assert_eq!(
+        crate::reminders::task_completion::consumed_completion_ids(
+            &crate::types::output::ToolOutput::SubagentWait(output)
+        ),
+        ["finished-first"]
+    );
+    assert!(
+        backend
+            .query("still-active", false, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_running()
+    );
+    assert!(!sibling.is_finished());
+
+    harness.finish.send(()).unwrap();
+    sibling.await.unwrap().unwrap();
+    let completion = harness.completions.recv().await.unwrap();
+    assert!(!completion.waiter_delivered);
+    assert!(completion.should_surface);
     harness.actor.abort();
 }
 

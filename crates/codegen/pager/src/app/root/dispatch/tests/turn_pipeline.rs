@@ -387,6 +387,15 @@ fn steer_targets_the_existing_turn_and_emits_no_new_prompt() {
         [Effect::SendInterject { expected_turn_id, text, .. }]
             if expected_turn_id == "turn-1" && text == "additional evidence"
     ));
+    assert!(
+        app.agents[&id].scrollback.is_empty(),
+        "steering is rendered after durable consumption"
+    );
+    assert_ne!(
+        app.agents[&id].toast.as_ref().map(|(text, _)| text.as_str()),
+        Some("Interjection sent"),
+        "dispatch alone must not claim delivery"
+    );
     assert_eq!(
         app.agents[&id].session.current_prompt_id.as_deref(),
         Some("turn-1")

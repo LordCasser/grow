@@ -58,6 +58,7 @@ pub enum ToolInput {
     TaskOutput(TaskOutputToolInput),
     SubagentList(tool_types::ListSubagentInput),
     SubagentStatus(tool_types::GetSubagentStatusInput),
+    SubagentResult(crate::implementations::grow_build::subagent::GetSubagentResultInput),
     SubagentWait(tool_types::WaitSubagentInput),
     KillTask(KillTaskToolInput),
     Task(TaskToolInput),

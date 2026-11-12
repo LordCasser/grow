@@ -423,6 +423,7 @@ mod tests {
         ConversationItem::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.to_string(),
             content: content.into(),
+            delivered_subagent_id: None,
             images: Vec::new(),
         })
     }

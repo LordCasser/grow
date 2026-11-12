@@ -198,16 +198,14 @@
     }
 
     #[test]
-    fn interjection_notification_dedups_originators_own_echo() {
-        // The originator rendered an optimistic block in dispatch_interject and
-        // recorded the id; its own broadcast echo must be dropped (no dup) and
-        // the id forgotten.
+    fn interjection_notification_dedups_replay_echo_by_message_identity() {
         let mut app = make_app_with_agent("sess-view");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .session
-            .remember_self_interjection("ij-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(
+            RenderBlock::UserPrompt(
+                crate::scrollback::blocks::UserPromptBlock::new("my own")
+                    .with_message_id("ij-1"),
+            ),
+        );
 
         let affected = handle_ext_notification(
             &interjection_ext_with_id("sess-view", "my own", Some("ij-1")),
@@ -215,23 +213,24 @@
         );
         assert!(
             !affected,
-            "an originator's own echo must be a no-op (already rendered locally)"
+            "a replayed user message with the same identity must suppress the live row"
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            last_interjection_text(&agent.scrollback).is_none(),
-            "the echo must not push a duplicate block"
-        );
-        assert!(
-            !agent.session.has_self_interjection("ij-1"),
-            "the id must be forgotten after dedup"
-        );
+        assert_eq!(agent.scrollback.len(), 1, "the echo must not push a duplicate block");
+    }
+
+    #[test]
+    fn repeated_interjection_notification_is_idempotent() {
+        let mut app = make_app_with_agent("sess-view");
+        let notif = interjection_ext_with_id("sess-view", "once", Some("message-1"));
+        assert!(handle_ext_notification(&notif, &mut app));
+        assert!(!handle_ext_notification(&notif, &mut app));
+        assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 1);
     }
 
     #[test]
     fn interjection_notification_with_foreign_id_renders() {
-        // A broadcast carrying an id this client did NOT mint (another pane's
-        // interjection) must render — only the originator dedups by its own id.
+        // A new identity renders in every attached pane.
         let mut app = make_app_with_agent("sess-view");
         let affected = handle_ext_notification(
             &interjection_ext_with_id("sess-view", "from another pane", Some("other-id")),

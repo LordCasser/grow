@@ -28,7 +28,7 @@ fn suspension_closes_auxiliary_admission_before_its_worker_runs() {
             .request_node_suspension(
                 "early-close".into(),
                 actor.session_id_string(),
-                tokio::time::Instant::now() + Duration::from_secs(5),
+                Some(tokio::time::Instant::now() + Duration::from_secs(5)),
                 respond_to,
             )
             .await;
@@ -53,7 +53,7 @@ fn expired_suspension_admission_keeps_the_healthy_writer_available() {
             .request_node_suspension(
                 "expired-request".into(),
                 actor.session_id_string(),
-                tokio::time::Instant::now() - Duration::from_secs(1),
+                Some(tokio::time::Instant::now() - Duration::from_secs(1)),
                 respond_to,
             )
             .await;
@@ -107,7 +107,7 @@ fn late_suggestions_during_suspension_do_not_panic_or_bypass_owner_drain() {
             .send(SessionCommand::SuspendRuntimeNode {
                 operation_id: "late-suggestion".into(),
                 root_session_id: actor.session_id_string(),
-                deadline,
+                deadline: Some(deadline),
                 respond_to,
             })
             .unwrap();
@@ -208,7 +208,7 @@ fn late_suggestions_during_suspension_do_not_panic_or_bypass_owner_drain() {
             .send(SessionCommand::SuspendRuntimeNode {
                 operation_id: "late-suggestion".into(),
                 root_session_id: actor.session_id_string(),
-                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                deadline: Some(tokio::time::Instant::now() + Duration::from_secs(5)),
                 respond_to,
             })
             .unwrap();
@@ -232,7 +232,7 @@ fn late_suggestions_during_suspension_do_not_panic_or_bypass_owner_drain() {
         commands
             .send(SessionCommand::RetireSuspendedRuntime {
                 operation_id: "late-suggestion".into(),
-                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                deadline: Some(tokio::time::Instant::now() + Duration::from_secs(5)),
                 respond_to,
             })
             .unwrap();

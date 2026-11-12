@@ -27,7 +27,7 @@ pub mod set_subagent_model;
 pub(crate) mod storage;
 pub mod subagent;
 pub mod task;
-pub use subagent::{GetSubagentStatusTool, ListSubagentTool, WaitSubagentTool};
+pub use subagent::{GetSubagentResultTool, GetSubagentStatusTool, ListSubagentTool, WaitSubagentTool};
 pub mod task_output;
 pub mod todo;
 pub mod update_goal;

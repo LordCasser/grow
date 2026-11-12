@@ -742,6 +742,8 @@ impl SessionActor {
         manager.reopen_after_runtime_restore();
         manager.restore_suspended_executions().await?;
         drop(manager);
+        // Gated cold startup defers this check until the runtime can be released.
+        self.refresh_goal_runtime_availability().await;
         self.compaction.lease.reopen_admission();
         self.state
             .lock()
@@ -768,7 +770,7 @@ impl SessionActor {
     pub(super) async fn retire_suspended_runtime(
         &self,
         operation_id: &str,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(), String> {
         let runtime = self.chat_state_handle.runtime_state().await?;
         if runtime.phase != RuntimePhase::Suspended
@@ -789,7 +791,7 @@ impl SessionActor {
             .persistence_tx
             .send(PersistenceMsg::FlushAndAck { respond_to })
             .map_err(|_| "suspended persistence owner is unavailable".to_string())?;
-        tokio::time::timeout_at(deadline, ack)
+        crate::session::wait_before(deadline, ack)
             .await
             .map_err(|_| "checkpoint saved; writer retirement is not confirmed".to_string())?
             .map_err(|_| "suspended writer flush acknowledgement was lost".to_string())?;
@@ -800,7 +802,7 @@ impl SessionActor {
         self: &Arc<Self>,
         operation_id: String,
         root_session_id: String,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         respond_to: oneshot::Sender<Result<RuntimeNodeRef, String>>,
     ) {
         if let Some(reason) = self.runtime_suspension_fault.borrow().as_ref() {
@@ -844,7 +846,7 @@ impl SessionActor {
             ));
             return;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             let _ = respond_to.send(Err(
                 "suspension request deadline elapsed before admission; retry with a fresh deadline"
                     .into(),
@@ -867,11 +869,11 @@ impl SessionActor {
         &self,
         operation_id: String,
         root_session_id: String,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<RuntimeNodeRef, String> {
         let started = std::time::Instant::now();
         tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "started", "session suspension progress");
-        // Keep this owner alive when the caller's shared exit deadline expires.
+        // Keep this owner alive even if a bounded caller stops waiting.
         // No checkpoint ACK is returned while a physical producer is unjoined.
         if self.chat_state_handle.runtime_state().await?.phase == RuntimePhase::Running {
             self.chat_state_handle
@@ -902,7 +904,7 @@ impl SessionActor {
             .map(|task| (task.handle.clone(), task.stopped.clone()));
         if let Some((handle, stopped)) = task {
             if self.compaction.lease.is_in_flight() {
-                tokio::time::timeout_at(deadline, self.compaction.lease.wait_idle())
+                crate::session::wait_before(deadline, self.compaction.lease.wait_idle())
                     .await
                     .map_err(|_| {
                         "active compaction owner did not settle before the suspension deadline"
@@ -933,7 +935,7 @@ impl SessionActor {
             .await
             .map_err(|error| error.to_string())?;
         quiesce_control_workers(self).await?;
-        self.cancel_background_compaction_before("session_suspended", Some(deadline))
+        self.cancel_background_compaction_before("session_suspended", deadline)
             .await
             .map_err(|error| error.to_string())?;
         self.sampler_handle.close();
@@ -959,8 +961,12 @@ impl SessionActor {
         let previous_commands = self.chat_state_handle.runtime_state().await?.commands;
         let commands = reuse_or_capture_command_settlements(previous_commands, || async {
             let bridge = self.tool_bridge_handle();
+            // Terminal retirement retains a local budget for process reaping
+            // and output I/O, starting when this stage is reached.
+            let command_deadline = deadline
+                .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(5));
             let mut command_evidence = bridge
-                .suspend_owned_commands(&self.session_id_string(), deadline)
+                .suspend_owned_commands(&self.session_id_string(), command_deadline)
                 .await
                 .map_err(|error| format!("command retirement is not confirmed: {error}"))?;
             command_evidence
@@ -997,6 +1003,8 @@ impl SessionActor {
                         } else {
                             chat_state::NotificationTaskKind::Task
                         },
+                        start_time: Some(command.start_time),
+                        end_time: command.end_time,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1037,7 +1045,7 @@ impl SessionActor {
                 source,
                 source_version,
                 command_suspension_result(command)?,
-                Some(deadline),
+                deadline,
             )
             .await?;
         }
@@ -1171,7 +1179,7 @@ impl SessionActor {
                         | SuspendedOperationState::OutcomeUnknown
                         | SuspendedOperationState::Completed
                 ) {
-                    if tokio::time::Instant::now() >= deadline {
+                    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                         return Err(
                             "suspension deadline expired before operation settlement".into()
                         );
@@ -1282,7 +1290,7 @@ impl SessionActor {
         tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "owners_drained", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");
         // Physical drain may outlive the caller. Do not start a new durable
         // checkpoint write with its expired deadline and poison a healthy writer.
-        if tokio::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             return Err(
                 "suspension owners settled after the deadline; retry the same operation identity"
                     .into(),
@@ -1681,6 +1689,8 @@ mod cursor_alignment_tests {
             is_backgrounded: true,
             owner: chat_state::NotificationOwner::Session,
             task_kind: chat_state::NotificationTaskKind::Task,
+            start_time: None,
+            end_time: None,
         }];
         let replayed = reuse_or_capture_command_settlements(Some(settled.clone()), || async {
             Err("terminal snapshot expired".into())

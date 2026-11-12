@@ -703,6 +703,15 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
     ) -> Result<SessionThreadExit, String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        self.drain_old_session_thread_before(session_id, Some(deadline)).await
+    }
+
+    pub(super) async fn drain_old_session_thread_before(
+        &self,
+        session_id: &acp::SessionId,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<SessionThreadExit, String> {
         let Some(is_finished) = self
             .session_threads
             .borrow()
@@ -723,7 +732,6 @@ impl MvpAgent {
             session_id = %session_id.0,
             "Waiting for old session thread to finish before reload"
         );
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let finished = self
                 .session_threads
@@ -742,7 +750,7 @@ impl MvpAgent {
                 );
                 return Ok(exit);
             }
-            if tokio::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 return Err(format!(
                     "session {} is still shutting down; retry after its writer exits",
                     session_id.0

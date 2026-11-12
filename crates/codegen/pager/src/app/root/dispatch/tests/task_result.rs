@@ -344,13 +344,11 @@ fn confirmed_quit_input_retries_unconfirmed_exit_and_ignores_old_result() {
         },
         &mut app,
     );
-    let old_deadline = app.exit_suspension.as_ref().unwrap().deadline;
 
     assert!(matches!(
         app.handle_input(&ctrl_d),
         crate::app::root::InputOutcome::Changed
     ));
-    assert_eq!(app.exit_suspension.as_ref().unwrap().deadline, old_deadline);
     let retry_effects = match app.handle_input(&ctrl_d) {
         crate::app::root::InputOutcome::Action(action) => dispatch(action, &mut app),
         other => panic!("second quit press should dispatch retry, got {other:?}"),

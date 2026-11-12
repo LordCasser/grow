@@ -110,6 +110,7 @@ pub(super) fn project_call_access(
         | ToolInput::TaskOutput(_)
         | ToolInput::SubagentList(_)
         | ToolInput::SubagentStatus(_)
+        | ToolInput::SubagentResult(_)
         | ToolInput::SubagentWait(_)
         | ToolInput::MemorySearch(_)
         | ToolInput::MemoryGet(_)

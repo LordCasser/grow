@@ -2164,7 +2164,7 @@ fn stale_tasks(dir: &std::path::Path) -> Vec<OrphanedTask> {
     else {
         return Vec::new();
     };
-    MvpAgent::find_stale_background_task_projections(&acp::SessionId::new("s"), &journal.history)
+    MvpAgent::find_stale_background_task_projections(&acp::SessionId::new("s"), &journal.history, &journal.events)
 }
 fn bg_update(task_id: &str) -> crate::session::storage::SessionUpdate {
     use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};

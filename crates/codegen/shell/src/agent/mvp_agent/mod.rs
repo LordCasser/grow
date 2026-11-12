@@ -926,6 +926,7 @@ pub(super) use super::ext_parsers;
 /// Metadata captured from a replayed `task_backgrounded` entry.
 pub(crate) struct OrphanedTask {
     task_id: String,
+    tool_call_id: String,
     command: String,
     cwd: String,
 }
@@ -1237,6 +1238,7 @@ impl MvpAgent {
     pub(super) fn find_stale_background_task_projections(
         session_id: &acp::SessionId,
         history: &crate::session::history::HistorySnapshot,
+        events: &[chat_state::TimelineEvent],
     ) -> Vec<OrphanedTask> {
         use crate::session::history::{GrowHistoryFact, HistoryContent, HistorySource};
         // Only task state and prompt/rewind boundaries affect this projection.
@@ -1256,9 +1258,20 @@ impl MvpAgent {
         for update in updates {
             let crate::session::storage::SessionUpdate::Grow(notification) = update else { continue };
             match notification.update {
-                crate::extensions::notification::SessionUpdate::TaskBackgrounded { task_id, command, cwd, .. } => { pending.insert(task_id.clone(), OrphanedTask { task_id, command, cwd }); },
+                crate::extensions::notification::SessionUpdate::TaskBackgrounded { task_id, tool_call_id, command, cwd, .. } => { pending.insert(task_id.clone(), OrphanedTask { task_id, tool_call_id, command, cwd }); },
                 crate::extensions::notification::SessionUpdate::TaskCompleted { task_snapshot, .. } => { pending.remove(&task_snapshot.task_id); },
                 _ => {},
+            }
+        }
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        for command in events.iter().flat_map(crate::session::history::background_command_settlements) {
+            if pending.get(&command.command_id).is_some_and(|task| task.tool_call_id == command.call_id) {
+                pending.remove(&command.command_id);
+            }
+            if pending.is_empty() {
+                break;
             }
         }
         pending.into_values().collect()
@@ -1271,8 +1284,9 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
         history: &crate::session::history::HistorySnapshot,
+        timeline: &chat_state::Timeline,
     ) -> Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>> {
-        let orphaned = Self::find_stale_background_task_projections(session_id, history);
+        let orphaned = Self::find_stale_background_task_projections(session_id, history, timeline.events());
         if orphaned.is_empty() {
             return Vec::new();
         }

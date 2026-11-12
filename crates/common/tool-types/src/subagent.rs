@@ -145,7 +145,7 @@ pub struct GetSubagentStatusOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitSubagentInput {
-    /// Non-empty subagent IDs, at most 20. Already finished children return immediately.
+    /// Non-empty subagent IDs, at most 20. Return as soon as any child reaches a terminal state.
     #[schemars(length(min = 1, max = 20))]
     pub subagent_ids: Vec<String>,
     /// Positive total call budget in milliseconds, default 30000; capped at {max_wait_ms}.
@@ -157,7 +157,7 @@ pub struct WaitSubagentInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentWaitReason {
-    AllFinished,
+    AnyFinished,
     DeadlineElapsed,
     ObservationFailed,
     Interrupted,
@@ -191,5 +191,6 @@ pub struct WaitSubagentOutput {
     pub reason: SubagentWaitReason,
     /// Actual elapsed time; independent of child execution duration and configured timeout.
     pub waited_ms: u64,
+    /// Every selected ID and its latest observation. Unobserved siblings remain unconfirmed.
     pub subagents: Vec<SubagentWaitResult>,
 }

@@ -1221,7 +1221,7 @@ agent_type = "grow-build"
                 let waited_body = blocked(&mut after_wait, &parent_server, &client).await;
                 parent_parked.assert_satisfied(); report.assert_satisfied(); wait.assert_satisfied();
                 let waited: WaitSubagentOutput = serde_json::from_str(tool_output(&waited_body, "call_parent_wait")).unwrap();
-                assert_eq!(waited.reason, SubagentWaitReason::AllFinished);
+                assert_eq!(waited.reason, SubagentWaitReason::AnyFinished);
                 assert_eq!(waited.subagents.len(), 1);
                 assert_eq!(waited.subagents[0].subagent_id, task_id);
                 assert_eq!(waited.subagents[0].status, SubagentStatus::Completed);

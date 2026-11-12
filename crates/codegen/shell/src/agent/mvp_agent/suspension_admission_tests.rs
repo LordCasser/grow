@@ -191,7 +191,7 @@ fn exit_scopes_do_not_coalesce_and_wait_for_concurrent_close_writer() {
 }
 
 #[test]
-fn standalone_exit_includes_a_draining_nonresident_writer() {
+fn standalone_exit_waits_for_slow_nonresident_writer() {
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("exit-draining");
@@ -205,7 +205,11 @@ fn standalone_exit_includes_a_draining_nonresident_writer() {
         );
         let mut exit = Box::pin(drive_exit_scope(&agent, None));
         assert!(futures::poll!(exit.as_mut()).is_pending());
+        tokio::time::pause();
         tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
         assert!(
             futures::poll!(exit.as_mut()).is_pending(),
             "absent view/actor is not a drained writer"
@@ -217,24 +221,21 @@ fn standalone_exit_includes_a_draining_nonresident_writer() {
 }
 
 #[test]
-fn exit_unconfirmed_lifecycle_lock_can_retry_after_owner_releases() {
+fn exit_waits_for_lifecycle_owner_to_release() {
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("exit-locked");
         let owner = agent.lock_session_lifecycle(&sid).await;
-        let result = drive_exit_scope(&agent, Some((31, vec![sid.0.as_ref()]))).await;
-        assert_eq!(result["status"], "unconfirmed");
-        assert!(
-            result["error"]
-                .as_str()
-                .unwrap()
-                .contains("lifecycle ownership")
-        );
+        let mut exit = Box::pin(drive_exit_scope(&agent, Some((31, vec![sid.0.as_ref()]))));
+        assert!(futures::poll!(exit.as_mut()).is_pending());
+        tokio::time::pause();
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        assert!(futures::poll!(exit.as_mut()).is_pending());
+        tokio::time::resume();
         drop(owner);
-        assert_eq!(
-            drive_exit_scope(&agent, Some((31, vec![sid.0.as_ref()]))).await["status"],
-            "suspended"
-        );
+        assert_eq!(exit.await["status"], "suspended");
     });
 }
 

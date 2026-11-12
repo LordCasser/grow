@@ -113,7 +113,7 @@ Switch between the prompt input and scrollback pane.
 
 **Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt — even while a turn is running).
 
-**Esc vs Ctrl+C:** Esc keeps its cancel / clear / rewind behavior above. Ctrl+C keeps its composer and focused local-control behavior; when used to cancel a turn, it cancels only that turn. While cancellation is pending, another Ctrl+C retries cancellation. Ctrl+C never arms quit confirmation, exits, suspends the session tree, or escalates a repeated cancel. Idle, Welcome, Dashboard, and read-only replay states do not treat Ctrl+C as quit. See the [confirmed quit contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension).
+**Esc vs Ctrl+C:** Esc keeps its cancel / clear / rewind behavior above. Ctrl+C keeps its composer and focused local-control behavior; when used to cancel a turn, it cancels only that turn. While cancellation is pending, another Ctrl+C retries cancellation. Ctrl+C never arms quit confirmation, exits, suspends the session tree, or escalates a repeated cancel. Idle, Welcome, Dashboard, and read-only replay states do not treat Ctrl+C as quit. See the [confirmed quit contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-waits-for-session-tree-suspension).
 
 ---
 
@@ -201,7 +201,7 @@ While the agent is generating:
 
 In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline — except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still steers the top prompt row (same as normal mode). (`Ctrl+Enter` steers mid-turn when bound on non–VS Code family; it does not submit a new idle turn.)
 
-Steering is a soft interruption: it targets the current turn identity and preserves its lifecycle. Queue with plain `Enter` when the note should wait for the next turn boundary.
+Steering is a soft interruption: it targets the current turn identity and preserves its lifecycle. Queue with plain `Enter` when the note should wait for the next turn boundary. A steer appears in the transcript once the current turn consumes it. If the turn is cancelled first, the pending input returns to the queue and appears when it is delivered.
 
 > **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#ctrlenter-does-not-interject-in-wezterm).
 
@@ -223,7 +223,7 @@ Actions available from any screen.
 
 **VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+D` is the default Quit key; `Ctrl+Q` remains an alias where the host passes it through. Half-page-down uses uppercase **`D`** on all terminals. Custom bindings can reassign either action. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
 
-Normal quit and the first controlled OS quit signal use the same suspension request and five-second deadline. An unconfirmed result leaves the application open. Retry creates a new request identity for the same suspension operation; force quit is only available as an explicit action from the unconfirmed screen.
+Normal quit and the first controlled OS quit signal wait for the same suspension confirmation. Saving continues automatically, even when it takes longer than five seconds. If the suspension reports a failure, press `r` to retry. Pressing `f` during saving or after a failure forces quit and may leave the session unable to resume.
 
 > **Returning to the welcome screen has no key binding** — use the `/home` slash command from inside a session. See [Slash Commands](04-slash-commands.md).
 

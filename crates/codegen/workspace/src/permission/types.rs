@@ -389,6 +389,7 @@ impl AccessKind {
             ToolInput::TaskOutput(_)
             | ToolInput::SubagentList(_)
             | ToolInput::SubagentStatus(_)
+            | ToolInput::SubagentResult(_)
             | ToolInput::SubagentWait(_)
             | ToolInput::Lsp(_)
             | ToolInput::MemorySearch(_)

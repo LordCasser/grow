@@ -354,6 +354,7 @@ mod tests {
             ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: "tc_1".to_string(),
                 content: "file written".into(),
+                delivered_subagent_id: None,
                 images: Vec::new(),
             }),
         ];

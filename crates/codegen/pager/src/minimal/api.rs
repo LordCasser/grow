@@ -1693,7 +1693,7 @@ mod session_deletion_exit_tests {
             app.session_deletion.as_mut().unwrap(),
             app.exit_suspension.as_ref(),
         );
-        assert!(text(&buf).contains("Suspending session tree"));
+        assert!(text(&buf).contains("Saving continues automatically"));
         assert!(!text(&buf).contains("Delete session history?"));
         dispatch(
             Action::TaskComplete(TaskResult::ExitSuspensionResolved {

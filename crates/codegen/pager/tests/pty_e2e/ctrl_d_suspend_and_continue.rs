@@ -15,7 +15,7 @@ async fn ctrl_d_suspends_running_root_and_continue_resumes_without_replay() {
         .expect("seed isolated mock provider");
 
     let project = tempfile::tempdir().expect("create project directory");
-    std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
+    git2::Repository::init(project.path()).expect("init test workspace");
     let marker = project.path().join("command-runs.txt");
     let pid_file = project.path().join("command-child.pid");
     let marker_arg = shell_quote(&marker);
@@ -229,6 +229,485 @@ async fn ctrl_d_suspends_running_root_and_continue_resumes_without_replay() {
         exported_transcript.contains("RECOVERED_ROOT_RESULT"),
         "export omitted the completed recovery response:\n{exported_transcript}"
     );
+}
+
+/// A background command is represented in Tasks by its terminal state. Cold
+/// continuation must recover that state from CommandsSettled rather than
+/// resurrecting the interrupted command as running.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored"]
+async fn ctrl_d_resume_restores_interrupted_command_as_terminal_in_tasks() {
+    let content = ContentController::start()
+        .await
+        .expect("start mock content");
+    content
+        .seed_llm_config()
+        .expect("seed isolated mock provider");
+
+    let project = tempfile::tempdir().expect("create project directory");
+    std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
+    let marker = project.path().join("task-command-runs.txt");
+    let pid_file = project.path().join("task-command.pid");
+    let command = format!(
+        "printf 'started\\n' >> {}; /bin/sleep 120 & sleep_pid=$!; printf '%s\\n' \"$sleep_pid\" > {}; wait \"$sleep_pid\"; printf 'finished\\n' >> {}",
+        shell_quote(&marker),
+        shell_quote(&pid_file),
+        shell_quote(&marker)
+    );
+    let args = json!({
+        "command": command,
+        "description": "cold resume terminal state regression"
+    })
+    .to_string();
+    let _tool_turn = expect_tool_turn(
+        &content,
+        "call_resume_terminal",
+        "run_terminal_command",
+        args,
+    );
+    content.set_response("BACKGROUND_COMMAND_ACCEPTED");
+
+    let binary = pager_binary().expect("resolve Pager binary");
+    let mut first = PtyHarness::spawn_with_content_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &["--permission-mode", "always-approve", "--trust"],
+        Some(project.path()),
+    )
+    .expect("spawn first Pager process");
+    first
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
+        .expect("welcome screen");
+    const USER_PROMPT: &str = "SUSPEND_COMMAND_TERMINAL_TASK";
+    first
+        .inject_keys(format!("{USER_PROMPT}\r").as_bytes())
+        .expect("submit prompt");
+    poll_for(Duration::from_secs(15), || {
+        first.update(Duration::from_millis(30));
+        std::fs::read_to_string(&marker)
+            .ok()
+            .filter(|text| text.contains("started") && pid_file.exists())
+    })
+    .expect("foreground command must have started before backgrounding");
+    let command_started = Instant::now();
+    assert!(
+        poll_for(Duration::from_secs(5), || {
+            first.update(Duration::from_millis(30));
+            (command_started.elapsed() >= Duration::from_millis(3_200)).then_some(())
+        })
+        .is_some(),
+        "command did not remain in the foreground for at least 3.2 seconds"
+    );
+    first
+        .inject_keys(b"\x02")
+        .expect("send foreground command to background");
+    first
+        .wait_for_text("BACKGROUND_COMMAND_ACCEPTED", Duration::from_secs(45))
+        .unwrap_or_else(|_| {
+            panic!(
+                "backgrounding did not release the command call; screen:\n{}\nrequests:\n{}",
+                first.screen_contents(),
+                dump_non_system_messages(&content.request_bodies())
+            )
+        });
+    const TASK_ROW: &str = "Task cold resume terminal state regression";
+    first.inject_keys(b"\x07").expect("open running Tasks pane");
+    first
+        .wait_for_text(TASK_ROW, Duration::from_secs(10))
+        .expect("command must appear in running Tasks before suspension");
+    first.inject_keys(b"\x07").expect("close Tasks pane");
+    first
+        .inject_keys(b"\x04\x04")
+        .expect("suspend via Ctrl+D twice");
+    assert_eq!(
+        first
+            .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
+            .expect("wait for suspension"),
+        0
+    );
+    let command_pid = std::fs::read_to_string(&pid_file)
+        .expect("command child pid")
+        .trim()
+        .parse::<libc::pid_t>()
+        .expect("valid command child pid");
+    assert!(
+        poll_for(Duration::from_secs(5), || (!process_alive(command_pid))
+            .then_some(()))
+        .is_some(),
+        "suspension must stop the command"
+    );
+
+    let session_path = session_dir_with_prompt(&content, USER_PROMPT);
+    let timeline_path = session_path.join("timeline.jsonl");
+    let suspended = std::fs::read_to_string(&timeline_path).expect("read suspended Timeline");
+    assert_eq!(
+        interrupted_command_settlement_count(&suspended, "call_resume_terminal"),
+        1
+    );
+    let settlement = parsed_timeline(&suspended)
+        .find_map(|event| {
+            let is_settlement = event.get("type").and_then(serde_json::Value::as_str)
+                == Some("runtime")
+                && event
+                    .pointer("/event/kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("commands_settled");
+            is_settlement
+                .then(|| {
+                    event
+                        .pointer("/event/commands")
+                        .and_then(serde_json::Value::as_array)
+                })
+                .flatten()
+                .and_then(|commands| {
+                    commands.iter().find(|command| {
+                        command.get("call_id").and_then(serde_json::Value::as_str)
+                            == Some("call_resume_terminal")
+                    })
+                })
+                .cloned()
+        })
+        .expect("durable CommandsSettled must contain the interrupted command");
+    assert_eq!(
+        settlement
+            .get("is_backgrounded")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the command was explicitly backgrounded before suspension"
+    );
+    let start_time: std::time::SystemTime = serde_json::from_value(
+        settlement
+            .get("start_time")
+            .expect("settlement records actual command start time")
+            .clone(),
+    )
+    .expect("decode actual command start time");
+    let end_time: std::time::SystemTime = serde_json::from_value(
+        settlement
+            .get("end_time")
+            .expect("settlement records actual command end time")
+            .clone(),
+    )
+    .expect("decode actual command end time");
+    let execution_elapsed = end_time
+        .duration_since(start_time)
+        .expect("actual command end follows actual start");
+    assert!(
+        execution_elapsed >= Duration::from_secs(3),
+        "durable execution bounds must include the foreground interval before manual backgrounding; got {execution_elapsed:?}"
+    );
+    drop(first);
+
+    content.set_response("BACKGROUND_COMMAND_RESUMED");
+    let mut resumed = PtyHarness::spawn_with_content_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[
+            "--continue",
+            "--permission-mode",
+            "always-approve",
+            "--trust",
+        ],
+        Some(project.path()),
+    )
+    .expect("spawn cold --continue process");
+    resumed
+        .wait_for_text("BACKGROUND_COMMAND_RESUMED", RESUME_TIMEOUT)
+        .unwrap_or_else(|_| {
+            panic!(
+                "resume did not finish; screen:\n{}\nrequests:\n{}",
+                resumed.screen_contents(),
+                dump_non_system_messages(&content.request_bodies())
+            )
+        });
+    assert_eq!(session_path, session_dir(&content, &mut resumed));
+    resumed.inject_keys(b"\x07").expect("open Tasks pane");
+    resumed
+        .wait_for_text("No running tasks.", Duration::from_secs(5))
+        .unwrap_or_else(|_| {
+            panic!(
+                "interrupted command must be absent from running-only Tasks after resume:\n{}",
+                resumed.screen_contents()
+            )
+        });
+    resumed
+        .inject_keys(b"h")
+        .expect("show completed task history");
+    resumed
+        .wait_for_text(TASK_ROW, Duration::from_secs(10))
+        .unwrap_or_else(|_| {
+            panic!(
+                "interrupted command must be present as terminal in Tasks history:\n{}",
+                resumed.screen_contents()
+            )
+        });
+    let tasks_screen = resumed.screen_contents();
+    let terminal_row = tasks_screen
+        .lines()
+        .find(|line| line.contains(TASK_ROW))
+        .expect("terminal task row is visible");
+    let expected_elapsed = pager_render::util::format_duration(execution_elapsed);
+    assert!(
+        terminal_row
+            .split_whitespace()
+            .any(|token| token == expected_elapsed),
+        "Tasks row must display the full recorded execution interval {expected_elapsed}: {terminal_row:?}"
+    );
+    assert!(
+        terminal_row
+            .split_whitespace()
+            .any(|token| matches!(token, "✗" | "x")),
+        "Tasks history must mark the command as unsuccessful: {terminal_row:?}"
+    );
+    eprintln!("Interrupted Tasks row: {terminal_row}");
+    eprintln!("Recorded process elapsed: {execution_elapsed:?}");
+    assert!(
+        !resumed.contains_text("1 command still running"),
+        "the interrupted command must not return as running:\n{}",
+        resumed.screen_contents()
+    );
+    let after = std::fs::read_to_string(&timeline_path).expect("read resumed Timeline");
+    assert_eq!(
+        interrupted_command_settlement_count(&after, "call_resume_terminal"),
+        1,
+        "resume must preserve the original command settlement"
+    );
+    let runs = std::fs::read_to_string(&marker).expect("read command marker");
+    assert_eq!(
+        runs.lines().filter(|line| *line == "started").count(),
+        1,
+        "command must not replay"
+    );
+    assert_eq!(
+        runs.lines().filter(|line| *line == "finished").count(),
+        0,
+        "interrupted command must not finish"
+    );
+    resumed.quit().expect("quit resumed Pager");
+}
+
+/// A paused Goal survives cold runtime restoration, and an explicit restart
+/// resumes the original Goal without another ordinary user message.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored"]
+async fn ctrl_d_cold_resume_restart_resumes_paused_goal() {
+    let content = ContentController::start()
+        .await
+        .expect("start mock content");
+    content
+        .seed_llm_config()
+        .expect("seed isolated mock provider");
+    content.set_response("GOAL_SESSION_READY");
+
+    let project = tempfile::tempdir().expect("create project directory");
+    git2::Repository::init(project.path()).expect("init test workspace");
+    let binary = pager_binary().expect("resolve Pager binary");
+    let mut first = PtyHarness::spawn_with_content_env_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &["--permission-mode", "always-approve", "--trust"],
+        &[("GROW_GOAL", "1")],
+        Some(project.path()),
+    )
+    .expect("spawn first Pager process with Goal enabled");
+    first
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
+        .expect("welcome screen");
+    const USER_PROMPT: &str = "GOAL_COLD_RESUME_SESSION_SEED";
+    first
+        .inject_keys(format!("{USER_PROMPT}\r").as_bytes())
+        .expect("create a session with one ordinary user turn");
+    first
+        .wait_for_text("GOAL_SESSION_READY", Duration::from_secs(45))
+        .expect("seed user turn completes");
+
+    let mut held_goal_turn = content.expect_agent_turn_blocked(
+        "hold first Goal continuation until paused",
+        "GOAL_FIRST_CONTINUATION_HELD",
+    );
+    first
+        .inject_keys(b"/goal set cold resume goal restart fixture\r")
+        .expect("create isolated Goal through /goal set");
+    first
+        .wait_for_text("Goal created and activated", Duration::from_secs(15))
+        .unwrap_or_else(|_| {
+            panic!(
+                "/goal set did not activate Goal; screen:\n{}",
+                first.screen_contents()
+            )
+        });
+    tokio::time::timeout(Duration::from_secs(15), held_goal_turn.wait_blocked())
+        .await
+        .expect("first Goal continuation reaches the provider");
+    first
+        .wait_for_text("GOAL_FIRST_CONTINUATION_HELD", Duration::from_secs(15))
+        .expect("hold the first model turn while the Goal is active");
+
+    first
+        .inject_keys(b"/goal pause\r")
+        .expect("pause the active Goal with /goal pause");
+    first
+        .wait_for_text("User paused current Goal", Duration::from_secs(15))
+        .unwrap_or_else(|_| {
+            panic!(
+                "/goal pause did not pause the Goal; screen:\n{}",
+                first.screen_contents()
+            )
+        });
+    first
+        .inject_keys(b"\x04\x04")
+        .expect("suspend the paused Goal with Ctrl+D twice");
+    assert_eq!(
+        first
+            .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
+            .expect("wait for confirmed suspension exit"),
+        0,
+        "paused Goal session should suspend normally"
+    );
+    held_goal_turn.release();
+    let session_path = session_dir_with_prompt(&content, USER_PROMPT);
+    let timeline_path = session_path.join("timeline.jsonl");
+    let suspended = std::fs::read_to_string(&timeline_path).expect("read suspended Timeline");
+    let goal_continuation_count = |timeline: &str| {
+        parsed_timeline(timeline)
+            .filter(|event| {
+                event.get("type").and_then(serde_json::Value::as_str) == Some("turn")
+                    && event
+                        .pointer("/event/state")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("started")
+                    && event
+                        .pointer("/event/identity/origin")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("goal_continuation")
+            })
+            .count()
+    };
+    let suspended_goal_turns = goal_continuation_count(&suspended);
+    assert!(
+        suspended_goal_turns >= 1,
+        "the active Goal must have started an internally-owned continuation before pause"
+    );
+    drop(first);
+
+    content.set_response("GOAL_RESTART_AUTOCONTINUED");
+    let mut resumed = PtyHarness::spawn_with_content_env_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[
+            "--continue",
+            "--permission-mode",
+            "always-approve",
+            "--trust",
+        ],
+        &[("GROW_GOAL", "1")],
+        Some(project.path()),
+    )
+    .expect("cold --continue with Goal enabled");
+    resumed
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, RESUME_TIMEOUT)
+        .unwrap_or_else(|_| {
+            panic!(
+                "cold --continue did not restore the session; screen:\n{}",
+                resumed.screen_contents()
+            )
+        });
+    assert_eq!(session_path, session_dir(&content, &mut resumed));
+    let before_restart = poll_for(RESUME_TIMEOUT, || {
+        resumed.update(Duration::from_millis(30));
+        let contents = std::fs::read_to_string(&timeline_path).ok()?;
+        parsed_timeline(&contents)
+            .any(|event| {
+                event
+                    .pointer("/event/kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("execution_released")
+            })
+            .then_some(contents)
+    })
+    .expect("the cold runtime must release execution before restart");
+    assert_eq!(
+        goal_continuation_count(&before_restart),
+        suspended_goal_turns,
+        "a paused Goal must remain idle until the user explicitly restarts it"
+    );
+
+    let _complete_restarted_goal = expect_tool_turn(
+        &content,
+        "call_goal_resume_complete",
+        "update_goal",
+        json!({
+            "status": "complete",
+            "completion_report": "Results: the resumed Goal continuation ran. Evidence: this scripted provider turn reached update_goal after /goal restart. Verification: the PTY fixture observed the goal_continuation Timeline entry. Limitations: this fixture verifies lifecycle recovery only."
+        })
+        .to_string(),
+    );
+    resumed
+        .wait_for_text("Ctrl+x:commands", RESUME_TIMEOUT)
+        .expect("the resumed Agent composer is ready for input");
+    resumed
+        .inject_keys(b"/goal restart")
+        .expect("type restart into the resumed composer");
+    resumed
+        .wait_for_text("❯ /goal restart", Duration::from_secs(5))
+        .expect("the composer received the restart command");
+    resumed.inject_keys(b"\r").expect("submit Goal restart");
+    resumed
+        .wait_for_text("Goal restarted", Duration::from_secs(15))
+        .unwrap_or_else(|_| {
+            panic!(
+                "/goal restart was not accepted; screen:\n{}",
+                resumed.screen_contents()
+            )
+        });
+    let after_restart = poll_for(RESUME_TIMEOUT, || {
+        resumed.update(Duration::from_millis(30));
+        let contents = std::fs::read_to_string(&timeline_path).ok()?;
+        let goal_completed = parsed_timeline(&contents).any(|event| {
+            event
+                .pointer("/event/snapshot/goal/status")
+                .and_then(serde_json::Value::as_str)
+                == Some("complete")
+        });
+        (goal_completed && goal_continuation_count(&contents) > suspended_goal_turns)
+            .then_some(contents)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "restarted Goal did not continue and complete without a user prompt; screen:
+{}",
+            resumed.screen_contents()
+        )
+    });
+    eprintln!(
+        "Goal continuation turns: {suspended_goal_turns} before restart, {} after restart",
+        goal_continuation_count(&after_restart)
+    );
+    assert!(
+        goal_continuation_count(&after_restart) > suspended_goal_turns,
+        "/goal restart must start a new turn with origin=goal_continuation"
+    );
+    assert_eq!(
+        started_prompt_count(&after_restart, USER_PROMPT),
+        1,
+        "cold resume and Goal restart must not duplicate or require an ordinary user prompt"
+    );
+    assert!(
+        !resumed.contains_text("panicked"),
+        "Pager panicked during Goal restart:\n{}",
+        resumed.screen_contents()
+    );
+    resumed.quit().expect("quit resumed Pager");
 }
 
 #[cfg(unix)]

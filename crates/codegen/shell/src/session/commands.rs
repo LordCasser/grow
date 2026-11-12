@@ -348,14 +348,14 @@ pub enum SessionCommand {
     SuspendRuntimeNode {
         operation_id: String,
         root_session_id: String,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         respond_to: oneshot::Sender<Result<chat_state::session_runtime::RuntimeNodeRef, String>>,
     },
     /// Retire a checkpointed runtime without terminalizing its logical work.
     /// The caller still joins SessionThread before reporting a successful exit.
     RetireSuspendedRuntime {
         operation_id: String,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// Install an immutable Goal snapshot before a delegated child turn is
@@ -982,9 +982,7 @@ pub enum SessionCommand {
     SteerTurn {
         expected_turn_id: String,
         text: String,
-        /// Client-minted id echoed back on the broadcast
-        /// `grow/session/interjection` so the originating pager can dedup its
-        /// optimistic local block. `None` from older clients.
+        /// Client-minted identity for stable input admission retries.
         id: Option<String>,
         /// Pasted images riding along with the interjection. Empty from
         /// text-only / older clients.

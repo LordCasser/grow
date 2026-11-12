@@ -3878,11 +3878,11 @@ mod tests {
         assert!(tracker.current_agent_msg.is_some());
     }
     #[test]
-    fn optimistic_user_bubble_reconciles_acp_echo_by_message_id() {
+    fn live_interjection_reconciles_replay_echo_by_message_id() {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
-        let optimistic =
-            crate::scrollback::blocks::UserPromptBlock::new("hello").with_message_id("message-1");
+        let optimistic = crate::scrollback::blocks::UserPromptBlock::interjection("hello")
+            .with_message_id("message-1");
         sb.push_block(RenderBlock::UserPrompt(optimistic));
 
         assert!(!tracker.handle_update(
@@ -3890,7 +3890,7 @@ mod tests {
             &meta(),
             &mut sb,
         ));
-        assert_eq!(sb.len(), 1, "the ACP echo must reuse the optimistic bubble");
+        assert_eq!(sb.len(), 1, "replay must reuse the live interjection row");
     }
     #[test]
     fn repeated_acp_echo_with_same_message_id_is_idempotent() {

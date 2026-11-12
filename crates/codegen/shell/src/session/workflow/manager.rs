@@ -1731,8 +1731,9 @@ impl WorkflowManager {
 
     pub(crate) async fn suspend_all_and_drain(
         &mut self,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Option<tokio::time::Instant>>,
     ) -> Result<(), String> {
+        let deadline = deadline.into();
         self.close_admission();
         for run in self.active.values() {
             run.suspend_intent.store(true, Ordering::Release);
@@ -1745,7 +1746,7 @@ impl WorkflowManager {
                 .get_mut(&id)
                 .expect("owned Run remains registered");
             // Borrow the receiver so a timeout cannot discard the owner/ACK.
-            tokio::time::timeout_at(deadline, &mut run.done)
+            crate::session::wait_before(deadline, &mut run.done)
                 .await
                 .map_err(|_| format!("Workflow {id} suspension is still settling"))?
                 .map_err(|_| format!("Workflow {id} lost its suspension acknowledgement"))??;

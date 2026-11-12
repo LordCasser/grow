@@ -3061,21 +3061,15 @@ pub(super) async fn run_session(
                         let admitted = session
                             .admit_human_steer(
                                 &expected_turn_id,
-                                text.clone(),
+                                text,
                                 images,
-                                id.clone(),
+                                id,
                             )
                             .await;
                         if let Err(error) = admitted {
                             let _ = respond_to.send(Err(error));
                             continue;
                         }
-                        // Broadcast to every attached client so all panes
-                        // viewing this session render the interjection block
-                        // — not just the originating client. The originator
-                        // dedups this echo by `id` against its optimistic
-                        // local block; viewers render it.
-                        session.broadcast_interjection(&text, id.as_deref());
                         // Diagnostic at enqueue (not drain) so it is recorded
                         // even when a cancel clears the buffer before the
                         // next drain point.

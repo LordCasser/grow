@@ -78,7 +78,7 @@ impl ChatStateHandle {
         .ok_or_else(|| "runtime authority is unavailable".into())
     }
 
-    /// Capture runtime state and all original Subagent Spawned/Ended events in
+    /// Capture runtime state and all original Subagent Spawned/Ended/Seed events in
     /// one owner operation, preserving their payloads, headers and sequence order.
     /// The owner has already validated these facts on live admission or recovery.
     /// This projection is for Shell tree coordination, not a complete Timeline;
@@ -124,7 +124,7 @@ impl ChatStateHandle {
         runtime_source_hash: String,
         turn: Option<crate::session_runtime::TurnContinuation>,
         step: Option<crate::StepId>,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Option<tokio::time::Instant>>,
     ) -> Result<crate::TimelineEvent, TimelineWriteError> {
         self.query("CheckpointRuntime", |reply| {
             ChatStateCommand::CheckpointRuntime {
@@ -132,7 +132,7 @@ impl ChatStateHandle {
                 runtime_source_hash,
                 turn,
                 step,
-                deadline,
+                deadline: deadline.into(),
                 reply,
             }
         })
@@ -145,12 +145,12 @@ impl ChatStateHandle {
     pub async fn settle_hooks_for_suspension(
         &self,
         operation_id: String,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Option<tokio::time::Instant>>,
     ) -> Result<Vec<crate::TimelineEvent>, TimelineWriteError> {
         self.query("SettleHooksForSuspension", |reply| {
             ChatStateCommand::SettleHooksForSuspension {
                 operation_id,
-                deadline,
+                deadline: deadline.into(),
                 reply,
             }
         })
@@ -214,9 +214,9 @@ impl ChatStateHandle {
     pub async fn record_timeline_event_durably_before(
         &self,
         kind: TimelineEventKind,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Option<tokio::time::Instant>>,
     ) -> Result<crate::TimelineEvent, TimelineWriteError> {
-        self.record_timeline_event_durably_with_deadline(kind, Some(deadline), None)
+        self.record_timeline_event_durably_with_deadline(kind, deadline.into(), None)
             .await
     }
 

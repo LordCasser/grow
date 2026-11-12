@@ -51,8 +51,9 @@ impl CompletionDeliveryTracker {
         }
     }
 
-    /// The original wait returned normally. Any completion it raced is owned
-    /// by that tool result and must not be surfaced again.
+    /// Release reservations after a normal return. Only terminal payloads
+    /// actually present in the tool result consume durable receipts; other
+    /// children remain eligible for later inbox delivery.
     pub(crate) fn finish_wait(&self, ids: &[String]) {
         let mut inner = self.inner.lock();
         for id in ids {

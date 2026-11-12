@@ -77,6 +77,7 @@ Normal 与 Minimal 在共用事件循环执行同一回收，不删除 canonical
 child 的后台任务开始/完成事实也经过原 history stream 和共用展示 reducer 恢复，
 已存在的 stdout、状态和取消 owner 不被旧快照覆盖，EntryId 则重新指向恢复后的行。
 canonical 完成事实仍会将尚在 Running 的同一任务推进终态；已终态的状态和时间不回退。
+挂起期间的命令终态来自所选 Timeline 的各次 `CommandsSettled`。历史 projector 按 task ID 和 tool-call ID 匹配仍可见的后台任务，保留已记录的完成行，并用结算中的执行起止时间恢复缺失终态的完整耗时，旧结算缺字段时使用历史记录时间。见 [挂起任务恢复](../openspec/specs/client-surfaces/spec.md#requirement-resume-displays-and-restores-suspended-work)。
 
 MCP 工具调用的原始 deadline 与取消通知派发分别归属：drop guard只向原 service/request ID 尝试一次通知，后台 Grow 派发等待最多三秒，不延长工具返回期限。超时表示发送未确认；锁定 SDK 已入队的发送仍可能继续，不能据此声称 wire 撤回或远端副作用已取消。见 [取消派发所有权](../openspec/specs/extension-runtime/spec.md#requirement-mcp-cancellation-dispatch-has-a-bounded-grow-owner) 与 [真实受阻传输验证](../openspec/changes/archive/2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。
 
@@ -92,7 +93,7 @@ ACP 的 `grow/plugins/action` Update 复用 plugin application 的结果采用�
 
 Skills 配置的 disabled/ignore/paths 变更在 leader 与 in-process 入口都投递既有 per-session reload owner；watcher 跟随最新 custom paths，登记期间更新不丢失，失败保旧 owner，取消包含已完成输出的析构均离开 LocalSet。macOS discovery 沿本模块既有平台选择方式使用 metadata polling，间隔复用 debounce且不比较任意文件内容，避免等待 FSEvents stream 注册；其它平台保留既有 backend。见[配置更新交付](../openspec/specs/configuration-rules/spec.md#requirement-skills-configuration-changes-reach-the-existing-session-catalog-owner)。
 
-长历史退出的树协调只从已验证 ChatState owner 查询 coherent runtime 与完整原始 Spawned/Ended 投影，冷来源仍按原完整验证。启动图片清理同样取 owner 的全部已提交历史引用，持有原 artifact gate 到 contained deletion 实际结束，owner 失败保资产；不再为这两项重复复制/重放整份 Timeline。五秒确认、durable checkpoint 和 writer 真实退役保持。见[退出树证据](../openspec/specs/client-surfaces/spec.md#requirement-resident-exit-tree-evidence-reuses-the-canonical-validated-owner)与[图片维护](../openspec/specs/client-surfaces/spec.md#requirement-live-image-maintenance-uses-committed-owner-evidence)。
+长历史退出的树协调只从已验证 ChatState owner 查询 coherent runtime 与完整原始 Spawned/Ended 投影，冷来源仍按原完整验证。启动图片清理同样取 owner 的全部已提交历史引用，持有原 artifact gate 到 contained deletion 实际结束，owner 失败保资产；不再为这两项重复复制/重放整份 Timeline。退出仍须等到 durable checkpoint 和 writer 真实退役。见[退出树证据](../openspec/specs/client-surfaces/spec.md#requirement-resident-exit-tree-evidence-reuses-the-canonical-validated-owner)与[图片维护](../openspec/specs/client-surfaces/spec.md#requirement-live-image-maintenance-uses-committed-owner-evidence)。
 
 SDK MCP reverse invoker 在声明注册时绑定实际 session 与注册连接。leader 从真实已接纳连接覆盖注入身份，SDK reverse target 优先于当前 driver，owner 断线不 fallback 到其他 driver 或同 serverId。resident load 复用原 invoker，cold load 用新连接重绑，SharedMcpPool 继承的 SDK Arc 保原 transport；内层 MCP message/id 原样传递。见[SDK 注册连接契约](../openspec/specs/extension-runtime/spec.md#requirement-sdk-mcp-reverse-requests-retain-their-registration-connection)。
 
@@ -139,6 +140,13 @@ Subagent coordinator 的 64 项容量按 pending、active、finalization、retir
 原 payload、Input::Consumed 的 item.content 和实际请求；permission_evidence
 或前端完整显示不能证明模型收到了全文。见
 [插话正文契约](../openspec/specs/input-admission/spec.md#requirement-steering-consumption-preserves-admitted-text)。
+
+运行中的插话在 `Input::Consumed` 获得持久确认后才通过
+`grow/session/interjection` 展示。实时通知与历史回放共用 display echo 的
+`messageId`。前台工具阻塞时提升的队列输入仍可能因取消按原身份回到 FIFO，
+此时 transcript 在实际投递时才显示。取消时，只有与当前前台 prompt 身份一致的提交可撤回到输入框。排查重复时按 `input_id` 核对路由与消费，
+再按 `messageId` 核对显示。见
+[插话显示契约](../openspec/specs/client-surfaces/spec.md#requirement-interjection-display-preserves-user-text-across-resume)。
 
 终端工具活动的分组入口是 Pager 的 `scrollback/state/groups.rs` 与
 `verb_group.rs`：先从原始顺序确定活动范围，再统计整组摘要并投影可见行。
@@ -481,17 +489,19 @@ Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗
 
 ### Runtime 状态与恢复诊断
 
-模型使用 `list_subagent` 枚举当前来源的子任务，`get_subagent_status` 按 `subagent_ids` 批量查询结构化状态、计数与持续时间，`wait_subagent` 独立等待并交付结果。枚举默认 `scope: "active"`，包含初始化、运行、挂起、收尾与观察未知项；`scope: "all"` 还包含授权持久历史。枚举和详情不读取答案 artifact，不消费完成通知。command 只使用 `get_command_output(task_ids, timeout_ms)`；旧混合入口已移除，不再用空 ID 数组发现。见 [工具职责契约](../openspec/specs/session-timeline/spec.md#requirement-subagent-tools-separate-enumeration-detail-and-completion-waiting)。
+主 Agent 的 `list_active_sessions` 发现同一协调运行时中的其他在线主会话。子任务枚举 `list_subagent` 默认使用 `scope: "active"`，包含初始化、运行、挂起、收尾与观察未知项。显式指定 `scope: "all"` 时才核验已结束子任务的历史链接，并返回历史状态。模型用 `get_subagent_status` 批量查看状态和统计，用 `get_subagent_result` 按单一 `subagent_id` 重新读取最终答案，用 `wait_subagent` 等待尚未结束的任务。枚举和详情不读取答案 artifact。主动读取成功交付最终答案时会确认同一子任务的待交付通知，原答案仍可重复读取。command 只使用 `get_command_output(task_ids, timeout_ms)`；旧混合入口已移除，不再用空 ID 数组发现。见 [工具职责契约](../openspec/specs/session-timeline/spec.md#requirement-subagent-tools-separate-enumeration-detail-and-completion-waiting)。
 
-这些子任务工具与 ACP `grow/subagent/get` 共用来源授权及 canonical 结果核对。runtime 缺项或断链时，在原期限内只读验证 source、root/direct-parent 权限和精确 Spawn/Seed/Ended/Result；历史 completed/failed/cancelled 可读，无关、未知及隐藏 Workflow child 继续拒绝。有 Spawn 无可信终态仍是观察未知。查询权限不扩大消息权限：root 可观察嵌套 child，消息仍由直接父级发送；空清单和无直接路由都不证明目标已清理。Pager 生命周期核对不读取无关采样正文，不恢复执行、不补写记录。见 [跨入口查询](../openspec/specs/session-timeline/spec.md#requirement-authorized-subagent-observations-agree-across-public-entries)。
+这些子任务工具与 ACP `grow/subagent/get` 共用来源授权及 canonical 结果核对。在线来源从 Timeline 的生命周期索引取得 Spawn/Seed/Ended，避免遍历或复制无关历史。单项查询的历史验证与 runtime 查询共享原期限，可在 runtime 沉默时返回可信终态。历史验证检查 source、root/direct-parent 权限和精确 Spawn/Seed/Ended/Result；历史 completed/failed/cancelled 可读，无关、未知及隐藏 Workflow child 继续拒绝。有 Spawn 无可信终态仍是观察未知。查询权限不扩大消息权限：root 可观察嵌套 child，消息仍由直接父级发送；空清单和无直接路由都不证明目标已清理。Pager 生命周期核对不读取无关采样正文，不恢复执行、不补写记录。见 [跨入口查询](../openspec/specs/session-timeline/spec.md#requirement-authorized-subagent-observations-agree-across-public-entries)。
 
-枚举、详情和非阻塞命令输出的整次预算为五秒；`wait_subagent` 默认等待30秒，显式等待使用 `timeout_ms` 与工具 cap 的较小值。资源队列、批量各项和来源读取共用绝对期限。后端分段返回未终态后继续等待；挂起与收尾不算完成，返回结束原因与实测耗时。`observation_unavailable`、`observation_timed_out`、`observation_invalid_evidence` 和 `observation_interrupted` 均不证明执行终态；未知计数为 null。intervention 中断保留全部目标身份和完成通知责任，等待识别使用已验证的输入类型，支持工具名和参数重命名。见 [调用期限与终态](../openspec/specs/session-timeline/spec.md#requirement-public-task-observations-share-one-call-deadline) 和 [中断投影](../openspec/specs/session-timeline/spec.md#requirement-interrupted-waits-preserve-identities-without-inventing-execution-state)。
+枚举、详情、单个子任务结果读取和非阻塞命令输出的整次预算为五秒；`wait_subagent` 默认等待30秒，显式等待使用 `timeout_ms` 与工具 cap 的较小值。资源队列、批量各项和来源读取共用绝对期限。后端分段返回未终态后继续等待；挂起与收尾不算完成。多 subagent 等待在任一目标确认终态时立即返回 `any_finished`、完成者 ID 与结果，主 agent 先分析该结果，再决定是否等待其余依赖。返回全部目标身份、最近实际状态和实测耗时；因另一目标完成而提前停止观测的无快照项标为 `observation_interrupted`，不会取消对应 child。`observation_unavailable`、`observation_timed_out`、`observation_invalid_evidence` 和 `observation_interrupted` 均不证明执行终态；未知计数为 null。intervention 中断保留全部目标身份和完成通知责任，等待识别使用已验证的输入类型，支持工具名和参数重命名。见 [调用期限与终态](../openspec/specs/session-timeline/spec.md#requirement-public-task-observations-share-one-call-deadline) 和 [中断投影](../openspec/specs/session-timeline/spec.md#requirement-interrupted-waits-preserve-identities-without-inventing-execution-state)。
+
+冷恢复的 runtime 解封在恢复执行和唤醒 idle arbiter 之前重新核对 Goal 所需工具。挂起前已暂停的 Goal 由用户通过 `/goal restart` 重新激活，仍按计划依赖决定何时开始下一轮。见 [Goal 续跑契约](../openspec/specs/behavior-goal/spec.md#requirement-goal-continuation-state)。
 
 恢复与普通 child 共用真实 signals 采样，UI 进度 ACK 不阻止本地采样；取消 token 覆盖等待 signals 回复，runner 退出时释放本次采样 owner，保留单项网关在途边界。见 [采样取消](../openspec/specs/session-timeline/spec.md#requirement-progress-sampling-cancellation-covers-signal-observation)。
 
-正常退出由默认全局 `Ctrl+D` 在一秒内连续按两次确认，再经 `grow/session/suspend_for_exit` 请求一个五秒共享期限的树挂起；首次按键不改变草稿、队列、当前回合或 Goal，UI 只有收到挂起确认才退出。挂起期间重复退出键合并到原操作，不强退。`Ctrl+C` 保留 composer 清理、局部控件操作和当前回合取消；取消中的重复 `Ctrl+C` 只重试取消，不关联退出。更新重启仍走同一树挂起屏障。排查恢复先核对 root 的 `TreeSuspended`、各节点 checkpoint、命令结算与物理 writer 退役，再检查 `RestorePrepared` / `Resumed` / `ExecutionReleased`。不要把 sampler 的部分输出、调用方超时或新的 actor 实例当作执行资格；中断或未知命令先核对其记录，不能自动重放。行为见 [session-timeline](../openspec/specs/session-timeline/spec.md) 与 [已确认退出契约](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension)，验证见 [挂起记录](../openspec/changes/archive/2026-10-19-suspend-session-tree/verification.md)。
+正常退出由默认全局 `Ctrl+D` 在一秒内连续按两次确认，再经 `grow/session/suspend_for_exit` 请求树挂起；首次按键不改变草稿、队列、当前回合或 Goal，UI 只有收到挂起确认才退出。挂起没有统一倒计时，超过五秒也会继续等待同一请求。挂起期间重复退出键合并到原操作，退出提示中的 `f` 会显式强退，可能导致无法恢复。`Ctrl+C` 保留 composer 清理、局部控件操作和当前回合取消；取消中的重复 `Ctrl+C` 只重试取消，不关联退出。更新重启仍走同一树挂起屏障。排查恢复先核对 root 的 `TreeSuspended`、各节点 checkpoint、命令结算与物理 writer 退役，再检查 `RestorePrepared` / `Resumed` / `ExecutionReleased`。不要把 sampler 的部分输出、调用方超时或新的 actor 实例当作执行资格；中断或未知命令先核对其记录，不能自动重放。行为见 [session-timeline](../openspec/specs/session-timeline/spec.md) 与 [已确认退出契约](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-waits-for-session-tree-suspension)，验证见 [挂起记录](../openspec/changes/archive/2026-10-19-suspend-session-tree/verification.md)。
 
-退出未确认后再次连续两次 `Ctrl+D` 走重试，Pending 期间重复退出仍合并；`r` 重试、`f` 显式强退与旧响应身份校验保留。normal/minimal、Welcome 和 Dashboard 共用可见的英文退出状态，长错误不能挤掉恢复动作行。见 [未确认退出交互](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension)。
+退出未确认后再次连续两次 `Ctrl+D` 走重试，Pending 期间重复退出仍合并；`r` 重试、`f` 显式强退与旧响应身份校验保留。normal/minimal、Welcome 和 Dashboard 共用可见的英文退出状态，长错误不能挤掉恢复动作行。见 [未确认退出交互](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-waits-for-session-tree-suspension)。
 
 排查 resume 后 child 集中显示 cancelled 时，先对齐 child 的 Turn terminal、parent 的 `Ended` 和退出日志；parent 在冷加载时补记 `Ended`，不代表取消发生在加载时。核对退出进程的启动时间和构建来源：替换磁盘上的 grow 不会更新仍在运行的旧进程。没有匹配的未消费挂起 checkpoint、且 child 已有取消终态时，普通 root resume 保留该终态；需要继续时使用已有显式 Task resume，不删除事实或回退旧 checkpoint。
 

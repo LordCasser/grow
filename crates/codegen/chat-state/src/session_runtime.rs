@@ -122,6 +122,12 @@ pub struct RuntimeCommandSettlement {
     pub is_backgrounded: bool,
     pub owner: crate::NotificationOwner,
     pub task_kind: crate::NotificationTaskKind,
+    /// Wall-clock execution bounds captured from the terminal snapshot. Older
+    /// settlements omit these and remain recoverable from presentation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<std::time::SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<std::time::SystemTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +394,25 @@ impl RuntimeLifecycle {
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_command_settlement_without_execution_times_remains_readable() {
+        let command: RuntimeCommandSettlement = serde_json::from_value(serde_json::json!({
+            "command_id": "command-1",
+            "call_id": "call-1",
+            "outcome": "interrupted",
+            "output_file": "/tmp/command-1.log",
+            "exit_code": null,
+            "signal": "SIGINT",
+            "output": "partial output",
+            "is_backgrounded": true,
+            "owner": { "kind": "session" },
+            "task_kind": "task"
+        }))
+        .unwrap();
+        assert_eq!(command.start_time, None);
+        assert_eq!(command.end_time, None);
+    }
+
     fn checkpoint() -> SessionRuntimeEvent {
         SessionRuntimeEvent::Checkpoint {
             operation_id: "op".into(),
@@ -487,6 +512,8 @@ mod tests {
             is_backgrounded: true,
             owner: crate::NotificationOwner::Session,
             task_kind: crate::NotificationTaskKind::Task,
+            start_time: None,
+            end_time: None,
         };
         let event = SessionRuntimeEvent::CommandsSettled {
             operation_id: "op".into(),

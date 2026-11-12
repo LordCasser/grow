@@ -5921,3 +5921,167 @@ mod wait_interrupt_tests {
         assert_eq!(depth.depth(), 0);
     }
 }
+
+#[cfg(test)]
+mod subagent_result_receipt_tests {
+    use super::*;
+
+    async fn deliver_result(actor: &SessionActor, subagent_id: &str, call_id: &str) {
+        let output =
+            tools::types::output::ToolOutput::SubagentResult(tool_types::SubagentWaitResult {
+                subagent_id: subagent_id.into(),
+                status: tool_types::SubagentStatus::Completed,
+                started_at_epoch_ms: Some(1),
+                duration_ms: Some(1),
+                output: Some("verified answer".into()),
+                error: None,
+            });
+        actor.chat_state_handle.push_assistant_response(
+            sampling_types::ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: call_id.into(),
+                    name: "get_subagent_result".into(),
+                    arguments: serde_json::json!({"subagent_id": subagent_id})
+                        .to_string()
+                        .into(),
+                },
+            ]),
+        );
+        actor
+            .handle_bridge_tool_success(
+                &acp::ToolCallId::new(call_id),
+                call_id,
+                "get_subagent_result",
+                "get_subagent_result",
+                ToolRunResult {
+                    output,
+                    prompt_text: "verified answer".into(),
+                    effective_tool_name: None,
+                },
+                0,
+                "test-model",
+                &serde_json::json!({"subagent_id": subagent_id}),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delivered_subagent_answer_suppresses_pending_and_late_receipts_across_replay() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = persistence_rx.recv().await {
+                        match message {
+                            PersistenceMsg::TimelineDurablyAndAck { respond_to, .. }
+                            | PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } => {
+                                let _ = respond_to.send(Ok(()));
+                            }
+                            PersistenceMsg::AppendUpdateDurablyAndAck { respond_to, .. }
+                            | PersistenceMsg::AppendUpdateBufferedAndAck { respond_to, .. } => {
+                                let _ = respond_to.send(Ok(()));
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                let (actor, _) = crate::session::actor::tests::support::create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
+                let notification_id = actor
+                    .receive_notification(
+                        chat_state::NotificationSource::SubagentCompleted {
+                            subagent_id: "completed-child".into(),
+                            owner: chat_state::NotificationOwner::Session,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "A child finished with a verified answer.".into(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(|notification| notification.id.as_str())
+                        .collect::<Vec<_>>(),
+                    [notification_id.as_str()]
+                );
+
+                deliver_result(&actor, "completed-child", "result-call").await;
+                deliver_result(&actor, "late-child", "late-result-call").await;
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::SubagentCompleted {
+                            subagent_id: "late-child".into(),
+                            owner: chat_state::NotificationOwner::Session,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "A late child receipt arrived after answer delivery.".into(),
+                    )
+                    .await
+                    .unwrap();
+                let other_notification_id = actor
+                    .receive_notification(
+                        chat_state::NotificationSource::SubagentCompleted {
+                            subagent_id: "other-child".into(),
+                            owner: chat_state::NotificationOwner::Session,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "Another child still needs delivery.".into(),
+                    )
+                    .await
+                    .unwrap();
+
+                let pending = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .unwrap();
+                assert_eq!(pending.len(), 1, "only unrelated child remains pending");
+                assert_eq!(pending[0].id, other_notification_id);
+                let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+                let replayed = chat_state::Timeline::from_events(timeline.clone()).unwrap();
+                assert_eq!(
+                    replayed
+                        .pending_notifications()
+                        .iter()
+                        .map(|notification| notification.id.as_str())
+                        .collect::<Vec<_>>(),
+                    [other_notification_id.as_str()],
+                    "cold replay must suppress both pre-existing and late same-child receipts"
+                );
+                let delivered_ids = timeline
+                    .iter()
+                    .flat_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Messages(message) => message.items.as_slice(),
+                        _ => &[],
+                    })
+                    .filter_map(|item| match item {
+                        sampling_types::ConversationItem::ToolResult(result) => {
+                            result.delivered_subagent_id.as_deref()
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(delivered_ids, ["completed-child", "late-child"]);
+                assert!(
+                    !pending
+                        .iter()
+                        .any(|notification| notification.id == notification_id)
+                );
+            })
+            .await;
+    }
+}

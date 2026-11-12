@@ -462,7 +462,11 @@ impl SessionActor {
                 }
             }
         }
-        let tool_chat = if inline_images.is_empty() {
+        let delivered_subagent_id = match &result.output {
+            ToolsToolOutput::SubagentResult(_) => consumed_ids.first().copied(),
+            _ => None,
+        };
+        let mut tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
         } else {
             ConversationItem::tool_result_with_images(
@@ -471,7 +475,14 @@ impl SessionActor {
                 inline_images,
             )
         };
-        if let Some((expected_surface_revision, context_window, max_result_tokens)) =
+        if let Some(subagent_id) = delivered_subagent_id
+            && let ConversationItem::ToolResult(item) = &mut tool_chat
+        {
+            item.delivered_subagent_id = Some(subagent_id.to_owned());
+            self.commit_delivered_subagent_answer(tool_chat, subagent_id)
+                .await
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+        } else if let Some((expected_surface_revision, context_window, max_result_tokens)) =
             context_recall_coordinates
         {
             let rejection_item = ConversationItem::tool_result(
@@ -503,7 +514,9 @@ impl SessionActor {
         } else {
             self.chat_state_handle.push_tool_result(tool_chat);
         }
-        self.acknowledge_consumed_notifications(&consumed_ids).await;
+        if delivered_subagent_id.is_none() {
+            self.acknowledge_consumed_notifications(&consumed_ids).await;
+        }
         let mut deferred_followups = Vec::new();
         if !extracted_images.is_empty() {
             let count = extracted_images.len();

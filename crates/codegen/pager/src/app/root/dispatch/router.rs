@@ -153,12 +153,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             begin_exit_suspension(app, restart_for_update, true)
         }
         Action::ForceQuit => {
-            if !app.exit_suspension.as_ref().is_some_and(|exit| {
-                matches!(
-                    &exit.phase,
-                    crate::app::root::ExitSuspensionPhase::Unconfirmed { .. }
-                )
-            }) {
+            if app.exit_suspension.is_none() {
                 return vec![];
             }
             app.exit_suspension = None;
@@ -1472,7 +1467,6 @@ fn begin_exit_suspension(app: &mut AppView, restart_for_update: bool, retry: boo
             crate::app::root::ExitSuspensionPhase::Pending
         },
         restart_for_update,
-        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
     });
     if starting {
         vec![]

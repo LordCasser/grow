@@ -319,20 +319,14 @@ impl SessionActor {
         self.normalize_images_with_notices(wrapped, images).await
     }
 
-    /// Broadcast a mid-turn interjection to every attached client.
-    ///
-    /// Fan it out (sessionId-routed, fire-and-forget) so every pane viewing the
-    /// session renders the interjection block, not just the originator. The
-    /// originating pager deduplicates its optimistic block by `id`; other
-    /// panes render it. `None` remains valid for older clients.
-    pub(super) fn broadcast_interjection(&self, text: &str, id: Option<&str>) {
-        let mut payload = serde_json::json!({
+    /// Publish the live view of a durably consumed steer. The transcript and
+    /// replay share the display identity, including when a client reconnects.
+    fn broadcast_consumed_interjection(&self, text: &str, message_id: &str) {
+        let payload = serde_json::json!({
             "sessionId": self.session_info.id.0.as_ref(),
             "text": text,
+            "messageId": message_id,
         });
-        if let Some(id) = id {
-            payload["interjectionId"] = serde_json::json!(id);
-        }
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
             self.notifications
                 .gateway
@@ -344,8 +338,8 @@ impl SessionActor {
     }
 
     /// Inject a synthetic user message into persistence and conversation
-    /// context, optionally notifying the pager. Interjection drains skip the
-    /// notification because the pager already owns the optimistic user row.
+    /// context, optionally notifying the pager. Admitted steers publish their
+    /// live transcript row after the durable consumption acknowledgement.
     pub(super) async fn inject_synthetic_user_message(
         &self,
         text: &str,
@@ -418,7 +412,7 @@ impl SessionActor {
                 ))));
         }
 
-        // Notify pager (skipped for interjections — pager has local block).
+        // The caller of an admitted steer owns its post-consumption broadcast.
         if notify_pager {
             self.send_update(
                 acp::SessionUpdate::UserMessageChunk(
@@ -613,6 +607,10 @@ impl SessionActor {
 
                 match publication {
                     Ok(()) => {
+                        self.broadcast_consumed_interjection(
+                            &display_text,
+                            &display_echo.message_id,
+                        );
                         if !group.items.is_empty()
                             && let Err(error) = self.finish_user_skill_loads(&group, true).await
                         {
