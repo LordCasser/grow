@@ -652,15 +652,25 @@ async fn ctrl_d_cold_resume_restart_resumes_paused_goal() {
         })
         .to_string(),
     );
-    resumed
-        .wait_for_text("Ctrl+x:commands", RESUME_TIMEOUT)
-        .expect("the resumed Agent composer is ready for input");
-    resumed
-        .inject_keys(b"/goal restart")
-        .expect("type restart into the resumed composer");
-    resumed
-        .wait_for_text("❯ /goal restart", Duration::from_secs(5))
-        .expect("the composer received the restart command");
+    // The composer can render while Pager still discards input during replay.
+    // Replace the draft until it renders in the composer, then submit once.
+    poll_for(RESUME_TIMEOUT, || {
+        resumed
+            .inject_keys(b"\x15/goal restart")
+            .expect("replace the resumed composer draft with the restart command");
+        resumed.update(Duration::from_millis(250));
+        resumed
+            .screen_contents()
+            .lines()
+            .any(|line| line.trim().trim_matches('│').trim() == "❯ /goal restart")
+            .then_some(())
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "the composer never accepted the restart draft; screen:\n{}",
+            resumed.screen_contents()
+        )
+    });
     resumed.inject_keys(b"\r").expect("submit Goal restart");
     resumed
         .wait_for_text("Goal restarted", Duration::from_secs(15))

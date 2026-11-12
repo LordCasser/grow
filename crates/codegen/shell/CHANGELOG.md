@@ -1,10 +1,10 @@
 # Changelog
 
-# 2.6.8 — 2026-11-12
+# 2.6.9 — 2026-11-12
 
 修复挂起命令的终态和耗时、冷恢复后的 Goal 接续、排队 steering 的重复显示，以及子 Agent 的观察和结果交付。
 
-完整发布说明见 [changelogs/2.6.8.md](changelogs/2.6.8.md)。
+完整发布说明见 [changelogs/2.6.9.md](changelogs/2.6.9.md)。
 
 # 2.6.6 — 2026-11-11
 
