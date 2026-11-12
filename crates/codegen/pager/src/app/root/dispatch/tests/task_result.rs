@@ -382,30 +382,31 @@ fn confirmed_quit_input_retries_unconfirmed_exit_and_ignores_old_result() {
 }
 
 #[test]
-fn force_quit_is_available_only_after_suspension_is_unconfirmed() {
-    let mut app = test_app_with_agent();
-    let pending = dispatch(Action::Quit, &mut app);
-    assert!(matches!(
-        dispatch(Action::ForceQuit, &mut app).as_slice(),
-        []
-    ));
-    let [Effect::SuspendForExit { exit_id }] = pending.as_slice() else {
-        panic!("expected suspension request, got {pending:?}");
-    };
-    assert!(
-        dispatch_task_result(
-            TaskResult::ExitSuspensionResolved {
-                exit_id: exit_id.clone(),
-                result: Err("not confirmed".into()),
-            },
-            &mut app,
-        )
-        .is_empty()
-    );
+fn force_quit_is_available_while_waiting_and_after_unconfirmed_suspension() {
+    for unconfirmed in [false, true] {
+        let mut app = test_app_with_agent();
+        assert!(dispatch(Action::ForceQuit, &mut app).is_empty());
+        let pending = dispatch(Action::Quit, &mut app);
+        let [Effect::SuspendForExit { exit_id }] = pending.as_slice() else {
+            panic!("expected suspension request, got {pending:?}");
+        };
+        if unconfirmed {
+            assert!(
+                dispatch_task_result(
+                    TaskResult::ExitSuspensionResolved {
+                        exit_id: exit_id.clone(),
+                        result: Err("not confirmed".into()),
+                    },
+                    &mut app,
+                )
+                .is_empty()
+            );
+        }
 
-    let effects = dispatch(Action::ForceQuit, &mut app);
-    assert!(matches!(effects.last(), Some(Effect::Quit)));
-    assert!(app.exit_suspension.is_none());
+        let effects = dispatch(Action::ForceQuit, &mut app);
+        assert!(matches!(effects.last(), Some(Effect::Quit)));
+        assert!(app.exit_suspension.is_none());
+    }
 }
 
 #[test]
