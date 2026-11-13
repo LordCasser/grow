@@ -29,6 +29,136 @@ pub(crate) struct PreparedHistory {
     pub mark_replay: bool,
 }
 
+const HISTORY_PAGE_ROWS: usize = 128;
+
+impl PreparedHistory {
+    /// Complete physical response records and tool call/update groups stay
+    /// together even if one group crosses the preferred page size.
+    pub(crate) fn take_page(&mut self, end: usize) -> io::Result<(usize, Vec<SessionUpdate>)> {
+        self.take_page_with_floor(end, end.saturating_sub(HISTORY_PAGE_ROWS))
+    }
+
+    fn take_page_with_floor(
+        &mut self,
+        end: usize,
+        mut start: usize,
+    ) -> io::Result<(usize, Vec<SessionUpdate>)> {
+        if end > self.updates.len() {
+            return Err(invalid("history page is outside the loaded cut"));
+        }
+        if start == 0 {
+            return Ok((0, self.updates.drain(..end).collect()));
+        }
+
+        start = page_start(self.updates[..end].iter().enumerate(), start);
+        Ok((start, self.updates.drain(start..end).collect()))
+    }
+}
+
+fn page_start<'a>(
+    updates: impl IntoIterator<Item = (usize, &'a SessionUpdate)>,
+    mut start: usize,
+) -> usize {
+    if start == 0 {
+        return 0;
+    }
+    let mut tool_spans = HashMap::new();
+    let mut response_spans = HashMap::new();
+    let mut previous_user = None;
+    let mut spans = Vec::new();
+    for (position, update) in updates {
+        if let Some(cursor) = cursor_from_update(update) {
+            response_spans
+                .entry(cursor.record)
+                .and_modify(|span: &mut (usize, usize)| span.1 = position)
+                .or_insert((position, position));
+        }
+        let tool = if let SessionUpdate::Acp(notification) = update {
+            match &notification.update {
+                acp::SessionUpdate::ToolCall(call) => Some(&call.tool_call_id),
+                acp::SessionUpdate::ToolCallUpdate(update) => Some(&update.tool_call_id),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(id) = tool {
+            tool_spans
+                .entry(id)
+                .and_modify(|span: &mut (usize, usize)| span.1 = position)
+                .or_insert((position, position));
+        }
+        if matches!(update, SessionUpdate::Acp(n)
+            if matches!(&n.update, acp::SessionUpdate::UserMessageChunk(_)))
+        {
+            if let Some(previous) = previous_user
+                && previous + 1 == position
+            {
+                spans.push((previous, position));
+            }
+            previous_user = Some(position);
+        } else {
+            previous_user = None;
+        }
+    }
+    spans.extend(tool_spans.into_values());
+    spans.extend(response_spans.into_values());
+    spans.sort_unstable_by_key(|span| std::cmp::Reverse(span.0));
+    for (first, last) in spans {
+        if first < start && start <= last {
+            start = first;
+        }
+    }
+    start
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IndexedPages {
+    index: crate::session::storage::jsonl::IndexedHistory,
+    history: HistorySnapshot,
+    rows: Vec<(usize, SessionUpdate)>,
+}
+
+impl IndexedPages {
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len() + self.index.omitted_count()
+    }
+
+    pub(crate) fn page(
+        &self,
+        session: &acp::SessionId,
+        end: usize,
+    ) -> io::Result<(usize, Vec<SessionUpdate>)> {
+        if end > self.len() {
+            return Err(invalid("indexed history page is outside the loaded cut"));
+        }
+        let floor = end.saturating_sub(HISTORY_PAGE_ROWS);
+        let row_end = self.rows.partition_point(|(rank, _)| *rank < end);
+        // Run the same grouping rule over retained updates. Only the range
+        // boundary matters, so avoid cloning payloads from preceding rows.
+        let start = page_start(
+            self.rows[..row_end]
+                .iter()
+                .map(|(rank, update)| (*rank, update)),
+            floor,
+        );
+        let first = self.rows[..row_end].partition_point(|(rank, _)| *rank < start);
+        let mut rows = self.rows[first..row_end].iter().peekable();
+        let mut next_notice = start - first;
+        let mut reader = self.index.page_reader()?;
+        let mut updates = Vec::with_capacity(end - start);
+        for rank in start..end {
+            if rows.peek().is_some_and(|(next, _)| *next == rank) {
+                updates.push(rows.next().expect("retained row").1.clone());
+            } else {
+                updates.push(reader.read(next_notice, session, &self.history)?);
+                next_notice += 1;
+            }
+        }
+        Ok((start, updates))
+    }
+}
+
 fn meta_mut(update: &mut SessionUpdate) -> &mut acp::Meta {
     match update {
         SessionUpdate::Acp(notification) => notification.meta.get_or_insert_with(acp::Meta::new),
@@ -77,6 +207,30 @@ fn time_from_ms(at_ms: i64) -> SystemTime {
 }
 
 impl HistorySnapshot {
+    pub(crate) fn indexed_pages(&self, prepared: PreparedHistory) -> io::Result<Option<IndexedPages>> {
+        let Some(index) = self.indexed.clone() else { return Ok(None); };
+        let rows = prepared
+            .updates
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, update)| {
+                let position = cursor_from_update(&update)
+                    .expect("projected row has a cursor")
+                    .record;
+                Ok((ordinal + index.omitted_before(position)?, update))
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(Some(IndexedPages {
+            index,
+            history: HistorySnapshot {
+                prefix_hash: self.prefix_hash.clone(),
+                indexed: self.indexed.clone(),
+                positions: self.positions.last().copied().into_iter().collect(),
+                ..Default::default()
+            },
+            rows,
+        }))
+    }
     /// One pure projector for live resume, offline readers and child views.
     /// Canonical lookup borrows the selected Timeline; there is no digest or
     /// response cache to construct, decode or compare.
@@ -92,7 +246,7 @@ impl HistorySnapshot {
             session,
             timeline,
             cursor,
-            self.sources.len() as u64,
+            self.record_count(),
             self.sources.iter().map(Cow::Borrowed),
             anchored,
             notice_refs,
@@ -109,12 +263,13 @@ impl HistorySnapshot {
     ) -> io::Result<PreparedHistory> {
         let _timer = crate::instrumentation_timer!("session.load.history_projection");
         let (anchored, notice_refs) = Self::source_indexes(&self.sources);
+        let cut = self.record_count();
         let sources = std::mem::take(&mut self.sources);
         self.project(
             session,
             timeline,
             cursor,
-            sources.len() as u64,
+            cut,
             sources.into_iter().map(Cow::Owned),
             anchored,
             notice_refs,
@@ -194,7 +349,11 @@ impl HistorySnapshot {
                 HistorySource::Presentation { at_ms, .. } => Some(*at_ms),
                 _ => None,
             };
-            let position = position as u64;
+            let position = self
+                .positions
+                .get(position)
+                .copied()
+                .unwrap_or(position as u64);
             let response = match source {
                 HistorySource::Presentation { fact, .. } => match &fact.content {
                     HistoryContent::Candidate(key) => by_key
@@ -263,7 +422,7 @@ impl HistorySnapshot {
                     if let HistorySource::Domain { event, .. } = source {
                         meta.insert(
                             "grow/historyTimestampMs".into(),
-                            timeline.events()[*event as usize].at_ms.into(),
+                            timeline.event(chat_state::EventSeq::new(*event)).expect("validated response source").at_ms.into(),
                         );
                     }
                     meta.extend(serde_json::json!({"responseProjection":true,"samplingRequestId":response.identity.request_id,"samplingAttempt":response.identity.attempt}).as_object().cloned().unwrap());
@@ -284,7 +443,7 @@ impl HistorySnapshot {
                 continue;
             }
             if let HistorySource::Domain { event, .. } = source {
-                let domain = &timeline.events()[*event as usize];
+                let domain = timeline.event(chat_state::EventSeq::new(*event)).expect("validated domain source");
                 if background_command_settlements(domain).next().is_some() {
                     settlement_sources.push((position, domain));
                 }
@@ -297,7 +456,7 @@ impl HistorySnapshot {
                             notice.clone(),
                         ),
                         meta: Some(
-                            serde_json::json!({"eventId": format!("{}-receipt-{event}", session.0), "grow/historyTimestampMs": timeline.events()[*event as usize].at_ms}),
+                            serde_json::json!({"eventId": format!("{}-receipt-{event}", session.0), "grow/historyTimestampMs": domain.at_ms}),
                         ),
                     };
                     let mut update = SessionUpdate::Grow(Box::new(notification));
@@ -344,9 +503,7 @@ impl HistorySnapshot {
                     chunk_meta,
                 } => {
                     let event = timeline
-                        .events()
-                        .get(*event as usize)
-                        .filter(|value| value.seq.get() == *event)
+                        .event(chat_state::EventSeq::new(*event))
                         .ok_or_else(|| invalid("history message source is absent"))?;
                     let message = event
                         .messages()
@@ -586,7 +743,7 @@ impl HistorySnapshot {
         Ok(merged)
     }
 
-    fn stamp_cursor(
+    pub(crate) fn stamp_cursor(
         &self,
         session: &acp::SessionId,
         cut: u64,

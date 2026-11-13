@@ -112,6 +112,7 @@ pub use crate::views::agent::{ActivePane, AgentViewLayout, InputMode, PaneAreas}
 use crate::views::block_viewer::BlockViewerPane;
 use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
+
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
 use crate::views::permission_view::PermissionViewState;
 use crate::views::plan_approval_view::{
@@ -639,6 +640,14 @@ pub(crate) type InlineMediaCompletions =
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
+    /// Branch-bound cursor and request ownership for observational older pages.
+    pub(crate) history_page_cursor: Option<String>,
+    /// The resident scrollback is only a display window, even if its older
+    /// cursor has been exhausted. Complete-history actions must reject it.
+    pub(crate) history_is_partial: bool,
+    pub(crate) history_page_request: Option<u64>,
+    pub(crate) history_page_request_seq: u64,
+    pub(crate) history_page_viewer: Option<crate::transcript_projection::TranscriptProjection>,
     /// Last `/agent` picker discovery request; late results from older views are ignored.
     pub(crate) switch_catalog_request: u64,
     pub scrollback: ScrollbackState,

@@ -36,15 +36,27 @@ struct PromptHistoryResponse {
 }
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
-pub async fn handle(_agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "grow/prompt_history" => handle_prompt_history(args).await,
+        "grow/prompt_history" => handle_prompt_history(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }
 
-async fn handle_prompt_history(args: &acp::ExtRequest) -> ExtResult {
+async fn handle_prompt_history(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let request: PromptHistoryRequest = parse_params(args)?;
+    if let Some(session_id) = request.session_id.as_deref()
+        && let Some(handle) = agent.control_session_handle(&acp::SessionId::new(session_id))
+        && handle.info.cwd == request.cwd
+        && let Some(prompts) = handle
+            .chat_state_handle
+            .recent_prompt_texts(MAX_HISTORY_ENTRIES)
+            .await
+    {
+        return to_raw_response(&PromptHistoryResponse {
+            prompts: deduplicate(prompts, MAX_HISTORY_ENTRIES),
+        });
+    }
     let prompts = timed!(try: "prompt_history: project timeline", async {
         tracing::debug!(
             cwd = request.cwd,

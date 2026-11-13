@@ -1389,7 +1389,7 @@ pub(crate) async fn spawn_session_actor(
     };
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
     let timeline_persistence = Box::new(
-        super::timeline_persistence::ChannelTimelinePersistence::new(persistence.tx.clone()),
+        super::timeline_persistence::ChannelTimelinePersistence::for_session(&persistence),
     );
     let initial_goal_scope = super::goal_support::goal_directive_scope(
         persisted_behavior

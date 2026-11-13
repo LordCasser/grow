@@ -363,14 +363,9 @@ impl WorkflowManager {
         &self,
         run_id: &str,
     ) -> Result<chat_state::WorkflowLifecycle, String> {
-        let events = self
-            .timeline
-            .timeline_events()
+        self.timeline
+            .workflow_lifecycle(run_id.to_owned())
             .await
-            .ok_or_else(|| "Workflow Timeline is unavailable".to_owned())?;
-        chat_state::Timeline::from_events(events)
-            .map_err(|error| error.to_string())?
-            .workflow_lifecycle(run_id)
             .ok_or_else(|| format!("workflow {run_id} has no Timeline lifecycle"))
     }
 

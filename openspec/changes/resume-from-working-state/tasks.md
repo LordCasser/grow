@@ -1,0 +1,26 @@
+## Implementation
+
+- [x] Project current Turn, unresolved waits and model-visible tool calls from the canonical actor in one read.
+- [x] Reuse validated root child facts in suspension and remove the redundant parent fold during child reconciliation.
+- [x] Add fixed-Surface suspension evidence scaling and an abrupt process-exit regression for the existing torn journal tail.
+- [x] Measure this increment at the Shell load and exit boundaries against the frozen baseline.
+- [x] Fold current Turn progress and open tools as facts commit; do not gate confirmed-session exit on prompt-history reads.
+- [x] Wire newest/older page delivery, isolate history from live controls, and preserve complete export through the validated history reader.
+- [ ] Bound remaining current-Turn and child-tree queries, including an active Turn containing many already-closed operations.
+- [ ] Persist and hydrate exact working state and apply only the validated tail on the normal cold path.
+- [ ] Serve indexed recent and older history pages through the ordinary session and Pager paths.
+- [ ] Preserve canonical identity, execution authority, rewind, and full-history operations.
+- [x] Verify message-ordinal copy beyond the resident page and stale completion after rebinding.
+- [ ] Add crash publication and fixed-working-state cold resume scaling regressions for the new durable protocol.
+- [x] Cover subprocess exit on both sides of display-index publication, complete and torn tails, exact notice identity, and page-local corruption checks.
+- [x] Run paired A/B with fixed working state and report exit, resume, input-ready and first-page outcomes.
+- [x] Repeat the paired terminal sweep through 394 MiB for indexed presentation history and measure the unoptimized domain-history case separately.
+- [x] Preserve original domain coordinates with a sparse resident fold and index Shell diagnostic observations for exact history reads.
+- [x] Cover subprocess exit before and after an incremental manifest publication, including the original runtime fact, exact retry and torn tail.
+- [x] Establish the initial index when the session is written and cover ordinary appends without opening or gracefully closing the session.
+- [ ] Move closed execution identities and evidence behind exact lookups, and publish only the working set as the executable checkpoint.
+- [ ] Validate historical sampling bodies on demand and during full audit or transfer. Keep execution-required artifact validation before release.
+- [ ] Verify execution readiness when recent-page delivery is delayed or fails, with an independent live cursor.
+- [ ] Rebuild pre-existing unindexed journals outside the normal interactive recovery path and measure direct open before migration separately.
+- [ ] Repeat terminal A/B after storage and index changes and verify the closed-history scaling bound.
+- [ ] Update developer documentation, validate and archive the implemented contracts.

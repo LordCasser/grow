@@ -363,6 +363,7 @@ fn suspended_consultation_stays_pending_through_replacement_prepare_commit_and_r
                     .send(SessionCommand::SuspendRuntimeNode {
                         operation_id: operation_id.clone(),
                         root_session_id: original.session_id_string(),
+                        root_chat_state: original.chat_state_handle.clone(),
                         deadline: Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10)),
                         respond_to,
                     })

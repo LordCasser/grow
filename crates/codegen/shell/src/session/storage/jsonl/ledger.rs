@@ -20,6 +20,26 @@ pub(super) enum AppendFact {
 }
 
 impl JsonlStorageAdapter {
+    pub(crate) fn read_domain_history_range(
+        directory: &super::super::ContainedDirectory,
+        range: std::ops::Range<u64>,
+    ) -> io::Result<Vec<chat_state::TimelineEvent>> {
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(events) = working_snapshot::read_domain_range(directory, range.clone())? {
+            return Ok(events);
+        }
+        let mut data = Self::read_journal_from_directory(directory)?;
+        if data.state.events < range.end {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Timeline history ended before the captured domain cut",
+            ));
+        }
+        data.events.truncate(range.end as usize);
+        Ok(data.events.drain(range.start as usize..).collect())
+    }
     pub(crate) fn read_journal_at_frontier(
         mut file: std::fs::File,
         path: PathBuf,
@@ -133,7 +153,7 @@ impl JsonlStorageAdapter {
         file: std::fs::File,
         path: PathBuf,
         mut remaining_bytes: Option<&mut u64>,
-        mut remaining_records: Option<&mut usize>,
+        remaining_records: Option<&mut usize>,
     ) -> io::Result<JournalData> {
         let mut file = file;
         let frontier = file.metadata()?.len();
@@ -154,8 +174,8 @@ impl JsonlStorageAdapter {
             &mut file,
             complete_len,
             &path,
-            remaining_bytes.take(),
-            remaining_records.take(),
+            remaining_bytes,
+            remaining_records,
         )?;
         Ok(data)
     }
@@ -164,8 +184,26 @@ impl JsonlStorageAdapter {
         file: &mut std::fs::File,
         complete_len: u64,
         path: &Path,
-        mut remaining_bytes: Option<&mut u64>,
-        mut remaining_records: Option<&mut usize>,
+        remaining_bytes: Option<&mut u64>,
+        remaining_records: Option<&mut usize>,
+    ) -> io::Result<(JournalData, blake3::Hasher)> {
+        Self::read_journal_prefix_indexed(
+            file,
+            complete_len,
+            path,
+            remaining_bytes,
+            remaining_records,
+            None::<fn(&history::JournalRecord, working_index::RecordRef) -> bool>,
+        )
+    }
+
+    pub(super) fn read_journal_prefix_indexed(
+        file: &mut std::fs::File,
+        complete_len: u64,
+        path: &Path,
+        remaining_bytes: Option<&mut u64>,
+        remaining_records: Option<&mut usize>,
+        mut retain: Option<impl FnMut(&history::JournalRecord, working_index::RecordRef) -> bool>,
     ) -> io::Result<(JournalData, blake3::Hasher)> {
         let mut events = Vec::new();
         let mut history = HistorySnapshot::default();
@@ -177,13 +215,32 @@ impl JsonlStorageAdapter {
             path,
             &mut state,
             &mut hash,
-            remaining_bytes.take(),
-            remaining_records.take(),
-            |record| {
-                history.push(&record);
-                if let JournalFact::Domain { event, .. } = record.fact {
+            remaining_bytes,
+            remaining_records,
+            |record, offset, json| {
+                let retained = retain.as_mut().is_none_or(|retain| {
+                    retain(
+                        &record,
+                        working_index::RecordRef {
+                            offset,
+                            len: json.len() as u64,
+                            digest: blake3::hash(json),
+                        },
+                    )
+                });
+                if retained {
+                    if !history.positions.is_empty() || record.seq != history.sources.len() as u64 {
+                        if history.positions.is_empty() {
+                            history.positions.extend(0..history.sources.len() as u64);
+                        }
+                        history.positions.push(record.seq);
+                    }
+                    history.push(&record);
+                }
+                if retained && let JournalFact::Domain { event, .. } = record.fact {
                     events.push(event);
                 }
+                Ok(())
             },
         )?;
         history.bytes = complete_len;
@@ -204,15 +261,39 @@ impl JsonlStorageAdapter {
         clippy::too_many_arguments,
         reason = "Keep the reader's existing optional byte/record budgets and caller-owned fold state at one scanner"
     )]
-    fn scan_journal_range(
+    pub(super) fn scan_journal_range(
         file: &mut std::fs::File,
         range: std::ops::Range<u64>,
         path: &Path,
         state: &mut history::AppendState,
         hash: &mut blake3::Hasher,
+        remaining_bytes: Option<&mut u64>,
+        remaining_records: Option<&mut usize>,
+        mut visit: impl FnMut(history::JournalRecord, u64, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        Self::scan_journal_bytes(
+            file,
+            range,
+            path,
+            hash,
+            remaining_bytes,
+            remaining_records,
+            |record, offset, json| {
+                state.accept(&record)?;
+                visit(record, offset, json)?;
+                Ok(true)
+            },
+        )
+    }
+
+    pub(super) fn scan_journal_bytes(
+        file: &mut std::fs::File,
+        range: std::ops::Range<u64>,
+        path: &Path,
+        hash: &mut blake3::Hasher,
         mut remaining_bytes: Option<&mut u64>,
         mut remaining_records: Option<&mut usize>,
-        mut visit: impl FnMut(history::JournalRecord),
+        mut visit: impl FnMut(history::JournalRecord, u64, &[u8]) -> io::Result<bool>,
     ) -> io::Result<()> {
         file.seek(io::SeekFrom::Start(range.start))?;
         let expected = range.end - range.start;
@@ -251,13 +332,19 @@ impl JsonlStorageAdapter {
                 } else {
                     io::Error::new(
                         error.kind(),
-                        format!("{}:{}: {error}", path.display(), state.records + 1),
+                        format!(
+                            "{} at byte {}: {error}",
+                            path.display(),
+                            range.start + consumed - read as u64
+                        ),
                     )
                 }
             })?;
-            state.accept(&record)?;
-            visit(record);
+            let keep_reading = visit(record, range.start + consumed - read as u64, json)?;
             hash.update(&line);
+            if !keep_reading {
+                return Ok(());
+            }
         }
         if consumed != expected {
             return Err(io::Error::new(
@@ -329,15 +416,25 @@ impl JsonlStorageAdapter {
         let lock = Self::lock_append_contained(directory, name, &path)?;
         let result = (|| {
             let mut file = directory.open_read_write_create(name)?;
-            let (complete_len, _) = Self::read_timeline_tail(&mut file)?;
-            if complete_len != file.metadata()?.len() {
-                file.set_len(complete_len)?;
-            }
-            let stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
+            let prior_stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
+            let complete_len = Self::timeline_complete_len(&mut file, prior_stamp.len)?;
             let mut cached = prefix_state
                 .lock()
                 .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?;
+            if cached.as_ref().is_some_and(|prefix| {
+                !prefix.has_full_hash && (prefix.len != complete_len || prefix.stamp != prior_stamp)
+            }) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "indexed Timeline changed during writer ownership",
+                ));
+            }
+            if complete_len != prior_stamp.len {
+                file.set_len(complete_len)?;
+            }
+            let stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
             let refreshed = match cached.as_ref() {
+                Some(prefix) if !prefix.has_full_hash => None,
                 Some(prefix) if prefix.len == complete_len && prefix.stamp == stamp => None,
                 Some(expected) => {
                     if expected.len != complete_len {
@@ -357,10 +454,17 @@ impl JsonlStorageAdapter {
                 }
                 None => Some(Self::load_timeline_prefix(&mut file, complete_len)?),
             };
-            if let Some(prefix) = refreshed {
+            if let Some(mut prefix) = refreshed {
+                #[cfg(unix)]
+                working_snapshot::attach_to_validated_prefix(
+                    std::sync::Arc::new(directory.try_clone()?),
+                    &mut file,
+                    &mut prefix,
+                )?;
                 *cached = Some(prefix);
             }
             let prefix = cached.as_mut().expect("validated Timeline prefix");
+            prefix.stamp = stamp;
             if let AppendFact::Presentation(event) = &mut fact {
                 prefix.state.bind_presentation(event)?;
             }
@@ -419,16 +523,21 @@ impl JsonlStorageAdapter {
                 let AppendFact::Presentation(event) = &fact else {
                     unreachable!()
                 };
-                if let Some(id) = event.event_id()
-                    && let Some(old) = prefix.state.identities.get(id)
-                {
-                    if old != &digest {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Timeline presentation identity conflicts with persisted payload",
-                        ));
+                if let Some(id) = event.event_id() {
+                    let old = match (prefix.state.identities.get(id), &prefix.indexed) {
+                        (Some(old), _) => Some(*old),
+                        (None, Some(index)) => index.identity(id)?,
+                        (None, None) => None,
+                    };
+                    if let Some(old) = old {
+                        if old != digest {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Timeline presentation identity conflicts with persisted payload",
+                            ));
+                        }
+                        repeated = true;
                     }
-                    repeated = true;
                 }
                 if let HistoryContent::Candidate(key) = &event.content
                     && prefix.state.anchors.contains_key(key)
@@ -438,69 +547,101 @@ impl JsonlStorageAdapter {
                 }
                 None
             };
-            if repeated {
-                if matches!(durability, AppendDurability::Durable) {
-                    Self::sync_file_durable(&file)?;
-                    #[cfg(test)]
-                    if let Some(probe) = sync_probe {
-                        probe(TimelineSyncPoint::File)?;
+            if !repeated {
+                let seq = prefix.state.records;
+                let line = if domain.is_some() {
+                    history::encode_domain(seq, &raw, response_anchor)?
+                } else {
+                    history::encode_presentation(seq, at_ms, &raw)?
+                };
+                Self::validate_jsonl_line_size(&line, "Timeline record")?;
+                // Do not clone or fold the historical domain state per append.
+                // Decode only this bounded new record; source indexes are compact.
+                let record = match fact {
+                    AppendFact::Domain(event) => history::JournalRecord {
+                        seq,
+                        fact: JournalFact::Domain {
+                            event,
+                            response_anchor,
+                        },
+                        digest,
+                    },
+                    AppendFact::Presentation(event) => history::JournalRecord {
+                        seq,
+                        fact: JournalFact::Presentation { at_ms, event },
+                        digest,
+                    },
+                };
+                prefix.state.validate(&record)?;
+                file.seek(io::SeekFrom::End(0))?;
+                if let Err(error) = file.write_all(&line).and_then(|()| file.flush()) {
+                    // Roll back only the bytes written by this attempt while the
+                    // append lock still excludes other writers.
+                    file.set_len(complete_len)?;
+                    prefix.stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
+                    return Err(error);
+                }
+                prefix.state.accept(&record)?;
+                if prefix.indexed.is_some() {
+                    let json = &line[..line.len() - 1];
+                    let reference = working_index::RecordRef {
+                        offset: complete_len,
+                        len: json.len() as u64,
+                        digest: blake3::hash(json),
+                    };
+                    if matches!(&record.fact, JournalFact::Domain { .. }) {
+                        prefix.unpublished_domain.push(reference);
                     }
-                    drop(file);
-                    directory.sync()?;
-                    #[cfg(test)]
-                    if let Some(probe) = sync_probe {
-                        probe(TimelineSyncPoint::Directory)?;
+                    if working_snapshot::classify(&record)
+                        != working_snapshot::RecordClass::Diagnostic
+                    {
+                        prefix.unpublished_records.push(reference);
                     }
                 }
-                return Ok(false);
+                prefix.hasher.update(&line);
+                prefix.len = complete_len + line.len() as u64;
+                prefix.hash = prefix.hasher.finalize();
+                prefix.stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
             }
-            let seq = prefix.state.records;
-            let line = if domain.is_some() {
-                history::encode_domain(seq, &raw, response_anchor)?
-            } else {
-                history::encode_presentation(seq, at_ms, &raw)?
-            };
-            Self::validate_jsonl_line_size(&line, "Timeline record")?;
-            // Do not clone or fold the historical domain state per append.
-            // Decode only this bounded new record; source indexes are compact.
-            let record = match fact {
-                AppendFact::Domain(event) => history::JournalRecord {
-                    seq,
-                    fact: JournalFact::Domain {
-                        event,
-                        response_anchor,
-                    },
-                    digest,
-                },
-                AppendFact::Presentation(event) => history::JournalRecord {
-                    seq,
-                    fact: JournalFact::Presentation { at_ms, event },
-                    digest,
-                },
-            };
-            prefix.state.validate(&record)?;
-            file.seek(io::SeekFrom::End(0))?;
-            file.write_all(&line)?;
-            file.flush()?;
-            prefix.state.accept(&record)?;
-            prefix.hasher.update(&line);
-            prefix.len = complete_len + line.len() as u64;
-            prefix.hash = prefix.hasher.finalize();
-            prefix.stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
+            #[cfg(unix)]
+            let publish = prefix
+                .indexed
+                .as_ref()
+                .is_some_and(|index| index.should_advance(prefix.len));
             if matches!(durability, AppendDurability::Durable) {
                 Self::sync_file_durable(&file)?;
                 #[cfg(test)]
                 if let Some(probe) = sync_probe {
                     probe(TimelineSyncPoint::File)?;
                 }
-                drop(file);
                 directory.sync()?;
                 #[cfg(test)]
                 if let Some(probe) = sync_probe {
                     probe(TimelineSyncPoint::Directory)?;
                 }
             }
-            Ok(true)
+            #[cfg(unix)]
+            if publish && let Some(indexed) = &prefix.indexed {
+                let advanced = if matches!(durability, AppendDurability::Buffered) {
+                    Self::sync_file_durable(&file)
+                        .and_then(|()| directory.sync())
+                        .and_then(|()| indexed.advance(prefix))
+                } else {
+                    indexed.advance(prefix)
+                };
+                match advanced {
+                    Ok(Some(indexed)) => {
+                        prefix.indexed = Some(indexed);
+                        prefix.unpublished_records.clear();
+                        prefix.unpublished_domain.clear();
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "Timeline committed; working frontier publication deferred")
+                    }
+                }
+            }
+            Ok(!repeated)
         })();
         #[cfg(any(unix, windows))]
         let _ = FileExt::unlock(&lock);
@@ -552,10 +693,11 @@ impl super::super::TimelineLedgerReader {
             &mut hash,
             None,
             None,
-            |record| {
+            |record, _, _| {
                 if let JournalFact::Domain { event, .. } = record.fact {
                     events.push(event);
                 }
+                Ok(())
             },
         )?;
         // Preserve the full reader's error order: validate all physical

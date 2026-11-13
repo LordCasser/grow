@@ -1956,8 +1956,8 @@ pub(super) async fn run_session(
                     SessionCommand::WatchRuntimeTurn { respond_to } => {
                         session.runtime_completion_watchers.borrow_mut().push(respond_to);
                     }
-                    SessionCommand::SuspendRuntimeNode { operation_id, root_session_id, deadline, respond_to } => {
-                        session.request_node_suspension(operation_id, root_session_id, deadline, respond_to).await;
+                    SessionCommand::SuspendRuntimeNode { operation_id, root_session_id, root_chat_state, deadline, respond_to } => {
+                        session.request_node_suspension(operation_id, root_session_id, root_chat_state, deadline, respond_to).await;
                     }
                     SessionCommand::RetireSuspendedRuntime { operation_id, deadline, respond_to } => {
                         let result = session.retire_suspended_runtime(&operation_id, deadline).await;

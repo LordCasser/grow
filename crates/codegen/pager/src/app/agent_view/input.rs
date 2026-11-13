@@ -301,6 +301,33 @@ impl AgentView {
     ) -> InputOutcome {
         self.handle_input_inner(ev, registry, false, effects)
     }
+    fn request_older_history_page(
+        &mut self,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> InputOutcome {
+        let Some(cursor) = self.history_page_cursor.clone() else {
+            return InputOutcome::Unchanged;
+        };
+        if self.history_page_request.is_some() {
+            return InputOutcome::Unchanged;
+        }
+        let Some(session_id) = self.session.session_id.clone() else {
+            return InputOutcome::Unchanged;
+        };
+        let agent_id = self.session.id;
+        self.history_page_request_seq = self.history_page_request_seq.wrapping_add(1);
+        let request_id = self.history_page_request_seq;
+        self.history_page_request = Some(request_id);
+        effects.push(super::actions::Effect::ReadHistoryPage {
+            agent_id,
+            session_id,
+            binding_epoch: self.session_binding_epoch,
+            request_id,
+            cursor,
+        });
+        self.show_toast("Loading older history…");
+        InputOutcome::Changed
+    }
     /// Enable prompt-focused conversation paging on a normal full-TUI agent surface.
     pub(in crate::app) fn handle_input_with_prompt_paging(
         &mut self,
@@ -443,6 +470,38 @@ impl AgentView {
         effects: &mut Vec<super::actions::Effect>,
         delegated: &mut bool,
     ) -> InputOutcome {
+        if self.history_page_viewer.is_some() {
+            return match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                    KeyCode::Esc => {
+                        self.history_page_viewer = None;
+                        InputOutcome::Changed
+                    }
+                    KeyCode::PageUp => {
+                        let at_top = self
+                            .history_page_viewer
+                            .as_ref()
+                            .is_some_and(|viewer| viewer.scrollback.scroll_info().0 == 0);
+                        if at_top {
+                            self.request_older_history_page(effects)
+                        } else {
+                            if let Some(viewer) = self.history_page_viewer.as_mut() {
+                                viewer.scrollback.page_up();
+                            }
+                            InputOutcome::Changed
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if let Some(viewer) = self.history_page_viewer.as_mut() {
+                            viewer.scrollback.page_down();
+                        }
+                        InputOutcome::Changed
+                    }
+                    _ => InputOutcome::Changed,
+                },
+                _ => InputOutcome::Changed,
+            };
+        }
         if matches!(ev, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Esc)
             && let Some(invocation) = self.session.pending_memory_browse.take()
         {
@@ -800,6 +859,14 @@ impl AgentView {
                 Event::Paste(text) => self.handle_modal_paste(text),
                 _ => InputOutcome::Changed,
             };
+        }
+        if self.active_pane == AgentPane::Scrollback
+            && matches!(ev, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::PageUp)
+        {
+            let (offset, _, _) = self.scrollback.scroll_info();
+            if offset == 0 && self.history_page_cursor.is_some() {
+                return self.request_older_history_page(effects);
+            }
         }
         if !self.permission_queue.is_empty() && self.active_pane != AgentPane::Scrollback {
             return match ev {
@@ -2166,6 +2233,51 @@ mod btw_focus_tests {
     }
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+    #[test]
+    fn page_up_at_oldest_visible_row_requests_an_observational_history_page() {
+        let mut agent = prompt_focused_agent();
+        agent.force_active_pane(AgentPane::Scrollback);
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("history-s1"));
+        agent.history_page_cursor = Some("opaque-cursor".into());
+        let mut effects = Vec::new();
+        let outcome = agent.handle_input(
+            &key(KeyCode::PageUp),
+            &ActionRegistry::defaults(),
+            &mut effects,
+        );
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            matches!(effects.as_slice(), [crate::app::actions::Effect::ReadHistoryPage {
+            agent_id,
+            session_id,
+            binding_epoch: 0,
+            request_id: 1,
+            cursor,
+        }] if *agent_id == agent.session.id && session_id.0.as_ref() == "history-s1" && cursor == "opaque-cursor")
+        );
+        assert_eq!(agent.history_page_request, Some(1));
+    }
+    #[test]
+    fn minimal_page_up_reaches_the_same_history_boundary() {
+        let mut agent = prompt_focused_agent();
+        agent.force_active_pane(AgentPane::Scrollback);
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("history-minimal"));
+        agent.history_page_cursor = Some("minimal-cursor".into());
+        let mut effects = Vec::new();
+        let outcome = agent.handle_minimal_input(
+            &key(KeyCode::PageUp),
+            &ActionRegistry::defaults(),
+            &mut effects,
+        );
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            matches!(effects.as_slice(), [crate::app::actions::Effect::ReadHistoryPage {
+            session_id,
+            cursor,
+            ..
+        }] if session_id.0.as_ref() == "history-minimal" && cursor == "minimal-cursor")
+        );
     }
     fn done_scroll_offset(agent: &AgentView) -> usize {
         agent

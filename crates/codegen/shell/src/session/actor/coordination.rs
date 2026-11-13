@@ -740,7 +740,7 @@ impl SessionActor {
     pub(super) async fn reconcile_coordination_answers(&self) -> Result<(), String> {
         let events = self
             .chat_state_handle
-            .timeline_events_from(self.coordination_answer_next_seq.get())
+            .resident_timeline_events_from(self.coordination_answer_next_seq.get())
             .await
             .ok_or("Timeline actor unavailable during consultation synchronization")?;
         let next_seq = events.last().map(|event| event.seq.get() + 1);
@@ -799,7 +799,7 @@ impl SessionActor {
     ) -> Result<Vec<(String, crate::coordination::IncomingInquiryAudit)>, String> {
         let events = self
             .chat_state_handle
-            .timeline_events()
+            .resident_timeline_events()
             .await
             .ok_or("Timeline actor unavailable")?;
         let mut latest =

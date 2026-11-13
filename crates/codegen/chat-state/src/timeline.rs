@@ -1787,7 +1787,7 @@ struct LifecycleFold {
     seen_turns: BTreeSet<TurnId>,
     internal_turns: BTreeSet<TurnId>,
     seen_steps: BTreeSet<StepId>,
-    seen_requests: BTreeSet<String>,
+    request_owners: BTreeMap<String, TurnId>,
     seen_tools: BTreeSet<String>,
     seen_compactions: BTreeSet<String>,
     workflows: BTreeMap<String, WorkflowFold>,
@@ -1799,6 +1799,7 @@ struct LifecycleFold {
     open_compaction: Option<OpenCompaction>,
     control_revision: Option<u64>,
     hooks: BTreeMap<String, HookFold>,
+    open_hooks: BTreeSet<String>,
     seen_hook_run_ids: BTreeSet<String>,
     user_prompt_hooks: BTreeMap<String, String>,
     inputs: BTreeMap<String, InputFold>,
@@ -1889,15 +1890,22 @@ impl OpenCompaction {
 #[derive(Debug, Clone, Default)]
 pub struct Timeline {
     runtime: crate::session_runtime::RuntimeLifecycle,
+    active_turn_start: Option<usize>,
+    active_turn_progress: ActiveTurnProgress,
+    suspension_waits: BTreeMap<String, (InteractionKind, String)>,
     planning: Option<PlanningSnapshot>,
     events: Vec<TimelineEvent>,
+    next_seq: u64,
+    first_event_at_ms: Option<i64>,
     subagent_lifecycle_positions: Vec<usize>,
     last_rewind_seq: Option<EventSeq>,
+    last_context_rebuild_seq: Option<EventSeq>,
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
     surface_revision: u64,
     /// Branch-local coordinates derived incrementally from accepted events.
     prompt_indices: BTreeSet<usize>,
+    user_prompt_positions: BTreeMap<usize, EventSeq>,
     next_prompt_index: usize,
     pending_control_contexts: BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
     pending_notifications: BTreeMap<String, PendingNotification>,
@@ -1911,8 +1919,17 @@ pub struct Timeline {
     delivered_subagent_answers: BTreeMap<String, TurnId>,
     lifecycle: LifecycleFold,
     latest_completed_attempts: HashMap<String, u32>,
-    response_admission_identities: HashSet<ResponseAdmissionIdentity>,
+    response_admission_positions: HashMap<ResponseAdmissionIdentity, EventSeq>,
     surface_tool_identity: SurfaceToolIdentitySummary,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ActiveTurnProgress {
+    input_consumed: bool,
+    latest_step: Option<EventSeq>,
+    pending_stop_hooks: BTreeSet<String>,
+    pending_stop_continuations: usize,
+    committed_stop_continuations: usize,
 }
 
 /// Quarantine emits one range per malformed assistant; adjacent carrier and
@@ -2179,6 +2196,40 @@ pub enum TimelineError {
 }
 
 impl Timeline {
+    /// True for diagnostic observations produced by the Shell event tracker.
+    /// These facts are durable history and have no effect on this fold.
+    pub fn is_diagnostic(event: &TimelineEvent) -> bool {
+        matches!(&event.kind, TimelineEventKind::Observation(observation) if observation.scope == "shell")
+    }
+
+    /// Fold a prefix validated by the durable journal reader. Gaps contain
+    /// only previously validated diagnostic observations.
+    pub fn from_indexed_prefix(
+        events: Vec<TimelineEvent>,
+        next_seq: EventSeq,
+        first_event_at_ms: Option<i64>,
+    ) -> Result<Self, TimelineError> {
+        let mut timeline = Self {
+            first_event_at_ms,
+            ..Self::default()
+        };
+        for event in events {
+            if event.seq.get() < timeline.next_seq || event.seq >= next_seq {
+                return Err(TimelineError::NonContiguousSeq {
+                    expected: timeline.next_seq,
+                    actual: event.seq.get(),
+                });
+            }
+            timeline.next_seq = event.seq.get();
+            timeline.accept_replayed(event)?;
+        }
+        if timeline.subagent_result_recorded && timeline.next_seq != next_seq.get() {
+            return Err(TimelineError::SubagentTimelineEnded);
+        }
+        timeline.next_seq = next_seq.get();
+        Ok(timeline)
+    }
+
     pub fn planning_snapshot(&self) -> Option<&PlanningSnapshot> {
         self.planning.as_ref()
     }
@@ -2219,6 +2270,34 @@ impl Timeline {
         Ok(self)
     }
 
+    /// Drop diagnostics after their original facts have committed and validated.
+    pub fn archive_diagnostics(&mut self) {
+        self.events.retain(|event| !Self::is_diagnostic(event));
+        self.active_turn_start = self.lifecycle.active_turn.and_then(|turn| {
+            self.events.iter().rposition(|event| {
+                matches!(&event.kind, TimelineEventKind::Turn(TurnEvent::Started { id, .. }) if *id == turn)
+            })
+        });
+        self.subagent_lifecycle_positions = self
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(position, event)| {
+                matches!(
+                    &event.kind,
+                    TimelineEventKind::Subagent(_) | TimelineEventKind::SubagentSeed(_)
+                )
+                .then_some(position)
+            })
+            .collect();
+    }
+
+    pub(crate) fn archive_latest_diagnostic(&mut self) {
+        if self.events.last().is_some_and(Self::is_diagnostic) {
+            self.events.pop();
+        }
+    }
+
     pub fn from_seed(items: Vec<ConversationItem>) -> Result<Self, TimelineError> {
         let mut timeline = Self::default();
         for mut item in items {
@@ -2245,25 +2324,56 @@ impl Timeline {
         &self.events
     }
 
+    pub fn event(&self, seq: EventSeq) -> Option<&TimelineEvent> {
+        let index = self.events.binary_search_by_key(&seq, |event| event.seq).ok()?;
+        self.events.get(index)
+    }
+
+    pub fn last_seq(&self) -> Option<EventSeq> {
+        self.next_seq.checked_sub(1).map(EventSeq::new)
+    }
+
+    pub(crate) fn has_archived_events(&self) -> bool {
+        self.next_seq != self.events.len() as u64
+    }
+
+    pub fn first_event_at_ms(&self) -> Option<i64> {
+        self.first_event_at_ms
+    }
+
     pub(crate) fn last_rewind_seq(&self) -> Option<EventSeq> {
         self.last_rewind_seq
+    }
+
+    pub fn history_branch(&self) -> Option<EventSeq> {
+        self.last_rewind_seq.max(self.last_context_rebuild_seq)
     }
 
     pub fn response_admission(
         &self,
         identity: &ResponseAdmissionIdentity,
     ) -> Option<&MessageEvent> {
-        self.events.iter().find_map(|event| match &event.kind {
-            TimelineEventKind::Messages(message)
-                if message
-                    .response_admission
-                    .as_ref()
-                    .is_some_and(|admission| admission.identity == *identity) =>
-            {
-                Some(message)
-            }
-            _ => None,
-        })
+        let seq = self.response_admission_positions.get(identity)?;
+        self.event(*seq)?.messages()
+    }
+
+    /// Check selected-branch ownership without copying the admitted body.
+    pub(crate) fn admitted_response_seq(
+        &self,
+        identity: &ResponseAdmissionIdentity,
+    ) -> Option<EventSeq> {
+        let seq = *self.response_admission_positions.get(identity)?;
+        if self
+            .last_context_rebuild_seq
+            .is_some_and(|rebuild| rebuild > seq)
+        {
+            return None;
+        }
+        (self.last_rewind_seq.is_none_or(|rewind| rewind < seq)
+            || fold_branch_provenance(self)
+                .admitted_response_events
+                .contains(&seq))
+        .then_some(seq)
     }
 
     /// Clone only the requested identity-bearing response when its event is on
@@ -2273,22 +2383,17 @@ impl Timeline {
         &self,
         identity: &ResponseAdmissionIdentity,
     ) -> Option<AdmittedResponse> {
-        let (event, message, admission) = self.events.iter().find_map(|event| {
-            let TimelineEventKind::Messages(message) = &event.kind else {
-                return None;
-            };
-            let admission = message.response_admission.as_ref()?;
-            (admission.identity == *identity).then_some((event, message, admission))
-        })?;
-        fold_branch_provenance(self)
-            .admitted_response_events
-            .contains(&event.seq)
-            .then(|| AdmittedResponse {
-                event_seq: event.seq,
-                identity: admission.identity.clone(),
-                items: message.items.clone(),
-                quarantined_tool_exchanges: admission.quarantined_tool_exchanges,
-            })
+        let event_seq = self.admitted_response_seq(identity)?;
+        let message = self.event(event_seq)?.messages()?;
+        Some(AdmittedResponse {
+            event_seq,
+            identity: identity.clone(),
+            items: message.items.clone(),
+            quarantined_tool_exchanges: message
+                .response_admission
+                .as_ref()?
+                .quarantined_tool_exchanges,
+        })
     }
 
     /// Identity-bearing assistant responses belonging to the currently
@@ -2389,7 +2494,7 @@ impl Timeline {
                         | NotificationSourceIdentity::AgentReply { .. }
                 )
             })
-            .filter_map(|(_, seq)| self.events.get(seq.get() as usize).cloned())
+            .filter_map(|(_, seq)| self.event(*seq).cloned())
             .collect::<Vec<_>>();
         receipts.sort_by_key(|event| event.seq);
         receipts
@@ -2412,7 +2517,7 @@ impl Timeline {
                 kind:
                     TimelineEventKind::Notification(NotificationEvent::Received { payload_ref, .. }),
                 ..
-            }) = self.events.get(seq.get() as usize)
+            }) = self.event(*seq)
             {
                 hashes.insert(payload_ref.blake3.clone());
             }
@@ -2479,7 +2584,7 @@ impl Timeline {
         };
         self.events
             .iter()
-            .skip(received.seq.get() as usize + 1)
+            .skip(self.events.partition_point(|event| event.seq <= received.seq))
             .find_map(|event| match &event.kind {
                 TimelineEventKind::Notification(NotificationEvent::Consumed {
                     notification_ids,
@@ -2504,9 +2609,7 @@ impl Timeline {
         let seq = self
             .received_notifications
             .get(&(source.identity(), source_version.clone()))?;
-        usize::try_from(seq.get())
-            .ok()
-            .and_then(|index| self.events.get(index))
+        self.event(*seq)
     }
 
     pub(crate) fn submitted_input_event(&self, input_id: &str) -> Option<&TimelineEvent> {
@@ -2522,7 +2625,7 @@ impl Timeline {
     }
 
     pub fn next_seq(&self) -> EventSeq {
-        EventSeq(self.events.len() as u64)
+        EventSeq(self.next_seq)
     }
 
     /// Monotonic revision of the model-visible Surface. Unlike the Timeline
@@ -2542,9 +2645,7 @@ impl Timeline {
     /// Whether an already-validated event can canonically own this historical
     /// Surface coordinate. The item need not remain on the current Surface.
     pub(crate) fn owns_surface_id(&self, id: SurfaceId) -> bool {
-        usize::try_from(id.event.get())
-            .ok()
-            .and_then(|index| self.events.get(index))
+        self.event(id.event)
             .is_some_and(|event| {
                 if event.seq != id.event {
                     return false;
@@ -2659,10 +2760,12 @@ impl Timeline {
         parent_spawn_seq: EventSeq,
         spawn: &SubagentSpawnEvent,
     ) -> Result<(), TimelineError> {
-        let seed = self.subagent_lifecycle_events().find_map(|event| match &event.kind {
-            TimelineEventKind::SubagentSeed(seed) => Some(seed),
-            _ => None,
-        });
+        let seed = self
+            .subagent_lifecycle_events()
+            .find_map(|event| match &event.kind {
+                TimelineEventKind::SubagentSeed(seed) => Some(seed),
+                _ => None,
+            });
         let Some(seed) = seed else {
             return Err(TimelineError::MissingSubagentSeed);
         };
@@ -2684,9 +2787,7 @@ impl Timeline {
             .result_ref
             .as_ref()
             .ok_or(TimelineError::MissingSubagentResult)?;
-        let result_index = usize::try_from(result_ref.first_seq)
-            .map_err(|_| TimelineError::InvalidSubagentResultLink)?;
-        let Some(event) = self.events.get(result_index) else {
+        let Some(event) = self.event(EventSeq::new(result_ref.first_seq)) else {
             return Err(TimelineError::MissingSubagentResult);
         };
         let TimelineEventKind::SubagentResult(result) = &event.kind else {
@@ -2767,45 +2868,39 @@ impl Timeline {
 
     /// User-authored inputs for the selected branch, indexed by prompt number.
     pub fn prompt_records(&self) -> Vec<PromptRecord> {
-        let mut prompts = BTreeMap::<usize, PromptRecord>::new();
-        for event in &self.events {
-            match &event.kind {
-                TimelineEventKind::Turn(TurnEvent::Started {
-                    identity,
-                    prompt_index: index,
-                    prompt_text: text,
+        self.user_prompt_positions
+            .values()
+            .map(|seq| {
+                let (prompt_index, text, input_kind) = self.user_prompt_at(*seq);
+                PromptRecord {
+                    prompt_index,
+                    text: text.to_owned(),
                     input_kind,
-                    ..
-                }) if identity.origin == "user" => {
-                    prompts.insert(
-                        *index,
-                        PromptRecord {
-                            prompt_index: *index,
-                            text: text.clone(),
-                            input_kind: *input_kind,
-                        },
-                    );
                 }
-                TimelineEventKind::Messages(MessageEvent {
-                    cause: MessageCause::Rewind,
-                    items,
-                    ..
-                }) => {
-                    let next = items
-                        .iter()
-                        .filter_map(|item| match item {
-                            ConversationItem::User(user) => user.prompt_index,
-                            ConversationItem::SkillLoad(skill) => skill.prompt_index,
-                            _ => None,
-                        })
-                        .max()
-                        .map_or(0, |index| index.saturating_add(1));
-                    prompts.retain(|index, _| *index < next);
-                }
-                _ => {}
-            }
-        }
-        prompts.into_values().collect()
+            })
+            .collect()
+    }
+
+    pub(crate) fn recent_prompt_texts(&self, limit: usize) -> Vec<String> {
+        self.user_prompt_positions
+            .values()
+            .rev()
+            .take(limit)
+            .map(|seq| self.user_prompt_at(*seq).1.to_owned())
+            .collect()
+    }
+
+    fn user_prompt_at(&self, seq: EventSeq) -> (usize, &str, TurnInputKind) {
+        let TimelineEventKind::Turn(TurnEvent::Started {
+            prompt_index,
+            prompt_text,
+            input_kind,
+            ..
+        }) = &self.event(seq).expect("indexed user Turn start exists").kind
+        else {
+            unreachable!("indexed user Turn start")
+        };
+        (*prompt_index, prompt_text, *input_kind)
     }
 
     pub fn direct_user_permission_evidence(&self) -> Vec<ConversationItem> {
@@ -2855,7 +2950,7 @@ impl Timeline {
 
     /// Next branch-local prompt coordinate, derived only from accepted turn
     /// starts and rewind branch selections. Every v2 turn start carries both
-    /// its coordinate and prompt text; this fold consumes only the coordinate.
+    /// its coordinate and prompt text.
     pub fn next_prompt_index(&self) -> usize {
         self.next_prompt_index
     }
@@ -2867,9 +2962,16 @@ impl Timeline {
         self.prompt_indices.iter().next_back().copied()
     }
 
-    fn apply_prompt_coordinate(&mut self, kind: &TimelineEventKind) {
-        match kind {
-            TimelineEventKind::Turn(TurnEvent::Started { prompt_index, .. }) => {
+    fn apply_prompt_coordinate(&mut self, event: &TimelineEvent) {
+        match &event.kind {
+            TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_index,
+                identity,
+                ..
+            }) => {
+                if identity.origin == "user" {
+                    self.user_prompt_positions.insert(*prompt_index, event.seq);
+                }
                 self.prompt_indices.insert(*prompt_index);
                 while self.prompt_indices.contains(&self.next_prompt_index) {
                     self.next_prompt_index += 1;
@@ -2890,6 +2992,7 @@ impl Timeline {
                     .max()
                     .map_or(0, |index| index.saturating_add(1));
                 self.prompt_indices.split_off(&next);
+                self.user_prompt_positions.split_off(&next);
                 self.next_prompt_index = self.next_prompt_index.min(next);
             }
             _ => {}
@@ -2943,6 +3046,62 @@ impl Timeline {
 
     pub fn surface_item(&self, index: usize) -> Option<&ConversationItem> {
         self.surface.get(index)
+    }
+
+    /// Only the current Turn can continue after suspension.
+    pub(crate) fn active_turn_events(&self, turn: TurnId) -> &[TimelineEvent] {
+        match self.active_turn_start {
+            Some(start) if self.active_turn() == Some(turn) => &self.events[start..],
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn suspension_waits(
+        &self,
+        operation_id: &str,
+    ) -> Option<&BTreeMap<String, (InteractionKind, String)>> {
+        (self.runtime.operation_id.as_deref() == Some(operation_id)
+            && self.runtime.phase == crate::session_runtime::RuntimePhase::Suspending)
+            .then_some(&self.suspension_waits)
+    }
+
+    pub(crate) fn suspension_turn_evidence(
+        &self,
+        turn: Option<TurnId>,
+        accepted_response: Option<&ResponseAdmissionIdentity>,
+    ) -> Option<crate::session_runtime::SuspendedTurnProgress> {
+        let turn = turn.filter(|turn| self.active_turn() == Some(*turn))?;
+        let progress = &self.active_turn_progress;
+        let response_consumed = accepted_response.is_some_and(|identity| {
+            self.admitted_response_seq(identity)
+                .is_none_or(|seq| progress.latest_step.is_some_and(|step| step > seq))
+        });
+        let open_tools = self
+            .lifecycle
+            .open_tools
+            .iter()
+            .filter(|(_, (owner, _, _))| *owner == turn)
+            .map(|(call_id, _)| call_id.clone())
+            .collect();
+        Some(crate::session_runtime::SuspendedTurnProgress {
+            input_consumed: progress.input_consumed,
+            next_step_consumed_response: response_consumed,
+            committed_stop_continuations: progress.committed_stop_continuations,
+            open_tool_calls: open_tools,
+        })
+    }
+
+    pub(crate) fn tool_was_started(&self, call: &str) -> bool {
+        self.lifecycle.seen_tools.contains(call)
+    }
+
+    pub(crate) fn is_interaction_open(
+        &self,
+        call: String,
+        attempt: String,
+        kind: InteractionKind,
+    ) -> bool {
+        self.lifecycle.open_interactions.get(&(call, attempt)) == Some(&kind)
     }
 
     pub fn active_turn(&self) -> Option<TurnId> {
@@ -3177,6 +3336,17 @@ impl Timeline {
         &mut self,
         reason: &str,
     ) -> Result<Option<TimelineEvent>, TimelineError> {
+        let Some(event) = self.prepare_open_compaction_settlement(reason)? else {
+            return Ok(None);
+        };
+        self.accept(event.clone())?;
+        Ok(Some(event))
+    }
+
+    pub(crate) fn prepare_open_compaction_settlement(
+        &self,
+        reason: &str,
+    ) -> Result<Option<TimelineEvent>, TimelineError> {
         let Some(open) = self.lifecycle.open_compaction.clone() else {
             return Ok(None);
         };
@@ -3195,7 +3365,7 @@ impl Timeline {
                 error: reason.into(),
             }
         };
-        self.record(TimelineEventKind::Compaction(terminal))
+        self.prepare(TimelineEventKind::Compaction(terminal))
             .map(Some)
     }
 
@@ -3284,11 +3454,9 @@ impl Timeline {
             .collect::<Vec<_>>();
         let hooks = self
             .lifecycle
-            .hooks
+            .open_hooks
             .iter()
-            .filter_map(|(occurrence_id, hook)| {
-                hook.decision.is_none().then_some(occurrence_id.clone())
-            })
+            .cloned()
             .collect::<Vec<_>>();
         let inputs = self
             .lifecycle
@@ -3464,16 +3632,18 @@ impl Timeline {
         Ok(self.events[start..].to_vec())
     }
 
+    pub(crate) fn has_open_hooks(&self) -> bool {
+        !self.lifecycle.open_hooks.is_empty()
+    }
+
     /// Settle only unfinished Hook executions after their workers have
     /// stopped. Other open runtime work remains untouched for its owner.
     pub fn settle_interrupted_hooks(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
         let hooks = self
             .lifecycle
-            .hooks
+            .open_hooks
             .iter()
-            .filter_map(|(occurrence_id, hook)| {
-                hook.decision.is_none().then_some(occurrence_id.clone())
-            })
+            .cloned()
             .collect::<Vec<_>>();
         let start = self.events.len();
         for occurrence_id in hooks {
@@ -3817,7 +3987,11 @@ impl Timeline {
         let lifecycle = self.validate(&event)?;
         let active_turn = self.lifecycle.active_turn.is_some();
         let active_step = self.lifecycle.active_step.is_some();
-        self.lifecycle = lifecycle;
+        if let Some(lifecycle) = lifecycle {
+            self.lifecycle = lifecycle;
+        } else if let TimelineEventKind::Control(control) = &event.kind {
+            self.lifecycle.control_revision = Some(control.revision);
+        }
         self.apply_validated_event(event, active_turn, active_step);
         Ok(())
     }
@@ -3840,6 +4014,7 @@ impl Timeline {
         active_turn: bool,
         active_step: bool,
     ) {
+        self.update_suspension_evidence(&event);
         match &event.kind {
             TimelineEventKind::Request(RequestEvent::Completed { id, attempt, .. }) => {
                 self.latest_completed_attempts.insert(id.clone(), *attempt);
@@ -3848,8 +4023,8 @@ impl Timeline {
                 response_admission: Some(admission),
                 ..
             }) => {
-                self.response_admission_identities
-                    .insert(admission.identity.clone());
+                self.response_admission_positions
+                    .insert(admission.identity.clone(), event.seq);
             }
             _ => {}
         }
@@ -4038,15 +4213,13 @@ impl Timeline {
         if matches!(&event.kind, TimelineEventKind::SubagentResult(_)) {
             self.subagent_result_recorded = true;
         }
-        self.apply_prompt_coordinate(&event.kind);
-        if matches!(
-            &event.kind,
-            TimelineEventKind::Messages(MessageEvent {
-                cause: MessageCause::Rewind,
-                ..
-            })
-        ) {
-            self.last_rewind_seq = Some(event.seq);
+        self.apply_prompt_coordinate(&event);
+        if let TimelineEventKind::Messages(message) = &event.kind {
+            match message.cause {
+                MessageCause::Rewind => self.last_rewind_seq = Some(event.seq),
+                MessageCause::ContextRebuild => self.last_context_rebuild_seq = Some(event.seq),
+                _ => {}
+            }
         }
         if matches!(
             &event.kind,
@@ -4054,7 +4227,110 @@ impl Timeline {
         ) {
             self.subagent_lifecycle_positions.push(self.events.len());
         }
+        self.first_event_at_ms.get_or_insert(event.at_ms);
+        self.next_seq += 1;
         self.events.push(event);
+    }
+
+    fn update_suspension_evidence(&mut self, event: &TimelineEvent) {
+        use crate::session_runtime::{SessionRuntimeEvent, SuspendedOperationState};
+        match &event.kind {
+            TimelineEventKind::Turn(TurnEvent::Started { .. }) => {
+                self.active_turn_start = Some(self.events.len());
+                self.active_turn_progress = ActiveTurnProgress::default();
+            }
+            TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
+                self.active_turn_start = None;
+                self.active_turn_progress = ActiveTurnProgress::default();
+            }
+            TimelineEventKind::Input(InputEvent::Consumed { turn, .. })
+                if self.active_turn() == Some(*turn) =>
+            {
+                self.active_turn_progress.input_consumed = true;
+            }
+            TimelineEventKind::Step(StepEvent::Started { .. }) => {
+                let progress = &mut self.active_turn_progress;
+                progress.latest_step = Some(event.seq);
+                progress.committed_stop_continuations += progress.pending_stop_continuations;
+                progress.pending_stop_continuations = 0;
+            }
+            TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id,
+                event: HookEventType::Stop | HookEventType::SubagentStop,
+                gate: HookGateKind::Stop,
+                ..
+            }) => {
+                // Hook validation already binds both gates to the active Turn
+                // and (for SubagentStop) the child's canonical seed identity.
+                self.active_turn_progress
+                    .pending_stop_hooks
+                    .insert(occurrence_id.clone());
+            }
+            TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision,
+            }) if self
+                .active_turn_progress
+                .pending_stop_hooks
+                .remove(occurrence_id) =>
+            {
+                if matches!(
+                    decision,
+                    HookAggregateDecision::Stop {
+                        decision: HookStopDecision::KeepWorking { .. }
+                    }
+                ) {
+                    self.active_turn_progress.pending_stop_continuations += 1;
+                }
+            }
+            TimelineEventKind::Interaction(InteractionEvent::Opened {
+                tool_call_id,
+                attempt_id,
+                kind,
+            }) => {
+                self.suspension_waits
+                    .insert(tool_call_id.clone(), (*kind, attempt_id.clone()));
+            }
+            TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                tool_call_id,
+                attempt_id,
+                kind,
+                resolution,
+            }) if *resolution != InteractionResolution::Suspended
+                && self.suspension_waits.get(tool_call_id).is_some_and(
+                    |(current_kind, current_attempt)| {
+                        current_kind == kind && current_attempt == attempt_id
+                    },
+                ) =>
+            {
+                self.suspension_waits.remove(tool_call_id);
+            }
+            TimelineEventKind::Runtime(SessionRuntimeEvent::ExecutionReleased { .. }) => {
+                let turn = self
+                    .runtime
+                    .checkpoint
+                    .as_ref()
+                    .and_then(|saved| saved.turn.as_ref());
+                self.suspension_waits.retain(|call, (kind, _)| {
+                    turn.is_some_and(|turn| {
+                        turn.operations.iter().any(|operation| {
+                            operation.call_id == *call
+                                && matches!(
+                                    (&operation.state, *kind),
+                                    (
+                                        SuspendedOperationState::AwaitPermission,
+                                        InteractionKind::Permission
+                                    ) | (
+                                        SuspendedOperationState::AwaitUser,
+                                        InteractionKind::Question | InteractionKind::PlanApproval
+                                    )
+                                )
+                        })
+                    })
+                });
+            }
+            _ => {}
+        }
     }
 
     fn apply_notification(&mut self, seq: EventSeq, event: &NotificationEvent) {
@@ -4173,12 +4449,24 @@ impl Timeline {
         }
     }
 
-    fn validate(&self, event: &TimelineEvent) -> Result<LifecycleFold, TimelineError> {
+    fn validate(&self, event: &TimelineEvent) -> Result<Option<LifecycleFold>, TimelineError> {
         self.validate_header(event)?;
+        match &event.kind {
+            TimelineEventKind::Runtime(_) | TimelineEventKind::Observation(_) => {
+                self.validate_content(event)?;
+                return Ok(None);
+            }
+            TimelineEventKind::Control(control) => {
+                validate_control_revision(self.lifecycle.control_revision, control.revision)?;
+                self.validate_content(event)?;
+                return Ok(None);
+            }
+            _ => {}
+        }
         let mut lifecycle = self.lifecycle.clone();
         lifecycle.accept(&event.kind)?;
         self.validate_content(event)?;
-        Ok(lifecycle)
+        Ok(Some(lifecycle))
     }
 
     fn validate_header(&self, event: &TimelineEvent) -> Result<(), TimelineError> {
@@ -4191,7 +4479,7 @@ impl Timeline {
                 actual: event.version,
             });
         }
-        let expected = self.events.len() as u64;
+        let expected = self.next_seq;
         if event.seq.get() != expected {
             return Err(TimelineError::NonContiguousSeq {
                 expected,
@@ -4296,8 +4584,10 @@ impl Timeline {
                 runtime
             {
                 if let Some(continuation) = checkpoint.turn.as_ref() {
-                    let started_prompt_id =
-                        self.events.iter().find_map(|event| match &event.kind {
+                    let started_prompt_id = self
+                        .active_turn_events(continuation.turn_id)
+                        .first()
+                        .and_then(|event| match &event.kind {
                             TimelineEventKind::Turn(TurnEvent::Started {
                                 id, prompt_id, ..
                             }) if *id == continuation.turn_id => Some(prompt_id.as_str()),
@@ -4314,15 +4604,21 @@ impl Timeline {
                     .as_ref()
                     .and_then(|turn| turn.accepted_response.as_ref())
                 {
-                    if self.admitted_response(&accepted.identity).is_none() {
+                    if self.admitted_response_seq(&accepted.identity).is_none() {
                         return Err(TimelineError::InvalidRuntime(
                             "checkpoint accepted response is absent from the current branch".into(),
                         ));
                     }
-                    if !self.events.iter().any(|event| matches!(&event.kind,
-                        TimelineEventKind::Request(RequestEvent::Started { id, turn, .. })
-                            if id == &accepted.identity.request_id
-                                && checkpoint.turn.as_ref().is_some_and(|cursor| cursor.turn_id == *turn))) {
+                    let continuation = checkpoint
+                        .turn
+                        .as_ref()
+                        .expect("response belongs to a continuation");
+                    if self
+                        .lifecycle
+                        .request_owners
+                        .get(&accepted.identity.request_id)
+                        != Some(&continuation.turn_id)
+                    {
                         return Err(TimelineError::InvalidRuntime(
                             "checkpoint accepted response belongs to another Turn".into(),
                         ));
@@ -4781,10 +5077,12 @@ impl Timeline {
             }
         }
         if let TimelineEventKind::SubagentResult(result) = &event.kind {
-            let seed = self.subagent_lifecycle_events().find_map(|event| match &event.kind {
-                TimelineEventKind::SubagentSeed(seed) => Some(seed),
-                _ => None,
-            });
+            let seed = self
+                .subagent_lifecycle_events()
+                .find_map(|event| match &event.kind {
+                    TimelineEventKind::SubagentSeed(seed) => Some(seed),
+                    _ => None,
+                });
             let Some(seed) = seed else {
                 return Err(TimelineError::MissingSubagentSeed);
             };
@@ -5066,8 +5364,8 @@ impl Timeline {
                 return Err(TimelineError::InvalidResponseAdmissionIdentity);
             }
             if self
-                .response_admission_identities
-                .contains(&admission.identity)
+                .response_admission_positions
+                .contains_key(&admission.identity)
             {
                 return Err(TimelineError::DuplicateResponseAdmissionIdentity);
             }
@@ -5561,7 +5859,8 @@ impl Timeline {
                     self.pending_notifications.retain(|id, receipt| {
                         if matches!(&receipt.source, NotificationSource::SubagentCompleted {
                             subagent_id: subject, ..
-                        } if subject == subagent_id) {
+                        } if subject == subagent_id)
+                        {
                             pending_lifecycle.remove(id);
                             false
                         } else {
@@ -5765,6 +6064,15 @@ fn gate_run_block_reason(handler: &HookHandlerPlan, run: &HookHandlerLifecycle) 
         } if handler.failure_policy == HookFailurePolicy::Block => Some(reason.clone()),
         _ => None,
     }
+}
+
+fn validate_control_revision(previous: Option<u64>, actual: u64) -> Result<(), TimelineError> {
+    if let Some(previous) = previous
+        && actual <= previous
+    {
+        return Err(TimelineError::NonMonotonicControlRevision { previous, actual });
+    }
+    Ok(())
 }
 
 impl LifecycleFold {
@@ -6187,6 +6495,7 @@ impl LifecycleFold {
                         return Err(TimelineError::InvalidHook);
                     }
                 }
+                self.open_hooks.insert(occurrence_id.clone());
                 self.hooks.insert(
                     occurrence_id.clone(),
                     HookFold {
@@ -6300,6 +6609,7 @@ impl LifecycleFold {
                     return Err(TimelineError::InvalidHook);
                 }
                 hook.decision = Some(decision.clone());
+                self.open_hooks.remove(occurrence_id);
             }
             TimelineEventKind::Turn(TurnEvent::Started {
                 id,
@@ -6445,7 +6755,7 @@ impl LifecycleFold {
                         actual: *step,
                     });
                 }
-                if !self.seen_requests.insert(id.clone()) {
+                if self.request_owners.insert(id.clone(), *turn).is_some() {
                     return Err(TimelineError::RequestAlreadyOpen(id.clone()));
                 }
                 if self
@@ -6864,14 +7174,7 @@ impl LifecycleFold {
             | TimelineEventKind::Sideband(_)
             | TimelineEventKind::SubagentResult(_) => {}
             TimelineEventKind::Control(control) => {
-                if let Some(previous) = self.control_revision
-                    && control.revision <= previous
-                {
-                    return Err(TimelineError::NonMonotonicControlRevision {
-                        previous,
-                        actual: control.revision,
-                    });
-                }
+                validate_control_revision(self.control_revision, control.revision)?;
                 self.control_revision = Some(control.revision);
             }
         }
@@ -8396,8 +8699,8 @@ mod tests {
             transactional.latest_completed_attempts
         );
         assert_eq!(
-            replay.response_admission_identities,
-            transactional.response_admission_identities
+            replay.response_admission_positions,
+            transactional.response_admission_positions
         );
         assert_eq!(
             replay.surface_tool_identity,

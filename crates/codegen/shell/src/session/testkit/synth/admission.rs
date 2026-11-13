@@ -1,6 +1,7 @@
 //! Upgrade legacy replay fixtures with canonical admitted-response history.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 
 use acp_transport::protocol as acp;
@@ -17,7 +18,71 @@ use crate::session::storage::SessionUpdate;
 
 use super::replay::SessionSpec;
 
-const FIXTURE_BUDGET: u64 = 256 * 1024 * 1024;
+const FIXTURE_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// Replay an existing synthetic journal through the ordinary storage writer.
+/// Sync once per MiB and on the final record to exercise periodic index
+/// publication without opening the session for recovery.
+pub async fn commit_fixture_through_normal_writer(
+    root: &Path,
+    info: &Info,
+    source_directory: &Path,
+    model_id: &str,
+) {
+    use std::io::BufRead;
+
+    use crate::session::history::JournalFact;
+    use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
+
+    let storage = JsonlStorageAdapter::with_root(root.to_path_buf());
+    storage
+        .init_session(info, crate::agent::models::ModelId::new(model_id))
+        .await
+        .expect("create fixture session through the normal writer");
+    let source = std::fs::File::open(source_directory.join(crate::session::storage::TIMELINE_FILE))
+        .expect("open synthetic journal");
+    let mut remaining = source.metadata().expect("stat synthetic journal").len();
+    let mut reader = std::io::BufReader::new(source);
+    let mut line = Vec::new();
+    let mut unpublished = 0;
+    while remaining != 0 {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line).expect("read fixture fact");
+        assert_eq!(line.last(), Some(&b'\n'));
+        remaining -= read as u64;
+        unpublished += read;
+        let durable = unpublished >= 1024 * 1024 || remaining == 0;
+        let record = crate::session::history::decode_record(&line[..read - 1])
+            .expect("validate synthetic fact");
+        match record.fact {
+            JournalFact::Domain { event, .. } => {
+                if durable {
+                    storage.append_timeline_event_durable(info, &event).await
+                } else {
+                    storage.append_timeline_event(info, &event).await
+                }
+                .expect("commit domain fact");
+            }
+            JournalFact::Presentation { event, .. } => {
+                let update = if let crate::session::history::HistoryContent::Candidate(key) =
+                    &event.content
+                {
+                    candidate_anchor(info, &key.request_id, event.event_id().unwrap())
+                } else {
+                    event.into_update(&info.id).unwrap().unwrap()
+                };
+                if durable {
+                    storage.append_update_durable_commit_aware(info, &update).await.unwrap();
+                } else {
+                    storage.append_update(info, &update).await.unwrap();
+                }
+            }
+        }
+        if durable {
+            unpublished = 0;
+        }
+    }
+}
 
 /// Convert the legacy input fixture into an ordered physical Timeline journal
 /// with durable response admissions. The legacy updates file is an intermediate
@@ -27,9 +92,63 @@ pub fn write_admitted_history(
     directory: &Path,
     spec: &SessionSpec,
     model_id: &str,
-    _missing_projection_every: usize,
+    missing_projection_every: usize,
     model_route: Option<(&str, &sampling_types::ModelImageInputKey)>,
 ) {
+    write_admitted_history_with_closed_observations(
+        info,
+        directory,
+        spec,
+        model_id,
+        missing_projection_every,
+        0,
+        model_route,
+    );
+}
+
+/// Write admitted history with inert, committed presentation observations
+/// before the fixed working turn. These records grow the closed history without
+/// changing the model-visible Timeline Surface.
+pub fn write_admitted_history_with_closed_observations(
+    info: &Info,
+    directory: &Path,
+    spec: &SessionSpec,
+    model_id: &str,
+    _missing_projection_every: usize,
+    closed_observations: usize,
+    model_route: Option<(&str, &sampling_types::ModelImageInputKey)>,
+) -> String {
+    write_admitted_history_with_closed_observations_kind(
+        info,
+        directory,
+        spec,
+        model_id,
+        _missing_projection_every,
+        closed_observations,
+        ClosedHistoryKind::PresentationNotice,
+        model_route,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClosedHistoryKind {
+    #[default]
+    PresentationNotice,
+    DomainObservation,
+}
+
+/// Variant of the fixed-surface fixture that can grow closed history as inert
+/// Shell diagnostic Timeline events instead of presentation records.
+pub fn write_admitted_history_with_closed_observations_kind(
+    info: &Info,
+    directory: &Path,
+    spec: &SessionSpec,
+    model_id: &str,
+    _missing_projection_every: usize,
+    closed_observations: usize,
+    closed_history_kind: ClosedHistoryKind,
+    model_route: Option<(&str, &sampling_types::ModelImageInputKey)>,
+) -> String {
     let updates_path = directory.join(crate::session::storage::UPDATES_FILE);
     let legacy_updates = std::fs::read_to_string(&updates_path).expect("read legacy updates");
     let legacy_updates = legacy_updates
@@ -88,6 +207,25 @@ pub fn write_admitted_history(
                 None,
             ))
             .expect("record current model route baseline");
+    }
+
+    if closed_history_kind == ClosedHistoryKind::DomainObservation {
+        for observation in 0..closed_observations {
+            timeline
+                .record(TimelineEventKind::Observation(
+                    chat_state::ObservationEvent {
+                        scope: "shell".into(),
+                        name: "artifact".into(),
+                        turn: None,
+                        step: None,
+                        data: Some(serde_json::json!({
+                            "payload": "x".repeat(16 * 1024),
+                            "index": observation,
+                        })),
+                    },
+                ))
+                .expect("record closed-history diagnostic observation");
+        }
     }
 
     let mut requests = Vec::with_capacity(spec.turns);
@@ -184,6 +322,10 @@ pub fn write_admitted_history(
     }
 
     let restored = Timeline::from_events(timeline.events().to_vec()).expect("restore Timeline");
+    assert_eq!(restored.surface_len(), spec.turns * 2 + 1);
+    let fixed_surface_blake3 = blake3::hash(&serde_json::to_vec(restored.surface()).unwrap())
+        .to_hex()
+        .to_string();
     let admissions = restored.admitted_responses();
     assert_eq!(admissions.len(), spec.turns);
     assert!(
@@ -211,7 +353,8 @@ pub fn write_admitted_history(
     }
 
     let timeline_path = directory.join(crate::session::storage::TIMELINE_FILE);
-    let mut journal = Vec::new();
+    let journal_file = std::fs::File::create(&timeline_path).expect("create Timeline journal");
+    let mut journal = std::io::BufWriter::new(journal_file);
     let mut physical_position = 0u64;
     let mut user_fact_index = 0usize;
     let mut candidates_placed = 0usize;
@@ -230,13 +373,51 @@ pub fn write_admitted_history(
         }
 
         let raw = serde_json::value::to_raw_value(event).expect("serialize domain event");
-        journal.extend(
-            crate::session::history::encode_domain(physical_position, &raw, response_anchor)
-                .expect("encode domain journal record"),
-        );
+        journal
+            .write_all(
+                &crate::session::history::encode_domain(physical_position, &raw, response_anchor)
+                    .expect("encode domain journal record"),
+            )
+            .expect("write domain journal record");
         physical_position = physical_position
             .checked_add(1)
             .expect("physical position does not overflow");
+
+        if closed_history_kind == ClosedHistoryKind::PresentationNotice
+            && event
+                .messages()
+                .is_some_and(|message| message.cause == MessageCause::Seed)
+        {
+            for observation in 0..closed_observations {
+                let fact = HistoryFact {
+                    meta: Some(acp::Meta::from_iter([
+                        (
+                            "eventId".into(),
+                            format!("{}-closed-{observation}", info.id.0).into(),
+                        ),
+                        ("agentTimestampMs".into(), event.at_ms.into()),
+                    ])),
+                    content: crate::session::history::HistoryContent::Grow(Box::new(
+                        crate::session::history::GrowHistoryFact::UiNotice(
+                            crate::extensions::notification::UiNotice {
+                                correlation_id: format!("pty-history-{observation:08}"),
+                                category:
+                                    crate::extensions::notification::UiNoticeCategory::Command,
+                                subject: Some("benchmark fixture".into()),
+                                description: None,
+                                message: "Committed presentation history fixture".into(),
+                                tone: crate::extensions::notification::UiNoticeTone::Info,
+                                details: Some(format!(
+                                    "Closed-history observation {observation:08}: {}",
+                                    "x".repeat(16 * 1024)
+                                )),
+                            },
+                        ),
+                    )),
+                };
+                append_presentation_fact(&mut journal, &mut physical_position, &fact);
+            }
+        }
 
         if event
             .messages()
@@ -259,7 +440,8 @@ pub fn write_admitted_history(
         "all candidate facts were placed"
     );
     assert_eq!(candidates_placed, admissions.len());
-    std::fs::write(&timeline_path, &journal).expect("write unified Timeline journal");
+    journal.flush().expect("flush unified Timeline journal");
+    drop(journal);
     std::fs::remove_file(&updates_path).expect("remove legacy updates input");
 
     let updates_bytes = 0u64;
@@ -275,7 +457,7 @@ pub fn write_admitted_history(
         .saturating_add(rewind_bytes);
     assert!(
         total_bytes <= FIXTURE_BUDGET,
-        "fixture exceeds 256 MiB: {total_bytes} bytes"
+        "fixture exceeds 512 MiB: {total_bytes} bytes"
     );
     eprintln!(
         "[testkit] admitted history: turns={} admissions={} missing_projections={} updates={}B timeline={}B rewind={}B total={}B",
@@ -287,23 +469,26 @@ pub fn write_admitted_history(
         rewind_bytes,
         total_bytes,
     );
+    fixed_surface_blake3
 }
 
 fn append_presentation_fact(
-    journal: &mut Vec<u8>,
+    journal: &mut impl Write,
     physical_position: &mut u64,
     fact: &HistoryFact,
 ) -> u64 {
     let position = *physical_position;
     let raw = serde_json::value::to_raw_value(fact).expect("serialize presentation fact");
-    journal.extend(
-        crate::session::history::encode_presentation(
-            position,
-            chrono::Utc::now().timestamp_millis(),
-            &raw,
+    journal
+        .write_all(
+            &crate::session::history::encode_presentation(
+                position,
+                chrono::Utc::now().timestamp_millis(),
+                &raw,
+            )
+            .expect("encode presentation journal record"),
         )
-        .expect("encode presentation journal record"),
-    );
+        .expect("write presentation journal record");
     *physical_position = (*physical_position)
         .checked_add(1)
         .expect("physical position does not overflow");

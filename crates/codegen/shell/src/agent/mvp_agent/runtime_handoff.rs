@@ -11,13 +11,21 @@ pub(super) struct ExitScope {
     session_ids: Vec<String>,
 }
 
+pub(super) struct PreparedTreeRestore {
+    operation_id: String,
+    instance_id: String,
+    handles: Vec<SessionHandle>,
+}
+
 #[derive(Default, PartialEq, Eq)]
 struct CanonicalChildFacts {
     spawned: std::collections::BTreeMap<String, chat_state::SubagentSpawnEvent>,
+    spawn_sequences: std::collections::BTreeMap<String, chat_state::EventSeq>,
     ended: std::collections::BTreeMap<String, chat_state::SubagentTerminalEvent>,
 }
 
 impl CanonicalChildFacts {
+    #[cfg(test)]
     fn read(events: Vec<chat_state::TimelineEvent>) -> Result<Self, String> {
         let timeline = chat_state::Timeline::from_events(events).map_err(|error| {
             format!("invalid root Timeline while reconciling children: {error}")
@@ -26,16 +34,19 @@ impl CanonicalChildFacts {
     }
 
     fn from_validated_timeline(timeline: &chat_state::Timeline) -> Result<Self, String> {
-        Self::scan(timeline.events())
+        Self::scan(timeline.subagent_lifecycle_events())
     }
 
-    fn scan(events: &[chat_state::TimelineEvent]) -> Result<Self, String> {
+    fn scan<'a>(
+        events: impl IntoIterator<Item = &'a chat_state::TimelineEvent>,
+    ) -> Result<Self, String> {
         let mut facts = Self::default();
         for event in events {
             match &event.kind {
                 chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
                     spawn,
                 )) => {
+                    let seq = event.seq;
                     if facts
                         .spawned
                         .insert(spawn.subagent_id.clone(), spawn.as_ref().clone())
@@ -46,6 +57,7 @@ impl CanonicalChildFacts {
                             spawn.subagent_id
                         ));
                     }
+                    facts.spawn_sequences.insert(spawn.subagent_id.clone(), seq);
                 }
                 chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
                     ended,
@@ -276,7 +288,6 @@ impl MvpAgent {
 
     async fn verify_ended_children(
         &self,
-        root_handle: &SessionHandle,
         root_session_id: &str,
         facts: &CanonicalChildFacts,
         task_ids: &std::collections::BTreeSet<String>,
@@ -291,16 +302,25 @@ impl MvpAgent {
                 .spawned
                 .get(task_id)
                 .ok_or_else(|| format!("ended child {task_id:?} has no original spawn"))?;
+            let spawn_seq = facts
+                .spawn_sequences
+                .get(task_id)
+                .copied()
+                .ok_or_else(|| format!("ended child {task_id:?} has no original spawn"))?;
             if terminal.result_ref.is_none() {
                 return Err(format!(
                     "ended child {task_id:?} has no canonical result reference"
                 ));
             }
-            let operation = crate::agent::subagent::durable_child_operation(
-                root_session_id,
-                task_id,
-                &root_handle.chat_state_handle,
-            );
+            let operation = async {
+                crate::agent::subagent::durable_child_operation_from_validated_facts(
+                    root_session_id,
+                    task_id,
+                    spawn_seq,
+                    spawn,
+                    Some(terminal),
+                )
+            };
             let operation = wait_before(deadline, operation)
                 .await
                 .map_err(|_| "child terminal verification exceeded suspension deadline")??;
@@ -333,14 +353,17 @@ impl MvpAgent {
         task_id: &str,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, String> {
-        let events = wait_before(deadline, root_handle.chat_state_handle.timeline_events())
-            .await
-            .map_err(|_| "root Timeline query exceeded suspension deadline")?
-            .ok_or("root Timeline unavailable while reconciling child completion")?;
-        let facts = CanonicalChildFacts::read(events)?;
+        let (_, events) = wait_before(
+            deadline,
+            root_handle.chat_state_handle.runtime_tree_snapshot(),
+        )
+        .await
+        .map_err(|_| "root Timeline query exceeded suspension deadline")?
+        .map_err(|_| "root Timeline unavailable while reconciling child completion")?;
+        let facts = CanonicalChildFacts::scan(events.iter())?;
         let candidates = std::collections::BTreeSet::from([task_id.to_owned()]);
         Ok(self
-            .verify_ended_children(root_handle, root_session_id, &facts, &candidates, deadline)
+            .verify_ended_children(root_session_id, &facts, &candidates, deadline)
             .await?
             .contains(task_id))
     }
@@ -591,7 +614,10 @@ impl MvpAgent {
 
     /// Called while load_session still owns the root lifecycle lock. Every
     /// node remains closed until all sources, routes and control links exist.
-    pub(super) async fn restore_session_tree(&self, root: &acp::SessionId) -> Result<(), String> {
+    pub(super) async fn prepare_session_tree_restore(
+        &self,
+        root: &acp::SessionId,
+    ) -> Result<Option<PreparedTreeRestore>, String> {
         use tools::implementations::grow_build::task::coordinator::ChildCheckpoint;
         use tools::implementations::grow_build::task::types::{
             SubagentExecutionRecipe, SubagentRequest,
@@ -601,7 +627,7 @@ impl MvpAgent {
             .ok_or("root runtime is unavailable")?;
         let mut runtime = root_handle.chat_state_handle.runtime_state().await?;
         if runtime.phase == RuntimePhase::Running {
-            return Ok(());
+            return Ok(None);
         }
         if runtime.root_session_id.as_deref() != Some(root.0.as_ref()) {
             return Err(format!(
@@ -632,12 +658,12 @@ impl MvpAgent {
             .instance_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-        let events = root_handle
+        let (_, events) = root_handle
             .chat_state_handle
-            .timeline_events()
+            .runtime_tree_snapshot()
             .await
-            .ok_or("root Timeline unavailable")?;
-        let facts = CanonicalChildFacts::read(events)?;
+            .map_err(|_| "root Timeline unavailable")?;
+        let facts = CanonicalChildFacts::scan(events.iter())?;
         let tree_sessions = runtime
             .tree
             .iter()
@@ -652,7 +678,6 @@ impl MvpAgent {
             .collect::<std::collections::BTreeSet<_>>();
         let verified_terminal_task_ids = self
             .verify_ended_children(
-                &root_handle,
                 root.0.as_ref(),
                 &facts,
                 &terminal_task_ids,
@@ -871,6 +896,23 @@ impl MvpAgent {
                 .await
                 .map_err(|_| "node resume commit acknowledgement was lost")??;
         }
+        Ok(Some(PreparedTreeRestore {
+            operation_id,
+            instance_id,
+            handles,
+        }))
+    }
+
+    pub(super) async fn release_session_tree_restore(
+        &self,
+        root: &acp::SessionId,
+        restore: PreparedTreeRestore,
+    ) -> Result<(), String> {
+        let PreparedTreeRestore {
+            operation_id,
+            instance_id,
+            handles,
+        } = restore;
         let (respond_to, response) = oneshot::channel();
         self.subagent_event_tx
             .send(SubagentEvent::ReleaseRestoredTree {
@@ -919,12 +961,12 @@ impl MvpAgent {
             .operation_id
             .as_deref()
             .ok_or("partial suspension operation identity is missing")?;
-        let events = root_handle
+        let (_, events) = root_handle
             .chat_state_handle
-            .timeline_events()
+            .runtime_tree_snapshot()
             .await
-            .ok_or("root Timeline unavailable while completing partial barrier")?;
-        let facts = CanonicalChildFacts::read(events)?;
+            .map_err(|_| "root Timeline unavailable while completing partial barrier")?;
+        let facts = CanonicalChildFacts::scan(events.iter())?;
         let open = facts
             .open()
             .map(|(task_id, spawn)| (task_id.clone(), spawn.clone()))
@@ -1136,7 +1178,6 @@ impl MvpAgent {
         terminal_candidates.extend(canonical.open().map(|(task_id, _)| task_id.clone()));
         let verified_terminal_ids = self
             .verify_ended_children(
-                &root_handle,
                 root.0.as_ref(),
                 &canonical,
                 &terminal_candidates,
@@ -1247,6 +1288,7 @@ impl MvpAgent {
             if let Err(error) = handle.cmd_tx.send(SessionCommand::SuspendRuntimeNode {
                 operation_id: operation_id.clone(),
                 root_session_id: root.0.to_string(),
+                root_chat_state: root_handle.chat_state_handle.clone(),
                 deadline,
                 respond_to,
             }) {
@@ -1347,7 +1389,6 @@ impl MvpAgent {
         tracing::info!(root_session_id = %root, phase = "latest_facts", elapsed_ms = started.elapsed().as_millis() as u64, "tree suspension progress");
         let latest_terminal_ids = self
             .verify_ended_children(
-                &root_handle,
                 root.0.as_ref(),
                 &latest_facts,
                 &coordinator_task_ids,

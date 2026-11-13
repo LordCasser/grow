@@ -348,6 +348,7 @@ pub enum SessionCommand {
     SuspendRuntimeNode {
         operation_id: String,
         root_session_id: String,
+        root_chat_state: chat_state::ChatStateHandle,
         deadline: Option<tokio::time::Instant>,
         respond_to: oneshot::Sender<Result<chat_state::session_runtime::RuntimeNodeRef, String>>,
     },

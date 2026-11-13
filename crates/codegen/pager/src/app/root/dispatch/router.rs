@@ -591,10 +591,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_copy_assistant_message(app, n, file_path)
         }
         Action::ExportConversation { file_path } => dispatch_export_conversation(app, file_path),
-        Action::OpenTranscriptPager => {
-            dispatch_open_transcript_pager(app);
-            vec![]
-        }
+        Action::OpenTranscriptPager => dispatch_open_transcript_pager(app),
         Action::MinimalExpandLast => {
             app.minimal_expand_last();
             vec![]
@@ -1453,8 +1450,8 @@ fn begin_exit_suspension(app: &mut AppView, restart_for_update: bool, retry: boo
     let exit_id = uuid::Uuid::now_v7().to_string();
     let starting = app.agents.values().any(|agent| {
         agent.session.loading_replay
-            || agent.session.prompt_history_loading
-            || (agent.session.session_id.is_none() && agent.session.state.is_busy())
+            || (agent.session.session_id.is_none()
+                && (agent.session.state.is_busy() || agent.session.prompt_history_loading))
     });
     app.exit_suspension = Some(crate::app::root::ExitSuspension {
         exit_id: exit_id.clone(),

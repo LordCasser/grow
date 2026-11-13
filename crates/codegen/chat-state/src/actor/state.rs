@@ -510,7 +510,7 @@ fn usage_from_timeline(
     let mut spawned_sidebands = BTreeSet::new();
     let mut subagents = BTreeMap::new();
     let mut ledger = UsageLedger::default();
-    ledger.initialize_segment(timeline.events().first().map(|event| event.at_ms));
+    ledger.initialize_segment(timeline.first_event_at_ms());
 
     for event in timeline.events() {
         if let crate::TimelineEventKind::Sideband(spawn) = &event.kind {

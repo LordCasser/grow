@@ -20,6 +20,7 @@ const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 const STRUCTURED_OUTPUT_MAX_RETRIES: u32 =
     chat_state::session_runtime::MAX_STRUCTURED_OUTPUT_RETRIES;
 const PLANNING_COMPLETION_BLOCKED: &str = "planning_completion_blocked";
+const CONTINUE_AFTER_PROGRESS_TOOL: &str = "GrowContinueAfterProgress";
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
@@ -1953,6 +1954,34 @@ impl SessionActor {
                 let mut request = self
                     .build_turn_request(effective_tools, memory_reminder, request_json_output)
                     .await?;
+                let prompt_index = self
+                    .turn_continuation
+                    .borrow()
+                    .as_ref()
+                    .map(|cursor| cursor.prompt_index);
+                if let Some(prompt_index) = prompt_index
+                    && request.items.iter().rev()
+                        .take_while(|item| item.prompt_index().is_none_or(|index| index >= prompt_index))
+                        .any(|item| {
+                        matches!(item, ConversationItem::User(user)
+                            if user.prompt_index == Some(prompt_index)
+                                && user.synthetic_reason == Some(sampling_types::SyntheticReason::Interjection))
+                    })
+                {
+                    request.tools.push(ToolSpec {
+                        name: CONTINUE_AFTER_PROGRESS_TOOL.into(),
+                        description: Some(
+                            concat!(
+                                "When the user asks for progress during this turn, answer them in ",
+                                "visible assistant text and call this tool in the same response. ",
+                                "Then continue the original work. A final answer is for ending ",
+                                "the work, not for reporting progress."
+                            )
+                            .into(),
+                        ),
+                        parameters: json!({"type": "object", "properties": {}, "additionalProperties": false}),
+                    });
+                }
                 ::diagnostics::unified_log::debug(
                     "shell.turn.build_request_done",
                     Some(self.session_info.id.0.as_ref()),
@@ -2853,6 +2882,9 @@ impl SessionActor {
                 }
             }
             for tc in &tool_calls {
+                if tc.name == CONTINUE_AFTER_PROGRESS_TOOL {
+                    continue;
+                }
                 if let Some((server, tool)) =
                     crate::session::mcp_servers::parse_mcp_tool_name(&tc.name)
                 {
@@ -2878,26 +2910,44 @@ impl SessionActor {
                     tool_name: step_tool_name.clone(),
                 });
             }
-            let tool_call_responses: Vec<ToolCallResponse> = tool_calls
-                .into_iter()
-                .map(|tc| ToolCallResponse {
+            let mut tool_call_responses = Vec::new();
+            for tc in tool_calls {
+                if tc.name == CONTINUE_AFTER_PROGRESS_TOOL {
+                    self.chat_state_handle
+                        .push_tool_result_durably(ConversationItem::tool_result(
+                            tc.id.to_string(),
+                            "Progress reply delivered. Continue the original work.",
+                        ))
+                        .await
+                        .map_err(|error| {
+                            crate::session::commands::fatal_turn_boundary_error(
+                                "progress reply",
+                                error.to_string(),
+                            )
+                        })?;
+                    continue;
+                }
+                tool_call_responses.push(ToolCallResponse {
                     id: tc.id.as_ref().to_owned(),
                     kind: "function".to_string(),
                     function: crate::sampling::types::ToolCallFunction {
                         name: tc.name,
                         arguments: tc.arguments.as_ref().to_owned(),
                     },
-                })
-                .collect();
-            let execute_tool_calls_result = self
-                .execute_tool_calls(tool_call_responses)
-                .await
-                .map_err(|error| {
-                    crate::session::commands::tool_execution_error(
-                        error,
-                        self.chat_state_handle.pending_timeline_commit(),
-                    )
-                })?;
+                });
+            }
+            let execute_tool_calls_result = if tool_call_responses.is_empty() {
+                ToolLoop::Continue
+            } else {
+                self.execute_tool_calls(tool_call_responses)
+                    .await
+                    .map_err(|error| {
+                        crate::session::commands::tool_execution_error(
+                            error,
+                            self.chat_state_handle.pending_timeline_commit(),
+                        )
+                    })?
+            };
             let resample_after_control = match execute_tool_calls_result {
                 ToolLoop::PermissionReject { tool_name, reason } => {
                     return Ok(TurnOutcome::Cancelled {

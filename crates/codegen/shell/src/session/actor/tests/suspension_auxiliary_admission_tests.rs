@@ -28,6 +28,7 @@ fn suspension_closes_auxiliary_admission_before_its_worker_runs() {
             .request_node_suspension(
                 "early-close".into(),
                 actor.session_id_string(),
+                actor.chat_state_handle.clone(),
                 Some(tokio::time::Instant::now() + Duration::from_secs(5)),
                 respond_to,
             )
@@ -53,6 +54,7 @@ fn expired_suspension_admission_keeps_the_healthy_writer_available() {
             .request_node_suspension(
                 "expired-request".into(),
                 actor.session_id_string(),
+                actor.chat_state_handle.clone(),
                 Some(tokio::time::Instant::now() - Duration::from_secs(1)),
                 respond_to,
             )
@@ -107,6 +109,7 @@ fn late_suggestions_during_suspension_do_not_panic_or_bypass_owner_drain() {
             .send(SessionCommand::SuspendRuntimeNode {
                 operation_id: "late-suggestion".into(),
                 root_session_id: actor.session_id_string(),
+                root_chat_state: actor.chat_state_handle.clone(),
                 deadline: Some(deadline),
                 respond_to,
             })
@@ -208,6 +211,7 @@ fn late_suggestions_during_suspension_do_not_panic_or_bypass_owner_drain() {
             .send(SessionCommand::SuspendRuntimeNode {
                 operation_id: "late-suggestion".into(),
                 root_session_id: actor.session_id_string(),
+                root_chat_state: actor.chat_state_handle.clone(),
                 deadline: Some(tokio::time::Instant::now() + Duration::from_secs(5)),
                 respond_to,
             })

@@ -78,6 +78,14 @@ impl ChatStateHandle {
         .ok_or_else(|| "runtime authority is unavailable".into())
     }
 
+    pub async fn workflow_lifecycle(&self, run_id: String) -> Option<crate::WorkflowLifecycle> {
+        self.query("GetWorkflowLifecycle", |reply| {
+            ChatStateCommand::GetWorkflowLifecycle { run_id, reply }
+        })
+        .await
+        .flatten()
+    }
+
     /// Capture runtime state and all original Subagent Spawned/Ended/Seed events in
     /// one owner operation, preserving their payloads, headers and sequence order.
     /// The owner has already validated these facts on live admission or recovery.
@@ -98,6 +106,41 @@ impl ChatStateHandle {
         })
         .await
         .ok_or_else(|| "runtime tree authority is unavailable".into())
+    }
+
+    pub async fn suspension_evidence(
+        &self,
+        operation_id: String,
+        turn: Option<crate::TurnId>,
+        accepted_response: Option<crate::ResponseAdmissionIdentity>,
+    ) -> Option<crate::session_runtime::SuspensionEvidence> {
+        self.query("GetSuspensionEvidence", |reply| {
+            ChatStateCommand::GetSuspensionEvidence {
+                operation_id,
+                turn,
+                accepted_response,
+                reply,
+            }
+        })
+        .await
+        .flatten()
+    }
+
+    pub async fn is_interaction_open(
+        &self,
+        call_id: String,
+        attempt_id: String,
+        kind: crate::InteractionKind,
+    ) -> Option<bool> {
+        self.query("IsInteractionOpen", |reply| {
+            ChatStateCommand::IsInteractionOpen {
+                call_id,
+                attempt_id,
+                kind,
+                reply,
+            }
+        })
+        .await
     }
 
     /// Canonical lifecycle projection of one recorded input identity, folded
@@ -1059,7 +1102,34 @@ impl ChatStateHandle {
     /// Capture a canonical suffix without cloning the already-reconciled prefix.
     pub async fn timeline_events_from(&self, from_seq: u64) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetTimelineEvents", |reply| {
-            ChatStateCommand::GetTimelineEvents { from_seq, reply }
+            ChatStateCommand::GetTimelineEvents { from_seq, include_archived: true, reply }
+        })
+        .await
+    }
+
+    /// Read runtime dependencies with their original sequence numbers.
+    pub async fn resident_timeline_events(&self) -> Option<Vec<crate::TimelineEvent>> {
+        self.resident_timeline_events_from(0).await
+    }
+
+    pub async fn resident_timeline_events_from(&self, from_seq: u64) -> Option<Vec<crate::TimelineEvent>> {
+        self.query("GetTimelineEvents", |reply| {
+            ChatStateCommand::GetTimelineEvents { from_seq, include_archived: false, reply }
+        })
+        .await
+    }
+
+    /// The selected history branch, if the actor still owns the Timeline.
+    pub async fn history_branch(&self) -> Option<Option<crate::EventSeq>> {
+        self.query("GetHistoryBranch", |reply| {
+            ChatStateCommand::GetHistoryBranch { reply }
+        })
+        .await
+    }
+
+    pub async fn recent_prompt_texts(&self, limit: usize) -> Option<Vec<String>> {
+        self.query("GetRecentPromptTexts", |reply| {
+            ChatStateCommand::GetRecentPromptTexts { limit, reply }
         })
         .await
     }

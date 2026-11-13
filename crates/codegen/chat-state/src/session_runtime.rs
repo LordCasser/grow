@@ -4,6 +4,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::{EventSeq, StepId, TurnId};
 
+/// Validated facts needed to settle a live suspension. Only the current Turn
+/// and interactions still awaiting a decision can contribute.
+pub struct SuspensionEvidence {
+    pub turn: Option<SuspendedTurnProgress>,
+    /// Tool calls with no model-visible result, keyed by ID with dispatch evidence.
+    pub surface_calls: std::collections::BTreeMap<String, bool>,
+    pub published_skills: std::collections::BTreeSet<String>,
+    pub waits: std::collections::BTreeMap<String, (crate::InteractionKind, String)>,
+}
+
+pub struct SuspendedTurnProgress {
+    pub input_consumed: bool,
+    pub next_step_consumed_response: bool,
+    pub committed_stop_continuations: usize,
+    pub open_tool_calls: std::collections::BTreeSet<String>,
+}
+
 pub const MAX_SUSPENDED_NODES: usize = 4096;
 pub const MAX_COMMAND_SETTLEMENT_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_STRUCTURED_OUTPUT_RETRIES: u32 = 3;

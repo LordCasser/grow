@@ -11365,6 +11365,99 @@ async fn request_runtime_suspension(handle: &crate::handle::ChatStateHandle, ope
         .unwrap();
 }
 
+#[tokio::test]
+async fn suspension_evidence_excludes_closed_history_and_keeps_exact_pending_wait() {
+    use crate::{InteractionEvent, InteractionKind, InteractionResolution, TimelineEventKind as K};
+
+    for closed_turns in [1, 100, 1000] {
+        let h = TestHarness::with_conversation(vec![ConversationItem::system("fixed context")]);
+        for _ in 0..closed_turns {
+            record_prompt(&h.handle, "closed historical turn").await;
+        }
+        let turn = crate::TurnId(u64::MAX - 1);
+        h.handle
+            .record_timeline_event_durably(K::Turn(crate::TurnEvent::Started {
+                id: turn,
+                prompt_id: "current-prompt".into(),
+                input_ids: Vec::new(),
+                identity: test_turn_identity(),
+                model_id: "test-model".into(),
+                input_message_count: 1,
+                prompt_index: closed_turns,
+                prompt_text: "current".into(),
+                input_kind: crate::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .await
+            .unwrap();
+        for index in 0..closed_turns as u32 {
+            let step = crate::StepId { turn, index };
+            h.handle
+                .record_timeline_event_durably(K::Step(crate::StepEvent::Started { id: step }))
+                .await
+                .unwrap();
+            h.handle
+                .record_timeline_event_durably(K::Step(crate::StepEvent::Ended {
+                    id: step,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                }))
+                .await
+                .unwrap();
+        }
+        let kind = InteractionKind::Permission;
+        for attempt in ["resolved", "waiting"] {
+            h.handle
+                .record_timeline_event_durably(K::Interaction(InteractionEvent::Opened {
+                    tool_call_id: "current-call".into(),
+                    attempt_id: attempt.into(),
+                    kind,
+                }))
+                .await
+                .unwrap();
+            if attempt == "resolved" {
+                h.handle
+                    .record_timeline_event_durably(K::Interaction(InteractionEvent::Resolved {
+                        tool_call_id: "current-call".into(),
+                        attempt_id: attempt.into(),
+                        kind,
+                        resolution: InteractionResolution::Allowed,
+                    }))
+                    .await
+                    .unwrap();
+            }
+        }
+        request_runtime_suspension(&h.handle, "suspension-test").await;
+        let evidence = h
+            .handle
+            .suspension_evidence("suspension-test".into(), Some(turn), None)
+            .await
+            .unwrap();
+        let progress = evidence.turn.expect("current Turn is preserved");
+        assert!(!progress.input_consumed);
+        assert!(!progress.next_step_consumed_response);
+        assert_eq!(progress.committed_stop_continuations, 0);
+        assert!(progress.open_tool_calls.is_empty());
+        assert_eq!(evidence.waits.len(), 1);
+        assert_eq!(
+            evidence.waits.get("current-call"),
+            Some(&(kind, "waiting".into()))
+        );
+        assert_eq!(
+            h.handle
+                .is_interaction_open("current-call".into(), "resolved".into(), kind)
+                .await,
+            Some(false)
+        );
+        assert_eq!(
+            h.handle
+                .is_interaction_open("current-call".into(), "waiting".into(), kind)
+                .await,
+            Some(true)
+        );
+    }
+}
+
 async fn settle_runtime_commands(handle: &crate::handle::ChatStateHandle, operation_id: &str) {
     handle
         .record_timeline_event_durably(crate::TimelineEventKind::Runtime(

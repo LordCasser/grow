@@ -15,12 +15,19 @@ use super::persistence::PersistenceMsg;
 /// Timeline events are the sole durable conversation representation.
 pub struct ChannelTimelinePersistence {
     tx: mpsc::UnboundedSender<PersistenceMsg>,
+    directory: Option<std::sync::Arc<crate::session::storage::ContainedDirectory>>,
 }
 
 impl ChannelTimelinePersistence {
     /// Create a new `ChannelTimelinePersistence` wrapping the given persistence channel.
     pub fn new(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
-        Self { tx }
+        Self { tx, directory: None }
+    }
+
+    pub(super) fn for_session(handle: &super::persistence::PersistenceHandle) -> Self {
+        let mut persistence = Self::new(handle.tx.clone());
+        persistence.directory = handle.session_directory();
+        persistence
     }
 }
 
@@ -50,6 +57,17 @@ impl TimelinePersistence for ChannelTimelinePersistence {
 
     fn flush(&mut self) {
         let _ = self.tx.send(PersistenceMsg::Flush);
+    }
+
+    fn retains_complete_history(&self) -> bool {
+        self.directory.is_none()
+    }
+
+    fn read_events(&self, from_seq: u64, end_seq: u64) -> Option<tokio::task::JoinHandle<io::Result<Vec<TimelineEvent>>>> {
+        let directory = self.directory.clone()?;
+        Some(tokio::task::spawn_blocking(move || {
+            crate::session::storage::jsonl::JsonlStorageAdapter::read_domain_history_range(&directory, from_seq..end_seq)
+        }))
     }
 }
 

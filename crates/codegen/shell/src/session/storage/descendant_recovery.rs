@@ -87,7 +87,7 @@ impl DescendantOwnership {
         Self {
             version: 2,
             session_id: session_id.to_owned(),
-            cut: history.sources.len() as u64,
+            cut: history.record_count(),
             hash: history.prefix_hash.clone(),
             spawns,
         }

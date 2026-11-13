@@ -627,6 +627,15 @@ pub(super) fn dispatch_rewind_success(
         return vec![];
     }
 
+    // The older-page cursor is bound to the pre-rewind branch/cut. Retire the
+    // outstanding owner before changing the visible transcript so a late page
+    // cannot reopen history from the discarded branch.
+    if response.mode.as_deref() != Some("files_only") {
+        agent.history_page_cursor = None;
+        agent.history_page_request = None;
+        agent.history_page_viewer = None;
+    }
+
     // The rewind went through: the inline editor's job is done. Close it
     // before the truncation below removes its entry.
     if inline_resubmit.is_some() {

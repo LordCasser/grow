@@ -10,6 +10,70 @@ use crate::app::root::dispatch::session::load::dispatch_load_session;
 use shell::session::unified_list::ListScope;
 
 #[test]
+fn observational_history_page_is_owned_and_does_not_touch_live_controls() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = acp::SessionId::new("history-session");
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.session_id = Some(session_id.clone());
+    agent.session_binding_epoch = 7;
+    agent.history_page_cursor = Some("older-2".into());
+    agent.history_is_partial = true;
+    agent.history_page_request = Some(3);
+    agent.session.plan_mode_active = false;
+    let live_scrollback_len = agent.scrollback.len();
+    let historical_mode = acp_transport::protocol::SessionNotification::new(
+        session_id.clone(),
+        acp_transport::protocol::SessionUpdate::CurrentModeUpdate(
+            acp_transport::protocol::CurrentModeUpdate::new(
+                acp_transport::protocol::SessionModeId::new("plan"),
+            ),
+        ),
+    );
+
+    dispatch_task_result(
+        TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: 7,
+            request_id: 3,
+            older_cursor: None,
+            result: Ok(vec![shell::session::storage::SessionUpdate::Acp(Box::new(
+                historical_mode,
+            ))]),
+        },
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(agent.history_page_viewer.is_some());
+    assert_eq!(
+        agent.history_page_viewer.as_ref().unwrap().scrollback.len(),
+        1
+    );
+    assert_eq!(agent.scrollback.len(), live_scrollback_len);
+    assert_eq!(agent.history_page_cursor, None);
+    assert!(agent.history_is_partial);
+    assert!(!agent.session.plan_mode_active);
+
+    app.agents.get_mut(&id).unwrap().history_page_request = Some(4);
+    dispatch_task_result(
+        TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id,
+            binding_epoch: 7,
+            request_id: 3,
+            older_cursor: None,
+            result: Ok(vec![]),
+        },
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(agent.history_page_request, Some(4));
+    assert_eq!(agent.history_page_cursor, None);
+    assert!(agent.history_is_partial);
+}
+
+#[test]
 fn plan_details_load_full_artifact_without_cached_body_and_preserve_todos() {
     use shell::tools::todo::{TodoItem, TodoPriority, TodoStatus};
     use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;

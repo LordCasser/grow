@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 use workspace::session::file_state::RewindPoint;
 
 mod ledger;
+mod working_index;
+mod working_snapshot;
+pub(crate) use working_snapshot::IndexedHistory;
 
 /// Hard limits for diagnostic and maintenance validation. Normal session
 /// loading keeps its existing semantics; bounded callers use this aggregate
@@ -98,9 +101,15 @@ struct LedgerPrefix {
     /// Continuation state after hashing exactly `len` committed bytes. The
     /// writer lease and file stamp make this cache authoritative for an
     /// unchanged writer epoch, so normal append never rereads the historical
-    /// ledger. A foreign write changes the stamp and forces a full hash check.
+    /// ledger. A foreign write changes the stamp and invalidates the cache.
     hasher: blake3::Hasher,
     state: crate::session::history::AppendState,
+    indexed: Option<IndexedHistory>,
+    /// The hasher covers the whole prefix unless recovery seeded it from a
+    /// published digest. Only a full hash can prove equality after replacement.
+    has_full_hash: bool,
+    unpublished_records: Vec<working_index::RecordRef>,
+    unpublished_domain: Vec<working_index::RecordRef>,
 }
 
 #[cfg(test)]
@@ -147,7 +156,7 @@ impl SessionReclaimMember {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct LedgerFileStamp {
     len: u64,
     modified: Option<std::time::SystemTime>,
@@ -647,13 +656,22 @@ impl JsonlStorageAdapter {
         info: &Info,
     ) -> io::Result<super::PersistedDataLight> {
         self.ensure_writer_lease(info)?;
-        self.load_light_data(info, true).await
+        self.load_light_data(info, true, false).await
+    }
+
+    pub(crate) async fn load_session_for_write_with_indexed_history(
+        &self,
+        info: &Info,
+    ) -> io::Result<super::PersistedDataLight> {
+        self.ensure_writer_lease(info)?;
+        self.load_light_data(info, true, true).await
     }
 
     async fn load_light_data(
         &self,
         info: &Info,
         restore_for_write: bool,
+        indexed_history: bool,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
         let opened = {
@@ -665,10 +683,21 @@ impl JsonlStorageAdapter {
             }
         };
         let summary = opened.summary().clone();
-        let (validated, prefix) = if restore_for_write {
-            self.load_validated_writer_timeline(&opened, info)?
-        } else {
-            (opened.validated_timeline(&info.id.to_string())?, None)
+        let (validated, prefix) = {
+            let storage = self.clone();
+            let opened = opened.clone();
+            let info = info.clone();
+            tokio::task::spawn_blocking(move || {
+                if restore_for_write {
+                    storage.load_validated_writer_timeline(&opened, &info, indexed_history)
+                } else {
+                    opened
+                        .validated_timeline(info.id.0.as_ref())
+                        .map(|validated| (validated, None))
+                }
+            })
+            .await
+            .map_err(io::Error::other)??
         };
         let history = validated.history;
         let timeline = validated.timeline;
@@ -729,12 +758,16 @@ impl JsonlStorageAdapter {
         &self,
         opened: &OpenedSession,
         info: &Info,
+        indexed_history: bool,
     ) -> io::Result<(ValidatedTimeline, Option<LedgerPrefix>)> {
         // Unix stamps carry device/inode/change time. Other platforms retain
         // the original full writer verification rather than borrowing a
         // prefix without equivalent file identity evidence.
         #[cfg(not(unix))]
-        return Ok((opened.validated_timeline(&info.id.to_string())?, None));
+        {
+            let _ = indexed_history;
+            return Ok((opened.validated_timeline(&info.id.to_string())?, None));
+        }
         #[cfg(unix)]
         {
             let directory = opened.directory();
@@ -753,18 +786,74 @@ impl JsonlStorageAdapter {
                         error
                     }
                 })?;
-            let (events, history, prefix) = {
+            let mut references = Vec::new();
+            let (events, history, mut prefix) = {
                 let _timer = crate::instrumentation_timer!("session.load.timeline_read_decode");
-                let (complete_len, _) = Self::read_timeline_tail(&mut file)?;
-                Self::read_timeline_prefix(&mut file, complete_len, &path)?
+                let file_len = file.metadata()?.len();
+                let complete_len = Self::timeline_complete_len(&mut file, file_len)?;
+                if indexed_history {
+                    if let Some((validated, prefix)) =
+                        working_snapshot::load(opened, &mut file, complete_len, &path)?
+                    {
+                        return Ok((validated, Some(prefix)));
+                    }
+                    Self::read_timeline_prefix_with_index(
+                        &mut file,
+                        complete_len,
+                        &path,
+                        Some(|record: &crate::session::history::JournalRecord, reference| {
+                            let entry = working_snapshot::IndexedRecord::new(record, reference);
+                            let retained = entry.is_retained();
+                            references.push(entry);
+                            retained
+                        }),
+                    )?
+                } else {
+                    Self::read_timeline_prefix(&mut file, complete_len, &path)?
+                }
             };
             let timeline = {
                 let _timer = crate::instrumentation_timer!("session.load.timeline_fold");
-                Timeline::from_events(events)
+                let domain_frontier = chat_state::EventSeq::new(prefix.state.events);
+                if indexed_history {
+                    Timeline::from_indexed_prefix(events, domain_frontier, prefix.state.first_domain_at_ms)
+                } else {
+                    Timeline::from_events(events)
+                }
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
             };
-            let validated =
+            let mut validated =
                 opened.validate_timeline_evidence(&info.id.to_string(), timeline, history)?;
+            if !indexed_history {
+                working_snapshot::attach_to_validated_prefix(
+                    opened.directory_handle(),
+                    &mut file,
+                    &mut prefix,
+                )?;
+            }
+            if indexed_history && references.iter().any(|entry| !entry.is_retained()) {
+                // A rewind can invalidate older notices. Preserve the dense
+                // branch projection until this dependency is indexed too.
+                let supported = validated.timeline.history_branch().is_none()
+                    && !validated.history.sources.iter().any(working_snapshot::is_rewind_marker);
+                let indexed = if supported {
+                    working_snapshot::publish(
+                        opened.directory_handle(),
+                        info.id.0.as_ref(),
+                        &file,
+                        &prefix,
+                        &references,
+                    )?
+                } else {
+                    None
+                };
+                if let Some(indexed) = indexed {
+                    validated.history.indexed = Some(indexed.clone());
+                    prefix.indexed = Some(indexed);
+                } else {
+                    validated = opened.validated_timeline(info.id.0.as_ref())?;
+                }
+            }
             Ok((validated, Some(prefix)))
         }
     }
@@ -787,7 +876,12 @@ impl JsonlStorageAdapter {
             .lock()
             .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?;
         if let Some(previous) = expected.as_ref()
-            && (previous.len != prefix.len || previous.hash != prefix.hash)
+            && (previous.len != prefix.len
+                || (if !previous.has_full_hash || !prefix.has_full_hash {
+                    previous.stamp != prefix.stamp
+                } else {
+                    previous.hash != prefix.hash
+                }))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1871,8 +1965,27 @@ impl JsonlStorageAdapter {
         crate::session::history::HistorySnapshot,
         LedgerPrefix,
     )> {
+        Self::read_timeline_prefix_with_index(
+            file,
+            complete_len,
+            path,
+            None::<fn(&crate::session::history::JournalRecord, working_index::RecordRef) -> bool>,
+        )
+    }
+
+    fn read_timeline_prefix_with_index(
+        file: &mut std::fs::File,
+        complete_len: u64,
+        path: &Path,
+        index: Option<impl FnMut(&crate::session::history::JournalRecord, working_index::RecordRef) -> bool>,
+    ) -> io::Result<(
+        Vec<chat_state::TimelineEvent>,
+        crate::session::history::HistorySnapshot,
+        LedgerPrefix,
+    )> {
         let stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
-        let (data, hasher) = Self::read_journal_prefix_data(file, complete_len, path, None, None)?;
+        let (data, hasher) =
+            Self::read_journal_prefix_indexed(file, complete_len, path, None, None, index)?;
         Self::check_timeline_prefix_stamp(file, &stamp)?;
         Ok((
             data.events,
@@ -1883,8 +1996,40 @@ impl JsonlStorageAdapter {
                 stamp,
                 hasher,
                 state: data.state,
+                indexed: None,
+                has_full_hash: true,
+                unpublished_records: Vec::new(),
+                unpublished_domain: Vec::new(),
             },
         ))
+    }
+
+    #[cfg(unix)]
+    fn publish_initial_history_index(
+        directory: &super::ContainedDirectory,
+        session_id: &str,
+        bytes: u64,
+    ) -> io::Result<()> {
+        let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+        let mut file = directory.open_regular(name, "initial Timeline ledger")?;
+        let mut references = Vec::new();
+        let (_, _, prefix) = Self::read_timeline_prefix_with_index(
+            &mut file,
+            bytes,
+            &directory.display_path().join(name),
+            Some(|record: &crate::session::history::JournalRecord, reference| {
+                references.push(working_snapshot::IndexedRecord::new(record, reference));
+                false
+            }),
+        )?;
+        working_snapshot::publish(
+            std::sync::Arc::new(directory.try_clone()?),
+            session_id,
+            &file,
+            &prefix,
+            &references,
+        )?;
+        Ok(())
     }
 
     fn append_sideband_line_sync(
@@ -1986,22 +2131,25 @@ impl JsonlStorageAdapter {
         }
     }
 
-    /// Return the committed byte length and final complete JSONL record without
-    /// scanning the whole ledger. The file is positioned arbitrarily on return.
-    fn read_timeline_tail(file: &mut std::fs::File) -> io::Result<(u64, Option<Vec<u8>>)> {
-        let file_len = file.metadata()?.len();
+    fn timeline_complete_len(file: &mut std::fs::File, file_len: u64) -> io::Result<u64> {
         if file_len == 0 {
-            return Ok((0, None));
+            return Ok(0);
         }
 
         file.seek(io::SeekFrom::Start(file_len - 1))?;
         let mut last_byte = [0u8; 1];
         file.read_exact(&mut last_byte)?;
-        let complete_len = if last_byte[0] == b'\n' {
-            file_len
+        if last_byte[0] == b'\n' {
+            Ok(file_len)
         } else {
-            Self::find_previous_newline(file, file_len)?.map_or(0, |position| position + 1)
-        };
+            Ok(Self::find_previous_newline(file, file_len)?.map_or(0, |position| position + 1))
+        }
+    }
+
+    /// Return the committed byte length and final complete JSONL record.
+    fn read_timeline_tail(file: &mut std::fs::File) -> io::Result<(u64, Option<Vec<u8>>)> {
+        let file_len = file.metadata()?.len();
+        let complete_len = Self::timeline_complete_len(file, file_len)?;
         if complete_len == 0 {
             return Ok((0, None));
         }
@@ -4671,12 +4819,15 @@ impl JsonlStorageAdapter {
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
             let facts = initial_presentation.into_facts(&timeline)?;
+            let journal = Self::encode_journal(timeline.events(), &facts)?;
             staging.write_atomic(
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
-                &Self::encode_journal(timeline.events(), &facts)?,
+                &journal,
                 true,
                 false,
             )?;
+            #[cfg(unix)]
+            Self::publish_initial_history_index(staging, info.id.0.as_ref(), journal.len() as u64)?;
             staging.write_atomic(
                 std::ffi::OsStr::new(super::SUMMARY_FILE),
                 &super::serialize_summary(&summary)?,
@@ -5105,9 +5256,18 @@ impl JsonlStorageAdapter {
                 source_ids: inherited_ids,
                 updates: transformed_updates,
             }.into_facts(&fork_timeline)?;
+            let journal = Self::encode_journal(fork_timeline.events(), &facts)?;
             staging.write_atomic(
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
-                &Self::encode_journal(fork_timeline.events(), &facts)?, true, false,
+                &journal,
+                true,
+                false,
+            )?;
+            #[cfg(unix)]
+            Self::publish_initial_history_index(
+                staging,
+                target_info.id.0.as_ref(),
+                journal.len() as u64,
             )?;
             Ok(super::CopySessionResult {
                 surface_items_copied,
@@ -5370,7 +5530,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         &self,
         info: &Info,
     ) -> io::Result<super::PersistedDataLight> {
-        self.load_light_data(info, false).await
+        self.load_light_data(info, false, false).await
     }
     async fn load_summary(&self, info: &Info) -> io::Result<Summary> {
         let info_clone = info.clone();

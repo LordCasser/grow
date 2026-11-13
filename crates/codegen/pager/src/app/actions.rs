@@ -1204,6 +1204,25 @@ pub enum AfterSessionDelete {
     /// Stay on the dashboard.
     Dashboard,
 }
+#[derive(Debug, Clone)]
+pub enum CompleteTranscriptPurpose {
+    Export {
+        file_path: Option<std::path::PathBuf>,
+    },
+    CopyAssistant {
+        n: usize,
+        file_path: Option<std::path::PathBuf>,
+    },
+    Pager,
+}
+
+#[derive(Debug)]
+pub enum CompleteTranscriptOutput {
+    Markdown(String),
+    AssistantMessage(String),
+    PagerPath(tempfile::TempPath),
+}
+
 #[derive(Debug)]
 pub enum Effect {
     ReviewRetainedPlan {
@@ -1297,6 +1316,24 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: String,
         session_cwd: Option<std::path::PathBuf>,
+    },
+    /// Read an older display page for the observational history viewer.
+    ReadHistoryPage {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        cursor: String,
+    },
+    /// Read and project the complete validated transcript for an export or
+    /// external pager request when the resident scrollback is a page window.
+    ReadCompleteTranscript {
+        agent_id: AgentId,
+        root_agent_id: AgentId,
+        root_binding_epoch: u32,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        purpose: CompleteTranscriptPurpose,
     },
     /// Rebuild an already attached session from canonical history after the
     /// leader could not deliver an accepted transient candidate.
@@ -2271,6 +2308,26 @@ pub enum TaskResult {
         /// semantics from the id spelling.
         foreground: Option<prompt_queue::ForegroundSnapshot>,
         descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+        /// Opaque branch/cut-bound continuation for the older display page.
+        older_history_cursor: Option<String>,
+    },
+    /// An observational older page was read independently from live delivery.
+    HistoryPageLoaded {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        older_cursor: Option<String>,
+        result: Result<Vec<shell::session::storage::SessionUpdate>, String>,
+    },
+    CompleteTranscriptBuilt {
+        agent_id: AgentId,
+        root_agent_id: AgentId,
+        root_binding_epoch: u32,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        purpose: CompleteTranscriptPurpose,
+        result: Result<CompleteTranscriptOutput, String>,
     },
     /// Session load (resume) failed.
     SessionLoadFailed {

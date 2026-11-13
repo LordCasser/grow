@@ -414,9 +414,7 @@ impl SidebandTimeline {
             || request.source_refs != spawn.source_refs
             || request.initiator_ref
                 != format!("t:{parent_timeline_id}/sideband:{}", spawn.sideband_id)
-            || !usize::try_from(spawn_seq)
-                .ok()
-                .and_then(|index| parent.events().get(index))
+            || !parent.event(crate::EventSeq::new(spawn_seq))
                 .is_some_and(|event| {
                     event.seq.get() == spawn_seq
                         && matches!(

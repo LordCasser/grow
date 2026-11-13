@@ -564,6 +564,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
     restore_summary: Option<String>,
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
     descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+    older_history_cursor: Option<String>,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
@@ -577,8 +578,12 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         let mut timer = diagnostics::instrumentation::timer("pager.replay.finalize");
         timer.with_field("agent_id", agent_id.0);
         agent.load_return_view = None;
+        agent.history_page_request = None;
+        agent.history_page_viewer = None;
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
+        agent.history_is_partial = older_history_cursor.is_some();
+        agent.history_page_cursor = older_history_cursor;
         agent.session.clear_live_feedback("session-load");
         {
             let _timer = diagnostics::instrumentation::timer("pager.replay.end_batch");

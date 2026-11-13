@@ -158,11 +158,27 @@ pub enum ChatStateCommand {
     GetRuntimeState {
         reply: oneshot::Sender<crate::session_runtime::RuntimeLifecycle>,
     },
+    GetWorkflowLifecycle {
+        run_id: String,
+        reply: oneshot::Sender<Option<crate::WorkflowLifecycle>>,
+    },
     GetRuntimeTreeSnapshot {
         reply: oneshot::Sender<(
             crate::session_runtime::RuntimeLifecycle,
             Vec<crate::TimelineEvent>,
         )>,
+    },
+    GetSuspensionEvidence {
+        operation_id: String,
+        turn: Option<crate::TurnId>,
+        accepted_response: Option<crate::ResponseAdmissionIdentity>,
+        reply: oneshot::Sender<Option<crate::session_runtime::SuspensionEvidence>>,
+    },
+    IsInteractionOpen {
+        call_id: String,
+        attempt_id: String,
+        kind: crate::InteractionKind,
+        reply: oneshot::Sender<bool>,
     },
     // ═══ Mutations (fire-and-forget) ═══
     /// Push a user message into the conversation.
@@ -523,7 +539,17 @@ pub enum ChatStateCommand {
     /// Clone the canonical event ledger for recovery/reconciliation logic.
     GetTimelineEvents {
         from_seq: u64,
+        include_archived: bool,
         reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
+    },
+
+    GetHistoryBranch {
+        reply: oneshot::Sender<Option<crate::EventSeq>>,
+    },
+
+    GetRecentPromptTexts {
+        limit: usize,
+        reply: oneshot::Sender<Vec<String>>,
     },
 
     /// Clone one active-branch response for live replay projection.

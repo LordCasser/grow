@@ -760,6 +760,11 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             }
         }
         let origin_client = self.origin_client_info_from_meta(request_meta.as_ref());
+        let page_history = target_client_id.is_none()
+            && request_meta.as_ref().is_some_and(|meta| {
+                meta.get("cursor").and_then(serde_json::Value::as_str).is_none()
+                    && meta.get("grow/historyPaging").and_then(serde_json::Value::as_bool) == Some(true)
+            });
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
         let claim_writer = resident_actor.is_none();
@@ -771,10 +776,11 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         } else {
             None
         };
-        let (observed_info, observed_persistence) = crate::session::persistence::load_light(
+        let (observed_info, observed_persistence) = crate::session::persistence::load_light_for_replay(
                 &session_info,
                 Some(self.gateway.clone()),
                 claim_writer,
+                page_history,
             )
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
@@ -818,10 +824,11 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     .prepare_recovery(&session_info)
                     .await
                     .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-                let (owned_info, owned_persistence) = crate::session::persistence::load_light(
+                let (owned_info, owned_persistence) = crate::session::persistence::load_light_for_replay(
                         &session_info,
                         Some(self.gateway.clone()),
                         true,
+                        page_history,
                     )
                     .await
                     .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
@@ -1154,14 +1161,14 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         } else {
             Vec::new()
         };
-        let (delta_completions, subagent_projections) = if no_replay {
+        let (subagent_projections, older_rows, indexed_pages) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
                 "Skipping session replay (noReplay requested by client)"
             );
-            (Vec::new(), Default::default())
+            (Default::default(), 0, None)
         } else {
-            let (replay_end_offset, mark_replay, subagent_projections) = self
+            self
                 // Replay must use the already validated/pinned Timeline snapshot.
                 .replay_session_updates(
                     &session_id,
@@ -1173,21 +1180,15 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     persist_data.as_ref(),
                     target_client_id.as_ref(),
                     cursor.as_deref(),
+                    page_history,
                 )
-                .await?;
-            let _ = (replay_end_offset, mark_replay);
-            (Vec::<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>>::new(), subagent_projections)
+                .await?
         };
+        let history_page_cut = super::history_paging::HistoryPageCut::new(&history, &timeline, older_rows, indexed_pages);
         if let Some(mute) = reconnect_gateway_mute.as_mut() {
             mute.restore();
         }
         if let Some(release) = actor_release.take() { let _ = release.send(true); }
-        {
-            let _timer = crate::instrumentation_timer!("session.delta_drain_completions");
-            for rx in delta_completions {
-                let _ = rx.await;
-            }
-        }
         let reconcile_completions = if runtime_recovery_gated { Vec::new() } else {
             let _timer = crate::instrumentation_timer!("session.reconcile_stale_tasks");
             self.repair_stale_background_task_projections(&session_id, &history, &timeline)
@@ -1292,7 +1293,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     });
             }
         }
-        if runtime_recovery_gated {
+        let prepared_restore = if runtime_recovery_gated {
             // A prior process may have released only a leaf prefix. Reconcile
             // those consumed rights as interruptions before adopting the still
             // unused checkpoints; the restoring-root filter preserves the rest.
@@ -1306,15 +1307,20 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 ).await;
             }
             let candidate = spawn_new_actor.then(|| self.control_session_handle(&session_id)).flatten();
-            if let Err(error) = self.restore_session_tree(&session_id).await {
-                if let Some(candidate) = candidate
-                    && let Err(retirement) = self.retire_failed_restore_candidate(&candidate).await
-                {
-                    return Err(acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}; {retirement}")));
+            match self.prepare_session_tree_restore(&session_id).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    if let Some(candidate) = candidate
+                        && let Err(retirement) = self.retire_failed_restore_candidate(&candidate).await
+                    {
+                        return Err(acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}; {retirement}")));
+                    }
+                    return Err(acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}")));
                 }
-                return Err(acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}")));
             }
-        }
+        } else {
+            None
+        };
         // A control snapshot is part of session-load completion, not a
         // best-effort side effect. Fresh actors did not exist at the earlier
         // replay boundary, while resident actors may still have their
@@ -1402,8 +1408,10 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
         // Cold actors already hold the replayed selection. Resident actors
         // retain their live selection; reconnect is not a model-control request.
-        drop(catalog_transaction);
         let mut response_meta_map = serde_json::Map::new();
+        if let Some(cut) = &history_page_cut {
+            response_meta_map.insert("grow/olderHistoryCursor".into(), cut.first_cursor().into());
+        }
         if let Some(ownership_meta) = descendant_ownership.into_load_meta() {
             response_meta_map.insert(
                 crate::session::storage::DESCENDANT_OWNERSHIP_META_KEY.to_owned(),
@@ -1519,6 +1527,28 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     .data("Session ended while loading; retry the session load."));
             }
         }
+        let response_meta = serde_json::Value::Object(response_meta_map);
+        let config_options = self.session_config_options(Some(&session_id), &model_state);
+        let response = acp::LoadSessionResponse::new()
+            .config_options(config_options)
+            .meta(response_meta.as_object().cloned());
+        // Reconciliation can take much longer than replay. Release only after
+        // all load-owned work is done, including the durable usage boundary.
+        if let Some(restore) = prepared_restore {
+            self.release_session_tree_restore(&session_id, restore)
+                .await
+                .map_err(|error| acp::Error::internal_error().data(format!(
+                    "Suspended tree restoration is blocked: {error}"
+                )))?;
+        }
+        if !no_replay {
+            self.resident_resources
+                .borrow_mut()
+                .entry(session_id.clone())
+                .or_default()
+                .history_page_cut = history_page_cut;
+        }
+        drop(catalog_transaction);
         if let Some(token) = recovery_token.take() {
             let healthy_epoch = self.sessions.borrow().get(&session_id).and_then(|handle| {
                 (!handle.cmd_tx.is_closed()
@@ -1533,16 +1563,11 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     });
                 }
         }
-        let response_meta = serde_json::Value::Object(response_meta_map);
         ::diagnostics::unified_log::info(
             "session loaded",
             Some(session_id.0.as_ref()),
             None,
         );
-        let config_options = self.session_config_options(Some(&session_id), &model_state);
-        let response = acp::LoadSessionResponse::new()
-            .config_options(config_options)
-            .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.sessions.borrow().get(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
         }
@@ -2181,6 +2206,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             "grow/session/updates" => {
                 crate::extensions::session_updates::handle(&args, &self.gateway).await
             }
+            "grow/read_history_page" => self.read_history_page(&args).await,
             "grow/session/state" => {
                 crate::extensions::session_state::handle_state(&args).await
             }

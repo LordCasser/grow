@@ -154,6 +154,7 @@ fn captured_ownership_enriches_existing_replayed_child_after_disk_disappears() {
                     restore_summary: None,
                     foreground: None,
                     descendant_ownership: Some(captured),
+                    older_history_cursor: None,
                 },
             ),
             &mut app,

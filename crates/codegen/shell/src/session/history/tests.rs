@@ -48,6 +48,61 @@ fn notification_value(update: SessionUpdate) -> Value {
 }
 
 #[test]
+fn history_pages_preserve_order_and_keep_crossing_tool_groups_whole() {
+    use super::projector::PreparedHistory;
+
+    let session = acp::SessionId::new("paged");
+    let wrap = |update| {
+        SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            session.clone(),
+            update,
+        )))
+    };
+    let id = acp::ToolCallId::new("crosses-page");
+    let text = |index: usize| {
+        wrap(acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                index.to_string(),
+            ))),
+        ))
+    };
+    let mut updates = (0..140).map(text).collect::<Vec<_>>();
+    updates.push(wrap(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+        id.clone(),
+        "Read file",
+    ))));
+    updates.extend((140..280).map(text));
+    updates.push(wrap(acp::SessionUpdate::ToolCallUpdate(
+        acp::ToolCallUpdate::new(
+            id,
+            acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+        ),
+    )));
+    let expected = serde_json::to_value(&updates).unwrap();
+    let mut prepared = PreparedHistory {
+        updates,
+        mark_replay: true,
+    };
+    let (mut start, latest) = prepared
+        .take_page(expected.as_array().unwrap().len())
+        .unwrap();
+    assert_eq!(start, 140);
+    assert!(matches!(&latest.first().unwrap(), SessionUpdate::Acp(n)
+        if matches!(&n.update, acp::SessionUpdate::ToolCall(_))));
+    assert!(matches!(&latest.last().unwrap(), SessionUpdate::Acp(n)
+        if matches!(&n.update, acp::SessionUpdate::ToolCallUpdate(_))));
+
+    let mut pages = vec![latest];
+    while start > 0 {
+        let (older, page) = prepared.take_page(start).unwrap();
+        start = older;
+        pages.push(page);
+    }
+    let paged = pages.into_iter().rev().flatten().collect::<Vec<_>>();
+    assert_eq!(serde_json::to_value(paged).unwrap(), expected);
+}
+
+#[test]
 fn durable_history_wire_facts_round_trip_all_golden_fields() {
     let session_id = acp::SessionId::new("golden");
     let mut grow_count = 0;
@@ -900,8 +955,7 @@ fn history_restores_distinct_command_terminals_across_suspensions() {
                     is_backgrounded: true,
                     owner: chat_state::NotificationOwner::Session,
                     task_kind: chat_state::NotificationTaskKind::Task,
-                    start_time: (index == 0)
-                        .then_some(SystemTime::UNIX_EPOCH),
+                    start_time: (index == 0).then_some(SystemTime::UNIX_EPOCH),
                     end_time: (index == 0)
                         .then_some(SystemTime::UNIX_EPOCH + Duration::from_millis(70_000)),
                 }],
@@ -964,7 +1018,9 @@ fn history_restores_distinct_command_terminals_across_suspensions() {
             );
             assert_eq!(
                 task_snapshot.end_time,
-                Some(SystemTime::UNIX_EPOCH + Duration::from_millis(settlement_times[index] as u64))
+                Some(
+                    SystemTime::UNIX_EPOCH + Duration::from_millis(settlement_times[index] as u64)
+                )
             );
         }
         assert!(task_snapshot.completed);

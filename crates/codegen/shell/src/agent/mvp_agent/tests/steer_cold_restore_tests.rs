@@ -13,6 +13,8 @@ use chat_state::{TimelineEventKind as K, session_runtime::*};
 
 const HOME_ENV: &str = "GROW_TEST_STEER_COLD_HOME";
 const PHASE_ENV: &str = "GROW_TEST_STEER_COLD_PHASE";
+const TORN_TAIL_ENV: &str = "GROW_TEST_STEER_COLD_TORN_TAIL";
+const CRASH_EXIT: i32 = 73;
 const STEER_TEXT: &str = "cold-steer: reconsider the restored plan with this image";
 
 fn tiny_png_base64() -> String {
@@ -37,7 +39,16 @@ fn sse_terminal_text(id: &str, content: &str) -> String {
 }
 
 #[test]
+fn preserved_steer_survives_crash_with_partial_journal_tail() {
+    run_cold_restore_fixture(true);
+}
+
+#[test]
 fn preserved_steer_survives_cold_restore_and_consumes_once_after_release() {
+    run_cold_restore_fixture(false);
+}
+
+fn run_cold_restore_fixture(torn_tail: bool) {
     let Ok(home) = std::env::var(HOME_ENV) else {
         let temp = tempfile::tempdir().unwrap();
         for phase in ["suspend", "restore"] {
@@ -47,10 +58,17 @@ fn preserved_steer_survives_cold_restore_and_consumes_once_after_release() {
                 .env("GROW_HOME", temp.path())
                 .env(HOME_ENV, temp.path())
                 .env(PHASE_ENV, phase)
+                .env(TORN_TAIL_ENV, if torn_tail { "1" } else { "0" })
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
+            let expected = if torn_tail && phase == "suspend" {
+                CRASH_EXIT
+            } else {
+                0
+            };
+            assert_eq!(
+                output.status.code(),
+                Some(expected),
                 "{phase}: {}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -58,6 +76,7 @@ fn preserved_steer_survives_cold_restore_and_consumes_once_after_release() {
         }
         return;
     };
+    let torn_tail = std::env::var(TORN_TAIL_ENV).as_deref() == Ok("1");
     run_local_for_bridge_test(|| async move {
         let home = std::path::Path::new(&home);
         let cwd = home.join("workspace");
@@ -203,6 +222,7 @@ context_window = 128000
                 }
             })
             .await;
+            std::fs::write(home.join("prompt-id"), &prompt_id).unwrap();
             cold_recovery_stage(
                 "steer-cold.steer",
                 agent.ext_method(acp::ExtRequest::new(
@@ -254,6 +274,16 @@ context_window = 128000
                 agent.control_session_handle(&sid).is_none(),
                 "old actor retired before the process exits"
             );
+            if torn_tail {
+                use std::io::Write as _;
+                let path =
+                    crate::session::persistence::session_dir(&handle.info).join("timeline.jsonl");
+                let mut journal = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                journal.write_all(b"{\"torn_test_record\":").unwrap();
+                journal.sync_all().unwrap();
+                // Skip process cleanup after the complete checkpoint and partial tail.
+                std::process::exit(CRASH_EXIT);
+            }
             drop(prompt_fut);
             let _ = &server;
             // Process exit here is the physical cold boundary.
@@ -270,12 +300,20 @@ context_window = 128000
                     .parse()
                     .unwrap(),
             );
-            cold_recovery_stage(
+            let loaded = cold_recovery_stage(
                 "steer-cold.load",
                 agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd)),
             )
             .await
             .unwrap();
+            let foreground = loaded
+                .meta
+                .as_ref()
+                .unwrap()
+                .get("grow/foreground")
+                .unwrap();
+            let prompt_id = std::fs::read_to_string(home.join("prompt-id")).unwrap();
+            assert_eq!(foreground["promptId"].as_str(), Some(prompt_id.as_str()));
             let handle = agent.control_session_handle(&sid).unwrap();
             // Wait for the full causal outcome before taking any snapshot:
             // the resumed model must actually see the steer (recorded request
@@ -380,10 +418,32 @@ context_window = 128000
                 )
             });
             let consumed_at = position(&is_consumed);
+            let load_accounted = position(&|kind| {
+                matches!(
+                    kind,
+                    K::Observation(observation)
+                        if observation.scope == "session_usage"
+                            && observation.name == "resume_started"
+                )
+            });
+            assert!(
+                load_accounted < released,
+                "cold load must commit its resume boundary before execution is released"
+            );
             assert!(
                 released < consumed_at,
                 "ExecutionReleased must precede the safe-boundary consumption"
             );
+            if torn_tail {
+                let path =
+                    crate::session::persistence::session_dir(&handle.info).join("timeline.jsonl");
+                let bytes = std::fs::read(path).unwrap();
+                assert!(
+                    !bytes
+                        .windows(b"torn_test_record".len())
+                        .any(|part| part == b"torn_test_record")
+                );
+            }
             let _ = &server;
         }
     });

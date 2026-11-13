@@ -554,6 +554,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             foreground,
             descendant_ownership,
+            older_history_cursor,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -563,6 +564,67 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             foreground,
             descendant_ownership,
+            older_history_cursor,
+        ),
+        TaskResult::HistoryPageLoaded {
+            agent_id,
+            session_id,
+            binding_epoch,
+            request_id,
+            older_cursor,
+            result,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if agent.session.session_id.as_ref() != Some(&session_id)
+                || agent.session_binding_epoch != binding_epoch
+                || agent.history_page_request != Some(request_id)
+            {
+                return vec![];
+            }
+            agent.history_page_request = None;
+            if app.active_view != crate::app::root::ActiveView::Agent(agent_id) {
+                return vec![];
+            }
+            match result {
+                Ok(updates) => {
+                    let mut projection =
+                        crate::transcript_projection::TranscriptProjection::default();
+                    for update in updates {
+                        projection.apply(shell::session::storage::transcript::TranscriptEvent {
+                            update,
+                            timestamp_ms: None,
+                            simulated_source: false,
+                        });
+                    }
+                    agent.history_page_cursor = older_cursor;
+                    agent.history_page_viewer = Some(projection);
+                }
+                Err(error) => agent.show_toast(&format!(
+                    "Could not load older history: {}",
+                    crate::app::root::effects::sanitize_user_error(&error)
+                )),
+            }
+            vec![]
+        }
+        TaskResult::CompleteTranscriptBuilt {
+            agent_id,
+            root_agent_id,
+            root_binding_epoch,
+            session_id,
+            binding_epoch,
+            purpose,
+            result,
+        } => super::transcript::handle_complete_transcript_built(
+            app,
+            agent_id,
+            root_agent_id,
+            root_binding_epoch,
+            session_id,
+            binding_epoch,
+            purpose,
+            result,
         ),
         TaskResult::SessionTitleFromDisk { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id)

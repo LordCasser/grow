@@ -91,6 +91,7 @@ async fn request_suspension_until(
         .request_node_suspension(
             OPERATION_ID.into(),
             actor.session_id_string(),
+            actor.chat_state_handle.clone(),
             Some(deadline),
             respond_to,
         )

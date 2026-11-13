@@ -133,6 +133,7 @@
                         restore_summary: None,
                         foreground: None,
                         descendant_ownership: None,
+                        older_history_cursor: None,
                     },
                 ),
                 &mut app,

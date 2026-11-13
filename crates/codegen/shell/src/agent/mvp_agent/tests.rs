@@ -4751,7 +4751,7 @@ fn fixed_timeline_snapshot_replays_complete_response_before_independent_history(
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let captured = seen.clone();
             let drain = tokio::task::spawn_local(async move { while let Some(message) = rx.recv().await { if let acp_transport::AcpClientMessage::SessionNotification(args) = message { captured.borrow_mut().push(args.request); let _ = args.response_tx.send(Ok(())); } } });
-            agent.replay_session_updates(&sid, &cwd, opened.directory(), &snapshot.timeline, &snapshot.history, true, None, None, None).await.unwrap();
+            agent.replay_session_updates(&sid, &cwd, opened.directory(), &snapshot.timeline, &snapshot.history, true, None, None, None, false).await.unwrap();
             let texts = seen.borrow().iter().filter_map(|notice| match &notice.update { acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content { acp::ContentBlock::Text(value) => Some(value.text.clone()), _ => None }, _ => None }).collect::<Vec<_>>();
             assert_eq!(texts, ["canonical", "independent"]);
             assert_eq!(std::fs::read(opened.directory().display_path().join("timeline.jsonl")).unwrap(), before);

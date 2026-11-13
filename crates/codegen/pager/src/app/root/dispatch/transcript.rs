@@ -2,7 +2,7 @@
 
 use super::ctx::{find_transcript_file_owner, with_active_agent};
 use super::session::lifecycle::skip_picker_and_create_session;
-use crate::app::actions::Effect;
+use crate::app::actions::{CompleteTranscriptOutput, CompleteTranscriptPurpose, Effect};
 use crate::app::root::{ActiveView, AppView};
 use crate::app::session::AgentId;
 use crate::app::transcript_file_writes::{FileWriteKind, TranscriptFileWrite};
@@ -57,7 +57,18 @@ pub(super) fn dispatch_copy_assistant_message(
     n: usize,
     file_path: Option<std::path::PathBuf>,
 ) -> Vec<Effect> {
+    let ActiveView::Agent(root_agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(root_binding_epoch) = app
+        .agents
+        .get(&root_agent_id)
+        .map(|root| root.session_binding_epoch)
+    else {
+        return vec![];
+    };
     let mut request = None;
+    let mut full_history_effect = None;
     with_active_agent(app, |agent| {
         if n == 0 {
             agent.scrollback.push_block(RenderBlock::notice(
@@ -65,70 +76,72 @@ pub(super) fn dispatch_copy_assistant_message(
             ));
             return;
         }
-        let mut available = 0;
-        let mut selected = None;
-        for i in (0..agent.scrollback.len()).rev() {
-            if let Some(entry) = agent.scrollback.entry(i)
-                && let RenderBlock::AgentMessage(msg) = &entry.block
-            {
-                available += 1;
-                if available == n {
-                    selected = Some(msg.copy_text(false));
-                    break;
-                }
-            }
-        }
-        let Some(text) = selected else {
-            let message = if available == 0 {
-                "No assistant messages to copy".to_string()
-            } else {
-                format!(
-                    "Only {} assistant {} available to copy",
-                    available,
-                    if available == 1 {
-                        "message"
-                    } else {
-                        "messages"
-                    },
-                )
-            };
-            agent.scrollback.push_block(RenderBlock::notice(message));
-            return;
-        };
-        if text.is_empty() {
+        let path = file_path.map(|p| {
             agent
-                .scrollback
-                .push_block(RenderBlock::notice("Assistant message is empty"));
-            return;
-        }
-
-        if let Some(p) = file_path {
-            let path = agent
                 .session
                 .cwd
-                .join(shellexpand::tilde(&p.to_string_lossy()).as_ref());
-            request = Some(TranscriptFileWrite {
-                agent_id: agent.session.id,
-                session_id: agent.session.session_id.clone(),
-                path,
-                content: text,
-                kind: FileWriteKind::Copy,
-            });
-            return;
-        }
-
-        let stats = crate::clipboard::clipboard_stats_suffix(&text);
-        let delivery = crate::clipboard::copy_text_or_file(&text);
-        agent.scrollback.push_block(RenderBlock::notice(format!(
-            "{}{stats}",
-            delivery.summary_message()
-        )));
-        agent.show_toast_for(
-            delivery.toast_message().as_ref(),
-            std::time::Duration::from_millis(u64::from(delivery.toast_ticks()) * 33),
-        );
+                .join(shellexpand::tilde(&p.to_string_lossy()).as_ref())
+        });
+        let text = match crate::transcript_projection::assistant_message_text(&agent.scrollback, n)
+        {
+            Ok(text) => text,
+            Err(_)
+                if agent.history_is_partial
+                    && let Some(session_id) = agent.session.session_id.clone() =>
+            {
+                full_history_effect = Some(Effect::ReadCompleteTranscript {
+                    agent_id: agent.session.id,
+                    root_agent_id,
+                    root_binding_epoch,
+                    session_id,
+                    binding_epoch: agent.session_binding_epoch,
+                    purpose: CompleteTranscriptPurpose::CopyAssistant { n, file_path: path },
+                });
+                return;
+            }
+            Err(message) => {
+                agent.scrollback.push_block(RenderBlock::notice(message));
+                return;
+            }
+        };
+        request = deliver_assistant_copy(agent, path, text);
     });
-    enqueue_file_write(app, request)
+    full_history_effect.map_or_else(|| enqueue_file_write(app, request), |effect| vec![effect])
+}
+
+fn deliver_assistant_copy(
+    agent: &mut crate::app::agent_view::AgentView,
+    path: Option<std::path::PathBuf>,
+    text: String,
+) -> Option<TranscriptFileWrite> {
+    if text.is_empty() {
+        agent
+            .scrollback
+            .push_block(RenderBlock::notice("Assistant message is empty"));
+        return None;
+    }
+
+    if let Some(path) = path {
+        return Some(TranscriptFileWrite {
+            agent_id: agent.session.id,
+            session_id: agent.session.session_id.clone(),
+            path,
+            content: text,
+            kind: FileWriteKind::Copy,
+        });
+    }
+
+    let stats = crate::clipboard::clipboard_stats_suffix(&text);
+    let delivery = crate::clipboard::copy_text_or_file(&text);
+    agent.scrollback.push_block(RenderBlock::notice(format!(
+        "{}{stats}",
+        delivery.summary_message()
+    )));
+    agent.show_toast_for(
+        delivery.toast_message().as_ref(),
+        std::time::Duration::from_millis(u64::from(delivery.toast_ticks()) * 33),
+    );
+    None
 }
 
 /// Dispatch for the `/export` command.
@@ -140,11 +153,46 @@ pub(super) fn dispatch_export_conversation(
     file_path: Option<std::path::PathBuf>,
 ) -> Vec<Effect> {
     let mut request = None;
+    let mut full_history_effect = None;
+    let root_agent_id = match app.active_view {
+        ActiveView::Agent(agent_id) => agent_id,
+        _ => return vec![],
+    };
+    let Some(root_binding_epoch) = app
+        .agents
+        .get(&root_agent_id)
+        .map(|root| root.session_binding_epoch)
+    else {
+        return vec![];
+    };
     with_active_agent(app, |agent| {
         if agent.session.loading_replay {
             agent.scrollback.push_block(RenderBlock::notice(
                 "Session history is still loading. Try /export again when loading finishes.",
             ));
+            return;
+        }
+        if agent.history_is_partial {
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.scrollback.push_block(RenderBlock::notice(
+                    "The complete transcript is not available until this session is saved.",
+                ));
+                return;
+            };
+            let path = file_path.map(|path| {
+                agent
+                    .session
+                    .cwd
+                    .join(shellexpand::tilde(&path.to_string_lossy()).as_ref())
+            });
+            full_history_effect = Some(Effect::ReadCompleteTranscript {
+                agent_id: agent.session.id,
+                root_agent_id,
+                root_binding_epoch,
+                session_id,
+                binding_epoch: agent.session_binding_epoch,
+                purpose: crate::app::actions::CompleteTranscriptPurpose::Export { file_path: path },
+            });
             return;
         }
 
@@ -186,7 +234,7 @@ pub(super) fn dispatch_export_conversation(
             agent.scrollback.push_block(RenderBlock::notice(block_msg));
         }
     });
-    enqueue_file_write(app, request)
+    full_history_effect.map_or_else(|| enqueue_file_write(app, request), |effect| vec![effect])
 }
 
 fn enqueue_file_write(app: &mut AppView, request: Option<TranscriptFileWrite>) -> Vec<Effect> {
@@ -219,6 +267,96 @@ fn enqueue_file_write(app: &mut AppView, request: Option<TranscriptFileWrite>) -
     }
 }
 
+pub(super) fn handle_complete_transcript_built(
+    app: &mut AppView,
+    agent_id: AgentId,
+    root_agent_id: AgentId,
+    root_binding_epoch: u32,
+    session_id: acp::SessionId,
+    binding_epoch: u32,
+    purpose: CompleteTranscriptPurpose,
+    result: Result<CompleteTranscriptOutput, String>,
+) -> Vec<Effect> {
+    let Some(root) = app.agents.get_mut(&root_agent_id) else {
+        return vec![];
+    };
+    if root.session_binding_epoch != root_binding_epoch {
+        return vec![];
+    }
+    let owner = if root.session.id == agent_id {
+        Some(root)
+    } else {
+        root.subagent_views
+            .get_mut(session_id.0.as_ref())
+            .map(|child| &mut **child)
+    };
+    let Some(agent) = owner.filter(|agent| {
+        agent.session.id == agent_id
+            && agent.session.session_id.as_ref() == Some(&session_id)
+            && agent.session_binding_epoch == binding_epoch
+    }) else {
+        return vec![];
+    };
+    match (purpose, result) {
+        (
+            CompleteTranscriptPurpose::CopyAssistant { file_path, .. },
+            Ok(CompleteTranscriptOutput::AssistantMessage(text)),
+        ) => {
+            let request = deliver_assistant_copy(agent, file_path, text);
+            enqueue_file_write(app, request)
+        }
+        (
+            CompleteTranscriptPurpose::Export {
+                file_path: Some(path),
+            },
+            Ok(CompleteTranscriptOutput::Markdown(content)),
+        ) => enqueue_file_write(
+            app,
+            Some(TranscriptFileWrite {
+                agent_id,
+                session_id: Some(session_id),
+                path,
+                content,
+                kind: FileWriteKind::Export,
+            }),
+        ),
+        (
+            CompleteTranscriptPurpose::Export { file_path: None },
+            Ok(CompleteTranscriptOutput::Markdown(content)),
+        ) => {
+            let stats = crate::clipboard::clipboard_stats_suffix(&content);
+            let delivery = agent.copy_to_clipboard(&content);
+            agent.scrollback.push_block(RenderBlock::notice(format!(
+                "Conversation: {}{stats}",
+                delivery.summary_message()
+            )));
+            vec![]
+        }
+        (CompleteTranscriptPurpose::Pager, Ok(CompleteTranscriptOutput::PagerPath(path))) => {
+            app.pending_pager = Some(crate::app::external_pager::PendingPager::new(
+                path,
+                false,
+                root_agent_id,
+                agent,
+            ));
+            vec![]
+        }
+        (_, Ok(_)) => {
+            agent.scrollback.push_block(RenderBlock::notice(
+                "The complete transcript request returned an unexpected result.",
+            ));
+            vec![]
+        }
+        (_, Err(error)) => {
+            agent.scrollback.push_block(RenderBlock::notice(format!(
+                "Could not read the complete transcript: {}",
+                crate::app::root::effects::sanitize_user_error(&error)
+            )));
+            vec![]
+        }
+    }
+}
+
 /// Open the full transcript in `$PAGER`.
 ///
 /// **Minimal mode** renders a full-fidelity ANSI transcript — every block
@@ -235,23 +373,48 @@ fn enqueue_file_write(app: &mut AppView, request: Option<TranscriptFileWrite>) -
 ///
 /// **Other modes** keep the compact markdown export (string concatenation, no
 /// layout or highlighting — cheap enough to stay synchronous).
-pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
+pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) -> Vec<Effect> {
     if app.screen_mode.is_minimal() {
         crate::minimal_api::request_minimal_transcript(app);
-        return;
+        return vec![];
     }
 
     let ActiveView::Agent(root) = app.active_view else {
-        return;
+        return vec![];
+    };
+    let Some(root_binding_epoch) = app
+        .agents
+        .get(&root)
+        .map(|agent| agent.session_binding_epoch)
+    else {
+        return vec![];
     };
     let mut md = None;
     let mut loading = false;
+    let mut full_history_effect = None;
     with_active_agent(app, |agent| {
         if agent.session.loading_replay {
             loading = true;
             agent.scrollback.push_block(RenderBlock::notice(
                 "Session history is still loading. Try /transcript again when loading finishes.",
             ));
+            return;
+        }
+        if agent.history_is_partial {
+            if let Some(session_id) = agent.session.session_id.clone() {
+                full_history_effect = Some(Effect::ReadCompleteTranscript {
+                    agent_id: agent.session.id,
+                    root_agent_id: root,
+                    root_binding_epoch,
+                    session_id,
+                    binding_epoch: agent.session_binding_epoch,
+                    purpose: crate::app::actions::CompleteTranscriptPurpose::Pager,
+                });
+            } else {
+                agent.scrollback.push_block(RenderBlock::notice(
+                    "The complete transcript is not available until this session is saved.",
+                ));
+            }
             return;
         }
         let blocks: Vec<_> = (0..agent.scrollback.len())
@@ -268,7 +431,10 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
     });
 
     if loading {
-        return;
+        return vec![];
+    }
+    if let Some(effect) = full_history_effect {
+        return vec![effect];
     }
 
     let Some(content) = md else {
@@ -277,7 +443,7 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
                 "No conversation transcript to view yet",
             ));
         });
-        return;
+        return vec![];
     };
 
     match content {
@@ -292,6 +458,7 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
             });
         }
     }
+    vec![]
 }
 
 /// Open the fullscreen block viewer for the selected entry.

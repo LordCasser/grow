@@ -3094,11 +3094,36 @@ pub(crate) async fn durable_child_operation(
     subagent_id: &str,
     parent: &chat_state::ChatStateHandle,
 ) -> Result<DurableChildOperation, String> {
-    let events = parent
-        .timeline_events()
+    let (_, events) = parent
+        .runtime_tree_snapshot()
         .await
-        .ok_or_else(|| "cannot query parent Timeline".to_string())?;
-    durable_child_operation_in_events(parent_timeline_id, subagent_id, events)
+        .map_err(|_| "cannot query parent Timeline".to_string())?;
+    let spawn = events.iter().find_map(|event| match &event.kind {
+        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn))
+            if spawn.subagent_id == subagent_id =>
+        {
+            Some((event.seq, spawn.as_ref()))
+        }
+        _ => None,
+    });
+    let Some((spawn_seq, spawn)) = spawn else {
+        return Ok(DurableChildOperation::Missing);
+    };
+    let terminal = events.iter().find_map(|event| match &event.kind {
+        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(terminal))
+            if terminal.subagent_id == subagent_id =>
+        {
+            Some(terminal)
+        }
+        _ => None,
+    });
+    durable_child_operation_from_validated_facts(
+        parent_timeline_id,
+        subagent_id,
+        spawn_seq,
+        spawn,
+        terminal,
+    )
 }
 
 pub(crate) fn durable_child_operation_in_events(
@@ -3121,7 +3146,7 @@ pub(crate) fn durable_child_operation_in_events(
     else {
         return Ok(DurableChildOperation::Missing);
     };
-    let Some(terminal) =
+    let terminal =
         timeline
             .events()
             .iter()
@@ -3130,11 +3155,34 @@ pub(crate) fn durable_child_operation_in_events(
                     terminal,
                 )) if terminal.subagent_id == subagent_id => Some(terminal),
                 _ => None,
-            })
-    else {
+            });
+    durable_child_operation_from_validated_facts(
+        parent_timeline_id,
+        subagent_id,
+        spawn_seq,
+        spawn,
+        terminal,
+    )
+}
+
+pub(crate) fn durable_child_operation_from_validated_facts(
+    parent_timeline_id: &str,
+    expected_subagent_id: &str,
+    spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: Option<&chat_state::SubagentTerminalEvent>,
+) -> Result<DurableChildOperation, String> {
+    if spawn.subagent_id != expected_subagent_id
+        || terminal.is_some_and(|terminal| {
+            terminal.subagent_id != expected_subagent_id
+                || terminal.child_session_id != spawn.child_session_id
+        })
+    {
+        return Err("child lifecycle facts do not match the requested task".into());
+    }
+    let Some(terminal) = terminal else {
         return Ok(DurableChildOperation::Open);
     };
-
     let (output, outcome, error, output_unavailable, planning_summary) =
         if terminal.result_ref.is_some() {
             let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
@@ -3895,12 +3943,12 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         mpsc::UnboundedSender<SessionCommand>,
     >,
 ) {
-    let Some(events) = parent_chat_state.timeline_events().await else {
-        tracing::error!(%parent_session_id, "cannot query parent Timeline during subagent recovery");
-        return;
-    };
-    let Ok(timeline) = chat_state::Timeline::from_events(events) else {
-        return;
+    let (runtime, events) = match parent_chat_state.runtime_tree_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(%parent_session_id, %error, "cannot query parent Timeline during subagent recovery");
+            return;
+        }
     };
     let mut spawns = std::collections::BTreeMap::<
         String,
@@ -3908,7 +3956,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     >::new();
     let mut terminals =
         std::collections::BTreeMap::<String, chat_state::SubagentTerminalEvent>::new();
-    for event in timeline.events() {
+    for event in &events {
         match &event.kind {
             chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) => {
                 spawns.insert(
@@ -3962,9 +4010,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             tracing::debug!(%subagent_id, "child absence is not actionable outside cold recovery");
             continue;
         }
-        if cold_recovery
-            && timeline.runtime_lifecycle().phase
-                == chat_state::session_runtime::RuntimePhase::Restoring
+        if cold_recovery && runtime.phase == chat_state::session_runtime::RuntimePhase::Restoring
         {
             let child_id = spawn.child_session_id.clone();
             let child_runtime = tokio::task::spawn_blocking(move || {
@@ -3980,7 +4026,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             .flatten();
             if !child_runtime.as_ref().is_some_and(|child| {
                 released_child_matches_restore(
-                    timeline.runtime_lifecycle(),
+                    &runtime,
                     &spawn.child_session_id,
                     child,
                 )
@@ -4105,16 +4151,16 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             tracing::error!(%subagent_id, "parent terminal has no spawn fact");
             continue;
         };
-        let update = match finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal)
-        {
-            Ok(update) => update,
-            Err(error) => {
-                tracing::error!(%subagent_id, %error, "refusing to publish an unverified subagent result");
-                continue;
-            }
-        };
         if emit_replay_projections && !projections.finished.contains(subagent_id) {
-            emit_subagent_notification(gateway, parent_session_id, update, parent_cmd_tx, true);
+            match finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal) {
+                Ok(update) => {
+                    emit_subagent_notification(gateway, parent_session_id, update, parent_cmd_tx, true);
+                }
+                Err(error) => {
+                    tracing::error!(%subagent_id, %error, "refusing to publish an unverified subagent result");
+                    continue;
+                }
+            }
         }
         // A crash after parent Ended can leave the durable model receipt
         // missing independently of its UI projection.

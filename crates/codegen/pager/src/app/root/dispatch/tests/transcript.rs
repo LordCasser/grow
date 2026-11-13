@@ -1146,6 +1146,167 @@ fn export_waits_until_history_replay_completes() {
 }
 
 #[test]
+fn paged_transcript_actions_read_full_history_after_the_older_cursor_is_exhausted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("complete.md");
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Fullscreen;
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.cwd = dir.path().to_path_buf();
+    agent.session.session_id = Some(acp::SessionId::new("paged-session"));
+    agent.history_is_partial = true;
+    agent.history_page_cursor = None;
+    agent
+        .scrollback
+        .push_block(RenderBlock::user_prompt("resident latest page only"));
+
+    let effects = dispatch(
+        Action::ExportConversation {
+            file_path: Some(path.clone()),
+        },
+        &mut app,
+    );
+    let [
+        crate::app::actions::Effect::ReadCompleteTranscript {
+            agent_id,
+            root_agent_id,
+            root_binding_epoch,
+            session_id,
+            binding_epoch,
+            purpose:
+                crate::app::actions::CompleteTranscriptPurpose::Export {
+                    file_path: Some(target),
+                },
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("partial export must read complete validated history: {effects:?}");
+    };
+    assert_eq!(*agent_id, AgentId(0));
+    assert_eq!(*root_agent_id, AgentId(0));
+    assert_eq!(session_id.0.as_ref(), "paged-session");
+    assert_eq!(
+        *binding_epoch,
+        app.agents[&AgentId(0)].session_binding_epoch
+    );
+    assert_eq!(target, &path);
+    assert!(!path.exists(), "must not write resident partial content");
+
+    let write_effects = dispatch_task_result(
+        TaskResult::CompleteTranscriptBuilt {
+            agent_id: *agent_id,
+            root_agent_id: *root_agent_id,
+            root_binding_epoch: *root_binding_epoch,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            purpose: crate::app::actions::CompleteTranscriptPurpose::Export {
+                file_path: Some(target.clone()),
+            },
+            result: Ok(crate::app::actions::CompleteTranscriptOutput::Markdown(
+                "## User\n\nolder verified history\n\n## User\n\nresident latest page only".into(),
+            )),
+        },
+        &mut app,
+    );
+    assert_eq!(write_effects.len(), 1);
+    assert!(complete_file_effect(write_effects.into_iter().next().unwrap(), &mut app).is_empty());
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("older verified history")
+    );
+
+    let pager_effects = dispatch(Action::OpenTranscriptPager, &mut app);
+    assert!(matches!(app.pending_pager, None));
+    assert!(pager_effects.iter().any(|effect| matches!(
+        effect,
+        crate::app::actions::Effect::ReadCompleteTranscript {
+            purpose: crate::app::actions::CompleteTranscriptPurpose::Pager,
+            ..
+        }
+    )));
+
+    app.pending_effects.clear();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    dispatch(Action::OpenTranscriptPager, &mut app);
+    assert!(crate::minimal_api::minimal_transcript_progress(&app).is_none());
+    assert!(app.pending_effects.iter().any(|effect| matches!(
+        effect,
+        crate::app::actions::Effect::ReadCompleteTranscript {
+            purpose: crate::app::actions::CompleteTranscriptPurpose::Pager,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn paged_copy_reads_older_assistant_and_discards_a_rebound_result() {
+    use crate::app::actions::{CompleteTranscriptOutput, CompleteTranscriptPurpose};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older.txt");
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.bind_session_id(acp::SessionId::new("paged-copy"));
+    agent.history_is_partial = true;
+    agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("Latest reply"));
+    let effects = dispatch(
+        Action::CopyAssistantMessage {
+            n: 2,
+            file_path: Some(path.clone()),
+        },
+        &mut app,
+    );
+    let [
+        Effect::ReadCompleteTranscript {
+            agent_id,
+            root_agent_id,
+            root_binding_epoch,
+            session_id,
+            binding_epoch,
+            purpose:
+                CompleteTranscriptPurpose::CopyAssistant {
+                    n: 2,
+                    file_path: Some(target),
+                },
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected a full-history copy, got {effects:?}");
+    };
+    assert_eq!(target, &path);
+    assert!(!path.exists());
+    let completion = || TaskResult::CompleteTranscriptBuilt {
+        agent_id: *agent_id,
+        root_agent_id: *root_agent_id,
+        root_binding_epoch: *root_binding_epoch,
+        session_id: session_id.clone(),
+        binding_epoch: *binding_epoch,
+        purpose: CompleteTranscriptPurpose::CopyAssistant {
+            n: 2,
+            file_path: Some(path.clone()),
+        },
+        result: Ok(CompleteTranscriptOutput::AssistantMessage(
+            "Older reply".into(),
+        )),
+    };
+    let mut write = dispatch_task_result(completion(), &mut app);
+    assert_eq!(write.len(), 1);
+    assert!(complete_file_effect(write.pop().unwrap(), &mut app).is_empty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "Older reply");
+    std::fs::remove_file(&path).unwrap();
+
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.bind_session_id(acp::SessionId::new("replacement"));
+    agent.bind_session_id(session_id.clone());
+    assert!(dispatch_task_result(completion(), &mut app).is_empty());
+    assert!(!path.exists());
+}
+
+#[test]
 fn copy_file_uses_session_cwd_and_keeps_private_permissions() {
     let session_dir = tempfile::tempdir().unwrap();
     let process_dir = tempfile::tempdir_in(".").unwrap();

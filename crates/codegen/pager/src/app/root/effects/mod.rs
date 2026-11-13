@@ -894,6 +894,8 @@ pub(crate) fn execute(
         Effect::LoadSession { agent_id, session_id, session_cwd } => {
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
+            meta.get_or_insert_with(acp::Meta::new)
+                .insert("grow/historyPaging".into(), serde_json::Value::Bool(true));
             if let Some(true) = session_flags.restore_code {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("grow/restore_code".into(), serde_json::Value::Bool(true));
@@ -943,6 +945,10 @@ pub(crate) fn execute(
                                 &acp_session_id,
                             );
                             let foreground = parse_session_load_foreground(resp.meta.as_ref());
+                            let older_history_cursor = resp.meta.as_ref()
+                                .and_then(|meta| meta.get("grow/olderHistoryCursor"))
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned);
                             TaskResult::SessionLoaded {
                                 agent_id,
                                 descendant_ownership: crate::acp::meta::session_load_descendant_ownership(
@@ -955,6 +961,7 @@ pub(crate) fn execute(
                                 code_restored,
                                 restore_summary,
                                 foreground,
+                                older_history_cursor,
                             }
                         }
                         Err(e) => {
@@ -974,6 +981,125 @@ pub(crate) fn execute(
                         }
                     }
                 });
+        }
+        Effect::ReadHistoryPage {
+            agent_id,
+            session_id,
+            binding_epoch,
+            request_id,
+            cursor,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.as_ref(),
+                    "cursor": cursor,
+                });
+                let request = acp::ExtRequest::new(
+                    "grow/read_history_page",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize history page request")
+                        .into(),
+                );
+                let result = match acp_send(request, &tx).await {
+                    Ok(response) => serde_json::from_str::<serde_json::Value>(response.0.get())
+                        .map_err(|error| error.to_string())
+                        .and_then(|wrapper| {
+                            if let Some(error) = wrapper.get("error") {
+                                return Err(error.to_string());
+                            }
+                            let result = wrapper.get("result").cloned().unwrap_or(wrapper);
+                            let response_session = result
+                                .get("sessionId")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| "history page response has no sessionId".to_string())?;
+                            if response_session != session_id.0.as_ref() {
+                                return Err("history page response sessionId mismatch".to_string());
+                            }
+                            let updates = serde_json::from_value::<Vec<shell::session::storage::SessionUpdate>>(
+                                result.get("updates").cloned().ok_or_else(|| "history page response has no updates".to_string())?,
+                            ).map_err(|error| error.to_string())?;
+                            let older_cursor = result
+                                .get("olderCursor")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned);
+                            Ok((updates, older_cursor))
+                        }),
+                    Err(error) => Err(error.to_string()),
+                };
+                let (result, older_cursor) = match result {
+                    Ok((updates, cursor)) => (Ok(updates), cursor),
+                    Err(error) => (Err(error), None),
+                };
+                TaskResult::HistoryPageLoaded {
+                    agent_id,
+                    session_id,
+                    binding_epoch,
+                    request_id,
+                    older_cursor,
+                    result,
+                }
+            });
+        }
+        Effect::ReadCompleteTranscript {
+            agent_id,
+            root_agent_id,
+            root_binding_epoch,
+            session_id,
+            binding_epoch,
+            purpose,
+        } => {
+            tasks.spawn(async move {
+                let read_session_id = session_id.0.to_string();
+                let read_purpose = purpose.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let grow_home = shell::util::grow_home::grow_home();
+                    let transcript = shell::session::storage::transcript::read_session_at(
+                        &read_session_id,
+                        &grow_home,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let mut projection = crate::transcript_projection::TranscriptProjection::default();
+                    for event in transcript.events {
+                        projection.apply(event);
+                    }
+                    projection.finish_snapshot();
+                    if let actions::CompleteTranscriptPurpose::CopyAssistant { n, .. } = &read_purpose {
+                        return crate::transcript_projection::assistant_message_text(&projection.scrollback, *n)
+                            .map(actions::CompleteTranscriptOutput::AssistantMessage);
+                    }
+                    let blocks = (0..projection.scrollback.len())
+                        .filter_map(|index| projection.scrollback.entry(index))
+                        .map(|entry| &entry.block);
+                    let markdown = crate::scrollback::export::render_blocks_to_markdown(blocks);
+                    if markdown.is_empty() {
+                        return Err("No conversation content to export".to_string());
+                    }
+                    match read_purpose {
+                        actions::CompleteTranscriptPurpose::Export { .. } => {
+                            Ok(actions::CompleteTranscriptOutput::Markdown(markdown))
+                        }
+                        actions::CompleteTranscriptPurpose::Pager => {
+                            crate::export_cmd::write_pager_transcript(&markdown, false)
+                                .map(actions::CompleteTranscriptOutput::PagerPath)
+                                .map_err(|error| error.to_string())
+                        }
+                        actions::CompleteTranscriptPurpose::CopyAssistant { .. } => unreachable!(),
+                    }
+                })
+                .await
+                .map_err(|error| format!("Transcript read failed: {error}"))
+                .and_then(|result| result);
+                TaskResult::CompleteTranscriptBuilt {
+                    agent_id,
+                    root_agent_id,
+                    root_binding_epoch,
+                    session_id,
+                    binding_epoch,
+                    purpose,
+                    result,
+                }
+            });
         }
         Effect::ResyncSession { agent_id, session_id, cwd, generation, permission_mode } => {
             let tx = acp_tx.clone();

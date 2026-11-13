@@ -607,6 +607,7 @@ pub fn request_minimal_transcript(app: &mut AppView) {
     };
     let root_session_id = root.session.session_id.clone();
     let root_view_agent_id = root.session.id;
+    let root_binding_epoch = root.session_binding_epoch;
     let child_session_id = selected_child_key(root).cloned();
     let agent = if let Some(sid) = child_session_id.as_ref() {
         let Some(child) = root.subagent_views.get_mut(sid) else {
@@ -622,6 +623,26 @@ pub fn request_minimal_transcript(app: &mut AppView) {
             .push_block(crate::scrollback::block::RenderBlock::notice(
                 "Session history is still loading. Try /transcript again when loading finishes.",
             ));
+        return;
+    }
+    if agent.history_is_partial {
+        let Some(session_id) = agent.session.session_id.clone() else {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::notice(
+                    "The complete transcript is not available until this session is saved.",
+                ));
+            return;
+        };
+        app.pending_effects
+            .push(crate::app::actions::Effect::ReadCompleteTranscript {
+                agent_id: agent.session.id,
+                root_agent_id: id,
+                root_binding_epoch,
+                session_id,
+                binding_epoch: agent.session_binding_epoch,
+                purpose: crate::app::actions::CompleteTranscriptPurpose::Pager,
+            });
         return;
     }
     let sb = &agent.scrollback;
@@ -666,6 +687,16 @@ pub fn take_minimal_transcript(app: &mut AppView) -> Option<TranscriptBuild> {
         .agents
         .get(&build.agent)
         .is_some_and(|root| root.session_reload.is_some());
+    if transcript_owner_agent(app, &build).is_some_and(|agent| agent.history_is_partial) {
+        if let Some(agent) = transcript_owner_agent_mut(app, &build) {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::notice(
+                    "The complete transcript is not available from the current history window.",
+                ));
+        }
+        return None;
+    }
     let agent = transcript_owner_agent(app, &build)?;
     if root_reloading || agent.session_reload.is_some() {
         // Also cover requests created after the reconnect entry hook.
@@ -744,6 +775,16 @@ pub fn set_minimal_transcript(app: &mut AppView, build: Option<TranscriptBuild>)
 
 /// Queue the final Minimal transcript snapshot write as an async Effect.
 pub fn queue_minimal_transcript_snapshot(app: &mut AppView, build: TranscriptBuild) {
+    if transcript_owner_agent(app, &build).is_some_and(|agent| agent.history_is_partial) {
+        if let Some(agent) = transcript_owner_agent_mut(app, &build) {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::notice(
+                    "The complete transcript is not available from the current history window.",
+                ));
+        }
+        return;
+    }
     app.pending_effects.push(
         crate::app::actions::Effect::WriteMinimalTranscriptSnapshot {
             generation: build.generation,
@@ -781,14 +822,18 @@ pub(crate) fn complete_minimal_transcript_snapshot(
         return;
     };
 
+    let result = if agent.history_is_partial {
+        Err("The complete transcript is not available from the current history window.".into())
+    } else {
+        result.map_err(|error| format!("Failed to write transcript: {error}"))
+    };
     match result {
         Ok(path) => {
             let pending =
                 crate::app::external_pager::PendingPager::new(path, true, owner.root_agent, agent);
             app.pending_pager = Some(pending);
         }
-        Err(error) => {
-            let message = format!("Failed to write transcript: {error}");
+        Err(message) => {
             let root = app
                 .agents
                 .get_mut(&owner.root_agent)

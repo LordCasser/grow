@@ -7,7 +7,9 @@
 mod grow_facts;
 pub(crate) use grow_facts::GrowHistoryFact;
 mod projector;
-pub(crate) use projector::{HISTORY_CURSOR_KEY, PreparedHistory, background_command_settlements};
+pub(crate) use projector::{
+    HISTORY_CURSOR_KEY, IndexedPages, PreparedHistory, background_command_settlements,
+};
 mod seed;
 pub(crate) use seed::SeedPresentation;
 
@@ -194,6 +196,11 @@ impl HistoryFact {
             acp::SessionNotification::new(session_id.clone(), update).meta(self.meta),
         ))))
     }
+}
+
+pub(crate) fn event_counter_after(id: &str) -> Option<u64> {
+    let counter = id.rsplit_once('-')?.1.parse::<u64>().ok()?;
+    Some(counter.saturating_add(1))
 }
 
 /// The checksum covers the exact stored fact bytes plus the fixed version and
@@ -385,6 +392,7 @@ fn encode(seq: u64, fact: &FactWire<'_>) -> io::Result<Vec<u8>> {
 pub(crate) struct AppendState {
     pub records: u64,
     pub events: u64,
+    pub first_domain_at_ms: Option<i64>,
     pub display_records: usize,
     pub anchors: BTreeMap<ResponseKey, u64>,
     pub identities: BTreeMap<String, blake3::Hash>,
@@ -515,6 +523,7 @@ impl AppendState {
                 response_anchor,
             } => {
                 self.index_receipt(event)?;
+                self.first_domain_at_ms.get_or_insert(event.at_ms);
                 self.last_domain = Some((event.seq.get(), record.digest, *response_anchor));
                 self.events += 1;
                 self.display_records += usize::from(response_anchor.is_some());
@@ -555,6 +564,8 @@ pub(crate) struct HistorySnapshot {
     pub bytes: u64,
     pub prefix_hash: String,
     pub notices: BTreeMap<u64, crate::extensions::notification::UiNotice>,
+    pub indexed: Option<crate::session::storage::jsonl::IndexedHistory>,
+    pub positions: Vec<u64>,
 }
 
 impl HistorySnapshot {
@@ -625,8 +636,7 @@ impl HistorySnapshot {
             }
             if let HistoryContent::Notice { event } = &fact.content {
                 let event = timeline
-                    .events()
-                    .get(*event as usize)
+                    .event(chat_state::EventSeq::new(*event))
                     .ok_or_else(|| invalid("notice source is missing"))?;
                 let identity =
                     crate::session::storage::communication_history::receipt_identity(event)?
@@ -645,9 +655,7 @@ impl HistorySnapshot {
             } = &fact.content
             {
                 let message = timeline
-                    .events()
-                    .get(*event as usize)
-                    .filter(|event_value| event_value.seq.get() == *event)
+                    .event(chat_state::EventSeq::new(*event))
                     .and_then(|event| event.messages())
                     .filter(|message| message.response_admission.is_none())
                     .ok_or_else(|| invalid("invalid inherited history source"))?;
@@ -747,17 +755,21 @@ impl HistorySnapshot {
     }
 
     pub(crate) fn display_record_count(&self) -> usize {
-        self.sources
-            .iter()
-            .filter(|source| match source {
-                HistorySource::Domain {
-                    response_anchor, ..
-                } => response_anchor.is_some(),
-                HistorySource::Presentation { fact, .. } => {
-                    !matches!(fact.content, HistoryContent::Candidate(_))
-                }
-            })
-            .count()
+        self.indexed
+            .as_ref()
+            .map_or(0, |index| index.omitted_count())
+            + self
+                .sources
+                .iter()
+                .filter(|source| match source {
+                    HistorySource::Domain {
+                        response_anchor, ..
+                    } => response_anchor.is_some(),
+                    HistorySource::Presentation { fact, .. } => {
+                        !matches!(fact.content, HistoryContent::Candidate(_))
+                    }
+                })
+                .count()
     }
 
     fn event_counter_floor(&self) -> u64 {
@@ -768,15 +780,22 @@ impl HistorySnapshot {
                 let HistorySource::Presentation { fact, .. } = source else {
                     return None;
                 };
-                fact.event_id()?.rsplit_once('-')?.1.parse::<u64>().ok()
+                event_counter_after(fact.event_id()?)
             })
             .max();
         // Synthesized receipt IDs end in their domain position. Cover every
         // physical position even when no presentation row exists (noReplay or
         // a hidden branch must not let later live events fall below that UI highwater).
-        max.map_or(self.sources.len() as u64, |max| {
-            max.saturating_add(1).max(self.sources.len() as u64)
-        })
+        max.unwrap_or(0).max(self.record_count()).max(
+            self.indexed.as_ref().map_or(0, |index| index.event_counter_floor()),
+        )
+    }
+
+    pub(crate) fn record_count(&self) -> u64 {
+        self.positions
+            .last()
+            .map_or(self.sources.len() as u64, |last| last + 1)
+            .max(self.indexed.as_ref().map_or(0, |index| index.records()))
     }
 
     pub(crate) fn reseed_event_counter(&self) {

@@ -190,6 +190,17 @@ fn startup_exit_retains_owner_and_can_retry_after_identity_is_confirmed() {
 }
 
 #[test]
+fn exit_does_not_wait_for_read_only_prompt_history() {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.bind_session_id(acp::SessionId::new("started"));
+    agent.session.prompt_history_loading = true;
+
+    let effects = dispatch(Action::Quit, &mut app);
+    assert!(matches!(effects.as_slice(), [Effect::SuspendForExit { .. }]));
+}
+
+#[test]
 fn global_quit_interrupts_the_attached_command_prefix() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();

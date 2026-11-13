@@ -61,6 +61,14 @@ impl SessionActor {
         if result_ref.timeline_id != child_session_id {
             return Err("planning result reference belongs to a different child session".into());
         }
+        let reference = Some(serde_json::to_string(result_ref).map_err(|error| error.to_string())?);
+        if plan
+            .links
+            .iter()
+            .any(|link| link.id == task_id && link.terminal && link.result_id == reference)
+        {
+            return Ok(());
+        }
         crate::agent::subagent::validate_planning_result_reference(
             self.session_info.id.0.as_ref(),
             task_id,
@@ -69,15 +77,11 @@ impl SessionActor {
             &self.chat_state_handle,
         )
         .await?;
-        let reference = Some(serde_json::to_string(result_ref).map_err(|error| error.to_string())?);
         let link = plan
             .links
             .iter_mut()
             .find(|link| link.id == task_id)
             .expect("the planning link was captured above");
-        if link.terminal && link.result_id == reference {
-            return Ok(());
-        }
         link.result_id = reference;
         plan.mark_link_terminal(
             task_id,

@@ -121,6 +121,122 @@ fn unchanged_planning_blockers_stop_sampling_and_goal_recovery() {
 }
 
 #[test]
+fn progress_steer_keeps_work_running_and_the_real_final_still_checks_deliveries() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let foreground = || {
+                test_support::InferenceRequestMatcher::foreground(
+                    test_support::InferenceEndpoint::Messages,
+                )
+            };
+            let _initial = server.expect_response(
+                "first completion attempt",
+                foreground(),
+                messages_turn(&[text_block("Checking the required review.")], END_TURN),
+            );
+            let mut before_steer = server.expect_response_blocked(
+                "step after the planning reminder",
+                foreground(),
+                messages_turn(&[text_block("Review still pending.")], END_TURN),
+            );
+            let _progress = server.expect_response(
+                "progress reply",
+                foreground(),
+                messages_turn(
+                    &[
+                        text_block("The implementation is ready; the required review is pending."),
+                        tool_use_block("progress", "GrowContinueAfterProgress", "{}"),
+                    ],
+                    "tool_use",
+                ),
+            );
+            let mut final_step = server.expect_response_blocked(
+                "actual final",
+                foreground(),
+                messages_turn(&[text_block("This is the final handoff.")], END_TURN),
+            );
+            let (actor, _) = goal_actor_with_sampler_and_max_turns(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                None,
+            )
+            .await;
+            install_unresolved_child(&actor).await;
+            let (result, ()) = tokio::join!(run_user_turn(&actor, "progress-turn"), async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    before_steer.wait_blocked(),
+                )
+                .await
+                .unwrap();
+                let turn = actor.events.current_turn().unwrap();
+                actor
+                    .admit_human_steer(
+                        "progress-turn",
+                        "Is the main work complete?".into(),
+                        Vec::new(),
+                        Some("progress-question".into()),
+                    )
+                    .await
+                    .unwrap();
+                before_steer.release();
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), final_step.wait_blocked())
+                    .await
+                    .expect("progress reply should lead to another step in the same turn");
+                assert_eq!(actor.events.current_turn(), Some(turn));
+                let requests = server.request_bodies();
+                assert!(
+                    !requests[0]["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| { tool["name"] == "GrowContinueAfterProgress" })
+                );
+                assert!(
+                    requests[2]["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| { tool["name"] == "GrowContinueAfterProgress" })
+                );
+                assert!(
+                    requests[2]
+                        .to_string()
+                        .contains("Is the main work complete?")
+                );
+                let next_request = requests[3].to_string();
+                assert!(
+                    next_request
+                        .contains("The implementation is ready; the required review is pending.")
+                );
+                assert!(
+                    next_request.contains("Progress reply delivered. Continue the original work.")
+                );
+                assert_eq!(
+                    next_request
+                        .matches("This work cannot be declared complete yet")
+                        .count(),
+                    1
+                );
+                final_step.release();
+            });
+            let error = result.expect_err("the final must still check unresolved delivery");
+            assert_eq!(
+                error.data.unwrap()["error_kind"],
+                "planning_completion_blocked"
+            );
+            assert_eq!(server.messages_request_count(), 4);
+        }));
+    });
+}
+
+#[test]
 fn resolved_planning_blockers_allow_the_next_final() {
     run_with_session_stack(|| {
         let rt = tokio::runtime::Builder::new_current_thread()

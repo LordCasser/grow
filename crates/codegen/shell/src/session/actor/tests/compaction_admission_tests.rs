@@ -516,6 +516,7 @@ fn suspension_at_summary_ack(expire_first: bool) {
                     .request_node_suspension(
                         "suspend-compaction-op".into(),
                         actor.session_id_string(),
+                        actor.chat_state_handle.clone(),
                         deadline,
                         tx,
                     )

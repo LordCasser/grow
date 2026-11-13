@@ -190,7 +190,7 @@ impl ChatStateActor {
         let request = ConversationRequest {
             source_projection: Some(serde_json::json!({
                 "timeline_id": timeline_id,
-                "source_seq": self.state.timeline.events().last().map(|event| event.seq.get()),
+                "source_seq": self.state.timeline.last_seq().map(|seq| seq.get()),
                 "surface_ids": surface_ids,
                 "runtime_context": runtime_context_index.map(|item_index| serde_json::json!({
                     "item_index": item_index,

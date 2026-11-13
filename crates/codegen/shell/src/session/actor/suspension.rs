@@ -459,7 +459,7 @@ impl SessionActor {
         // sources remain independent checks. Aggregate metadata is diagnostic.
         let events = self
             .chat_state_handle
-            .timeline_events()
+            .resident_timeline_events()
             .await
             .ok_or("Timeline unavailable")?;
         let (_, saved_effort, saved_provider, saved_transport) =
@@ -802,6 +802,7 @@ impl SessionActor {
         self: &Arc<Self>,
         operation_id: String,
         root_session_id: String,
+        root_chat_state: chat_state::ChatStateHandle,
         deadline: Option<tokio::time::Instant>,
         respond_to: oneshot::Sender<Result<RuntimeNodeRef, String>>,
     ) {
@@ -859,7 +860,7 @@ impl SessionActor {
         self.runtime_suspension_worker
             .arm(tokio::task::spawn_local(async move {
                 let result = session
-                    .suspend_node(operation_id, root_session_id, deadline)
+                    .suspend_node(operation_id, root_session_id, root_chat_state, deadline)
                     .await;
                 let _ = respond_to.send(result);
             }));
@@ -869,6 +870,7 @@ impl SessionActor {
         &self,
         operation_id: String,
         root_session_id: String,
+        root_chat_state: chat_state::ChatStateHandle,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<RuntimeNodeRef, String> {
         let started = std::time::Instant::now();
@@ -1049,41 +1051,32 @@ impl SessionActor {
             )
             .await?;
         }
-        let events = self
+        let mut cursor = self.turn_continuation.borrow().clone();
+        let evidence = self
             .chat_state_handle
-            .timeline_events()
+            .suspension_evidence(
+                operation_id.clone(),
+                cursor.as_ref().map(|turn| turn.turn_id),
+                cursor.as_ref().and_then(|turn| turn.accepted_response.as_ref())
+                    .map(|response| response.identity.clone()),
+            )
             .await
             .ok_or("suspension evidence unavailable")?;
-        let pending = suspension_interactions(&events, &operation_id)?;
-        let surface = self.chat_state_handle.get_conversation().await;
-        let delegation_events = self.runtime_delegation_events().await?;
-        let mut cursor = self.turn_continuation.borrow().clone();
-        if cursor.as_ref().is_some_and(|cursor| events.iter().any(|event| matches!(&event.kind,
-            chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { id, .. }) if *id == cursor.turn_id))) {
-            // Explicit cancellation and genuine completion already own their
-            // terminal. A stale in-memory cursor cannot resurrect that work.
+        let calls = evidence.surface_calls;
+        let published_skills = evidence.published_skills;
+        let pending = evidence.waits;
+        if evidence.turn.is_none() {
+            // A stale in-memory cursor cannot resurrect a terminal Turn.
             cursor = None;
         }
-        let canonical_response_seq = match cursor
-            .as_ref()
-            .and_then(|turn| turn.accepted_response.as_ref())
-        {
-            Some(accepted) => self
-                .chat_state_handle
-                .admitted_response(accepted.identity.clone())
-                .await
-                .map(|response| response.event_seq),
-            None => None,
-        };
-        if let Some(turn) = cursor.as_mut() {
-            align_suspension_cursor(
-                turn,
-                &events,
-                canonical_response_seq,
-                &self.session_id_string(),
-            )?;
-            if turn.resume_point == TurnResumePoint::Input && events.iter().any(|event| matches!(&event.kind,
-                chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed { turn: input_turn, .. }) if *input_turn == turn.turn_id)) {
+        if let (Some(turn), Some(progress)) = (cursor.as_mut(), evidence.turn) {
+            if progress.next_step_consumed_response {
+                turn.accepted_response = None;
+            }
+            let committed = u32::try_from(progress.committed_stop_continuations)
+                .map_err(|_| "Stop continuation count overflow")?;
+            turn.stop_continuations_used = turn.stop_continuations_used.max(committed);
+            if turn.resume_point == TurnResumePoint::Input && progress.input_consumed {
                 turn.resume_point = TurnResumePoint::Model;
             }
             turn.task_output_usage = self
@@ -1100,24 +1093,13 @@ impl SessionActor {
                 turn.sampling_deadline_ms = budget.deadline_ms;
                 turn.sampling_replay_safe = budget.replay_safe;
             }
-            let mut calls = std::collections::BTreeMap::new();
-            for item in &surface {
-                if let ConversationItem::Assistant(assistant) = item {
-                    for call in &assistant.tool_calls {
-                        calls.insert(call.id.to_string(), call.name.to_string());
-                    }
-                }
-            }
-            for item in &surface {
-                if let ConversationItem::ToolResult(result) = item {
-                    calls.remove(&result.tool_call_id);
-                }
-            }
-            let model_call_ids = calls
-                .keys()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
-            for (call_id, _name) in calls {
+            let model_call_ids = calls.keys().cloned().collect();
+            let delegation_events = if calls.is_empty() {
+                Vec::new()
+            } else {
+                root_chat_state.runtime_tree_snapshot().await?.1
+            };
+            for (call_id, started) in calls {
                 let child = delegation_events
                     .iter()
                     .rev()
@@ -1132,14 +1114,6 @@ impl SessionActor {
                         }
                         _ => None,
                     });
-                let started_input = events.iter().rev().find_map(|event| match &event.kind {
-                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started {
-                        call_id: id,
-                        input,
-                        ..
-                    }) if id == &call_id => Some(input),
-                    _ => None,
-                });
                 let command = commands.iter().find(|command| command.call_id == call_id);
                 let (state, dependency_id) = if let Some(child) = child {
                     (
@@ -1159,7 +1133,7 @@ impl SessionActor {
                             (SuspendedOperationState::AwaitUser, Some(call_id.clone()))
                         }
                     }
-                } else if started_input.is_none() {
+                } else if !started {
                     (SuspendedOperationState::NotDispatched, None)
                 } else if let Some(command) = command {
                     (
@@ -1225,28 +1199,9 @@ impl SessionActor {
             // assistant tool call. Settle their existing cards without adding
             // an orphan model ToolResult. A published Skill body is already
             // canonical; an uncommitted preparation remains explicitly unknown.
-            let mut host_calls = std::collections::BTreeSet::new();
-            for event in &events {
-                match &event.kind {
-                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started {
-                        call_id,
-                        turn: id,
-                        ..
-                    }) if *id == turn.turn_id => {
-                        host_calls.insert(call_id.clone());
-                    }
-                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed {
-                        call_id,
-                        ..
-                    }) => {
-                        host_calls.remove(call_id);
-                    }
-                    _ => {}
-                }
-            }
-            for call_id in host_calls.difference(&model_call_ids) {
+            for call_id in progress.open_tool_calls.difference(&model_call_ids) {
                 let command = commands.iter().find(|command| command.call_id == *call_id);
-                let published_skill = surface.iter().any(|item| matches!(item, ConversationItem::SkillLoad(skill) if skill.call_id == *call_id));
+                let published_skill = published_skills.contains(call_id);
                 let outcome = if published_skill
                     || command.is_some_and(|command| {
                         command.outcome != CommandSettlementStatus::Interrupted
@@ -1296,38 +1251,13 @@ impl SessionActor {
                     .into(),
             );
         }
-        let mut open_interactions = std::collections::BTreeSet::new();
-        for event in self
-            .chat_state_handle
-            .timeline_events()
-            .await
-            .ok_or("suspension interaction evidence unavailable")?
-        {
-            match &event.kind {
-                chat_state::TimelineEventKind::Interaction(
-                    chat_state::InteractionEvent::Opened {
-                        tool_call_id,
-                        attempt_id,
-                        kind,
-                    },
-                ) => {
-                    open_interactions.insert((tool_call_id.clone(), attempt_id.clone(), *kind));
-                }
-                chat_state::TimelineEventKind::Interaction(
-                    chat_state::InteractionEvent::Resolved {
-                        tool_call_id,
-                        attempt_id,
-                        kind,
-                        ..
-                    },
-                ) => {
-                    open_interactions.remove(&(tool_call_id.clone(), attempt_id.clone(), *kind));
-                }
-                _ => {}
-            }
-        }
         for (call_id, (kind, attempt_id)) in &pending {
-            if open_interactions.remove(&(call_id.clone(), attempt_id.clone(), *kind)) {
+            if self
+                .chat_state_handle
+                .is_interaction_open(call_id.clone(), attempt_id.clone(), *kind)
+                .await
+                .ok_or("suspension interaction evidence unavailable")?
+            {
                 self.chat_state_handle
                     .record_timeline_event_durably_before(
                         chat_state::TimelineEventKind::Interaction(
@@ -1435,117 +1365,11 @@ impl SessionActor {
 #[path = "suspension_receipt_tests.rs"]
 mod receipt_tests;
 
-/// Align the in-memory cursor with the durable Timeline prefix. A committed
-/// next Step is authoritative even when the caller has not received its ACK.
-fn align_suspension_cursor(
-    turn: &mut chat_state::session_runtime::TurnContinuation,
-    events: &[chat_state::TimelineEvent],
-    canonical_response_seq: Option<chat_state::EventSeq>,
-    session_id: &str,
-) -> Result<(), &'static str> {
-    if turn.accepted_response.is_some() {
-        let response_seq = canonical_response_seq;
-        let response_has_been_consumed = response_seq.is_some_and(|response_seq| {
-            events.iter().any(|event| {
-                event.seq > response_seq
-                    && matches!(
-                        &event.kind,
-                        chat_state::TimelineEventKind::Step(
-                            chat_state::StepEvent::Started { id }
-                        ) if id.turn == turn.turn_id
-                    )
-            })
-        });
-        if response_seq.is_none() || response_has_been_consumed {
-            turn.accepted_response = None;
-        }
-    }
-
-    let Some(turn_started_seq) = events.iter().find_map(|event| match &event.kind {
-        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { id, .. })
-            if *id == turn.turn_id =>
-        {
-            Some(event.seq)
-        }
-        _ => None,
-    }) else {
-        return Ok(());
-    };
-    let turn_end_seq = events.iter().find_map(|event| match &event.kind {
-        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { id, .. })
-            if *id == turn.turn_id && event.seq > turn_started_seq =>
-        {
-            Some(event.seq)
-        }
-        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { id, .. })
-            if *id != turn.turn_id && event.seq > turn_started_seq =>
-        {
-            Some(event.seq)
-        }
-        _ => None,
-    });
-    let in_turn = |seq: chat_state::EventSeq| {
-        seq > turn_started_seq && turn_end_seq.is_none_or(|end| seq < end)
-    };
-
-    let mut stop_occurrences = std::collections::BTreeSet::new();
-    let mut pending_keep_working = 0usize;
-    let mut committed_continuations = 0usize;
-    for event in events {
-        if !in_turn(event.seq) {
-            continue;
-        }
-        match &event.kind {
-            chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
-                occurrence_id,
-                event,
-                cause,
-                gate: chat_state::HookGateKind::Stop,
-                ..
-            }) if (matches!(event, chat_state::HookEventType::Stop)
-                && matches!(cause, chat_state::HookCause::Turn { turn: id } if *id == turn.turn_id))
-                || (matches!(event, chat_state::HookEventType::SubagentStop)
-                    && matches!(cause, chat_state::HookCause::Subagent { subagent_id } if subagent_id == session_id)) =>
-            {
-                stop_occurrences.insert(occurrence_id.as_str());
-            }
-            chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Completed {
-                occurrence_id,
-                decision:
-                    chat_state::HookAggregateDecision::Stop {
-                        decision: chat_state::HookStopDecision::KeepWorking { .. },
-                    },
-            }) if stop_occurrences.contains(occurrence_id.as_str()) => {
-                pending_keep_working += 1;
-            }
-            chat_state::TimelineEventKind::Step(chat_state::StepEvent::Started { id })
-                if id.turn == turn.turn_id =>
-            {
-                committed_continuations += pending_keep_working;
-                pending_keep_working = 0;
-            }
-            _ => {}
-        }
-    }
-
-    let committed_continuations =
-        u32::try_from(committed_continuations).map_err(|_| "Stop continuation count overflow")?;
-    turn.stop_continuations_used = turn.stop_continuations_used.max(committed_continuations);
-    Ok(())
-}
-
 #[cfg(test)]
-mod cursor_alignment_tests {
-    use super::{SessionActor, align_suspension_cursor, reuse_or_capture_command_settlements};
-    use chat_state::session_runtime::{
-        AcceptedResponseContinuation, CommandSettlementStatus, RuntimeCommandSettlement,
-        TurnContinuation, TurnResumePoint,
-    };
-    use chat_state::{
-        EventSeq, HookAggregateDecision, HookCause, HookEvent, HookEventType, HookGateKind,
-        HookStopDecision, StepId, TimelineEvent, TimelineEventKind, TurnEvent, TurnId,
-        TurnIdentity, TurnInputKind, TurnTerminal, TurnTerminalSource,
-    };
+mod suspension_tests {
+    use super::{SessionActor, reuse_or_capture_command_settlements};
+    use chat_state::session_runtime::{CommandSettlementStatus, RuntimeCommandSettlement};
+    use chat_state::{EventSeq, TimelineEvent, TimelineEventKind};
 
     const SESSION_ID: &str = "subagent-session";
 
@@ -1742,225 +1566,13 @@ mod cursor_alignment_tests {
         }
     }
 
-    fn turn_started(seq: u64, turn: TurnId) -> TimelineEvent {
-        event(
-            seq,
-            TimelineEventKind::Turn(TurnEvent::Started {
-                prompt_id: "fixture-prompt".into(),
-                id: turn,
-                input_ids: vec![],
-                identity: TurnIdentity {
-                    origin: "test".into(),
-                    turn_kind: "user".into(),
-                    goal_id: None,
-                    goal_definition_revision: None,
-                    stage_id: None,
-                },
-                model_id: "test".into(),
-                input_message_count: 0,
-                prompt_index: 0,
-                prompt_text: "test".into(),
-                input_kind: TurnInputKind::Prompt,
-                redirect_kind: None,
-            }),
-        )
-    }
-
-    fn turn_ended(seq: u64, turn: TurnId) -> TimelineEvent {
-        event(
-            seq,
-            TimelineEventKind::Turn(TurnEvent::Ended {
-                id: turn,
-                outcome: "completed".into(),
-                duration_ms: 0,
-                tool_count: 0,
-                terminal: TurnTerminal {
-                    source: TurnTerminalSource::Host,
-                    stop_reason: "stop".into(),
-                    completion_kind: "test".into(),
-                },
-                cancellation_category: None,
-                details: None,
-            }),
-        )
-    }
-
-    fn step_started(seq: u64, turn: TurnId) -> TimelineEvent {
-        event(
-            seq,
-            TimelineEventKind::Step(chat_state::StepEvent::Started {
-                id: StepId { turn, index: 1 },
-            }),
-        )
-    }
-
-    fn stop_triggered(
-        seq: u64,
-        occurrence: &str,
-        event_type: HookEventType,
-        cause: HookCause,
-    ) -> TimelineEvent {
-        event(
-            seq,
-            TimelineEventKind::Hook(HookEvent::Triggered {
-                occurrence_id: occurrence.into(),
-                event: event_type,
-                gate: HookGateKind::Stop,
-                cause,
-                config_generation: 1,
-                handlers: Vec::new(),
-            }),
-        )
-    }
-
-    fn keep_working_completed(seq: u64, occurrence: &str) -> TimelineEvent {
-        event(
-            seq,
-            TimelineEventKind::Hook(HookEvent::Completed {
-                occurrence_id: occurrence.into(),
-                decision: HookAggregateDecision::Stop {
-                    decision: HookStopDecision::KeepWorking {
-                        reasons: Vec::new(),
-                        additional_context: Vec::new(),
-                    },
-                },
-            }),
-        )
-    }
-
-    fn cursor(turn_id: TurnId, accepted_response: bool, saved_count: u32) -> TurnContinuation {
-        TurnContinuation {
-            turn_id,
-            prompt_id: "prompt".into(),
-            prompt_index: 0,
-            origin: "user".into(),
-            next_step_index: 1,
-            tool_turns_used: 0,
-            tool_calls_used: 0,
-            stop_continuations_used: saved_count,
-            output_schema: None,
-            resume_point: TurnResumePoint::Model,
-            task_output_usage: None,
-            accepted_response: accepted_response.then(|| AcceptedResponseContinuation {
-                identity: chat_state::ResponseAdmissionIdentity {
-                    request_id: "request".into(),
-                    attempt: 1,
-                },
-                stop_reason: None,
-                stop_message: None,
-            }),
-            structured_output_retries: 0,
-            sampling_attempts_used: 0,
-            sampling_max_attempts: None,
-            sampling_replay_safe: true,
-            sampling_deadline_ms: None,
-            operations: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn next_step_ack_gap_consumes_response_and_counts_committed_stop() {
-        let turn_id = TurnId(1);
-        let mut cursor = cursor(turn_id, true, 1);
-        let events = vec![
-            turn_started(1, turn_id),
-            event(
-                2,
-                TimelineEventKind::Hook(HookEvent::Triggered {
-                    occurrence_id: "stop".into(),
-                    event: HookEventType::Stop,
-                    gate: HookGateKind::Stop,
-                    cause: HookCause::Turn { turn: turn_id },
-                    config_generation: 1,
-                    handlers: Vec::new(),
-                }),
-            ),
-            keep_working_completed(3, "stop"),
-            stop_triggered(
-                4,
-                "stop-2",
-                HookEventType::Stop,
-                HookCause::Turn { turn: turn_id },
-            ),
-            keep_working_completed(5, "stop-2"),
-            step_started(6, turn_id),
-        ];
-
-        align_suspension_cursor(&mut cursor, &events, Some(EventSeq::new(1)), SESSION_ID)
-            .expect("timeline count fits");
-
-        assert!(cursor.accepted_response.is_none());
-        assert_eq!(cursor.stop_continuations_used, 2);
-    }
-
-    #[test]
-    fn accepted_response_stays_frozen_when_no_next_step_is_committed() {
-        let turn_id = TurnId(1);
-        let mut cursor = cursor(turn_id, true, 0);
-        let events = vec![turn_started(1, turn_id)];
-
-        align_suspension_cursor(&mut cursor, &events, Some(EventSeq::new(2)), SESSION_ID)
-            .expect("timeline count fits");
-
-        assert!(cursor.accepted_response.is_some());
-        assert_eq!(cursor.stop_continuations_used, 0);
-    }
-
-    #[test]
-    fn another_turns_stop_cannot_consume_or_count_for_this_cursor() {
-        let turn_id = TurnId(1);
-        let other_turn = TurnId(2);
-        let mut cursor = cursor(turn_id, true, 0);
-        let events = vec![
-            turn_started(1, turn_id),
-            turn_ended(2, turn_id),
-            turn_started(3, other_turn),
-            stop_triggered(
-                4,
-                "other-stop",
-                HookEventType::Stop,
-                HookCause::Turn { turn: other_turn },
-            ),
-            keep_working_completed(5, "other-stop"),
-            step_started(6, other_turn),
-        ];
-
-        align_suspension_cursor(&mut cursor, &events, Some(EventSeq::new(1)), SESSION_ID)
-            .expect("timeline count fits");
-
-        assert!(cursor.accepted_response.is_some());
-        assert_eq!(cursor.stop_continuations_used, 0);
-    }
-
-    #[test]
-    fn subagent_stop_counts_only_inside_the_cursor_turn_boundary() {
-        let turn_id = TurnId(1);
-        let mut cursor = cursor(turn_id, false, 0);
-        let events = vec![
-            turn_started(1, turn_id),
-            stop_triggered(
-                2,
-                "subagent-stop",
-                HookEventType::SubagentStop,
-                HookCause::Subagent {
-                    subagent_id: SESSION_ID.into(),
-                },
-            ),
-            keep_working_completed(3, "subagent-stop"),
-            step_started(4, turn_id),
-        ];
-
-        align_suspension_cursor(&mut cursor, &events, None, SESSION_ID)
-            .expect("timeline count fits");
-
-        assert_eq!(cursor.stop_continuations_used, 1);
-    }
 }
 
 /// Physical wait owners disappear during drain. Their Timeline attempts remain
 /// the authority across retries, including owners resolved as Suspended before
 /// the node intent. Only waits retained by the matching checkpoint survive
 /// ExecutionReleased until a new attempt or a real resolution takes ownership.
+#[cfg(test)]
 fn suspension_interactions(
     events: &[chat_state::TimelineEvent],
     operation_id: &str,

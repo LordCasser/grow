@@ -1,4 +1,4 @@
-//! Shared, observational projection for offline export and replay.
+//! Shared, observational projection for offline export, replay, and history pages.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -20,6 +20,29 @@ use shell::extensions::notification::{
 use shell::session::storage::SessionUpdate;
 use shell::session::storage::transcript::TranscriptEvent;
 mod surfaces;
+
+pub(crate) fn assistant_message_text(
+    scrollback: &ScrollbackState,
+    n: usize,
+) -> Result<String, String> {
+    let mut available = 0;
+    for index in (0..scrollback.len()).rev() {
+        if let Some(entry) = scrollback.entry(index)
+            && let RenderBlock::AgentMessage(message) = &entry.block
+        {
+            available += 1;
+            if available == n {
+                return Ok(message.copy_text(false));
+            }
+        }
+    }
+    let error = match available {
+        0 => "No assistant messages to copy".into(),
+        1 => "Only 1 assistant message available to copy".into(),
+        count => format!("Only {count} assistant messages available to copy"),
+    };
+    Err(error)
+}
 
 pub struct TranscriptProjection {
     pub(crate) surfaces: surfaces::RecordedSurfaces,

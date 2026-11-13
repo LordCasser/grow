@@ -77,6 +77,9 @@ impl ChatStateActor {
             self.persistence_poisoned = true;
             return Err(crate::commands::TimelineWriteError::CommittedProjectionInvalid(error));
         }
+        if self.state.timeline.has_archived_events() && !self.persistence.retains_complete_history() {
+            self.state.timeline.archive_latest_diagnostic();
+        }
         self.refresh_prompt_projection(previous_prompt_index);
         if self.state.timeline.surface_revision() != previous_surface_revision {
             self.state.refresh_context_pressure();
@@ -226,6 +229,9 @@ impl ChatStateActor {
         });
         if self.persistence_poisoned {
             return false;
+        }
+        if self.state.timeline.has_archived_events() && !self.persistence.retains_complete_history() {
+            self.state.timeline.archive_latest_diagnostic();
         }
         self.refresh_prompt_projection(previous_prompt_index);
         if self.state.timeline.surface_revision() != previous_surface_revision {
@@ -387,7 +393,7 @@ impl ChatStateActor {
                 deadline,
                 reply,
             } => {
-                let frontier = self.state.timeline.events().last().map(|event| event.seq);
+                let frontier = self.state.timeline.last_seq();
                 let result = match frontier {
                     Some(frontier) => {
                         let kind = TimelineEventKind::Runtime(
@@ -424,6 +430,8 @@ impl ChatStateActor {
                             "hook settlement does not belong to the active suspension".into(),
                         ),
                     ))
+                } else if !self.state.timeline.has_open_hooks() {
+                    Ok(Vec::new())
                 } else {
                     let mut candidate = self.state.timeline.clone();
                     match candidate.settle_interrupted_hooks() {
@@ -684,10 +692,10 @@ impl ChatStateActor {
                 let _ = reply.send(result);
             }
             ChatStateCommand::SettleOpenCompactionDurably { reason, reply } => {
-                let prepared = {
-                    let mut candidate = self.state.timeline.clone();
-                    candidate.settle_open_compaction(&reason)
-                };
+                let prepared = self
+                    .state
+                    .timeline
+                    .prepare_open_compaction_settlement(&reason);
                 let result = match prepared {
                     Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
                     Ok(None) => Ok(None),
@@ -1083,7 +1091,20 @@ impl ChatStateActor {
                 ));
             }
             ChatStateCommand::GetTrajectory { reply } => {
-                let _ = reply.send(self.state.timeline.trajectory());
+                let timeline = &self.state.timeline;
+                if timeline.has_archived_events() {
+                    if let Some(read) = self.persistence.read_events(0, timeline.next_seq().get()) {
+                        tokio::spawn(async move {
+                            if let Ok(Ok(events)) = read.await
+                                && let Ok(timeline) = Timeline::from_events(events)
+                            {
+                                let _ = reply.send(timeline.trajectory());
+                            }
+                        });
+                    }
+                } else {
+                    let _ = reply.send(timeline.trajectory());
+                }
             }
             ChatStateCommand::GetHookProjection {
                 occurrence_id,
@@ -1094,10 +1115,28 @@ impl ChatStateActor {
             ChatStateCommand::GetCompletedHookProjections { reply } => {
                 let _ = reply.send(self.state.timeline.completed_hook_projections());
             }
-            ChatStateCommand::GetTimelineEvents { from_seq, reply } => {
-                let events = self.state.timeline.events();
+            ChatStateCommand::GetTimelineEvents { from_seq, include_archived, reply } => {
+                let timeline = &self.state.timeline;
+                let events = timeline.events();
                 let start = events.partition_point(|event| event.seq.get() < from_seq);
+                let end_seq = timeline.next_seq().get();
+                if include_archived && events[start..].len() as u64 != end_seq.saturating_sub(from_seq) {
+                    if let Some(read) = self.persistence.read_events(from_seq, end_seq) {
+                        tokio::spawn(async move {
+                            if let Ok(Ok(events)) = read.await {
+                                let _ = reply.send(events);
+                            }
+                        });
+                    }
+                    return;
+                }
                 let _ = reply.send(events[start..].to_vec());
+            }
+            ChatStateCommand::GetHistoryBranch { reply } => {
+                let _ = reply.send(self.state.timeline.history_branch());
+            }
+            ChatStateCommand::GetRecentPromptTexts { limit, reply } => {
+                let _ = reply.send(self.state.timeline.recent_prompt_texts(limit));
             }
             ChatStateCommand::GetPlanningState { reply } => {
                 let _ = reply.send(self.state.timeline.planning_snapshot().cloned());
@@ -1107,6 +1146,62 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetRuntimeState { reply } => {
                 let _ = reply.send(self.state.timeline.runtime_lifecycle().clone());
+            }
+            ChatStateCommand::GetWorkflowLifecycle { run_id, reply } => {
+                let _ = reply.send(self.state.timeline.workflow_lifecycle(&run_id));
+            }
+            ChatStateCommand::GetSuspensionEvidence {
+                operation_id,
+                turn,
+                accepted_response,
+                reply,
+            } => {
+                let timeline = &self.state.timeline;
+                let evidence = timeline.suspension_waits(&operation_id).map(|waits| {
+                    let turn = timeline.suspension_turn_evidence(turn, accepted_response.as_ref());
+                    let mut surface_calls = std::collections::BTreeMap::new();
+                    let mut published_skills = std::collections::BTreeSet::new();
+                    if turn.is_some() {
+                        let surface = timeline.surface();
+                        for item in surface {
+                            match item {
+                                ConversationItem::Assistant(assistant) => {
+                                    surface_calls.extend(assistant.tool_calls.iter().map(|call| {
+                                        (call.id.to_string(), timeline.tool_was_started(&call.id))
+                                    }));
+                                }
+                                ConversationItem::SkillLoad(skill) => {
+                                    published_skills.insert(skill.call_id.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                        for item in surface {
+                            if let ConversationItem::ToolResult(result) = item {
+                                surface_calls.remove(&result.tool_call_id);
+                            }
+                        }
+                    }
+                    crate::session_runtime::SuspensionEvidence {
+                        turn,
+                        surface_calls,
+                        published_skills,
+                        waits: waits.clone(),
+                    }
+                });
+                let _ = reply.send(evidence);
+            }
+            ChatStateCommand::IsInteractionOpen {
+                call_id,
+                attempt_id,
+                kind,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.state
+                        .timeline
+                        .is_interaction_open(call_id, attempt_id, kind),
+                );
             }
             ChatStateCommand::GetRuntimeTreeSnapshot { reply } => {
                 let timeline = &self.state.timeline;
@@ -1161,12 +1256,12 @@ impl ChatStateActor {
                 let _ = reply.send(id);
             }
             ChatStateCommand::MaterializeTimeline { timeline_id, reply } => {
-                let materialized = self.state.timeline.events().last().map(|event| {
+                let materialized = self.state.timeline.last_seq().map(|seq| {
                     crate::TimelineMaterialization {
                         input_ref: crate::TimelineRangeRef {
                             timeline_id,
                             first_seq: 0,
-                            last_seq: event.seq.get(),
+                            last_seq: seq.get(),
                         },
                         surface_revision: self.state.timeline.surface_revision(),
                         surface: self.state.timeline.surface().to_vec(),
@@ -1180,14 +1275,14 @@ impl ChatStateActor {
                 let _ = reply.send(materialized);
             }
             ChatStateCommand::MaterializeBranchTranscript { timeline_id, reply } => {
-                let materialized = self.state.timeline.events().last().map(|event| {
+                let materialized = self.state.timeline.last_seq().map(|seq| {
                     let (transcript_ids, transcript) =
                         self.state.timeline.branch_transcript_with_ids();
                     crate::RecallMaterialization {
                         source_ref: crate::TimelineRangeRef {
                             timeline_id,
                             first_seq: 0,
-                            last_seq: event.seq.get(),
+                            last_seq: seq.get(),
                         },
                         surface_revision: self.state.timeline.surface_revision(),
                         surface: self.state.timeline.surface().to_vec(),

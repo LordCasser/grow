@@ -51,6 +51,7 @@ async fn request_suspension(
         .request_node_suspension(
             operation_id.to_owned(),
             actor.session_id_string(),
+            actor.chat_state_handle.clone(),
             Some(deadline),
             respond_to,
         )

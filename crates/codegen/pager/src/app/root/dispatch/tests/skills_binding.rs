@@ -275,6 +275,7 @@ fn skills_binding_open_reload_toggle_and_session_ready_producers_capture_epoch()
                 restore_summary: None,
                 foreground: None,
                 descendant_ownership: None,
+                older_history_cursor: None,
             }
         } else {
             TaskResult::SessionCreated {

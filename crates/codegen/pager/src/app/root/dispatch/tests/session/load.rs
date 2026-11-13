@@ -86,6 +86,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
             ),
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -141,6 +142,7 @@ fn session_loaded_models_do_not_overwrite_new_session_default() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -175,6 +177,7 @@ fn session_reload_reissues_matching_deferred_behavior_to_clear_confirmation() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -212,6 +215,7 @@ fn session_reload_reissues_unresolved_deferred_behavior_before_prompt_drain() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -326,6 +330,7 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -387,6 +392,7 @@ fn session_loaded_purges_replay_transient() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -411,6 +417,7 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -467,6 +474,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
             ),
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -505,6 +513,7 @@ fn session_loaded_without_restore_no_summary() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -550,6 +559,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -641,6 +651,7 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -711,6 +722,7 @@ fn session_loaded_combines_pending_first_prompt_before_typed_prompt() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -820,6 +832,7 @@ fn loading_replay_ignores_input_and_preserves_existing_draft_until_session_loade
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -902,6 +915,7 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );
@@ -1004,6 +1018,7 @@ fn session_loaded_clears_stale_running_entries() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
+            older_history_cursor: None,
         }),
         &mut app,
     );

@@ -8,7 +8,10 @@ pub mod admission;
 pub mod bench;
 pub mod replay;
 
-pub use admission::write_admitted_history;
+pub use admission::{
+    ClosedHistoryKind, write_admitted_history, write_admitted_history_with_closed_observations,
+    write_admitted_history_with_closed_observations_kind,
+};
 pub use bench::synthesize_to_target_bytes;
 pub use replay::{
     SessionSpec, expected_replay_lines, locate_session_dir, prepare_session, sid,

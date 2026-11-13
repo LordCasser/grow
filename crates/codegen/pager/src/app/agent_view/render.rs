@@ -3756,6 +3756,35 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, prompt_post_flush);
         }
+        if let Some(history) = self.history_page_viewer.as_mut() {
+            let area = layout.scrollback_content;
+            let page_area = Rect {
+                y: area.y.saturating_add(1),
+                height: area.height.saturating_sub(1),
+                ..area
+            };
+            history
+                .scrollback
+                .prepare_layout(page_area.width, page_area.height);
+            let _ = crate::scrollback::ScrollbackPane::new()
+                .active(true)
+                .with_frame(frame_stamp)
+                .render_with_scratch(page_area, buf, &history.scrollback, scratch);
+            let status = if self.history_page_request.is_some() {
+                "Older history · loading… · Esc returns"
+            } else if self.history_page_cursor.is_some() {
+                "Older history · PgUp loads more · PgDn scrolls · Esc returns"
+            } else {
+                "Older history · start reached · PgDn scrolls · Esc returns"
+            };
+            buf.set_stringn(
+                area.x,
+                area.y,
+                status,
+                area.width as usize,
+                Style::default().fg(theme.accent_user).bg(theme.bg_base),
+            );
+        }
         let block_viewer_toast = self.active_toast_message().map(|s| s.to_string());
         if let Some(ref mut viewer) = self.block_viewer {
             use ratatui::style::Modifier;

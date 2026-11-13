@@ -109,6 +109,10 @@ impl AgentView {
         session_id: agent_client_protocol::schema::v1::SessionId,
     ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
+            self.history_page_cursor = None;
+            self.history_is_partial = false;
+            self.history_page_request = None;
+            self.history_page_viewer = None;
             if self.session.plan_completed {
                 self.clear_completed_plan_details();
                 self.session.plan_completed = false;
@@ -138,6 +142,10 @@ impl AgentView {
         }
         self.clear_behavior_switch_confirmation();
         if self.session.session_id.take().is_some() {
+            self.history_page_cursor = None;
+            self.history_is_partial = false;
+            self.history_page_request = None;
+            self.history_page_viewer = None;
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.clear_minimal_btw_lifecycle();
         }
@@ -218,6 +226,11 @@ impl AgentView {
         let mut view = Self {
             session,
             session_binding_epoch: 0,
+            history_page_cursor: None,
+            history_is_partial: false,
+            history_page_request: None,
+            history_page_request_seq: 0,
+            history_page_viewer: None,
             switch_catalog_request: 0,
             scrollback,
             prompt,

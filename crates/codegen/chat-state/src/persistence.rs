@@ -52,6 +52,19 @@ pub trait TimelinePersistence: Send + 'static {
 
     /// Flush pending writes to disk.
     fn flush(&mut self);
+
+    fn retains_complete_history(&self) -> bool {
+        true
+    }
+
+    /// Read exact historical facts for an explicit full-history query.
+    fn read_events(
+        &self,
+        _from_seq: u64,
+        _end_seq: u64,
+    ) -> Option<tokio::task::JoinHandle<io::Result<Vec<TimelineEvent>>>> {
+        None
+    }
 }
 
 // ============================================================================

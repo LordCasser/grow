@@ -3028,6 +3028,15 @@ pub(crate) async fn load_light(
     gateway: Option<GatewaySender>,
     claim_writer: bool,
 ) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
+    load_light_for_replay(info, gateway, claim_writer, false).await
+}
+
+pub(crate) async fn load_light_for_replay(
+    info: &Info,
+    gateway: Option<GatewaySender>,
+    claim_writer: bool,
+    indexed_history: bool,
+) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
     let root_dir = grow_home();
     let storage = JsonlStorageAdapter::with_root(root_dir.clone());
 
@@ -3035,7 +3044,9 @@ pub(crate) async fn load_light(
     // epoch before reading Timeline. A resident reconnect reuses the existing
     // actor, so its replay load remains observational and must not contend with
     // that actor's lease.
-    let persisted = if claim_writer {
+    let persisted = if claim_writer && indexed_history {
+        storage.load_session_for_write_with_indexed_history(info).await?
+    } else if claim_writer {
         storage.load_session_for_write_without_updates(info).await?
     } else {
         storage.load_session_without_updates(info).await?
