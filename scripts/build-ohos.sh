@@ -187,8 +187,9 @@ if [ -z "$RUST_PREFIX" ] \
   fi
   while IFS= read -r formula; do
     [ -n "$formula" ] || continue
+    # Brew may read stdin. Only the loop should consume the dependency list.
     HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 \
-      brew install --build-from-source "$formula"
+      brew install --build-from-source "$formula" </dev/null
   done <<< "$rust_deps"
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 \
     brew install --build-from-source rust
