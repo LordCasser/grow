@@ -85,22 +85,21 @@ pub(super) fn dispatch_copy_assistant_message(
         let text = match crate::transcript_projection::assistant_message_text(&agent.scrollback, n)
         {
             Ok(text) => text,
-            Err(_)
-                if agent.history_is_partial
-                    && let Some(session_id) = agent.session.session_id.clone() =>
-            {
-                full_history_effect = Some(Effect::ReadCompleteTranscript {
-                    agent_id: agent.session.id,
-                    root_agent_id,
-                    root_binding_epoch,
-                    session_id,
-                    binding_epoch: agent.session_binding_epoch,
-                    purpose: CompleteTranscriptPurpose::CopyAssistant { n, file_path: path },
-                });
-                return;
-            }
             Err(message) => {
-                agent.scrollback.push_block(RenderBlock::notice(message));
+                if agent.history_is_partial
+                    && let Some(session_id) = agent.session.session_id.clone()
+                {
+                    full_history_effect = Some(Effect::ReadCompleteTranscript {
+                        agent_id: agent.session.id,
+                        root_agent_id,
+                        root_binding_epoch,
+                        session_id,
+                        binding_epoch: agent.session_binding_epoch,
+                        purpose: CompleteTranscriptPurpose::CopyAssistant { n, file_path: path },
+                    });
+                } else {
+                    agent.scrollback.push_block(RenderBlock::notice(message));
+                }
                 return;
             }
         };
