@@ -1938,6 +1938,8 @@ pub trait ExecutionHistory: std::fmt::Debug + Send + Sync {
         seq: EventSeq,
     ) -> std::io::Result<Option<TimelineEvent>>;
 
+    fn response_selected(&self, seq: EventSeq) -> std::io::Result<bool>;
+
     fn admitted_calls_before(
         &self,
         call_id: &str,
@@ -2298,6 +2300,7 @@ pub struct Timeline {
     first_event_at_ms: Option<i64>,
     subagent_lifecycle_positions: Vec<usize>,
     last_rewind_seq: Option<EventSeq>,
+    rewind_display_targets: BTreeMap<EventSeq, usize>,
     last_context_rebuild_seq: Option<EventSeq>,
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
@@ -2343,8 +2346,8 @@ pub struct SurfaceCheckpoint {
     revision: u64,
     controls: ControlContexts,
     seed_open: bool,
-    unsupported_image_projection: bool,
     context_rebuild: Option<EventSeq>,
+    rewind: Option<EventSeq>,
     skills: SurfaceSkillSources,
 }
 
@@ -2492,8 +2495,19 @@ impl ControlContexts {
 }
 
 impl SurfaceCheckpoint {
-    pub fn can_restore(&self) -> bool {
-        !self.unsupported_image_projection
+    /// Install the Surface after the canonical projector has accepted an image
+    /// transformation. The image operation does not change pending skill loads.
+    pub fn accept_projected_image_surface(&mut self, projected: &Timeline) {
+        self.items.clone_from(&projected.surface);
+        self.ids.clone_from(&projected.surface_ids);
+        self.revision = projected.surface_revision;
+        self.seed_open = false;
+    }
+
+    pub fn accept_rewound_surface(&mut self, projected: &Timeline) {
+        self.accept_projected_image_surface(projected);
+        self.rewind = projected.last_rewind_seq;
+        self.skills = projected.branch_skill_sources();
     }
 
     pub fn accept(
@@ -2502,15 +2516,6 @@ impl SurfaceCheckpoint {
         turn_active: bool,
         step_active: bool,
     ) -> Result<(), TimelineError> {
-        if matches!(event.kind, TimelineEventKind::ImageProjection(_)) {
-            self.unsupported_image_projection = true;
-            self.items.clear();
-            self.ids.clear();
-            self.controls = ControlContexts::default();
-        }
-        if !self.can_restore() {
-            return Ok(());
-        }
         if event.seq.get() == 0 {
             self.seed_open = true;
         }
@@ -2996,6 +3001,7 @@ impl Timeline {
             timeline.seed_open_at_checkpoint = surface.seed_open;
             timeline.published_skills = surface.skills;
             timeline.last_context_rebuild_seq = surface.context_rebuild;
+            timeline.last_rewind_seq = surface.rewind;
         }
         for event in events {
             if event.seq.get() < timeline.next_seq || event.seq >= next_seq {
@@ -3314,6 +3320,10 @@ impl Timeline {
         self.last_rewind_seq.max(self.last_context_rebuild_seq)
     }
 
+    pub fn rewind_display_target(&self, event: EventSeq) -> Option<usize> {
+        self.rewind_display_targets.get(&event).copied()
+    }
+
     pub fn has_rewound(&self) -> bool {
         self.last_rewind_seq.is_some()
     }
@@ -3391,16 +3401,18 @@ impl Timeline {
         if let Some(response) = self.admitted_response(identity) {
             return Ok(Some(response));
         }
-        if self.has_rewound() {
-            return Ok(None);
-        }
         let Some(history) = &self.lifecycle.history else {
             return Ok(None);
         };
-        Ok(history
+        let event = history
             .response_admission_before(identity, self.next_seq())
-            .map_err(TimelineError::ResponseHistory)?
-            .filter(|event| {
+            .map_err(TimelineError::ResponseHistory)?;
+        if let Some(event) = &event
+            && !history.response_selected(event.seq).map_err(TimelineError::ResponseHistory)?
+        {
+            return Ok(None);
+        }
+        Ok(event.filter(|event| {
                 self.last_context_rebuild_seq
                     .is_none_or(|rebuild| event.seq > rebuild)
             })
@@ -3440,8 +3452,7 @@ impl Timeline {
     }
 
     pub fn admitted_response_views_since(&self, from: EventSeq) -> Vec<AdmittedResponseView<'_>> {
-        let selected_events = self
-            .has_rewound()
+        let selected_events = (self.has_rewound() && !self.has_surface_checkpoint())
             .then(|| fold_branch_provenance(self).admitted_response_events);
         let start = self.events.partition_point(|event| event.seq < from);
         self.events[start..]
@@ -4066,6 +4077,14 @@ impl Timeline {
             .collect()
     }
 
+    pub fn selected_prompt_coordinates(
+        &self,
+    ) -> impl Iterator<Item = (usize, Option<EventSeq>)> + '_ {
+        self.prompt_indices.iter().map(|index| {
+            (*index, self.user_prompt_positions.get(index).copied())
+        })
+    }
+
     pub(crate) fn prompt_records_with_history(
         &self,
         limit: usize,
@@ -4220,6 +4239,7 @@ impl Timeline {
                 self.user_prompt_positions.split_off(&next);
                 self.next_prompt_index = self.next_prompt_index.min(next);
                 self.archived_prompt_max = self.archived_prompt_max.filter(|index| *index < next);
+                self.rewind_display_targets.insert(event.seq, self.next_prompt_index);
             }
             _ => {}
         }
@@ -7108,9 +7128,20 @@ impl Timeline {
                 })
                 .collect();
         }
+        let sources = self.branch_skill_sources();
+        self.surface.iter().enumerate().filter_map(|(index, item)| {
+            let id = self.surface_ids[index];
+            let origin = sources.origin(id).unwrap_or(id.event);
+            (matches!(item, ConversationItem::SkillLoad(_))
+                && sources.last_response.is_none_or(|response| response < origin))
+                .then_some(index)
+        }).collect()
+    }
+
+    fn branch_skill_sources(&self) -> SurfaceSkillSources {
         let fold = fold_branch_provenance(self);
-        let latest_response = fold.admitted_response_events.iter().max().copied();
-        self.surface
+        let last_response = fold.admitted_response_events.iter().max().copied();
+        let origins = self.surface
             .iter()
             .enumerate()
             .filter_map(|(index, item)| {
@@ -7137,13 +7168,11 @@ impl Timeline {
                                 _ => None,
                             })
                             .min()
-                    })
-                    .or_else(|| self.surface_ids.get(index).map(|id| id.event));
-                latest_response
-                    .is_none_or(|response| origin.is_some_and(|origin| response < origin))
-                    .then_some(index)
+                    })?;
+                Some((self.surface_ids[index], origin))
             })
-            .collect()
+            .collect();
+        SurfaceSkillSources { origins, last_response }
     }
 
     /// Project unconsumed skills for this selected branch and current Surface.
@@ -7342,9 +7371,17 @@ impl Timeline {
     }
 
     fn valid_rewind_replacement(&self, replacement: &[ConversationItem]) -> bool {
-        (0..self.next_prompt_index()).any(|target| {
-            self.rewind_surface(target)
-                .is_ok_and(|expected| conversation_slices_match(&expected, replacement))
+        let Ok(canonical) = self.canonical_branch() else { return false };
+        let branch = canonical.branch_transcript();
+        branch.iter().filter_map(|item| match item {
+            ConversationItem::User(user) => user.prompt_index,
+            _ => None,
+        }).any(|target| {
+            target < self.next_prompt_index()
+                && conversation_slices_match(
+                    &branch[..sampling_types::conversation_truncate_for_prompt(&branch, target)],
+                    replacement,
+                )
         })
     }
 

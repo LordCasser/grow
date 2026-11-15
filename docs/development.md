@@ -797,13 +797,15 @@ Request 按原领域序号查询起点和终态，冷恢复保留未完成起点
 
 Fork 继承的回复和思考展示按子会话的原始 seed 消息引用分页。发布时验证来源并记录正文片段，保留会话内的消息身份，子会话不继承原 provider 的接纳身份。Pager 在后台读取子任务 lifecycle 的精确索引引用并验证父子 Seed/Result 链接。最近页仅含子任务终态时，Pager 根据该页的精确 spawn 归属建立子视图，保留原终态展示。旧页以只读历史查看器显示。
 
-已发生 rewind 或图片投影、且发布现场未覆盖该分支转换的会话，仍通过完整 Timeline 验证恢复。性能对照使用普通可执行分支。分支快照的后续工作记录在 [恢复分支投影审查](../openspec/backlog.md#2026-11-15-恢复分支投影审查)。
+Rewind 和图片投影在发布时复用原分支校验，保存转换后的 Surface、原始 item ID 和修订号。Rewind 另外保存选中 prompt 与响应原始身份，以及展示排除区间。历史页按原位置跳过已撤销区间，图片历史继续按既有展示规则读取。进程在转换提交、快照发布之间退出时，当前 writer 可以用原日志验证并修补该截点。更早版本写入的会话通过既有迁移流程建立新版索引。见 [转换后恢复契约](../openspec/specs/session-timeline/spec.md#requirement-working-publications-cover-rewind-and-image-projection)。
 
 历史 Goal 展示、重试结束和压缩与记忆处理结果使用普通展示页。现行 Goal 由 Control 恢复。常规 ask、查询和取消从持有源会话的 actor 按询问 ID 读取已发布审计和后续事实，保留原启动、终态及重试冲突判断。用户图片孤儿清理从已发布索引验证原消息引用并合并尾部，清理期间继续持有图片发布 gate。见 [恢复契约](../openspec/specs/session-timeline/spec.md#requirement-executable-resume-hydrates-committed-working-state)。
 
 Agent 消息的历史展示保留原物理锚点，无锚点时使用原回执所在位置。重试和回复按发送方与操作 ID 核对回执，附件清理只查本批候选引用。收端 ask 恢复待答的询问、尚未注入的终态和当前 inbox；已注入的问答通过索引按原身份和历史位置读取。Workflow 在冷启动时只恢复当前开放或挂起的执行，`/workflows` 和 `/workflow-run` 使用显式历史查询。见 [Workflow 恢复契约](../openspec/specs/workflow-execution/spec.md#requirement-workflow-restore-retains-the-latest-valid-runs)。
 
 闭合 Tool lifecycle 的对照设置 `GROW_COMPARE_NORMAL_WRITES=1`、`GROW_COMPARE_CLOSED_HISTORY_KIND=tool-lifecycle` 和 `GROW_COMPARE_HISTORY_POINTS=64,8192,30000`。在基线 checkout 构建同一测试文件的 `commit_comparison_fixture` 入口，将测试二进制路径传给 `GROW_COMPARE_BASELINE_FIXTURE_WRITER`，以两边各自的存储写入路径保留自然发布的索引。夹具包含普通会话进入第一轮前的 `ContextRebuild`，最大样本超过 515 MB。首次打开前核对模型 Surface 哈希，以及两条已经同步、仍在发布边界外的尾部记录。测试在就绪后立即验证键入，独立记录最近页到达时间，以及显式提交第一条 prompt 到 mock 应答出现在完整终端帧的耗时。使用 `GROW_COMPARE_STAGE_LOGS=1` 可采集各次启动的内部计时。
+
+转换后会话分别用 `GROW_COMPARE_TRANSFORM_KIND=rewind` 和 `unsupported-image` 跑相同入口，每次使用独立输出目录。Rewind 保留第一个已接纳响应并撤销第二个响应。图片夹具在模型 Surface 移除原图，但 Timeline 保留原证据。两个转换夹具使用相同形态的两条已同步 Observation 尾部记录。对比基线为 v2.6.13。三档实测见 [转换后恢复验收](../openspec/changes/archive/2026-11-15-index-transformed-session-branches/verification.md)。
 
 单测从空闲输入框直接退出时，使用相同的写入和二进制设置，改跑 `fixed_surface_resume_cold_exit_acceptance`，设置 `GROW_COMPARE_COLD_EXIT=1`。每个尺寸交错运行三对样本。测试等待加载完成并显示最近页，然后发送两次 Ctrl+D，全程无模型请求。
 

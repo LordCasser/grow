@@ -76,6 +76,7 @@ pub(super) struct ExecutionCut {
     pub waits: RuntimeWaits,
     pub surface: SurfaceCheckpoint,
     pub progress: ActiveTurnProgress,
+    pub image_projection: Option<DomainReference>,
     planning: Option<DomainReference>,
     title: Option<DomainReference>,
     model: Option<DomainReference>,
@@ -104,6 +105,8 @@ pub(super) struct Frontier {
     pub recap_covered_main_turns: Option<usize>,
     #[serde(default)]
     pub context_rebuild: Option<EventSeq>,
+    pub rewind: Option<EventSeq>,
+    pub display_branch: Option<u64>,
     #[serde(default)]
     pub child_seed: Option<EventSeq>,
     #[serde(alias = "notices")]
@@ -123,6 +126,12 @@ pub(super) struct Frontier {
 pub(super) struct DomainReference {
     pub seq: EventSeq,
     pub record: RecordRef,
+}
+
+impl Frontier {
+    pub(super) fn history_branch(self) -> Option<EventSeq> {
+        self.context_rebuild.max(self.rewind)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -204,6 +213,16 @@ pub(super) fn name(generation: Uuid) -> String {
 }
 
 impl Index {
+    pub(super) fn visible_range(
+        &self,
+        frontier: Frontier,
+        anchor: u64,
+    ) -> io::Result<std::ops::RangeInclusive<u64>> {
+        let Some(publication) = frontier.display_branch else { return Ok(0..=anchor) };
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        super::branch_history::visible_range(&tx, publication, anchor)
+    }
+
     pub(super) fn pending_consultations(&self, frontier: Frontier) -> io::Result<Vec<TimelineEvent>> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         super::consultation_history::pending(&tx, &mut self.journal()?, frontier)
@@ -367,13 +386,23 @@ impl Index {
                 None,
                 |record, offset, json| {
                     check_cancelled()?;
-                    responses.accept(&record, offset, json, frontier.context_rebuild)?;
+                    responses.accept(&record, offset, json, frontier.history_branch())?;
                     let reference = RecordRef {
                         offset,
                         len: json.len() as u64,
                         digest: blake3::hash(json),
                     };
                     let class = super::working_snapshot::classify(&record);
+                    if class == super::working_snapshot::RecordClass::BranchMarker {
+                        let (selected, history) = super::branch_history::read_transformation(
+                            &self.directory, offset + json.len() as u64 + 1,
+                            frontier.domain, true, &check_cancelled,
+                        )?;
+                        super::branch_history::publish_display(
+                            &tx, &self.directory, session, &selected, history, record.seq,
+                        )?;
+                        frontier.display_branch = Some(record.seq);
+                    }
                     if let JournalFact::Presentation { event, .. } = &record.fact {
                         event.validate_projection_identity()?;
                         if let Some(id) = event.event_id() {
@@ -525,6 +554,7 @@ impl Index {
                             &mut journal,
                             &event.content,
                             reference,
+                            |position| super::branch_history::visible_at_write(&tx, frontier.display_branch, position),
                         )? {
                             tool_fragments::publish(&tx, reference.position, at_ms, &call)?;
                         }
@@ -671,10 +701,37 @@ impl Index {
                         ),
                         &read_event,
                     )?;
-                    runtime
-                        .surface
-                        .accept(&event, frontier.turn.is_some(), frontier.step.is_some())
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    if let TimelineEventKind::ImageProjection(projection) = &event.kind {
+                        let projected = super::branch_history::project_image(
+                            &self.directory,
+                            session,
+                            reference,
+                            projection,
+                            &check_cancelled,
+                        )?;
+                        runtime.surface.accept_projected_image_surface(&projected);
+                        runtime.image_projection = Some(reference);
+                    } else if event.messages().is_some_and(|message| {
+                        message.cause == chat_state::MessageCause::Rewind
+                    }) {
+                        let (rewound, history) = super::branch_history::read_transformation(
+                            &self.directory, offset + json.len() as u64 + 1,
+                            frontier.domain, true, &check_cancelled,
+                        )?;
+                        boundaries.select_rewind(event.seq, &rewound)?;
+                        responses.select_rewind(frontier.history_branch(), event.seq, &rewound)?;
+                        runtime.surface.accept_rewound_surface(&rewound);
+                        frontier.rewind = Some(event.seq);
+                        super::branch_history::publish_display(
+                            &tx, &self.directory, session, &rewound, history, record.seq,
+                        )?;
+                        frontier.display_branch = Some(record.seq);
+                    } else {
+                        runtime
+                            .surface
+                            .accept(&event, frontier.turn.is_some(), frontier.step.is_some())
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    }
                     runtime.progress.accept(&event, frontier.turn);
                     runtime.waits.apply(&runtime.lifecycle, &event.kind);
                     if let TimelineEventKind::Runtime(transition) = &event.kind {
@@ -1572,6 +1629,7 @@ fn terminal_display_call(
     journal: &mut File,
     content: &HistoryContent,
     reference: DisplayReference,
+    visible: impl Fn(u64) -> io::Result<bool>,
 ) -> io::Result<Option<acp::ToolCall>> {
     match content {
         HistoryContent::ToolCall(call)
@@ -1593,6 +1651,9 @@ fn terminal_display_call(
             let Some(start) = state.start else {
                 return Ok(None);
             };
+            if !visible(start.position)? {
+                return Ok(None);
+            }
             let mut call = read_tool_start(journal, start)?;
             if call.tool_call_id.0.as_ref() != id {
                 return Err(invalid("Tool display start refers to a different call"));
@@ -1600,6 +1661,9 @@ fn terminal_display_call(
             for change in state.changes() {
                 if change.position <= start.position || change.position >= reference.position {
                     return Err(invalid("Tool display field crosses its terminal row"));
+                }
+                if !visible(change.position)? {
+                    continue;
                 }
                 let HistoryContent::ToolUpdate(update) = read_display_content(journal, change)?
                 else {
@@ -1908,6 +1972,11 @@ impl ExecutionHistory for Cut {
         )
     }
 
+    fn response_selected(&self, source: EventSeq) -> io::Result<bool> {
+        let tx = self.index.db.begin_read().map_err(io::Error::other)?;
+        response_history::selected_at(&tx, self.frontier.rewind, source)
+    }
+
     fn turn_before(&self, id: TurnId, seq: EventSeq) -> io::Result<bool> {
         let tx = self.index.db.begin_read().map_err(io::Error::other)?;
         boundary_history::turn_before(&tx, &mut self.index.journal()?, self.frontier, id, seq)
@@ -1930,6 +1999,7 @@ impl ExecutionHistory for Cut {
             self.frontier.domain.min(seq.get()),
             self.frontier.bytes,
             limit,
+            self.frontier.rewind,
         )
     }
 

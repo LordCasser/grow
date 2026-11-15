@@ -9,8 +9,9 @@ pub mod bench;
 pub mod replay;
 
 pub use admission::{
-    ClosedHistoryKind, write_admitted_history, write_admitted_history_with_closed_observations,
-    write_admitted_history_with_closed_observations_kind,
+    ClosedHistoryKind, TransformedBranchKind, write_admitted_history,
+    write_admitted_history_with_closed_observations,
+    write_admitted_history_with_closed_observations_kind, write_admitted_transformed_history,
 };
 pub use bench::synthesize_to_target_bytes;
 pub use replay::{

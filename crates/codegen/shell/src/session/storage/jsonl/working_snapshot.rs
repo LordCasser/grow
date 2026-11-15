@@ -53,6 +53,12 @@ impl IndexedTaskTerminal {
         #[cfg(not(unix))]
         match *self {}
     }
+    pub(crate) fn start(&self) -> u64 {
+        #[cfg(unix)]
+        return self.0.start.position;
+        #[cfg(not(unix))]
+        match *self {}
+    }
 }
 
 impl IndexedUserEchoRow {
@@ -64,7 +70,7 @@ impl IndexedUserEchoRow {
     }
 }
 
-const VERSION: u8 = 48;
+const VERSION: u8 = 49;
 const MANIFEST: &str = "working-history.json";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 #[cfg(unix)]
@@ -102,6 +108,8 @@ struct Manifest {
 pub(super) enum RecordClass {
     Retained,
     Display,
+    #[cfg(unix)]
+    BranchMarker,
     #[cfg(unix)]
     UserEcho,
     #[cfg(unix)]
@@ -320,6 +328,7 @@ pub(super) fn classify(record: &JournalRecord) -> RecordClass {
                 return RecordClass::Boundary;
             }
             chat_state::TimelineEventKind::Runtime(_) => return RecordClass::Runtime,
+            chat_state::TimelineEventKind::ImageProjection(_) => return RecordClass::Surface,
             chat_state::TimelineEventKind::Workflow(_) => return RecordClass::Workflow,
             chat_state::TimelineEventKind::Tool(_) => return RecordClass::Tool,
             chat_state::TimelineEventKind::Compaction(_) => return RecordClass::Compaction,
@@ -335,9 +344,7 @@ pub(super) fn classify(record: &JournalRecord) -> RecordClass {
                 return RecordClass::Compaction;
             }
 
-            chat_state::TimelineEventKind::Messages(message)
-                if message.cause != chat_state::MessageCause::Rewind =>
-            {
+            chat_state::TimelineEventKind::Messages(_) => {
                 return RecordClass::Surface;
             }
             chat_state::TimelineEventKind::Control(_) => return RecordClass::Control,
@@ -408,6 +415,12 @@ pub(super) fn classify(record: &JournalRecord) -> RecordClass {
     let JournalFact::Presentation { event, .. } = &record.fact else {
         return RecordClass::Retained;
     };
+    #[cfg(unix)]
+    if matches!(&event.content, HistoryContent::Grow(value)
+        if matches!(value.as_ref(), history::GrowHistoryFact::RewindMarker { .. }))
+    {
+        return RecordClass::BranchMarker;
+    }
     #[cfg(unix)]
     if matches!(event.content, HistoryContent::Notice { .. }) {
         return RecordClass::CommunicationNotice;
@@ -527,6 +540,7 @@ pub(super) fn retains_reference(record: &JournalRecord) -> bool {
         | RecordClass::Model
         | RecordClass::ResponseCandidate
         | RecordClass::InheritedText
+        | RecordClass::BranchMarker
         | RecordClass::Signals
         | RecordClass::Announcement
         | RecordClass::Interaction
@@ -550,6 +564,32 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 impl IndexedHistory {
+    #[cfg(unix)]
+    pub(super) fn acknowledge_torn_tail_removal(
+        &self,
+        file: &File,
+        complete_len: u64,
+        stamp: &LedgerFileStamp,
+    ) -> io::Result<Option<Self>> {
+        if complete_len != self.manifest.bytes {
+            return Ok(None);
+        }
+        JsonlStorageAdapter::sync_file_durable(file)?;
+        let mut manifest = (*self.manifest).clone();
+        manifest.journal = stamp.clone();
+        if !write_manifest(&self.directory, &manifest)? {
+            return Err(invalid("cannot refresh the repaired Timeline stamp"));
+        }
+        Ok(Some(Self { manifest: Arc::new(manifest), ..self.clone() }))
+    }
+
+    pub(crate) fn visible_range(&self, anchor: u64) -> io::Result<std::ops::RangeInclusive<u64>> {
+        #[cfg(unix)]
+        return self.tools.visible_range(self.manifest.tool_frontier, anchor);
+        #[cfg(not(unix))]
+        Ok(0..=anchor)
+    }
+
     pub(crate) fn has_child_presentation(&self) -> bool {
         #[cfg(unix)]
         return self.manifest.tool_frontier.has_child_presentation;
@@ -1141,6 +1181,9 @@ impl IndexedHistoryReader<'_> {
                 else {
                     return Err(invalid("indexed child lifecycle row has no Grow update"));
                 };
+                if !self.history.visible_range(reference.position)?.contains(&reference.position) {
+                    continue;
+                }
                 let parent = match &notification.update {
                     crate::extensions::notification::SessionUpdate::SubagentSpawned {
                         parent_session_id,
@@ -1617,6 +1660,9 @@ impl IndexedHistoryReader<'_> {
         if start.position >= position {
             return Err(invalid("Tool display start crosses the page position"));
         }
+        if !self.history.visible_range(start.position)?.contains(&start.position) {
+            return Ok(None);
+        }
         let JournalFact::Presentation { event, .. } = self.read_display(start)?.fact else {
             unreachable!("verified display record");
         };
@@ -1629,6 +1675,9 @@ impl IndexedHistoryReader<'_> {
         for reference in state.changes() {
             if reference.position >= position || reference.position <= start.position {
                 return Err(invalid("Tool display field crosses the page position"));
+            }
+            if !self.history.visible_range(reference.position)?.contains(&reference.position) {
+                continue;
             }
             let JournalFact::Presentation { event, .. } = self.read_display(reference)?.fact else {
                 unreachable!("verified display record");
@@ -1865,6 +1914,7 @@ fn build_generation(
             | RecordClass::Model
             | RecordClass::ResponseCandidate
             | RecordClass::InheritedText
+            | RecordClass::BranchMarker
             | RecordClass::Signals
             | RecordClass::Announcement
             | RecordClass::Interaction
@@ -2193,9 +2243,6 @@ pub(super) fn migrate(
         prefix.state.first_domain_at_ms,
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if timeline.has_rewound() || history.sources.iter().any(is_rewind_marker) {
-        return Ok(());
-    }
     opened.validate_timeline_evidence(info.id.0.as_ref(), timeline, history)?;
     check_cancelled()?;
     let candidate = build(
@@ -2398,6 +2445,23 @@ fn hydrate(
     data.events.extend(compaction.events);
     data.events.extend(index.tools.pending_consultations(source.tool_frontier)?);
     let execution = index.tools.execution_checkpoint(source.tool_frontier)?;
+    if let Some(reference) = execution.image_projection {
+        if reference.seq.get() >= source.domain_events
+            || !matches!(
+                super::tool_history::read_domain(file, reference, source.bytes)?.kind,
+                chat_state::TimelineEventKind::ImageProjection(_)
+            )
+        {
+            return Err(invalid("working Surface image projection differs from the journal"));
+        }
+    }
+    if let Some(rewind) = source.tool_frontier.rewind {
+        let event = read_indexed_domain(&index.directory, source, rewind)?
+            .ok_or_else(|| invalid("working Surface rewind is missing from the Timeline"))?;
+        if !event.messages().is_some_and(|message| message.cause == chat_state::MessageCause::Rewind) {
+            return Err(invalid("working Surface rewind differs from the Timeline"));
+        }
+    }
     let recovery = index
         .tools
         .recovery_snapshots(&execution, source.tool_frontier)?;
@@ -2414,8 +2478,7 @@ fn hydrate(
         latest_model_selection(&model_chain)?;
     }
     data.events.extend(recovery);
-    if !execution.surface.can_restore()
-        || tail.events.iter().any(|event| {
+    if tail.events.iter().any(|event| {
             matches!(
                 &event.kind,
                 chat_state::TimelineEventKind::ImageProjection(_)
@@ -2457,6 +2520,7 @@ fn hydrate(
         Some(execution.surface),
     )
     .and_then(|mut base| {
+        debug_assert_eq!(base.history_branch(), source.tool_frontier.history_branch());
         base.restore_open_workflows(workflows)?;
         base.restore_hook_checkpoint(hooks.session_id, hooks.generation);
         base.restore_input_checkpoint(inputs)?;
@@ -2529,7 +2593,7 @@ fn hydrate(
         rows.sort_unstable_by_key(|(position, _)| *position);
         (data.history.positions, data.history.sources) = rows.into_iter().unzip();
     }
-    if timeline.has_rewound() || data.history.sources.iter().any(is_rewind_marker) {
+    if data.history.sources.iter().any(is_rewind_marker) {
         return Ok(None);
     }
     let stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
@@ -2618,6 +2682,10 @@ mod tests {
     use crate::session::{info::Info, persistence::default_model_id, storage::StorageAdapter};
 
     include!("working_snapshot/large_publication_test.rs");
+    mod branch_publication {
+        use super::*;
+        include!("working_snapshot/branch_publication_test.rs");
+    }
 
     const TEST: &str = "session::storage::jsonl::working_snapshot::tests::process_exit_around_index_publication_recovers_exact_tail";
     const ADVANCE_TEST: &str = "session::storage::jsonl::working_snapshot::tests::process_exit_around_frontier_advance_preserves_domain_sequence";
@@ -3457,6 +3525,56 @@ mod tests {
             Ok(Some(InquiryEvent::OutgoingCompleted { audit }))
                 if audit.question == "question-closed-0"
         ));
+    }
+
+    #[tokio::test]
+    async fn image_projection_publishes_exact_surface_and_keeps_original_evidence() {
+        use chat_state::{ImageProjectionEvent, ImageShadow, ImageShadowSource};
+        use sampling_types::conversation::{UNSUPPORTED_IMAGE_REPLACEMENT, conversation_image_groups};
+        use sampling_types::{ContentPart, ConversationItem, ModelImageInputKey};
+
+        let root = tempfile::tempdir().unwrap();
+        let (storage, info) = fixture(root.path());
+        storage.init_session(&info, default_model_id()).await.unwrap();
+        let mut dense = chat_state::Timeline::from_seed(vec![
+            ConversationItem::user_with_parts(vec![ContentPart::Image {
+                url: "data:image/png;base64,original".into(),
+                description: None,
+            }]),
+        ]).unwrap();
+        let original = dense.events()[0].clone();
+        storage.append_timeline_event(&info, &original).await.unwrap();
+        let group = conversation_image_groups(dense.surface()).remove(0);
+        let projection = dense.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+            trigger_runtime: ModelImageInputKey::new("mock", "messages", "endpoint"),
+            source_revision: dense.surface_revision(),
+            shadows: vec![ImageShadow {
+                source: dense.surface_ids()[0],
+                fingerprint: group.fingerprint,
+                image_count: 1,
+                replacement: UNSUPPORTED_IMAGE_REPLACEMENT.into(),
+                provenance: ImageShadowSource::UnsupportedModel,
+            }],
+            tool_calls: vec![],
+        })).unwrap();
+        storage.append_timeline_event_durable(&info, &projection).await.unwrap();
+        let tail = dense.append(ConversationItem::user("fixed tail"), MessageCause::User).unwrap();
+        storage.append_timeline_event_durable(&info, &tail).await.unwrap();
+        drop(storage);
+
+        let (storage, _) = fixture(root.path());
+        let recovered = storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
+        assert!(recovered.timeline.has_surface_checkpoint());
+        assert_eq!(recovered.timeline.events().iter().map(|event| event.seq).collect::<Vec<_>>(), [tail.seq]);
+        assert_eq!(recovered.timeline.surface_ids(), dense.surface_ids());
+        assert_eq!(recovered.timeline.surface_revision(), dense.surface_revision());
+        assert_eq!(serde_json::to_value(recovered.timeline.surface()).unwrap(), serde_json::to_value(dense.surface()).unwrap());
+        let source = recovered.timeline.exact_event(original.seq).unwrap().unwrap();
+        assert_eq!(conversation_image_groups(&source.messages().unwrap().items).len(), 1);
+        assert!(conversation_image_groups(recovered.timeline.surface()).is_empty());
+        let manifest = &recovered.history.indexed.as_ref().unwrap().manifest;
+        assert_eq!(manifest.retained_records, 0);
+        assert_eq!(manifest.domain_events, projection.seq.get() + 1);
     }
 
     #[tokio::test]

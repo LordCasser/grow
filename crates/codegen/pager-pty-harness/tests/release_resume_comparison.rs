@@ -122,10 +122,15 @@ fn foreground_request_count(content: &ContentController) -> usize {
         .count()
 }
 
-fn fixed_surface_spec() -> SessionSpec {
+fn fixed_surface_spec(transform: Option<synth::TransformedBranchKind>) -> SessionSpec {
     SessionSpec {
         // This is the only model-visible user/assistant pair at every size.
-        turns: WORKING_TURNS,
+        // Rewind deliberately creates and discards a second admitted response.
+        turns: if transform == Some(synth::TransformedBranchKind::Rewind) {
+            WORKING_TURNS + 1
+        } else {
+            WORKING_TURNS
+        },
         // Closed-history records are added separately as committed Grow
         // presentation facts, so command regeneration stays out of the fixture.
         acu_per_turn: 0,
@@ -139,9 +144,25 @@ fn fixed_surface_spec() -> SessionSpec {
     }
 }
 
+fn transform_from_env() -> Option<synth::TransformedBranchKind> {
+    match std::env::var("GROW_COMPARE_TRANSFORM_KIND") {
+        Ok(value) if value == "rewind" => Some(synth::TransformedBranchKind::Rewind),
+        Ok(value) if value == "unsupported-image" => {
+            Some(synth::TransformedBranchKind::UnsupportedImage)
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        other => {
+            panic!("set GROW_COMPARE_TRANSFORM_KIND to rewind or unsupported-image, got {other:?}")
+        }
+    }
+}
+
 struct UnpublishedTail {
     manifest_version: u64,
     bytes: u64,
+    journal_bytes: u64,
+    published_bytes: u64,
+    unpublished_history_bytes: u64,
     records: usize,
     digest: String,
     normalized_signature: String,
@@ -176,8 +197,12 @@ fn unpublished_tail(directory: &Path) -> UnpublishedTail {
     let mut tail = Vec::new();
     journal
         .read_to_end(&mut tail)
-        .expect("read unpublished tail");
-    assert_eq!(tail.last(), Some(&b'\n'), "tail contains complete records");
+        .expect("read unpublished history");
+    assert_eq!(
+        tail.last(),
+        Some(&b'\n'),
+        "unpublished tail has complete records"
+    );
     let lines: Vec<_> = tail
         .strip_suffix(b"\n")
         .unwrap()
@@ -186,18 +211,25 @@ fn unpublished_tail(directory: &Path) -> UnpublishedTail {
     assert_eq!(lines.len(), UNPUBLISHED_TAIL_RECORDS);
 
     let mut normalized = Vec::new();
-    for (index, line) in lines.into_iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         let mut record: Value = serde_json::from_slice(line).expect("parse unpublished record");
         assert_eq!(record["fact"]["kind"], "domain");
         let timeline_event = record["fact"]["event"]
             .as_object_mut()
             .expect("domain record contains its Timeline event");
-        let expected = if index == 0 { "step" } else { "turn" };
-        assert_eq!(timeline_event["type"], expected);
+        let event_type = timeline_event["type"]
+            .as_str()
+            .expect("Timeline event has a type")
+            .to_owned();
         let event = timeline_event["event"]
             .as_object_mut()
             .expect("Timeline event kind contains its payload");
-        assert_eq!(event["state"], "ended");
+        match event_type.as_str() {
+            "step" if index == 0 => assert_eq!(event["state"], "ended"),
+            "turn" if index == 1 => assert_eq!(event["state"], "ended"),
+            "observation" => assert_eq!(event["name"], format!("fixture_unpublished_tail_{index}")),
+            other => panic!("unexpected unpublished tail event {other:?} at {index}"),
+        }
         timeline_event.insert("seq".into(), Value::from(0));
         record["seq"] = Value::from(0);
         record["checksum"] = Value::from("normalized");
@@ -209,6 +241,9 @@ fn unpublished_tail(directory: &Path) -> UnpublishedTail {
     UnpublishedTail {
         manifest_version,
         bytes: tail.len() as u64,
+        journal_bytes,
+        published_bytes,
+        unpublished_history_bytes: journal_bytes - published_bytes,
         records: UNPUBLISHED_TAIL_RECORDS,
         digest: blake3::hash(&tail).to_hex().to_string(),
         normalized_signature: blake3::hash(&normalized).to_hex().to_string(),
@@ -236,18 +271,80 @@ struct PreparedFixture {
     history_bytes: u64,
     unpublished_tail: UnpublishedTail,
     closed_history_kind: synth::ClosedHistoryKind,
+    transform: Option<synth::TransformedBranchKind>,
     normal_writes: bool,
     baseline_manifest_removed: bool,
 }
 
-async fn prepare_measure_fixture(label: &str, history_observations: usize) -> PreparedFixture {
+fn verify_prepared_fixtures<'a>(
+    fixtures: impl IntoIterator<Item = (usize, &'a PreparedFixture)>,
+    transformed: bool,
+) {
+    let mut expected_surface = None;
+    let mut expected_tail = None;
+    let mut sizes = std::collections::BTreeMap::<usize, Vec<u64>>::new();
+    let mut tails = std::collections::BTreeMap::new();
+    for (point, fixture) in fixtures {
+        let tail = &fixture.unpublished_tail;
+        assert_eq!(
+            *expected_surface.get_or_insert(&fixture.surface_hash),
+            &fixture.surface_hash,
+            "the model-visible Surface must match before any timed launch"
+        );
+        assert_eq!(
+            *expected_tail.get_or_insert(&tail.normalized_signature),
+            &tail.normalized_signature,
+            "the unpublished tail payload must match across sizes"
+        );
+        assert_eq!(
+            *tails.entry(point).or_insert(&tail.digest),
+            &tail.digest,
+            "both arms must carry byte-identical tails at {point}"
+        );
+        assert_eq!(tail.records, UNPUBLISHED_TAIL_RECORDS);
+        assert_eq!(tail.published_bytes + tail.bytes, tail.journal_bytes);
+        assert!(!fixture.baseline_manifest_removed);
+        assert!(fixture.history_bytes >= point as u64 * 16 * 1024);
+        sizes.entry(point).or_default().push(fixture.history_bytes);
+    }
+    let mut previous = 0;
+    for (point, bytes) in sizes {
+        assert_eq!(bytes.len(), 6, "three paired trials required at {point}");
+        let min = *bytes.iter().min().unwrap();
+        let max = *bytes.iter().max().unwrap();
+        if transformed {
+            assert_eq!(max, min, "fixture size must match across arms");
+        }
+        assert!(min > previous, "closed history must grow at every point");
+        eprintln!(
+            "[fixed-surface-preflight] pairs={point} history_bytes={min} tail_blake3={}",
+            tails[&point]
+        );
+        previous = min;
+    }
+    assert!(
+        previous > 515_000_000,
+        "largest closed history must exceed 515 MB"
+    );
+    eprintln!(
+        "[fixed-surface-preflight] surface_blake3={} normalized_tail_blake3={}",
+        expected_surface.unwrap(),
+        expected_tail.unwrap()
+    );
+}
+
+async fn prepare_measure_fixture(
+    label: &str,
+    history_observations: usize,
+    transform: Option<synth::TransformedBranchKind>,
+) -> PreparedFixture {
     let content = ContentController::start().await.unwrap();
     content.seed_llm_config().unwrap();
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir(project.path().join(".git")).unwrap();
     let cwd = dunce::canonicalize(project.path()).unwrap();
     let root = content.sandbox().grow_home();
-    let spec = fixed_surface_spec();
+    let spec = fixed_surface_spec(transform);
     let normal_writes = std::env::var("GROW_COMPARE_NORMAL_WRITES").as_deref() == Ok("1");
     let donor = normal_writes.then(|| tempfile::tempdir().unwrap());
     let fixture_root = donor.as_ref().map_or(root, |dir| dir.path());
@@ -267,7 +364,7 @@ async fn prepare_measure_fixture(label: &str, history_observations: usize) -> Pr
         closed_history_kind != synth::ClosedHistoryKind::ToolLifecycle || normal_writes,
         "tool-lifecycle fixture requires GROW_COMPARE_NORMAL_WRITES=1"
     );
-    let surface_hash = synth::write_admitted_history_with_closed_observations_kind(
+    let surface_hash = synth::write_admitted_transformed_history(
         &info,
         &source_directory,
         &spec,
@@ -276,6 +373,7 @@ async fn prepare_measure_fixture(label: &str, history_observations: usize) -> Pr
         history_observations,
         closed_history_kind,
         None,
+        transform,
     );
     let directory = if normal_writes {
         if let Some(writer) = label
@@ -346,6 +444,7 @@ async fn prepare_measure_fixture(label: &str, history_observations: usize) -> Pr
         history_bytes,
         unpublished_tail,
         closed_history_kind,
+        transform,
         normal_writes,
         baseline_manifest_removed,
     }
@@ -366,6 +465,7 @@ async fn measure(
         history_bytes,
         unpublished_tail,
         closed_history_kind,
+        transform,
         normal_writes,
         baseline_manifest_removed,
     } = fixture;
@@ -456,8 +556,12 @@ async fn measure(
         )
         .unwrap();
         cold.set_respond_to_queries(true);
-        let cold_resume =
-            observe_resume_milestones(&mut cold, cold_started, latest_marker, typed_confirmation);
+        let cold_resume = observe_resume_milestones(
+            &mut cold,
+            cold_started,
+            "GROW_FIRST_OPERATION_ACCEPTED",
+            typed_confirmation,
+        );
         assert_eq!(
             foreground_request_count(&content),
             repeat + 1,
@@ -539,6 +643,11 @@ async fn measure(
     json!({
         "label": label,
         "history_observations": history_observations,
+        "transformation": match transform {
+            None => "ordinary",
+            Some(synth::TransformedBranchKind::Rewind) => "rewind",
+            Some(synth::TransformedBranchKind::UnsupportedImage) => "unsupported_image",
+        },
         "closed_tool_lifecycle_pairs": if closed_history_kind
             == synth::ClosedHistoryKind::ToolLifecycle
         {
@@ -570,6 +679,9 @@ async fn measure(
         "unpublished_tail_blake3": unpublished_tail.digest,
         "unpublished_tail_signature": unpublished_tail.normalized_signature,
         "publication_manifest_version": unpublished_tail.manifest_version,
+        "publication_frontier_bytes": unpublished_tail.published_bytes,
+        "unpublished_history_bytes": unpublished_tail.unpublished_history_bytes,
+        "journal_bytes": unpublished_tail.journal_bytes,
         "unpublished_tail_durable": true,
         "history_bytes": history_bytes,
         "stage_logs": stage_logs,
@@ -604,6 +716,7 @@ async fn measure_cold_exit(
         surface_hash,
         history_bytes,
         unpublished_tail: tail,
+        transform,
         ..
     } = fixture;
     assert!(history_bytes >= (history_observations as u64) * 16 * 1024);
@@ -663,6 +776,11 @@ async fn measure_cold_exit(
     json!({
         "label": label,
         "history_observations": history_observations,
+        "transformation": match transform {
+            None => "ordinary",
+            Some(synth::TransformedBranchKind::Rewind) => "rewind",
+            Some(synth::TransformedBranchKind::UnsupportedImage) => "unsupported_image",
+        },
         "closed_tool_lifecycle_pairs": history_observations,
         "fixed_surface_messages": WORKING_TURNS * 2,
         "fixed_surface_blake3": surface_hash,
@@ -678,6 +796,9 @@ async fn measure_cold_exit(
         "unpublished_tail_blake3": tail.digest,
         "unpublished_tail_signature": tail.normalized_signature,
         "publication_manifest_version": tail.manifest_version,
+        "publication_frontier_bytes": tail.published_bytes,
+        "unpublished_history_bytes": tail.unpublished_history_bytes,
+        "journal_bytes": tail.journal_bytes,
         "unpublished_tail_durable": true,
         "phases_ms": {
             "first_frame": first_frame_ms,
@@ -720,13 +841,13 @@ async fn normal_writer_publishes_padding_before_fixed_terminal_tail() {
     let (info, source_directory) = synth::replay::prepare_legacy_session(
         source_root.path(),
         cwd.path(),
-        &fixed_surface_spec(),
+        &fixed_surface_spec(None),
     )
     .await;
     synth::write_admitted_history_with_closed_observations_kind(
         &info,
         &source_directory,
-        &fixed_surface_spec(),
+        &fixed_surface_spec(None),
         "mock/mock",
         0,
         1,
@@ -768,6 +889,55 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn transformed_branch_fixtures_publish_before_fixed_unpublished_tail() {
+    for transform in [
+        synth::TransformedBranchKind::Rewind,
+        synth::TransformedBranchKind::UnsupportedImage,
+    ] {
+        let source_root = tempfile::tempdir().unwrap();
+        let target_root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let spec = fixed_surface_spec(Some(transform));
+        let (info, source_directory) =
+            synth::replay::prepare_legacy_session(source_root.path(), cwd.path(), &spec).await;
+        let surface_hash = synth::write_admitted_transformed_history(
+            &info,
+            &source_directory,
+            &spec,
+            "mock/mock",
+            0,
+            1,
+            synth::ClosedHistoryKind::ToolLifecycle,
+            None,
+            Some(transform),
+        );
+
+        synth::admission::commit_fixture_through_normal_writer_with_unpublished_tail(
+            target_root.path(),
+            &info,
+            &source_directory,
+            "mock/mock",
+            UNPUBLISHED_TAIL_RECORDS,
+        )
+        .await;
+
+        let directory = synth::locate_session_dir(target_root.path(), info.id.0.as_ref());
+        let tail = unpublished_tail(&directory);
+        assert_eq!(tail.records, UNPUBLISHED_TAIL_RECORDS);
+        assert!(!tail.digest.is_empty());
+        let manifest = std::fs::read(directory.join("working-history.json")).unwrap();
+        let manifest: Value = serde_json::from_slice(&manifest[32..]).unwrap();
+        assert!(
+            manifest["bytes"].as_u64().unwrap()
+                < std::fs::metadata(directory.join("timeline.jsonl"))
+                    .unwrap()
+                    .len()
+        );
+        assert!(!surface_hash.is_empty());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "manual explicit-binary PTY acceptance; run with GROW_COMPARE_ACCEPT_SIZE_CURVE=1"]
 async fn fixed_surface_resume_size_curve_acceptance() {
@@ -787,6 +957,7 @@ async fn fixed_surface_resume_size_curve_acceptance() {
         Ok("tool-lifecycle"),
         "the resume comparison varies closed Tool lifecycle facts"
     );
+    let transform = transform_from_env();
     assert!(
         std::env::var_os("GROW_COMPARE_BASELINE_FIXTURE_WRITER").is_some(),
         "the baseline fixture must be written by its pinned Shell adapter"
@@ -823,11 +994,6 @@ async fn fixed_surface_resume_size_curve_acceptance() {
         .write(true)
         .open(out.join("measurements.jsonl"))
         .unwrap();
-    let mut fixed_surface: Option<Value> = None;
-    let mut history_bytes_by_size = std::collections::BTreeMap::new();
-    let mut tail_digests_by_size: std::collections::BTreeMap<usize, Vec<String>> =
-        std::collections::BTreeMap::new();
-    let mut expected_tail_signature: Option<String> = None;
     let mut phase_samples: std::collections::BTreeMap<(usize, String, String, String), Vec<f64>> =
         std::collections::BTreeMap::new();
     let pairs = 3;
@@ -842,13 +1008,17 @@ async fn fixed_surface_resume_size_curve_acceptance() {
             };
             for (side, binary) in order {
                 let label = format!("history-{observations}-pair-{pair}-{side}");
-                let fixture = prepare_measure_fixture(&label, observations).await;
+                let fixture = prepare_measure_fixture(&label, observations, transform).await;
                 trials.push((pair, offset, observations, side, binary, label, fixture));
             }
         }
     }
     // Keep the write workload for the large fixtures outside every timed
     // launch, and warm both executables after fixture preparation.
+    verify_prepared_fixtures(
+        trials.iter().map(|trial| (trial.2, &trial.6)),
+        transform.is_some(),
+    );
     for binary in [&baseline, &candidate] {
         warm_executable(binary);
     }
@@ -868,42 +1038,6 @@ async fn fixed_surface_resume_size_curve_acceptance() {
                 "test-process-shell-storage-adapter"
             }
         );
-        let history_bytes = row["history_bytes"].as_u64().unwrap();
-        assert!(history_bytes >= (history_observations as u64) * 16 * 1024);
-        assert_eq!(row["baseline_manifest_removed"], false);
-        assert_eq!(row["unpublished_tail_records"], UNPUBLISHED_TAIL_RECORDS);
-        assert!(row["publication_manifest_version"].as_u64().is_some());
-        assert_eq!(row["unpublished_tail_durable"], true);
-        assert!(row["unpublished_tail_bytes"].as_u64().unwrap() > 0);
-        let tail_signature = row["unpublished_tail_signature"]
-            .as_str()
-            .expect("normalized unpublished tail signature")
-            .to_owned();
-        if let Some(expected) = &expected_tail_signature {
-            assert_eq!(
-                expected, &tail_signature,
-                "all sizes and arms must carry the same logical unpublished tail"
-            );
-        } else {
-            expected_tail_signature = Some(tail_signature);
-        }
-        tail_digests_by_size
-            .entry(history_observations)
-            .or_default()
-            .push(row["unpublished_tail_blake3"].as_str().unwrap().to_owned());
-        history_bytes_by_size
-            .entry(history_observations)
-            .and_modify(|sizes: &mut Vec<u64>| sizes.push(history_bytes))
-            .or_insert_with(|| vec![history_bytes]);
-        let surface = row["fixed_surface_blake3"].clone();
-        if let Some(expected) = &fixed_surface {
-            assert_eq!(
-                expected, &surface,
-                "model-visible Surface changed across history sizes or A/B runs"
-            );
-        } else {
-            fixed_surface = Some(surface);
-        }
         for (phase, value) in row["phases_ms"].as_object().unwrap() {
             phase_samples
                 .entry((
@@ -932,33 +1066,6 @@ async fn fixed_surface_resume_size_curve_acceptance() {
         report.flush().unwrap();
         eprintln!("[fixed-surface-pty-ab] {row}");
     }
-    assert!(
-        tail_digests_by_size
-            .values()
-            .all(|digests| { digests.windows(2).all(|pair| pair[0] == pair[1]) }),
-        "both arms and all pairs must carry byte-identical tails at each size"
-    );
-    let size_curve: Vec<_> = history_bytes_by_size
-        .iter()
-        .map(|(observations, sizes)| (*observations, *sizes.iter().min().unwrap()))
-        .collect();
-    assert!(
-        size_curve.windows(2).all(|pair| pair[0].1 < pair[1].1),
-        "committed history bytes must grow at every size-curve point"
-    );
-    assert!(
-        size_curve
-            .last()
-            .is_some_and(|(_, bytes)| *bytes >= 350 * 1024 * 1024),
-        "final size-curve point must contain at least 350 MiB of committed history"
-    );
-    assert!(
-        size_curve
-            .last()
-            .is_some_and(|(_, bytes)| *bytes > 515_000_000),
-        "final tool-lifecycle point must contain more than 515,000,000 bytes of committed history"
-    );
-
     let summaries: Vec<_> = phase_samples
         .into_iter()
         .map(|((history_observations, side, pass, phase), mut samples)| {
@@ -999,6 +1106,7 @@ async fn fixed_surface_resume_cold_exit_acceptance() {
         std::env::var("GROW_COMPARE_CLOSED_HISTORY_KIND").as_deref(),
         Ok("tool-lifecycle")
     );
+    let transform = transform_from_env();
     let baseline = PathBuf::from(std::env::var_os("GROW_COMPARE_BASELINE_BINARY").unwrap());
     let candidate = PathBuf::from(std::env::var_os("GROW_COMPARE_CANDIDATE_BINARY").unwrap());
     let out = PathBuf::from(std::env::var_os("GROW_COMPARE_OUTPUT").unwrap());
@@ -1030,12 +1138,6 @@ async fn fixed_surface_resume_cold_exit_acceptance() {
         .write(true)
         .open(out.join("cold-exit-measurements.jsonl"))
         .unwrap();
-    let mut fixed_surface: Option<Value> = None;
-    let mut tail_signature: Option<String> = None;
-    let mut tails_by_size: std::collections::BTreeMap<usize, Vec<String>> =
-        std::collections::BTreeMap::new();
-    let mut sizes_by_point: std::collections::BTreeMap<usize, Vec<u64>> =
-        std::collections::BTreeMap::new();
     let mut phase_samples: std::collections::BTreeMap<(usize, String), Vec<f64>> =
         std::collections::BTreeMap::new();
 
@@ -1053,7 +1155,8 @@ async fn fixed_surface_resume_cold_exit_acceptance() {
             for (side, binary) in arms {
                 let label =
                     format!("cold-exit-history-{history_observations}-trial-{trial}-{side}");
-                let fixture = prepare_measure_fixture(&label, history_observations).await;
+                let fixture =
+                    prepare_measure_fixture(&label, history_observations, transform).await;
                 trials.push((
                     trial,
                     size_order_index,
@@ -1066,6 +1169,10 @@ async fn fixed_surface_resume_cold_exit_acceptance() {
             }
         }
     }
+    verify_prepared_fixtures(
+        trials.iter().map(|trial| (trial.2, &trial.6)),
+        transform.is_some(),
+    );
     for binary in [&baseline, &candidate] {
         warm_executable(binary);
     }
@@ -1076,61 +1183,21 @@ async fn fixed_surface_resume_cold_exit_acceptance() {
             "idle exit must not submit a prompt"
         );
         assert_eq!(row["exit_code"], 0);
-        assert_eq!(row["unpublished_tail_records"], UNPUBLISHED_TAIL_RECORDS);
-        assert_eq!(row["baseline_manifest_removed"], false);
         assert_eq!(row["latest_page_marker"], "GROW_SEQ_000001");
-        assert!(row["unpublished_tail_bytes"].as_u64().unwrap() > 0);
-        if let Some(expected) = &fixed_surface {
-            assert_eq!(
-                expected, &row["fixed_surface_blake3"],
-                "cold-exit Surface changed"
+        phase_samples
+            .entry((history_observations, side.to_owned()))
+            .or_default()
+            .push(
+                row["phases_ms"]["ctrl_d_from_resume_ready_exit"]
+                    .as_f64()
+                    .unwrap(),
             );
-        } else {
-            fixed_surface = Some(row["fixed_surface_blake3"].clone());
-        }
-        let signature = row["unpublished_tail_signature"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        if let Some(expected) = &tail_signature {
-            assert_eq!(expected, &signature, "normalized terminal tail changed");
-        } else {
-            tail_signature = Some(signature);
-        }
-        tails_by_size
-            .entry(history_observations)
-            .or_default()
-            .push(row["unpublished_tail_blake3"].as_str().unwrap().to_owned());
-        sizes_by_point
-            .entry(history_observations)
-            .or_default()
-            .push(row["history_bytes"].as_u64().unwrap());
-        for phase in ["ctrl_d_from_resume_ready_exit"] {
-            phase_samples
-                .entry((history_observations, side.to_owned()))
-                .or_default()
-                .push(row["phases_ms"][phase].as_f64().unwrap());
-        }
         row["trial"] = json!(trial);
         row["size_order_index"] = json!(size_order_index);
         row["binary"] = json!(side);
         writeln!(report, "{row}").unwrap();
         report.flush().unwrap();
         eprintln!("[fixed-surface-idle-ctrl-d-pty] {row}");
-    }
-    for (size, digests) in tails_by_size {
-        assert_eq!(digests.len(), 6, "three paired trials required at {size}");
-        assert!(
-            digests.windows(2).all(|pair| pair[0] == pair[1]),
-            "A/B tails must match at {size}"
-        );
-    }
-    for (size, bytes) in sizes_by_point {
-        assert_eq!(bytes.len(), 6);
-        assert!(
-            bytes.iter().max().unwrap() - bytes.iter().min().unwrap() <= 1,
-            "only the one-byte fixture metadata variation is expected at {size}"
-        );
     }
     let summaries: Vec<_> = phase_samples
         .into_iter()

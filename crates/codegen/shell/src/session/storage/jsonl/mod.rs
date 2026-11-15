@@ -19,6 +19,8 @@ use workspace::session::file_state::RewindPoint;
 #[cfg(unix)]
 mod boundary_history;
 #[cfg(unix)]
+mod branch_history;
+#[cfg(unix)]
 mod compaction_history;
 #[cfg(unix)]
 mod consultation_history;
@@ -1134,37 +1136,40 @@ impl JsonlStorageAdapter {
                     opened.directory_handle(),
                     &mut file,
                     &mut prefix,
-                    cached,
+                    cached.clone(),
                 )?;
             }
             if indexed_history {
-                // A rewind can invalidate older notices. Preserve the dense
-                // branch projection until this dependency is indexed too.
-                let supported = !validated.timeline.has_rewound()
-                    && !validated.timeline.events().iter().any(|event| {
-                        matches!(
-                            event.kind,
-                            chat_state::TimelineEventKind::ImageProjection(_)
-                        )
-                    })
-                    && !validated
-                        .history
-                        .sources
-                        .iter()
-                        .any(working_snapshot::is_rewind_marker);
-                if background_migration {
-                    if supported {
-                        let migration =
-                            working_snapshot::LegacyMigration::new(directory, &prefix, references)?;
-                        return Ok((validated, Some(prefix), Some(migration)));
+                // A crash can leave the canonical transformation beyond its
+                // manifest. Repair this cut while owning its append lock so
+                // even an immediate second exit cannot repeat the full fold.
+                let transformed = validated.timeline.has_rewound()
+                    || validated.history.sources.iter().any(working_snapshot::is_rewind_marker)
+                    || validated.timeline.events().iter().any(|event| {
+                        matches!(event.kind, chat_state::TimelineEventKind::ImageProjection(_))
+                    });
+                let repaired = if transformed {
+                    working_snapshot::attach_to_validated_prefix(
+                        opened.directory_handle(),
+                        &mut file,
+                        &mut prefix,
+                        cached.clone(),
+                    )?;
+                    match prefix.indexed.as_ref() {
+                        Some(index) => index.advance(&mut file, &prefix)?,
+                        None => None,
                     }
-                    return Ok((
-                        opened.validated_timeline(info.id.0.as_ref())?,
-                        Some(prefix),
-                        None,
-                    ));
+                } else {
+                    None
+                };
+                if background_migration && repaired.is_none() {
+                    let migration =
+                        working_snapshot::LegacyMigration::new(directory, &prefix, references)?;
+                    return Ok((validated, Some(prefix), Some(migration)));
                 }
-                let indexed = if supported {
+                let indexed = if repaired.is_some() {
+                    repaired
+                } else {
                     working_snapshot::publish(
                         opened.directory_handle(),
                         info.id.0.as_ref(),
@@ -1172,8 +1177,6 @@ impl JsonlStorageAdapter {
                         &prefix,
                         &references,
                     )?
-                } else {
-                    None
                 };
                 if let Some(indexed) = indexed {
                     if let Some((hydrated, writer_prefix)) =

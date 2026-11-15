@@ -572,6 +572,13 @@ impl JsonlStorageAdapter {
             let runtime_event = domain.is_some_and(|event| {
                 matches!(event.kind, chat_state::TimelineEventKind::Runtime(_))
             });
+            #[cfg(unix)]
+            let branch_changed = domain.is_some_and(|event| {
+                matches!(event.kind, chat_state::TimelineEventKind::ImageProjection(_))
+                    || event.messages().is_some_and(|message| message.cause == chat_state::MessageCause::Rewind)
+            }) || matches!(&fact, AppendFact::Presentation(event)
+                if matches!(&event.content, HistoryContent::Grow(value)
+                    if matches!(value.as_ref(), history::GrowHistoryFact::RewindMarker { .. })));
             if !repeated {
                 let seq = prefix.state.records;
                 let line = if domain.is_some() {
@@ -630,7 +637,7 @@ impl JsonlStorageAdapter {
             let publish = prefix
                 .indexed
                 .as_ref()
-                .is_some_and(|index| index.should_advance(prefix));
+                .is_some_and(|index| branch_changed || index.should_advance(prefix));
             if matches!(durability, AppendDurability::Durable) {
                 let mut runtime_sync = runtime_event
                     .then(|| crate::instrumentation_timer!("session.runtime.durable_sync"));
@@ -671,6 +678,15 @@ impl JsonlStorageAdapter {
                     Ok(None) => {}
                     Err(error) => return Err(error),
                 }
+            }
+            #[cfg(unix)]
+            if repeated && complete_len != prior_stamp.len
+                && let Some(indexed) = &prefix.indexed
+                && let Some(repaired) = indexed.acknowledge_torn_tail_removal(
+                    &file, complete_len, &prefix.stamp,
+                )?
+            {
+                prefix.indexed = Some(repaired);
             }
             Ok(!repeated)
         })();

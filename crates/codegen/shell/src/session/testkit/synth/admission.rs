@@ -20,6 +20,7 @@ use crate::session::storage::SessionUpdate;
 use super::replay::SessionSpec;
 
 const FIXTURE_BUDGET: u64 = 512 * 1024 * 1024;
+const TRANSFORMED_BRANCH_PUBLICATION_PADDING_BYTES: usize = 1024 * 1024;
 
 /// Replay an existing synthetic journal through the ordinary storage writer.
 /// Sync once per MiB and on the final record to exercise periodic index
@@ -104,29 +105,46 @@ pub async fn commit_fixture_through_normal_writer_with_unpublished_tail(
         else {
             panic!("benchmark unpublished tail must contain domain records");
         };
-        assert!(matches!(
+        if matches!(
             first_terminal.kind,
             TimelineEventKind::Step(StepEvent::Ended { .. })
-        ));
-        let padding = chat_state::TimelineEvent {
-            version: first_terminal.version,
-            seq: first_terminal.seq,
-            at_ms: 1_794_571_200_000,
-            kind: TimelineEventKind::Observation(chat_state::ObservationEvent {
-                scope: "shell".into(),
-                name: "artifact".into(),
-                turn: None,
-                step: None,
-                data: Some(serde_json::json!({
-                    "payload": "x".repeat(1024 * 1024),
-                    "fixture": "unpublished-terminal-tail",
-                })),
-            }),
-        };
-        storage
-            .append_timeline_event_durable(info, &padding)
-            .await
-            .expect("durably publish benchmark tail padding");
+        ) {
+            let padding = chat_state::TimelineEvent {
+                version: first_terminal.version,
+                seq: first_terminal.seq,
+                at_ms: 1_794_571_200_000,
+                kind: TimelineEventKind::Observation(chat_state::ObservationEvent {
+                    scope: "shell".into(),
+                    name: "artifact".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(serde_json::json!({
+                        "payload": "x".repeat(1024 * 1024),
+                        "fixture": "unpublished-terminal-tail",
+                    })),
+                }),
+            };
+            storage
+                .append_timeline_event_durable(info, &padding)
+                .await
+                .expect("durably publish benchmark tail padding");
+        } else {
+            for line in &pending {
+                let crate::session::history::JournalFact::Domain { mut event, .. } =
+                    crate::session::history::decode_record(&line[..line.len() - 1])
+                        .expect("decode held transformed-branch tail")
+                        .fact
+                else {
+                    panic!("transformed-branch tail must contain domain records");
+                };
+                event.at_ms = 1_794_571_200_000;
+                storage
+                    .append_timeline_event_durable(info, &event)
+                    .await
+                    .expect("durably append fixed transformed-branch tail without publishing");
+            }
+            return;
+        }
     }
     for (index, line) in pending.into_iter().enumerate() {
         let crate::session::history::JournalFact::Domain { mut event, .. } =
@@ -243,6 +261,12 @@ pub enum ClosedHistoryKind {
     ToolLifecycle,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransformedBranchKind {
+    Rewind,
+    UnsupportedImage,
+}
+
 /// Variant of the fixed-surface fixture that can grow closed history as inert
 /// Shell diagnostic Timeline events instead of presentation records.
 pub fn write_admitted_history_with_closed_observations_kind(
@@ -254,6 +278,32 @@ pub fn write_admitted_history_with_closed_observations_kind(
     closed_observations: usize,
     closed_history_kind: ClosedHistoryKind,
     model_route: Option<(&str, &sampling_types::ModelImageInputKey)>,
+) -> String {
+    write_admitted_transformed_history(
+        info,
+        directory,
+        spec,
+        model_id,
+        _missing_projection_every,
+        closed_observations,
+        closed_history_kind,
+        model_route,
+        None,
+    )
+}
+
+/// Write a canonical Timeline fixture with a validated rewind or unsupported
+/// image projection after the generated closed history and admitted responses.
+pub fn write_admitted_transformed_history(
+    info: &Info,
+    directory: &Path,
+    spec: &SessionSpec,
+    model_id: &str,
+    _missing_projection_every: usize,
+    closed_observations: usize,
+    closed_history_kind: ClosedHistoryKind,
+    model_route: Option<(&str, &sampling_types::ModelImageInputKey)>,
+    transform: Option<TransformedBranchKind>,
 ) -> String {
     let updates_path = directory.join(crate::session::storage::UPDATES_FILE);
     let legacy_updates = std::fs::read_to_string(&updates_path).expect("read legacy updates");
@@ -298,10 +348,12 @@ pub fn write_admitted_history_with_closed_observations_kind(
         )
         .expect("record seed");
     if closed_history_kind == ClosedHistoryKind::ToolLifecycle {
-        timeline.replace_all(
-            vec![ConversationItem::system("admitted response resume fixture")],
-            MessageCause::ContextRebuild,
-        ).expect("record the production startup context boundary");
+        timeline
+            .replace_all(
+                vec![ConversationItem::system("admitted response resume fixture")],
+                MessageCause::ContextRebuild,
+            )
+            .expect("record the production startup context boundary");
     }
     if let Some((provider_model, transport)) = model_route {
         let model = crate::agent::models::ModelId::new(model_id);
@@ -446,8 +498,24 @@ pub fn write_admitted_history_with_closed_observations_kind(
                 redirect_kind: None,
             }))
             .expect("start turn");
+        let mut user_item =
+            if transform == Some(TransformedBranchKind::UnsupportedImage) && turn_index == 0 {
+                use sampling_types::conversation::ContentPart;
+                ConversationItem::user_with_parts(vec![
+                    ContentPart::Text {
+                        text: user.clone().into(),
+                    },
+                    ContentPart::Image {
+                        url: "data:image/png;base64,fixture-unsupported-image".into(),
+                        description: None,
+                    },
+                ])
+            } else {
+                ConversationItem::user(user.clone())
+            };
+        user_item.set_prompt_index(turn_index);
         timeline
-            .append(ConversationItem::user(user.clone()), MessageCause::User)
+            .append(user_item, MessageCause::User)
             .expect("record user input");
         timeline
             .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
@@ -512,13 +580,157 @@ pub fn write_admitted_history_with_closed_observations_kind(
         requests.push(request_id);
     }
 
+    if let Some(transform) = transform {
+        match transform {
+            TransformedBranchKind::Rewind => {
+                let target_prompt_index = 1;
+                let selected = timeline
+                    .rewind_surface(target_prompt_index)
+                    .expect("select first prompt branch");
+                timeline
+                    .replace_all(selected, MessageCause::Rewind)
+                    .expect("record selected rewind branch");
+            }
+            TransformedBranchKind::UnsupportedImage => {
+                use chat_state::{ImageProjectionEvent, ImageShadow, ImageShadowSource};
+                use sampling_types::conversation::{
+                    UNSUPPORTED_IMAGE_REPLACEMENT, conversation_image_groups,
+                };
+                let (source, _) = timeline
+                    .surface_ids()
+                    .iter()
+                    .zip(timeline.surface())
+                    .find(|(_, item)| matches!(item, ConversationItem::User(_)))
+                    .expect("image-bearing user has a Surface identity");
+                let group = conversation_image_groups(timeline.surface())
+                    .into_iter()
+                    .next()
+                    .expect("fixture user contains one image group");
+                let image_count = group.image_count();
+                timeline
+                    .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                        trigger_runtime: sampling_types::ModelImageInputKey::new(
+                            "text-only-fixture-model",
+                            "messages",
+                            "fixture-endpoint",
+                        ),
+                        source_revision: timeline.surface_revision(),
+                        shadows: vec![ImageShadow {
+                            source: *source,
+                            fingerprint: group.fingerprint,
+                            image_count,
+                            replacement: UNSUPPORTED_IMAGE_REPLACEMENT.to_owned(),
+                            provenance: ImageShadowSource::UnsupportedModel,
+                        }],
+                        tool_calls: Vec::new(),
+                    }))
+                    .expect("project unsupported image from canonical Surface");
+            }
+        }
+    }
+
+    if transform.is_some() {
+        timeline
+            .record(TimelineEventKind::Observation(
+                chat_state::ObservationEvent {
+                    scope: "shell".into(),
+                    name: "fixture_transformed_branch_publication_padding".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(serde_json::json!({
+                        "fixture": "transformed-branch-publication-padding",
+                        "payload": "x".repeat(TRANSFORMED_BRANCH_PUBLICATION_PADDING_BYTES),
+                    })),
+                },
+            ))
+            .expect("append publication-threshold padding after branch transform");
+        for index in 0..2 {
+            timeline
+                .record(TimelineEventKind::Observation(
+                    chat_state::ObservationEvent {
+                        scope: "shell".into(),
+                        name: format!("fixture_unpublished_tail_{index}"),
+                        turn: None,
+                        step: None,
+                        data: Some(serde_json::json!({
+                            "fixture": "fixed-transformed-branch-tail",
+                            "index": index,
+                        })),
+                    },
+                ))
+                .expect("append fixed transformed-branch tail");
+        }
+    }
+
     let restored = Timeline::from_events(timeline.events().to_vec()).expect("restore Timeline");
-    assert_eq!(restored.surface_len(), spec.turns * 2 + 1);
+    let selected_turns = if transform == Some(TransformedBranchKind::Rewind) {
+        1
+    } else {
+        spec.turns
+    };
+    assert_eq!(restored.surface_len(), selected_turns * 2 + 1);
+    match transform {
+        Some(TransformedBranchKind::Rewind) => {
+            assert!(
+                restored
+                    .surface()
+                    .iter()
+                    .all(|item| !item.text_content().contains("GROW_SEQ_000002"))
+            );
+            assert!(
+                restored
+                    .surface()
+                    .iter()
+                    .any(|item| item.text_content().contains("GROW_SEQ_000001"))
+            );
+            let selected_prompts = restored
+                .prompt_records()
+                .into_iter()
+                .map(|prompt| prompt.prompt_index)
+                .collect::<Vec<_>>();
+            assert_eq!(selected_prompts, [0]);
+            assert!(
+                restored.events().iter().any(|event| {
+                    event.messages().is_some_and(|message| {
+                        message
+                            .items
+                            .iter()
+                            .any(|item| item.text_content().contains("GROW_SEQ_000002"))
+                    })
+                }),
+                "discarded response remains in canonical Timeline evidence"
+            );
+        }
+        Some(TransformedBranchKind::UnsupportedImage) => {
+            assert!(
+                sampling_types::conversation::conversation_image_groups(restored.surface())
+                    .is_empty()
+            );
+            assert!(restored.surface().iter().any(|item| {
+                item.text_content()
+                    .contains(sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT)
+            }));
+            assert!(
+                restored.events().iter().any(|event| {
+                    event.messages().is_some_and(|message| {
+                        message.items.iter().any(|item| {
+                            !sampling_types::conversation::conversation_image_groups(
+                                std::slice::from_ref(item),
+                            )
+                            .is_empty()
+                        })
+                    })
+                }),
+                "raw image evidence remains in canonical messages"
+            );
+        }
+        None => {}
+    }
     let fixed_surface_blake3 = blake3::hash(&serde_json::to_vec(restored.surface()).unwrap())
         .to_hex()
         .to_string();
     let admissions = restored.admitted_responses();
-    assert_eq!(admissions.len(), spec.turns);
+    assert_eq!(admissions.len(), selected_turns);
     assert!(
         admissions
             .iter()
@@ -532,7 +744,11 @@ pub fn write_admitted_history_with_closed_observations_kind(
             .expect("user chunk is durable history");
         user_facts.push(user_fact);
         let request_id = &requests[turn_index];
-        let event_id = crate::util::event_id::generate_event_id(&info.id.0);
+        let event_id = if transform.is_some() {
+            format!("{}-fixture-candidate-{turn_index:04}", info.id.0)
+        } else {
+            crate::util::event_id::generate_event_id(&info.id.0)
+        };
         let candidate = candidate_anchor(info, request_id, &event_id);
         let fact = HistoryFact::from_update(&candidate)
             .expect("convert candidate presentation")
@@ -626,6 +842,25 @@ pub fn write_admitted_history_with_closed_observations_kind(
             append_presentation_fact(&mut journal, &mut physical_position, fact);
             user_fact_index += 1;
         }
+        if transform == Some(TransformedBranchKind::Rewind)
+            && event
+                .messages()
+                .is_some_and(|message| message.cause == MessageCause::Rewind)
+        {
+            append_presentation_fact(
+                &mut journal,
+                &mut physical_position,
+                &HistoryFact {
+                    meta: None,
+                    content: crate::session::history::HistoryContent::Grow(Box::new(
+                        crate::session::history::GrowHistoryFact::RewindMarker {
+                            target_prompt_index: 1,
+                            created_at: "2026-11-15T00:00:00Z".to_owned(),
+                        },
+                    )),
+                },
+            );
+        }
     }
     assert_eq!(
         user_fact_index,
@@ -636,7 +871,7 @@ pub fn write_admitted_history_with_closed_observations_kind(
         candidate_facts.is_empty(),
         "all candidate facts were placed"
     );
-    assert_eq!(candidates_placed, admissions.len());
+    assert_eq!(candidates_placed, requests.len());
     journal.flush().expect("flush unified Timeline journal");
     drop(journal);
     std::fs::remove_file(&updates_path).expect("remove legacy updates input");

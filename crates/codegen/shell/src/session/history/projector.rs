@@ -171,7 +171,37 @@ impl IndexedPages {
     pub(crate) fn page_before(
         &self,
         session: &acp::SessionId,
+        mut before: PagePosition,
+    ) -> io::Result<(Option<PagePosition>, Vec<SessionUpdate>)> {
+        loop {
+            let anchor = if before.part == 0 && before.offset.is_none() {
+                let Some(previous) = before.record.checked_sub(1) else {
+                    return Ok((None, Vec::new()));
+                };
+                previous
+            } else {
+                before.record
+            };
+            let window = self.index.visible_range(anchor)?;
+            if window.is_empty() {
+                return Ok((None, Vec::new()));
+            }
+            if *window.end() != anchor {
+                before = PagePosition { record: *window.end() + 1, part: 0, offset: None };
+            }
+            let (older, updates) = self.page_in_window(session, before, *window.start())?;
+            match older {
+                Some(next) if updates.is_empty() => before = next,
+                _ => return Ok((older, updates)),
+            }
+        }
+    }
+
+    fn page_in_window(
+        &self,
+        session: &acp::SessionId,
         before: PagePosition,
+        lower: u64,
     ) -> io::Result<(Option<PagePosition>, Vec<SessionUpdate>)> {
         let mut reader = self.index.page_reader()?;
         let limit = HISTORY_PAGE_ROWS + 1;
@@ -204,15 +234,17 @@ impl IndexedPages {
             } else {
                 0
             };
-        let display_start = display_end.saturating_sub(limit);
+        let first_display = self.index.omitted_before(lower)?;
+        let display_start = display_end.saturating_sub(limit).max(first_display);
         let mut display_floor = None;
         for rank in display_start..display_end {
             let position = self.index.display_position(rank)?;
-            if rank == display_start && display_start != 0 {
+            if rank == display_start && display_start != first_display {
                 display_floor = Some((position, 0));
             }
             candidates.push(((position, 0), PageRow::Display(rank)));
         }
+        candidates.retain(|(position, _)| position.0 >= lower);
         candidates.sort_unstable_by(|(left, _), (right, _)| right.cmp(left));
         let mut updates = Vec::new();
         let mut budget = HISTORY_PAGE_BYTES - 2;
@@ -224,11 +256,14 @@ impl IndexedPages {
             if terminal_floor.max(display_floor).is_some_and(|floor| (record, part) < floor) {
                 break;
             }
-            if matches!(&row, PageRow::TaskTerminal(row)
-                if row.superseded() || self.task_completions_in_tail.contains(row.task_id()))
-            {
-                cursor = Some(PagePosition { record, part, offset: None });
-                continue;
+            if let PageRow::TaskTerminal(row) = &row {
+                if row.superseded()
+                    || self.task_completions_in_tail.contains(row.task_id())
+                    || !self.index.visible_range(row.start())?.contains(&row.start())
+                {
+                    cursor = Some(PagePosition { record, part, offset: None });
+                    continue;
+                }
             }
             let offset = ((record, part) == before.key()).then_some(before.offset).flatten();
             let (older_offset, update) = match row {
@@ -285,13 +320,16 @@ impl IndexedPages {
         // continuation remains inclusive until its oldest fragment arrives.
         if let Some(position) = cursor
             && position.offset.is_none()
-            && self.rows.first().is_none_or(|(first, _)| first.key() >= position.key())
-            && self.index.omitted_before(position.record)? == 0
-            && reader.response_rows_before(position.key(), 1, self.history.response_branch)?.is_empty()
-            && reader.user_echo_rows_before(position.key(), 1)?.is_empty()
-            && reader.task_terminals_before(position.key(), 1, self.history.record_count())?.is_empty()
+            && !self.rows.iter().any(|(row, _)| row.record >= lower && row.key() < position.key())
+            && self.index.omitted_before(position.record)? == first_display
+            && reader.response_rows_before(position.key(), 1, self.history.response_branch)?.first().is_none_or(|row| row.position().0 < lower)
+            && reader.user_echo_rows_before(position.key(), 1)?.first().is_none_or(|row| row.position().0 < lower)
+            && reader.task_terminals_before(position.key(), 1, self.history.record_count())?.first().is_none_or(|row| row.position().0 < lower)
         {
             cursor = None;
+        }
+        if cursor.is_none() && lower != 0 {
+            cursor = Some(PagePosition { record: lower, part: 0, offset: None });
         }
         Ok((cursor, updates))
     }
@@ -567,6 +605,7 @@ impl HistorySnapshot {
             anchored,
             notice_refs,
             indexed_page,
+            None,
         )
     }
 
@@ -591,7 +630,34 @@ impl HistorySnapshot {
             anchored,
             notice_refs,
             false,
+            None,
         )
+    }
+
+    /// Capture the exact physical intervals discarded by the existing display
+    /// projector during an explicit branch publication.
+    pub(crate) fn rewind_visibility(
+        &self,
+        session: &acp::SessionId,
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<Vec<std::ops::Range<u64>>> {
+        let (anchored, notice_refs) = Self::source_indexes(&self.sources);
+        let mut discarded = Vec::new();
+        self.project(
+            session, timeline, None, self.record_count(),
+            self.sources.iter().map(Cow::Borrowed), anchored, notice_refs, false,
+            Some(&mut discarded),
+        )?;
+        discarded.sort_unstable_by_key(|range| range.start);
+        let mut combined: Vec<std::ops::Range<u64>> = Vec::new();
+        for range in discarded {
+            if let Some(previous) = combined.last_mut().filter(|previous| previous.end >= range.start) {
+                previous.end = previous.end.max(range.end);
+            } else {
+                combined.push(range);
+            }
+        }
+        Ok(combined)
     }
 
     fn source_indexes(
@@ -630,6 +696,7 @@ impl HistorySnapshot {
         anchored: BTreeMap<u64, u64>,
         notice_refs: std::collections::BTreeSet<u64>,
         indexed_page: bool,
+        rewind_visibility: Option<&mut Vec<std::ops::Range<u64>>>,
     ) -> io::Result<PreparedHistory> {
         Self::validate_owner(timeline, session.0.as_ref())?;
         let admitted = match self.indexed.as_ref().filter(|_| indexed_page) {
@@ -665,6 +732,8 @@ impl HistorySnapshot {
             .collect::<std::collections::BTreeSet<_>>();
         let mut updates = Vec::new();
         let mut settlement_sources = Vec::new();
+        let mut pending_rewind = None;
+        let mut recovered_markers = Vec::new();
         for (position, row) in sources.into_iter().enumerate() {
             let source = row.as_ref();
             let at_ms = match source {
@@ -676,6 +745,20 @@ impl HistorySnapshot {
                 .get(position)
                 .copied()
                 .unwrap_or(position as u64);
+            match source {
+                HistorySource::Domain { event, .. } => {
+                    if let Some(target) = timeline.rewind_display_target(chat_state::EventSeq::new(*event)) {
+                        recovered_markers.extend(pending_rewind.replace((position, target)));
+                    }
+                }
+                HistorySource::Presentation { fact, .. }
+                    if matches!(&fact.content, HistoryContent::Grow(value)
+                        if matches!(value.as_ref(), super::GrowHistoryFact::RewindMarker { .. })) =>
+                {
+                    pending_rewind = None;
+                }
+                _ => {}
+            }
             let response = match source {
                 HistorySource::Presentation { fact, .. } => match &fact.content {
                     HistoryContent::Candidate(key) => by_key
@@ -901,7 +984,34 @@ impl HistorySnapshot {
                 updates.push(update);
             }
         }
-        let updates = crate::session::storage::filter_rewind_updates(updates);
+        recovered_markers.extend(pending_rewind);
+        if !recovered_markers.is_empty() {
+            for (record, target_prompt_index) in recovered_markers {
+                let mut marker = SessionUpdate::Grow(Box::new(GrowNotification {
+                    session_id: session.clone(),
+                    update: GrowUpdate::RewindMarker {
+                        target_prompt_index,
+                        created_at: String::new(),
+                    },
+                    meta: None,
+                }));
+                self.stamp_cursor(session, cut, None, record, 0, true, &mut marker)?;
+                updates.push(marker);
+            }
+            updates.sort_by_key(|update| {
+                let cursor = cursor_from_update(update).expect("projected row has a cursor");
+                (cursor.record, cursor.part)
+            });
+        }
+        let updates = if let Some(discarded) = rewind_visibility {
+            crate::session::storage::filter_rewind_updates_with(updates, |first, marker| {
+                let end = cursor_from_update(marker).expect("projected marker has a cursor").record;
+                let start = first.and_then(cursor_from_update).map_or(end, |first| first.record);
+                discarded.push(start..end + 1);
+            })
+        } else {
+            crate::session::storage::filter_rewind_updates(updates)
+        };
         let mut updates =
             self.project_command_terminals(session, cut, updates, settlement_sources)?;
         if indexed_page && let Some(index) = &self.indexed {

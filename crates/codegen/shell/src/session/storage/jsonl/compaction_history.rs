@@ -59,6 +59,7 @@ pub(super) fn archives_terminal_sideband(purpose: SidebandPurpose) -> bool {
             | SidebandPurpose::MemoryRewrite
             | SidebandPurpose::ProgressReport
             | SidebandPurpose::InfoRequest
+            | SidebandPurpose::ImageDescription
             | SidebandPurpose::ContextRecall
     )
 }

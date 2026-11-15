@@ -18,6 +18,7 @@ const ADMISSIONS: TableDefinition<(&str, u32), &[u8]> = TableDefinition::new("re
 const ADMITTED_CALLS: TableDefinition<(&str, u64, u64), &[u8]> =
     TableDefinition::new("response_admitted_calls");
 const ROWS: TableDefinition<(u64, u64, u64), &[u8]> = TableDefinition::new("response_display");
+const SELECTED: TableDefinition<(u64, u64), ()> = TableDefinition::new("selected_responses");
 const INHERITED_ROWS: u64 = u64::MAX;
 const FRAGMENTS: TableDefinition<(u64, u64, u64), &[u8]> =
     TableDefinition::new("response_fragment");
@@ -55,6 +56,7 @@ pub(super) struct Writer<'tx> {
     admissions: Table<'tx, (&'static str, u32), &'static [u8]>,
     admitted_calls: Table<'tx, (&'static str, u64, u64), &'static [u8]>,
     rows: Table<'tx, (u64, u64, u64), &'static [u8]>,
+    selected: Table<'tx, (u64, u64), ()>,
     fragments: Table<'tx, (u64, u64, u64), &'static [u8]>,
 }
 
@@ -69,8 +71,39 @@ impl<'tx> Writer<'tx> {
             admissions: tx.open_table(ADMISSIONS).map_err(io::Error::other)?,
             admitted_calls: tx.open_table(ADMITTED_CALLS).map_err(io::Error::other)?,
             rows: tx.open_table(ROWS).map_err(io::Error::other)?,
+            selected: tx.open_table(SELECTED).map_err(io::Error::other)?,
             fragments: tx.open_table(FRAGMENTS).map_err(io::Error::other)?,
         })
+    }
+
+    pub(super) fn select_rewind(
+        &mut self,
+        previous_branch: Option<EventSeq>,
+        rewind: EventSeq,
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<()> {
+        let survivors = timeline.admitted_response_views().into_iter()
+            .map(|view| view.event_seq).collect::<std::collections::BTreeSet<_>>();
+        let previous = context_partition(previous_branch);
+        let branch = context_partition(Some(rewind));
+        let mut rows = Vec::new();
+        for result in self.rows.range((previous, 0, 0)..=(previous, u64::MAX, u64::MAX))
+            .map_err(io::Error::other)?
+        {
+            let (key, value) = result.map_err(io::Error::other)?;
+            let row: Row = serde_json::from_slice(value.value())?;
+            if survivors.contains(&row.source) {
+                let (_, position, part) = key.value();
+                rows.push(((branch, position, part), value.value().to_vec()));
+            }
+        }
+        for (key, value) in rows {
+            self.rows.insert(key, value.as_slice()).map_err(io::Error::other)?;
+        }
+        for seq in survivors {
+            self.selected.insert((branch, seq.get()), ()).map_err(io::Error::other)?;
+        }
+        Ok(())
     }
 
     pub(super) fn accept(
@@ -324,34 +357,33 @@ pub(super) fn admitted_calls_before(
     end: u64,
     bytes: u64,
     limit: usize,
+    rewind: Option<EventSeq>,
 ) -> io::Result<Vec<sampling_types::ToolCall>> {
     if start >= end {
         return Ok(Vec::new());
     }
     let table = tx.open_table(ADMITTED_CALLS).map_err(io::Error::other)?;
-    table
-        .range((call_id, start, 0)..(call_id, end, 0))
-        .map_err(io::Error::other)?
-        .take(limit)
-        .map(|row| {
-            let (key, value) = row.map_err(io::Error::other)?;
-            let (_, seq, index) = key.value();
-            let reference: DomainReference = serde_json::from_slice(value.value())?;
-            if reference.seq.get() != seq {
-                return Err(invalid(
-                    "admitted Tool call index differs from its response coordinate",
-                ));
-            }
-            let event = read_domain(journal, reference, bytes)?;
-            event
-                .messages()
-                .filter(|message| message.response_admission.is_some())
-                .and_then(|message| response_calls(message).nth(index as usize))
-                .filter(|call| call.id.as_ref() == call_id)
-                .cloned()
-                .ok_or_else(|| invalid("admitted Tool call index differs from its response"))
-        })
-        .collect()
+    let mut calls = Vec::new();
+    for row in table.range((call_id, start, 0)..(call_id, end, 0)).map_err(io::Error::other)? {
+        if calls.len() == limit { break; }
+        let (key, value) = row.map_err(io::Error::other)?;
+        let (_, seq, index) = key.value();
+        if !selected_at(tx, rewind, EventSeq::new(seq))? { continue; }
+        let reference: DomainReference = serde_json::from_slice(value.value())?;
+        if reference.seq.get() != seq {
+            return Err(invalid("admitted Tool call index differs from its response coordinate"));
+        }
+        let event = read_domain(journal, reference, bytes)?;
+        let call = event
+            .messages()
+            .filter(|message| message.response_admission.is_some())
+            .and_then(|message| response_calls(message).nth(index as usize))
+            .filter(|call| call.id.as_ref() == call_id)
+            .cloned()
+            .ok_or_else(|| invalid("admitted Tool call index differs from its response"))?;
+        calls.push(call);
+    }
+    Ok(calls)
 }
 
 pub(super) fn candidate_before(
@@ -472,7 +504,7 @@ pub(super) fn rows_before(
     let table = tx.open_table(ROWS).map_err(io::Error::other)?;
     let before = before.min((records, 0));
     let mut rows = Vec::with_capacity(2 * limit);
-    for partition in [context_partition(frontier.context_rebuild), INHERITED_ROWS] {
+    for partition in [context_partition(frontier.history_branch()), INHERITED_ROWS] {
         let start = (partition, 0, 0);
         let end = (partition, before.0, before.1);
         let mut visible = 0;
@@ -501,6 +533,12 @@ pub(super) fn rows_before(
 
 fn context_partition(rebuild: Option<EventSeq>) -> u64 {
     rebuild.map_or(0, |seq| seq.get() + 1)
+}
+
+pub(super) fn selected_at(tx: &ReadTransaction, rewind: Option<EventSeq>, source: EventSeq) -> io::Result<bool> {
+    let Some(rewind) = rewind.filter(|rewind| source < *rewind) else { return Ok(true); };
+    let table = tx.open_table(SELECTED).map_err(io::Error::other)?;
+    Ok(table.get((context_partition(Some(rewind)), source.get())).map_err(io::Error::other)?.is_some())
 }
 
 pub(super) fn read_fragment(

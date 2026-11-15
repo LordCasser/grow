@@ -9,8 +9,8 @@ use std::{fs::File, io};
 
 const TURNS: TableDefinition<u64, &[u8]> = TableDefinition::new("turn_starts");
 const STEPS: TableDefinition<(u64, u32), &[u8]> = TableDefinition::new("step_starts");
-const COORDINATES: TableDefinition<u64, u64> = TableDefinition::new("prompt_coordinates");
-const PROMPTS: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("user_prompt_starts");
+const COORDINATES: TableDefinition<(u64, u64), u64> = TableDefinition::new("prompt_coordinates");
+const PROMPTS: TableDefinition<(u64, u64, u64), &[u8]> = TableDefinition::new("user_prompt_starts");
 const DEPENDENCIES: TableDefinition<u64, &[u8]> = TableDefinition::new("boundary_dependencies");
 const CUTS: TableDefinition<u64, &[u8]> = TableDefinition::new("boundary_cuts");
 
@@ -21,6 +21,7 @@ struct Cut {
     dependencies: u64,
     next_prompt: usize,
     max_prompt: Option<usize>,
+    branch: u64,
     keep_turn: bool,
     keep_step: bool,
 }
@@ -30,8 +31,8 @@ pub(super) struct Writer<'a> {
     cuts: Table<'a, u64, &'static [u8]>,
     turns: Table<'a, u64, &'static [u8]>,
     steps: Table<'a, (u64, u32), &'static [u8]>,
-    coordinates: Table<'a, u64, u64>,
-    prompts: Table<'a, (u64, u64), &'static [u8]>,
+    coordinates: Table<'a, (u64, u64), u64>,
+    prompts: Table<'a, (u64, u64, u64), &'static [u8]>,
     dependencies: Table<'a, u64, &'static [u8]>,
 }
 
@@ -84,23 +85,23 @@ impl<'a> Writer<'a> {
                 let prompt = *prompt_index as u64;
                 if self
                     .coordinates
-                    .get(prompt)
+                    .get((self.cut.branch, prompt))
                     .map_err(io::Error::other)?
                     .is_none()
                 {
                     self.coordinates
-                        .insert(prompt, event.seq.get())
+                        .insert((self.cut.branch, prompt), event.seq.get())
                         .map_err(io::Error::other)?;
                 }
                 if identity.origin == "user" {
                     self.prompts
-                        .insert((prompt, event.seq.get()), value.as_slice())
+                        .insert((self.cut.branch, prompt, event.seq.get()), value.as_slice())
                         .map_err(io::Error::other)?;
                 }
                 self.cut.max_prompt = self.cut.max_prompt.max(Some(*prompt_index));
                 while self
                     .coordinates
-                    .get(self.cut.next_prompt as u64)
+                    .get((self.cut.branch, self.cut.next_prompt as u64))
                     .map_err(io::Error::other)?
                     .is_some()
                 {
@@ -165,6 +166,29 @@ impl<'a> Writer<'a> {
     fn keep_active(&mut self) {
         self.cut.keep_turn |= self.cut.active_turn.is_some();
         self.cut.keep_step |= self.cut.active_step.is_some();
+    }
+
+    pub(super) fn select_rewind(
+        &mut self,
+        source: EventSeq,
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<()> {
+        let branch = source.get() + 1;
+        self.cut.branch = branch;
+        self.cut.next_prompt = timeline.next_prompt_index();
+        self.cut.max_prompt = None;
+        for (index, user) in timeline.selected_prompt_coordinates() {
+            self.cut.max_prompt = Some(index);
+            self.coordinates.insert((branch, index as u64), source.get()).map_err(io::Error::other)?;
+            let Some(seq) = user else { continue };
+            let Some(TimelineEventKind::Turn(TurnEvent::Started { id, .. })) =
+                timeline.event(seq).map(|event| &event.kind)
+            else { return Err(invalid("selected prompt has no Turn start")) };
+            let reference = self.turns.get(id.0).map_err(io::Error::other)?
+                .ok_or_else(|| invalid("selected prompt has no indexed Turn"))?;
+            self.prompts.insert((branch, index as u64, seq.get()), reference.value()).map_err(io::Error::other)?;
+        }
+        Ok(())
     }
 
     fn keep_pair(&mut self, start: DomainReference, end: DomainReference) -> io::Result<()> {
@@ -293,7 +317,7 @@ pub(super) fn step_before(
 pub(super) fn has_prompt(tx: &ReadTransaction, cut: Frontier, prompt: usize) -> io::Result<bool> {
     let table = tx.open_table(COORDINATES).map_err(io::Error::other)?;
     Ok(table
-        .get(prompt as u64)
+        .get((cut.rewind.map_or(0, |seq| seq.get() + 1), prompt as u64))
         .map_err(io::Error::other)?
         .is_some_and(|row| row.value() < cut.domain))
 }
@@ -306,24 +330,26 @@ pub(super) fn prompts_before(
 ) -> io::Result<Vec<PromptRecord>> {
     let table = tx.open_table(PROMPTS).map_err(io::Error::other)?;
     let mut records = Vec::new();
+    let branch = cut.rewind.map_or(0, |seq| seq.get() + 1);
     let mut before = None;
     while records.len() < limit {
         let row = match before {
             Some(prompt) => table
-                .range(..(prompt, 0))
+                .range((branch, 0, 0)..(branch, prompt, 0))
                 .map_err(io::Error::other)?
                 .next_back(),
-            None => table.iter().map_err(io::Error::other)?.next_back(),
+            None => table.range((branch, 0, 0)..=(branch, u64::MAX, u64::MAX))
+                .map_err(io::Error::other)?.next_back(),
         };
         let Some(row) = row else { break };
         let (key, value) = row.map_err(io::Error::other)?;
-        let (prompt, seq) = key.value();
+        let (_, prompt, seq) = key.value();
         before = Some(prompt);
         let value = if seq < cut.domain {
             Some(value)
         } else {
             table
-                .range((prompt, 0)..(prompt, cut.domain))
+                .range((branch, prompt, 0)..(branch, prompt, cut.domain))
                 .map_err(io::Error::other)?
                 .next_back()
                 .transpose()

@@ -2473,6 +2473,97 @@ fn validate_consultation_result(
     Ok(body)
 }
 
+fn validate_image_projection_evidence(
+    projection: &chat_state::ImageProjectionEvent,
+    ledgers: &SidebandLedgers,
+) -> io::Result<()> {
+    for shadow in &projection.shadows {
+        match &shadow.provenance {
+            chat_state::ImageShadowSource::Description { result_ref } => {
+                let owner = "image projection";
+                let result = completed_sideband_result(
+                    ledgers,
+                    &result_ref.timeline_id,
+                    result_ref.first_seq,
+                    owner,
+                )?;
+                let expected = crate::session::image_describe::render_image_description_block(
+                    result.raw_output.trim(),
+                );
+                if expected != shadow.replacement {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "image projection text does not match sideband {}/{}",
+                            result_ref.timeline_id, result_ref.first_seq
+                        ),
+                    ));
+                }
+                let attempt_seq = result.source_event_seqs[1];
+                let attempt = ledgers
+                    .get(&result_ref.timeline_id)
+                    .and_then(|events| {
+                        usize::try_from(attempt_seq)
+                            .ok()
+                            .and_then(|i| events.get(i))
+                    })
+                    .and_then(|event| match &event.kind {
+                        chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "image projection references missing attempt {}/{}",
+                                result_ref.timeline_id, attempt_seq
+                            ),
+                        )
+                    })?;
+                // Neutral descriptions can predate an unrelated append;
+                // Timeline validation still binds the new projection's
+                // exact current revision, source identity and fingerprint.
+                let source_is_selected = attempt
+                    .assembly_manifest
+                    .selected_surface_ids
+                    .contains(&shadow.source)
+                    && attempt
+                        .assembly_manifest
+                        .context_surface_ids
+                        .contains(&shadow.source)
+                    && attempt
+                        .assembly_manifest
+                        .source_revision
+                        .is_some_and(|revision| revision <= projection.source_revision)
+                    && attempt.input_refs.iter().any(|source| {
+                        source.first_seq <= shadow.source.event.get()
+                            && shadow.source.event.get() <= source.last_seq
+                    })
+                    && result.evidence_refs.iter().any(|source| {
+                        source.first_seq <= shadow.source.event.get()
+                            && shadow.source.event.get() <= source.last_seq
+                    });
+                if !source_is_selected {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "image projection source is not proven by sideband {}/{}",
+                            result_ref.timeline_id, result_ref.first_seq
+                        ),
+                    ));
+                }
+            }
+            // Neither disposition has a provider Sideband to cross-check
+            // here. Timeline validation enforces the local OCR engine, the
+            // source identity/fingerprint, and the exact canonical
+            // unsupported-model replacement text.
+            chat_state::ImageShadowSource::LocalOcr { .. }
+            | chat_state::ImageShadowSource::UnsupportedModel => continue,
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_sideband_ledgers(
     parent_timeline_id: &str,
     parent: &chat_state::Timeline,
@@ -2737,92 +2828,8 @@ fn validate_sideband_ledgers_with_spawns(
     }
 
     for event in parent.events() {
-        let chat_state::TimelineEventKind::ImageProjection(projection) = &event.kind else {
-            continue;
-        };
-        for shadow in &projection.shadows {
-            match &shadow.provenance {
-                chat_state::ImageShadowSource::Description { result_ref } => {
-                    let owner = "image projection";
-                    let result = completed_sideband_result(
-                        ledgers,
-                        &result_ref.timeline_id,
-                        result_ref.first_seq,
-                        owner,
-                    )?;
-                    let expected = crate::session::image_describe::render_image_description_block(
-                        result.raw_output.trim(),
-                    );
-                    if expected != shadow.replacement {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "image projection text does not match sideband {}/{}",
-                                result_ref.timeline_id, result_ref.first_seq
-                            ),
-                        ));
-                    }
-                    let attempt_seq = result.source_event_seqs[1];
-                    let attempt = ledgers
-                        .get(&result_ref.timeline_id)
-                        .and_then(|events| {
-                            usize::try_from(attempt_seq)
-                                .ok()
-                                .and_then(|i| events.get(i))
-                        })
-                        .and_then(|event| match &event.kind {
-                            chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "image projection references missing attempt {}/{}",
-                                    result_ref.timeline_id, attempt_seq
-                                ),
-                            )
-                        })?;
-                    // Neutral descriptions can predate an unrelated append;
-                    // Timeline validation still binds the new projection's
-                    // exact current revision, source identity and fingerprint.
-                    let source_is_selected = attempt
-                        .assembly_manifest
-                        .selected_surface_ids
-                        .contains(&shadow.source)
-                        && attempt
-                            .assembly_manifest
-                            .context_surface_ids
-                            .contains(&shadow.source)
-                        && attempt
-                            .assembly_manifest
-                            .source_revision
-                            .is_some_and(|revision| revision <= projection.source_revision)
-                        && attempt.input_refs.iter().any(|source| {
-                            source.first_seq <= shadow.source.event.get()
-                                && shadow.source.event.get() <= source.last_seq
-                        })
-                        && result.evidence_refs.iter().any(|source| {
-                            source.first_seq <= shadow.source.event.get()
-                                && shadow.source.event.get() <= source.last_seq
-                        });
-                    if !source_is_selected {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "image projection source is not proven by sideband {}/{}",
-                                result_ref.timeline_id, result_ref.first_seq
-                            ),
-                        ));
-                    }
-                }
-                // Neither disposition has a provider Sideband to cross-check
-                // here. Timeline validation enforces the local OCR engine, the
-                // source identity/fingerprint, and the exact canonical
-                // unsupported-model replacement text.
-                chat_state::ImageShadowSource::LocalOcr { .. }
-                | chat_state::ImageShadowSource::UnsupportedModel => continue,
-            }
+        if let chat_state::TimelineEventKind::ImageProjection(projection) = &event.kind {
+            validate_image_projection_evidence(projection, ledgers)?;
         }
     }
 
@@ -3866,7 +3873,11 @@ enum RewindStep {
 /// truncates survivors back to the target prompt. [`filter_rewind_lines`] and
 /// [`filter_rewind_updates`] wrap this over raw JSONL and typed updates so the
 /// two paths share one algorithm.
-fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Vec<T> {
+fn filter_rewind_by<T>(
+    items: Vec<T>,
+    classify: impl Fn(&T) -> RewindStep,
+    mut on_rewind: impl FnMut(Option<&T>, &T),
+) -> Vec<T> {
     let mut result: Vec<T> = Vec::with_capacity(items.len());
     let mut prompt_starts: Vec<usize> = Vec::new();
     let mut tracker = UserRunTurnTracker::new();
@@ -3876,6 +3887,7 @@ fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Ve
             RewindStep::Rewind { target } => {
                 // Out-of-range target keeps every survivor: fold to `result.len()`.
                 let trunc = prompt_starts.get(target).copied().unwrap_or(result.len());
+                on_rewind(result.get(trunc), &item);
                 result.truncate(trunc);
                 prompt_starts.truncate(target);
                 tracker.on_non_user();
@@ -3959,7 +3971,7 @@ pub(crate) fn filter_rewind_lines(lines: Vec<&str>) -> Vec<&str> {
     if !lines.iter().any(|l| l.contains(&*REWIND_MARKER)) {
         return lines;
     }
-    filter_rewind_by(lines, |line| rewind_step_for_line(line))
+    filter_rewind_by(lines, |line| rewind_step_for_line(line), |_, _| {})
 }
 
 /// Filter rewind dead branches from typed `SessionUpdate` values.
@@ -3967,6 +3979,13 @@ pub(crate) fn filter_rewind_lines(lines: Vec<&str>) -> Vec<&str> {
 /// Typed equivalent of [`filter_rewind_lines`] over the same
 /// [`filter_rewind_by`] driver, operating on fully-deserialized updates.
 pub fn filter_rewind_updates(updates: Vec<SessionUpdate>) -> Vec<SessionUpdate> {
+    filter_rewind_updates_with(updates, |_, _| {})
+}
+
+pub(crate) fn filter_rewind_updates_with(
+    updates: Vec<SessionUpdate>,
+    on_rewind: impl FnMut(Option<&SessionUpdate>, &SessionUpdate),
+) -> Vec<SessionUpdate> {
     let has_rewinds = updates.iter().any(|u| {
         matches!(
             u,
@@ -3979,7 +3998,7 @@ pub fn filter_rewind_updates(updates: Vec<SessionUpdate>) -> Vec<SessionUpdate> 
     if !has_rewinds {
         return updates;
     }
-    filter_rewind_by(updates, rewind_step_for_update)
+    filter_rewind_by(updates, rewind_step_for_update, on_rewind)
 }
 
 /// Strip `<fork-context>` and `<resume-context>` XML wrappers from user
