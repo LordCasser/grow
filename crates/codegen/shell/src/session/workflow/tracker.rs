@@ -1760,6 +1760,19 @@ impl WorkflowTracker {
         })
     }
 
+    pub(crate) fn append_restored_history(
+        &mut self,
+        snapshots: Vec<WorkflowRunState>,
+    ) -> Result<(), &'static str> {
+        let mut restored = Self::from_snapshot(snapshots)?;
+        for run in restored.runs.drain(..) {
+            if !self.runs.iter().any(|existing| existing.state.run_id == run.state.run_id) {
+                self.runs.push(run);
+            }
+        }
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> Vec<WorkflowRunState> {
         self.list()
     }
@@ -2397,6 +2410,50 @@ mod tests {
         assert_eq!(state.status, WorkflowRunStatus::Active);
         assert_eq!(state.turn_handoff, WorkflowTurnHandoff::None);
         (t, "wf_1".into())
+    }
+
+    #[test]
+    fn historical_restore_adds_missing_runs_without_replacing_live_state() {
+        let (mut live, _) = tracker_with_run();
+        let mut history = WorkflowTracker::default();
+        history.start_run(
+            "wf_1".into(),
+            "live".into(),
+            "stale duplicate".into(),
+            vec![],
+            Some(1000),
+            None,
+            test_runtime_route(),
+        );
+        history
+            .apply_outcome(
+                "wf_1",
+                &WorkflowOutcome::Completed {
+                    result: serde_json::json!("stale"),
+                },
+            )
+            .unwrap();
+        history.start_run(
+            "wf_old".into(),
+            "old".into(),
+            "historical".into(),
+            vec![],
+            Some(1000),
+            None,
+            test_runtime_route(),
+        );
+        history
+            .apply_outcome(
+                "wf_old",
+                &WorkflowOutcome::Completed {
+                    result: serde_json::json!("done"),
+                },
+            )
+            .unwrap();
+
+        live.append_restored_history(history.snapshot()).unwrap();
+        assert_eq!(live.get("wf_1").unwrap().status, WorkflowRunStatus::Active);
+        assert_eq!(live.get("wf_old").unwrap().status, WorkflowRunStatus::Complete);
     }
 
     #[test]

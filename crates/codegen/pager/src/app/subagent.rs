@@ -348,101 +348,303 @@ pub(crate) fn replay_inherited_updates(
     Some(outcome)
 }
 
-/// Rebuild the flat descendant index after a root session load. Root replay
-/// contains direct-child lifecycle records, while each nested spawn is durable
-/// in its immediate parent's session. Walk those child logs breadth-first and
-/// feed lifecycle and per-child control records through the normal notification
-/// projection so nested routing plus model/Agent identity are authoritative
-/// immediately after load.
+#[derive(Debug)]
+pub struct DescendantReplayNode {
+    pub parent_session_id: String,
+    pub durable_children: std::collections::BTreeMap<String, ChildReplaySpawn>,
+    pub lifecycle: Vec<shell::extensions::notification::SessionNotification>,
+}
+
+#[derive(Debug, Default)]
+pub struct DescendantReplayBatch {
+    pub root_spawns: std::collections::BTreeMap<String, ChildReplaySpawn>,
+    pub replayed_direct_children: std::collections::HashSet<String>,
+    pub nodes: Vec<DescendantReplayNode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DescendantControlCapture {
+    pub child_session_id: String,
+    pub binding_epoch: u32,
+    pub model_generation: u64,
+    pub agent_generation: u64,
+}
+
+/// Capture the validated child tree and ordered presentation without touching
+/// Pager state. Dense fallback reads therefore stay off the reducer path.
+pub(crate) fn read_descendant_replay_batch(
+    root_session_id: &str,
+    replayed_direct_children: &[String],
+    ownership: Option<DescendantOwnership>,
+    grow_home: &std::path::Path,
+) -> DescendantReplayBatch {
+    use shell::extensions::notification::SessionUpdate;
+
+    let root_ownership = ownership
+        .filter(|ownership| ownership.belongs_to(root_session_id))
+        .or_else(|| {
+            match shell::session::storage::load_descendant_ownership_at(root_session_id, grow_home)
+            {
+                Ok(ownership) => ownership,
+                Err(error) => {
+                    tracing::debug!(session_id = root_session_id, ?error, "failed to read root ownership");
+                    None
+                }
+            }
+        });
+    if root_ownership
+        .as_ref()
+        .is_some_and(|ownership| !ownership.is_complete())
+    {
+        tracing::debug!(
+            session_id = root_session_id,
+            "cold ownership contains only unresolved child lifecycle"
+        );
+    }
+    let mut replayed_direct_children = replayed_direct_children
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let root_spawns = root_ownership
+        .map(|ownership| {
+            replayed_direct_children.extend(
+                ownership
+                    .replayed_child_ids()
+                    .map(str::to_owned),
+            );
+            ownership.into_spawns()
+        })
+        .unwrap_or_default();
+    let mut queue = std::collections::VecDeque::new();
+    for (child_session_id, spawn) in &root_spawns {
+        if replayed_direct_children.contains(child_session_id.as_str()) {
+            queue.push_back((
+                child_session_id.clone(),
+                root_session_id.to_owned(),
+                spawn.clone(),
+            ));
+        }
+    }
+    let mut batch = DescendantReplayBatch {
+        root_spawns,
+        replayed_direct_children: replayed_direct_children.clone(),
+        nodes: Vec::new(),
+    };
+    let mut visited = std::collections::HashSet::new();
+    while let Some((parent_session_id, owner_session_id, owner_spawn)) = queue.pop_front() {
+        if !visited.insert(parent_session_id.clone()) {
+            continue;
+        }
+        let (ownership, lifecycle) =
+            match shell::session::storage::load_descendant_child_replay_at(
+                &parent_session_id,
+                &owner_session_id,
+                &owner_spawn,
+                grow_home,
+            ) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(
+                        session_id = parent_session_id,
+                        ?error,
+                        "failed to replay descendant lifecycle"
+                    );
+                    continue;
+                }
+            };
+        let durable_children = ownership.into_spawns();
+        for notification in &lifecycle {
+            if let SessionUpdate::SubagentSpawned {
+                subagent_id,
+                parent_session_id: lifecycle_parent,
+                child_session_id,
+                ..
+            } = &notification.update
+                && notification.session_id.0.as_ref() == parent_session_id
+                && lifecycle_parent == &parent_session_id
+                && let Some(spawn) = durable_children.get(child_session_id)
+                && subagent_id == &spawn.spawn.subagent_id
+            {
+                queue.push_back((
+                    child_session_id.clone(),
+                    parent_session_id.clone(),
+                    spawn.clone(),
+                ));
+            }
+        }
+        batch.nodes.push(DescendantReplayNode {
+            parent_session_id,
+            durable_children,
+            lifecycle,
+        });
+    }
+    batch
+}
+
+/// Start the read worker and hold descendant notifications until its captured
+/// replay has been applied. This does not mark the root as loading, so input
+/// and navigation retain the ordinary post-load behavior.
+pub(crate) fn schedule_descendant_state_restore(
+    app: &mut crate::app::root::AppView,
+    root_agent_id: crate::app::session::AgentId,
+    ownership: Option<DescendantOwnership>,
+) -> Vec<crate::app::actions::Effect> {
+    let Some(root) = app.agents.get_mut(&root_agent_id) else {
+        return Vec::new();
+    };
+    let Some(session_id) = root.session.session_id.clone() else {
+        return Vec::new();
+    };
+    let child_control_captures = root
+        .subagent_views
+        .iter()
+        .map(|(child_session_id, child)| DescendantControlCapture {
+            child_session_id: child_session_id.clone(),
+            binding_epoch: child.session_binding_epoch,
+            model_generation: child.descendant_model_control_generation,
+            agent_generation: child.descendant_agent_control_generation,
+        })
+        .collect();
+    root.descendant_restore_generation = root.descendant_restore_generation.wrapping_add(1);
+    root.descendant_restore_pending = true;
+    vec![crate::app::actions::Effect::RestoreDescendantState {
+        agent_id: root_agent_id,
+        session_id,
+        binding_epoch: root.session_binding_epoch,
+        request_id: root.descendant_restore_generation,
+        root_child_session_ids: root.session.subagent_sessions.keys().cloned().collect(),
+        child_control_captures,
+        ownership,
+        grow_home: effective_grow_home(),
+    }]
+}
+
+/// Apply one immutable read result on the reducer thread after rejecting stale
+/// session bindings and superseded restore requests.
+pub(crate) fn apply_descendant_state_restore(
+    app: &mut crate::app::root::AppView,
+    root_agent_id: crate::app::session::AgentId,
+    session_id: &agent_client_protocol::schema::v1::SessionId,
+    binding_epoch: u32,
+    request_id: u64,
+    child_control_captures: &[DescendantControlCapture],
+    batch: DescendantReplayBatch,
+) {
+    let Some(root) = app.agents.get(&root_agent_id) else {
+        return;
+    };
+    if root.session.session_id.as_ref() != Some(session_id)
+        || root.session_binding_epoch != binding_epoch
+        || root.descendant_restore_generation != request_id
+        || !root.descendant_restore_pending
+    {
+        return;
+    }
+    let previous_loading_replay = root.session.loading_replay;
+    if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        root.descendant_restore_pending = false;
+        root.session.loading_replay = true;
+    }
+    apply_descendant_replay_batch(app, root_agent_id, child_control_captures, batch);
+    if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        root.session.loading_replay = previous_loading_replay;
+    }
+}
+
+/// Keep direct test callers synchronous; production load and reconnect paths
+/// use [`schedule_descendant_state_restore`] instead.
+#[cfg(test)]
 pub(crate) fn restore_descendant_state(
     app: &mut crate::app::root::AppView,
     root_agent_id: crate::app::session::AgentId,
     ownership: Option<DescendantOwnership>,
 ) {
-    let _timer = shell::instrumentation_timer!("pager.replay.descendants");
-    use shell::extensions::notification::SessionUpdate;
-
     let Some(root) = app.agents.get(&root_agent_id) else {
         return;
     };
-    let grow_home = effective_grow_home();
-    let Some(root_session_id) = root.session.session_id.as_ref().map(|id| id.0.to_string()) else {
+    let Some(session_id) = root.session.session_id.as_ref() else {
         return;
     };
-    let replayed_direct_children = root
+    let session_id = session_id.0.to_string();
+    let direct_children = root
         .session
         .subagent_sessions
         .keys()
         .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    // A verified empty frontier is useful; absence/foreign metadata is not
-    // evidence of an empty tree. Keep the independent validated fallback.
-    let root_spawns = ownership
-        .filter(|ownership| ownership.belongs_to(&root_session_id))
-        .or_else(|| {
-            match shell::session::storage::load_descendant_ownership_at(
-                &root_session_id,
-                &grow_home,
-            ) {
-                Ok(ownership) => ownership,
-                Err(error) => {
-                    tracing::debug!(
-                        session_id = root_session_id,
-                        ?error,
-                        "failed to read root ownership"
-                    );
-                    None
-                }
-            }
-        })
-        .map(DescendantOwnership::into_spawns)
-        .unwrap_or_default();
-    let mut queue = std::collections::VecDeque::new();
-    let mut visited = std::collections::HashSet::new();
+        .collect::<Vec<_>>();
     let previous_loading_replay = root.session.loading_replay;
+    let batch = read_descendant_replay_batch(
+        &session_id,
+        &direct_children,
+        ownership,
+        &effective_grow_home(),
+    );
     if let Some(root) = app.agents.get_mut(&root_agent_id) {
-        for (child_session_id, spawn) in &root_spawns {
-            if replayed_direct_children.contains(child_session_id) {
-                enrich_projected_subagent(root, child_session_id, spawn);
-                queue.push_back((
-                    child_session_id.clone(),
-                    root_session_id.clone(),
-                    spawn.clone(),
-                ));
-            }
-        }
-        // Reuse the lifecycle projection's restoration semantics: spawn does
-        // not eagerly replay a whole child transcript and finish does not add
-        // a second live footer. The descendant-specific handler bypasses the
-        // network "unexpected replay" gate while retaining source-local
-        // highwaters.
         root.session.loading_replay = true;
     }
+    apply_descendant_replay_batch(app, root_agent_id, &[], batch);
+    if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        root.session.loading_replay = previous_loading_replay;
+    }
+}
 
-    while let Some((parent_session_id, owner_session_id, owner_spawn)) = queue.pop_front() {
-        if !visited.insert(parent_session_id.clone()) {
+pub(crate) fn apply_descendant_replay_batch(
+    app: &mut crate::app::root::AppView,
+    root_agent_id: crate::app::session::AgentId,
+    child_control_captures: &[DescendantControlCapture],
+    batch: DescendantReplayBatch,
+) {
+    use shell::extensions::notification::SessionUpdate;
+    let replayed_direct_children = batch
+        .replayed_direct_children
+        .iter()
+        .filter(|child| batch.root_spawns.contains_key(*child))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        for (child_session_id, spawn) in &batch.root_spawns {
+            if replayed_direct_children.contains(child_session_id) {
+                enrich_projected_subagent(root, child_session_id, spawn);
+            }
+        }
+    }
+    for child_session_id in &replayed_direct_children {
+        let missing_view = app
+            .agents
+            .get(&root_agent_id)
+            .is_some_and(|root| !root.subagent_views.contains_key(child_session_id));
+        let Some(spawn) = batch.root_spawns.get(child_session_id) else {
+            continue;
+        };
+        if missing_view {
+            apply_projected_root_spawn(app, root_agent_id, spawn);
+            if let Some(root) = app.agents.get_mut(&root_agent_id) {
+                enrich_projected_subagent(root, child_session_id, spawn);
+            }
+        }
+    }
+    let captured_direct_children = batch.replayed_direct_children;
+    for node in batch.nodes {
+        let parent_is_current = app.agents.get(&root_agent_id).is_some_and(|root| {
+            if captured_direct_children.contains(&node.parent_session_id) {
+                replayed_direct_children.contains(&node.parent_session_id)
+            } else {
+                root.subagent_views.contains_key(&node.parent_session_id)
+            }
+        });
+        if !parent_is_current {
             continue;
         }
-        let (ownership, lifecycle) = match shell::session::storage::load_descendant_child_replay_at(
-            &parent_session_id,
-            &owner_session_id,
-            &owner_spawn,
-            &grow_home,
-        ) {
-            Ok(Some(snapshot)) => snapshot,
-            Ok(None) => continue,
-            Err(error) => {
-                tracing::debug!(
-                    session_id = parent_session_id,
-                    ?error,
-                    "failed to replay descendant lifecycle"
-                );
+        for mut notification in node.lifecycle {
+            if !should_apply_descendant_control(
+                app,
+                root_agent_id,
+                child_control_captures,
+                &notification,
+            ) {
                 continue;
             }
-        };
-        let durable_children = ownership.into_spawns();
-
-        for mut notification in lifecycle {
             let lifecycle_child = match &notification.update {
                 SessionUpdate::SubagentSpawned {
                     subagent_id,
@@ -455,11 +657,12 @@ pub(crate) fn restore_descendant_state(
                     parent_session_id: lifecycle_parent,
                     child_session_id,
                     ..
-                } => durable_children
+                } => node
+                    .durable_children
                     .get(child_session_id)
                     .filter(|spawn| {
-                        notification.session_id.0.as_ref() == parent_session_id
-                            && lifecycle_parent == &parent_session_id
+                        notification.session_id.0.as_ref() == node.parent_session_id
+                            && lifecycle_parent == &node.parent_session_id
                             && subagent_id == &spawn.spawn.subagent_id
                     })
                     .map(|_| child_session_id.clone()),
@@ -467,10 +670,11 @@ pub(crate) fn restore_descendant_state(
                     subagent_id,
                     child_session_id,
                     ..
-                } => durable_children
+                } => node
+                    .durable_children
                     .get(child_session_id)
                     .filter(|spawn| {
-                        notification.session_id.0.as_ref() == parent_session_id
+                        notification.session_id.0.as_ref() == node.parent_session_id
                             && subagent_id == &spawn.spawn.subagent_id
                     })
                     .map(|_| child_session_id.clone()),
@@ -490,7 +694,7 @@ pub(crate) fn restore_descendant_state(
                     .then(|| lifecycle_child.clone())
                     .flatten();
             notification.session_id =
-                agent_client_protocol::schema::v1::SessionId::new(parent_session_id.clone());
+                agent_client_protocol::schema::v1::SessionId::new(node.parent_session_id.clone());
             let mut meta = notification
                 .meta
                 .take()
@@ -507,18 +711,112 @@ pub(crate) fn restore_descendant_state(
             );
             crate::app::acp_handler::handle_descendant_state_replay(&ext, app, root_agent_id);
             if let Some(child) = discovered_child
-                && let Some(spawn) = durable_children.get(&child)
+                && let Some(spawn) = node.durable_children.get(&child)
+                && let Some(root) = app.agents.get_mut(&root_agent_id)
             {
-                if let Some(root) = app.agents.get_mut(&root_agent_id) {
-                    enrich_projected_subagent(root, &child, &spawn);
-                }
-                queue.push_back((child, parent_session_id.clone(), spawn.clone()));
+                enrich_projected_subagent(root, &child, spawn);
             }
         }
     }
-    if let Some(root) = app.agents.get_mut(&root_agent_id) {
-        root.session.loading_replay = previous_loading_replay;
-        root.session.replay_live_cursor_seen = false;
+}
+
+fn apply_projected_root_spawn(
+    app: &mut crate::app::root::AppView,
+    owner_agent_id: crate::app::session::AgentId,
+    spawn: &ChildReplaySpawn,
+) {
+    use shell::extensions::notification::{SessionNotification, SessionUpdate};
+
+    let event = &spawn.spawn;
+    let effective_context_source = match event.context_source {
+        chat_state::SubagentContextSource::New => "new",
+        chat_state::SubagentContextSource::Forked => "forked",
+        chat_state::SubagentContextSource::Resumed => "resumed",
+    };
+    let update = SessionNotification {
+        session_id: agent_client_protocol::schema::v1::SessionId::new(
+            event.security_parent_session_id.clone(),
+        ),
+        update: SessionUpdate::SubagentSpawned {
+            subagent_id: event.subagent_id.clone(),
+            parent_session_id: event.security_parent_session_id.clone(),
+            parent_prompt_id: event.parent_prompt_id.clone(),
+            child_session_id: event.child_session_id.clone(),
+            subagent_type: event.subagent_type.clone(),
+            description: event.description.clone(),
+            effective_context_source: Some(effective_context_source.to_owned()),
+            context_normalized: event.context_normalized,
+            capability_mode: event.capability_mode.clone(),
+            permission_mode: event.permission_mode.clone(),
+            effective_permission_mode: event.effective_permission_mode.clone(),
+            model: Some(event.effective_model_id.clone()),
+            reasoning_effort: event
+                .reasoning_effort
+                .as_ref()
+                .map(ToString::to_string),
+            model_state: None,
+            workflow_agent_names: None,
+            resumed_from: event.resumed_from.clone(),
+            workflow_run_id: event.workflow_run_id.clone(),
+            goal_id: event.goal_id.clone(),
+        },
+        meta: Some(serde_json::json!({"isReplay": true})),
+    };
+    let Ok(raw) = serde_json::value::to_raw_value(&update) else {
+        return;
+    };
+    let ext = agent_client_protocol::schema::v1::ExtNotification::new(
+        "grow/session_notification",
+        std::sync::Arc::from(raw),
+    );
+    crate::app::acp_handler::handle_descendant_state_replay(&ext, app, owner_agent_id);
+}
+
+/// Do not let an older captured child control overwrite a live update received
+/// while its disk snapshot was being read.
+fn should_apply_descendant_control(
+    app: &crate::app::root::AppView,
+    root_agent_id: crate::app::session::AgentId,
+    captures: &[DescendantControlCapture],
+    notification: &shell::extensions::notification::SessionNotification,
+) -> bool {
+    use shell::extensions::notification::SessionUpdate;
+    let (is_agent, captured_generation) = match &notification.update {
+        SessionUpdate::ModelChanged { .. } => (
+            false,
+            captures
+                .iter()
+                .find(|capture| capture.child_session_id == notification.session_id.0.as_ref())
+                .map(|capture| (capture.binding_epoch, capture.model_generation)),
+        ),
+        SessionUpdate::AgentChanged { .. } => (
+            true,
+            captures
+                .iter()
+                .find(|capture| capture.child_session_id == notification.session_id.0.as_ref())
+                .map(|capture| (capture.binding_epoch, capture.agent_generation)),
+        ),
+        _ => return true,
+    };
+    let Some(child) = app
+        .agents
+        .get(&root_agent_id)
+        .and_then(|root| root.subagent_views.get(notification.session_id.0.as_ref()))
+    else {
+        return true;
+    };
+    let generation = if is_agent {
+        child.descendant_agent_control_generation
+    } else {
+        child.descendant_model_control_generation
+    };
+    match captured_generation {
+        Some((binding_epoch, captured)) => {
+            child.session_binding_epoch == binding_epoch
+                && captured == 0
+                && generation == captured
+        }
+        None => generation == 0,
     }
 }
 /// True when the child scrollback has no substantive replay content yet.

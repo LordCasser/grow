@@ -57,9 +57,10 @@ impl SessionActor {
             },
         };
         let _control_gate = self.step_control_gate.lock().await;
+        let (sender, operation, _, _) = source.agent_message().expect("agent message source");
         let receipts = self
             .chat_state_handle
-            .parent_message_receipts()
+            .agent_message_receipts(sender, operation)
             .await
             .ok_or_else(|| {
                 AgentMessageDeliveryError::unconfirmed(
@@ -168,7 +169,7 @@ impl SessionActor {
             let _artifact_guard = self.notification_artifact_gate.lock().await;
             let Some(retained_hashes) = self
                 .chat_state_handle
-                .retained_notification_payload_hashes()
+                .retained_notification_payload_candidates(hashes.clone())
                 .await
             else {
                 tracing::warn!(
@@ -233,7 +234,9 @@ impl SessionActor {
         }
         let Some(retained_hashes) = self
             .chat_state_handle
-            .retained_notification_payload_hashes()
+            .retained_notification_payload_candidates(
+                candidates.iter().map(|payload| payload.blake3.clone()).collect(),
+            )
             .await
         else {
             tracing::warn!("notification payload cleanup skipped because Timeline is unavailable");
@@ -1213,7 +1216,7 @@ impl SessionActor {
         // Resume checkpoints are context for the next real turn, not a reason
         // to spend a model turn. If a terminal receipt is also present, fold
         // the checkpoint context into that already-necessary turn.
-        if !notifications.iter().any(Self::notification_autostarts) {
+        if !notifications.iter().any(|receipt| self.notification_autostarts(receipt)) {
             return;
         }
 
@@ -1419,12 +1422,22 @@ impl SessionActor {
         (notification_ids, blocks)
     }
 
-    fn notification_autostarts(notification: &chat_state::PendingNotification) -> bool {
-        !matches!(
-            notification.source,
-            chat_state::NotificationSource::TaskStillRunning { .. }
-                | chat_state::NotificationSource::InquiryAnswered { .. }
-        )
+    pub(super) fn consultation_autostart_allowed(&self) -> bool {
+        !self.goal_provider_admission_closed()
+            && matches!(
+                self.goal_tracker.lock().status(),
+                None | Some(crate::session::goal_tracker::GoalStatus::Complete)
+            )
+    }
+
+    fn notification_autostarts(&self, notification: &chat_state::PendingNotification) -> bool {
+        match notification.source {
+            chat_state::NotificationSource::TaskStillRunning { .. } => false,
+            chat_state::NotificationSource::InquiryAnswered { continue_if_idle, .. } => {
+                continue_if_idle && self.consultation_autostart_allowed()
+            }
+            _ => true,
+        }
     }
 
     /// Repeated graceful exits can checkpoint the same still-running task
@@ -3759,6 +3772,7 @@ mod tests {
                 chat_state::NotificationSource::InquiryAnswered {
                     source_session_id: "asking-session".into(),
                     inquiry_id: id.into(),
+                    continue_if_idle: false,
                 },
                 chat_state::NotificationSourceVersion::Opaque {
                     value: format!("terminal-{id}"),

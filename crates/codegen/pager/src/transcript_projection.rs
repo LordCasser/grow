@@ -7,6 +7,7 @@ use crate::acp::meta::NotificationMeta;
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
 use crate::scrollback::blocks::{
     BgTaskBlock, NoticeCategory, NoticeTone, SessionEvent, SubagentBlock, SubagentPermissionEvent,
     WorkflowBlock, WorkflowBlockPhase, WorkflowBlockStatus,
@@ -172,6 +173,11 @@ impl TranscriptProjection {
     /// annotated as incomplete at its captured boundary.
     pub fn finish_snapshot(&mut self) {
         self.settle_image_recovery_operations(None, "Image recovery incomplete at snapshot");
+    }
+
+    pub(crate) fn finish_display_page(&mut self) {
+        self.tracker.finish_transcript_turn(&mut self.scrollback);
+        self.scrollback.finish_all_running();
     }
 
     pub fn behavior_label(&self) -> Option<String> {
@@ -423,6 +429,32 @@ impl TranscriptProjection {
             self.surfaces.apply(&update);
         }
         match update {
+            GrowUpdate::ToolOutputFragment(fragment) => {
+                let end = fragment.byte_start + fragment.json.len() as u64;
+                let older = if fragment.byte_start == 0 {
+                    "earliest"
+                } else {
+                    "older bytes available"
+                };
+                let summary = format!(
+                    "{} · {:?} · {:?} · bytes {}–{}/{} · {older}",
+                    fragment.title,
+                    fragment.kind,
+                    fragment.status,
+                    fragment.byte_start,
+                    end,
+                    fragment.total_bytes,
+                );
+                let output = format!(
+                    "Tool {} · source {} · JSON digest {}\n{}",
+                    fragment.tool_call_id, fragment.source_position, fragment.digest, fragment.json,
+                );
+                self.scrollback
+                    .push_block(RenderBlock::ToolCall(ToolCallBlock::Other(
+                        OtherToolCallBlock::new("Historical Tool output", summary)
+                            .with_output(output),
+                    )));
+            }
             GrowUpdate::ControlStateUpdate(update) => {
                 use shell::extensions::notification::ControlPhase;
                 if update.current.domain() != update.domain

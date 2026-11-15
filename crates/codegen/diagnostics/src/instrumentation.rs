@@ -550,6 +550,13 @@ impl InstrumentationTimer {
         Self::new_with_mode(name, mode())
     }
 
+    /// Measure from a point before the tracing subscriber was installed.
+    pub fn since(name: &'static str, start: Instant) -> Self {
+        let mut timer = Self::new(name);
+        timer.start = start;
+        timer
+    }
+
     fn new_with_mode(name: &'static str, mode: InstrumentationMode) -> Self {
         let span_guard = (mode == InstrumentationMode::Chrome).then(|| {
             tracing::info_span!(target: TARGET, "instrumentation.timer", name = %name).entered()

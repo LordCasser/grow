@@ -16,70 +16,57 @@ impl SessionActor {
         }
     }
 
-    async fn runtime_delegation_events(&self) -> Result<Vec<chat_state::TimelineEvent>, String> {
-        let runtime = self.chat_state_handle.runtime_state().await?;
-        let root_id = runtime
-            .root_session_id
-            .unwrap_or_else(|| self.session_id_string());
+    async fn runtime_delegation_operation(
+        &self,
+        root_id: &str,
+        task_id: &str,
+    ) -> Result<Option<chat_state::timeline::SubagentOperation>, String> {
         if root_id == self.session_id_string() {
-            return self
-                .chat_state_handle
-                .timeline_events()
-                .await
-                .ok_or("root Timeline unavailable".into());
+            return self.chat_state_handle.subagent_operation(task_id.to_owned()).await;
         }
+        if let Some((owner, handle)) = &self.tool_context.subagent_lifecycle_root
+            && owner == root_id
+            && !handle.is_closed()
+        {
+            return handle.subagent_operation(task_id.to_owned()).await;
+        }
+        let root_id = root_id.to_owned();
+        let task_id = task_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
-            let opened = storage
-                .open_session_by_id(&root_id)
+            let opened = storage.open_session_by_id(&root_id)
                 .map_err(|error| error.to_string())?
                 .ok_or("original lifecycle root is missing")?;
-            Ok(opened
-                .validated_timeline(&root_id)
+            opened.validated_timeline(&root_id)
                 .map_err(|error| error.to_string())?
                 .timeline
-                .events()
-                .to_vec())
+                .subagent_operation(&task_id)
+                .map_err(|error| error.to_string())
         })
         .await
         .map_err(|error| error.to_string())?
     }
 
-    async fn restored_child_planning_summary(
+    async fn restored_terminal_child_summary(
         &self,
+        root_id: &str,
+        spawn_seq: chat_state::EventSeq,
         spawn: &chat_state::SubagentSpawnEvent,
-        task_id: &str,
-    ) -> Result<Option<tool_types::planning::SubagentPlanningSummary>, String> {
-        // The original snapshot identifies the child to await, but its Ended
-        // fact can be committed only after the restored child finishes.
-        let root_events = self.runtime_delegation_events().await?;
-        let root = chat_state::Timeline::from_events(root_events.clone())
-            .map_err(|error| format!("invalid lifecycle-root Timeline: {error}"))?;
-        let terminal = root
-            .events()
-            .iter()
-            .find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(end))
-                    if end.subagent_id == task_id
-                        && end.child_session_id == spawn.child_session_id =>
-                {
-                    Some(end.clone())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| "completed child has no durable root terminal".to_string())?;
-        let result_ref = terminal.result_ref.as_ref().ok_or_else(|| {
-            "completed child terminal has no canonical result reference".to_string()
-        })?;
-        crate::agent::subagent::validate_planning_result_reference_in_events(
-            &spawn.security_parent_session_id,
-            task_id,
-            &spawn.child_session_id,
-            result_ref,
-            &root_events,
-        )
-        .await?;
-        crate::agent::subagent::durable_child_planning_summary(spawn, &terminal)
+    ) -> Result<Option<tool_types::planning::SubagentPlanningSummary>, acp::Error> {
+        use crate::agent::subagent::{DurableChildOperation, durable_child_operation_from_validated_facts};
+        let (_, _, terminal) = self.runtime_delegation_operation(root_id, &spawn.subagent_id)
+            .await
+            .map_err(|error| acp::Error::internal_error().data(error))?
+            .filter(|(seq, current, _)| *seq == spawn_seq && current == spawn)
+            .ok_or_else(|| acp::Error::internal_error().data("original child spawn is unavailable"))?;
+        let terminal = terminal.filter(|terminal| terminal.result_ref.is_some())
+            .ok_or_else(|| acp::Error::internal_error().data("original child has no canonical terminal result"))?;
+        let DurableChildOperation::Completed(result) = durable_child_operation_from_validated_facts(
+            root_id, &spawn.subagent_id, spawn_seq, spawn, Some(&terminal),
+        ).map_err(|error| acp::Error::internal_error().data(error))? else {
+            unreachable!("a verified terminal has a durable result")
+        };
+        Ok(result.planning_summary)
     }
 
     fn add_restored_planning_summary(
@@ -168,29 +155,20 @@ impl SessionActor {
             let result_already_present = surface.iter().any(|item| {
                 matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == operation.call_id)
             });
-            let events = self
-                .runtime_delegation_events()
+            let root_id = self.chat_state_handle.runtime_state().await
+                .map_err(|error| acp::Error::internal_error().data(error))?
+                .root_session_id
+                .unwrap_or_else(|| self.session_id_string());
+            let (spawn_seq, spawn, initial_terminal) = self
+                .runtime_delegation_operation(&root_id, &task_id)
                 .await
-                .map_err(|error| acp::Error::internal_error().data(error))?;
-            let (spawn_seq, spawn) = events
-                .iter()
-                .find_map(|event| match &event.kind {
-                    chat_state::TimelineEventKind::Subagent(
-                        chat_state::SubagentEvent::Spawned(spawn),
-                    ) if spawn.subagent_id == task_id
-                        && spawn.origin_tool_call_id.as_deref()
-                            == Some(operation.call_id.as_str())
-                        && spawn.security_parent_session_id == self.session_id_string() =>
-                    {
-                        Some((event.seq, spawn))
-                    }
-                    _ => None,
+                .map_err(|error| acp::Error::internal_error().data(error))?
+                .filter(|(_, spawn, _)| {
+                    spawn.origin_tool_call_id.as_deref() == Some(operation.call_id.as_str())
+                        && spawn.security_parent_session_id == self.session_id_string()
                 })
-                .ok_or_else(|| {
-                    acp::Error::internal_error()
-                        .data("original child spawn identity is unavailable")
-                })?;
-            let spawn = spawn.clone();
+                .ok_or_else(|| acp::Error::internal_error()
+                    .data("original child spawn identity is unavailable"))?;
             let recipe = tools::implementations::grow_build::task::types::SubagentExecutionRecipe::from_value(&spawn.execution_recipe)
                 .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
             if result_already_present && recipe.run_in_background {
@@ -223,46 +201,17 @@ impl SessionActor {
                     ),
                 }
             } else {
-                let root_id = self
-                    .chat_state_handle
-                    .runtime_state()
-                    .await
-                    .map_err(|error| acp::Error::internal_error().data(error))?
-                    .root_session_id
-                    .unwrap_or_else(|| self.session_id_string());
-                let canonical_events = self
-                    .runtime_delegation_events()
-                    .await
-                    .map_err(|error| acp::Error::internal_error().data(error))?;
-                if result_already_present
-                    && matches!(
-                        crate::agent::subagent::durable_child_operation_in_events(
-                            &root_id,
-                            &task_id,
-                            canonical_events.clone(),
-                        )
-                        .map_err(|error| acp::Error::internal_error().data(error))?,
-                        crate::agent::subagent::DurableChildOperation::Completed(_)
-                    )
-                    && let Some(terminal) =
-                        canonical_events.iter().find_map(|event| match &event.kind {
-                            chat_state::TimelineEventKind::Subagent(
-                                chat_state::SubagentEvent::Ended(terminal),
-                            ) if terminal.subagent_id == task_id
-                                && terminal.child_session_id == spawn.child_session_id =>
-                            {
-                                Some(terminal.clone())
-                            }
-                            _ => None,
-                        })
-                {
-                    self.settle_restored_child_completion_receipt(
-                        &root_id, spawn_seq, &spawn, &terminal,
-                    )
-                    .await
-                    .map_err(|error| acp::Error::internal_error().data(error))?;
-                }
                 if result_already_present {
+                    if let Some(terminal) = &initial_terminal {
+                        crate::agent::subagent::durable_child_operation_from_validated_facts(
+                            &root_id, &task_id, spawn_seq, &spawn, Some(terminal),
+                        ).map_err(|error| acp::Error::internal_error().data(error))?;
+                        self.settle_restored_child_completion_receipt(
+                            &root_id, spawn_seq, &spawn, terminal,
+                        )
+                        .await
+                        .map_err(|error| acp::Error::internal_error().data(error))?;
+                    }
                     continue;
                 }
                 let backend = self.tool_bridge_handle()
@@ -272,18 +221,21 @@ impl SessionActor {
                 // An ended child is deliberately not adopted into a fresh
                 // coordinator. Its canonical result still satisfies the
                 // original wait, including completion during a partial restore.
-                let canonical_events = self.runtime_delegation_events().await
-                    .map_err(|error| acp::Error::internal_error().data(error))?;
-                let status = match crate::agent::subagent::durable_child_operation_in_events(
-                    &root_id,
-                    &task_id,
-                    canonical_events.clone(),
-                ).map_err(|error| acp::Error::internal_error().data(error))? {
+                let (current_seq, current_spawn, terminal) = self
+                    .runtime_delegation_operation(&root_id, &task_id)
+                    .await
+                    .map_err(|error| acp::Error::internal_error().data(error))?
+                    .filter(|(seq, current, _)| *seq == spawn_seq && current == &spawn)
+                    .ok_or_else(|| acp::Error::internal_error().data("original child spawn is unavailable"))?;
+                let durable = crate::agent::subagent::durable_child_operation_from_validated_facts(
+                    &root_id, &task_id, current_seq, &current_spawn, terminal.as_ref(),
+                ).map_err(|error| acp::Error::internal_error().data(error))?;
+                let (status, summary) = match durable {
                     crate::agent::subagent::DurableChildOperation::Completed(result) => {
                         if result.output_unavailable {
                             return Err(acp::Error::internal_error().data("original child output is unavailable"));
                         }
-                        if result.success {
+                        let status = if result.success {
                             SubagentSnapshotStatus::Completed {
                                 output: result.output.to_string(),
                                 tool_calls: result.tool_calls,
@@ -297,12 +249,13 @@ impl SessionActor {
                             SubagentSnapshotStatus::Failed {
                                 error: result.error.unwrap_or_else(|| "original child failed".into()),
                             }
-                        }
+                        };
+                        (status, result.planning_summary)
                     }
                     crate::agent::subagent::DurableChildOperation::Missing => {
                         return Err(acp::Error::internal_error().data("original child spawn is unavailable"));
                     }
-                    crate::agent::subagent::DurableChildOperation::Open => backend
+                    crate::agent::subagent::DurableChildOperation::Open => (backend
                     .backend()
                     .query(&task_id, true, Some(25_000))
                     .await
@@ -314,7 +267,7 @@ impl SessionActor {
                         acp::Error::internal_error().data(
                             "original child is absent; it will not be replaced by a new spawn",
                         )
-                    })?.status,
+                    })?.status, None),
                 };
                 match status {
                     SubagentSnapshotStatus::Completed {
@@ -324,31 +277,22 @@ impl SessionActor {
                         tokens_used,
                         worktree_path,
                     } => {
-                        if let Some(terminal) = canonical_events.iter().find_map(|event| {
-                            match &event.kind {
-                                chat_state::TimelineEventKind::Subagent(
-                                    chat_state::SubagentEvent::Ended(terminal),
-                                ) if terminal.subagent_id == task_id
-                                    && terminal.child_session_id == spawn.child_session_id =>
-                                {
-                                    Some(terminal.clone())
-                                }
-                                _ => None,
-                            }
-                        }) {
+                        if let Some(terminal) = &terminal {
                             self.settle_restored_child_completion_receipt(
                                 &root_id,
                                 spawn_seq,
                                 &spawn,
-                                &terminal,
+                                terminal,
                             )
                             .await
                             .map_err(|error| acp::Error::internal_error().data(error))?;
                         }
-                        let summary = self
-                            .restored_child_planning_summary(&spawn, &task_id)
-                            .await
-                            .map_err(|error| acp::Error::internal_error().data(error))?;
+                        let summary = match terminal {
+                            Some(ref terminal) if terminal.result_ref.is_some() => summary,
+                            Some(_) => return Err(acp::Error::internal_error()
+                                .data("original child has no canonical terminal result")),
+                            None => self.restored_terminal_child_summary(&root_id, spawn_seq, &spawn).await?,
+                        };
                         break Self::add_restored_planning_summary(
                             json!({ "subagent_id": task_id, "status": "completed", "output": output, "tool_calls": tool_calls, "turns": turns, "tokens_used": tokens_used, "worktree_path": worktree_path }),
                             summary,
@@ -356,31 +300,22 @@ impl SessionActor {
                         .map_err(|error| acp::Error::internal_error().data(error))?;
                     }
                     SubagentSnapshotStatus::Failed { error } => {
-                        if let Some(terminal) = canonical_events.iter().find_map(|event| {
-                            match &event.kind {
-                                chat_state::TimelineEventKind::Subagent(
-                                    chat_state::SubagentEvent::Ended(terminal),
-                                ) if terminal.subagent_id == task_id
-                                    && terminal.child_session_id == spawn.child_session_id =>
-                                {
-                                    Some(terminal.clone())
-                                }
-                                _ => None,
-                            }
-                        }) {
+                        if let Some(terminal) = &terminal {
                             self.settle_restored_child_completion_receipt(
                                 &root_id,
                                 spawn_seq,
                                 &spawn,
-                                &terminal,
+                                terminal,
                             )
                             .await
                             .map_err(|error| acp::Error::internal_error().data(error))?;
                         }
-                        let summary = self
-                            .restored_child_planning_summary(&spawn, &task_id)
-                            .await
-                            .map_err(|error| acp::Error::internal_error().data(error))?;
+                        let summary = match terminal {
+                            Some(ref terminal) if terminal.result_ref.is_some() => summary,
+                            Some(_) => return Err(acp::Error::internal_error()
+                                .data("original child has no canonical terminal result")),
+                            None => self.restored_terminal_child_summary(&root_id, spawn_seq, &spawn).await?,
+                        };
                         break Self::add_restored_planning_summary(
                             json!({ "subagent_id": task_id, "status": "failed", "error": error }),
                             summary,
@@ -388,10 +323,12 @@ impl SessionActor {
                         .map_err(|error| acp::Error::internal_error().data(error))?;
                     }
                     SubagentSnapshotStatus::Cancelled { reason } => {
-                        let summary = self
-                            .restored_child_planning_summary(&spawn, &task_id)
-                            .await
-                            .map_err(|error| acp::Error::internal_error().data(error))?;
+                        let summary = match terminal {
+                            Some(ref terminal) if terminal.result_ref.is_some() => summary,
+                            Some(_) => return Err(acp::Error::internal_error()
+                                .data("original child has no canonical terminal result")),
+                            None => self.restored_terminal_child_summary(&root_id, spawn_seq, &spawn).await?,
+                        };
                         break Self::add_restored_planning_summary(
                             json!({ "subagent_id": task_id, "status": "cancelled", "reason": reason }),
                             summary,
@@ -874,6 +811,7 @@ impl SessionActor {
         deadline: Option<tokio::time::Instant>,
     ) -> Result<RuntimeNodeRef, String> {
         let started = std::time::Instant::now();
+        let _timer = crate::instrumentation_timer!("session.exit.suspend_node");
         tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "started", "session suspension progress");
         // Keep this owner alive even if a bounded caller stops waiting.
         // No checkpoint ACK is returned while a physical producer is unjoined.

@@ -2040,9 +2040,11 @@ pub(super) async fn run_session(
                     SessionCommand::RebuildAgentForDefinition { definition, intent, responds_to } => {
                         session.admit_agent_selection(definition, intent, responds_to).await;
                     }
-                    SessionCommand::PublishControlState { respond_to } => {
+                    SessionCommand::PublishControlState { replay_hooks, respond_to } => {
                         session.publish_control_state_snapshot().await;
-                        session.publish_completed_hook_projections().await;
+                        if replay_hooks {
+                            session.publish_completed_hook_projections().await;
+                        }
                         let _ = respond_to.send(());
                     }
                     SessionCommand::PublishCoordinationState { respond_to } => {
@@ -2910,7 +2912,7 @@ pub(super) async fn run_session(
                         session.send_available_commands_update().await;
                         // Reattach advertises current process state after replay;
                         // old transcript usage never restores this ledger.
-                        if let Ok(usage) = session.chat_state_handle.try_get_session_usage().await {
+                        if let Some(usage) = session.chat_state_handle.session_usage_summary().await {
                             session.emit_session_usage_update(&usage);
                         }
                     }

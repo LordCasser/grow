@@ -51,20 +51,46 @@ pub struct UsageTotals {
 /// Agent identity within one [`UsageLedger`]. The owning agent is the agent
 /// whose chat-state actor owns the ledger; folded children retain their
 /// externally stable subagent IDs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UsageAgent {
     Owner,
     Subagent(String),
 }
 
+/// Stable identity for one actor-incarnation usage segment. The initial run is
+/// intentionally distinct from every event sequence, including sequence zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "event_seq", rename_all = "snake_case")]
+pub enum UsageSegmentId {
+    Initial,
+    Resume(crate::EventSeq),
+}
+
+impl UsageSegmentId {
+    pub fn for_segment(segment: &UsageSegment) -> Self {
+        segment
+            .resume_event_seq
+            .map(Self::Resume)
+            .unwrap_or(Self::Initial)
+    }
+}
+
+/// A byte-bounded page of historical incarnation accounting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageSegmentPage {
+    pub segments: Vec<(UsageSegmentId, UsageSegment)>,
+    pub next_before: Option<UsageSegmentId>,
+}
+
 /// Usage accumulated during one actor incarnation. The first entry represents
 /// the initial run; each later entry starts at a durable cold-resume boundary.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageSegment {
     pub resume_event_seq: Option<crate::EventSeq>,
     pub started_at_ms: Option<i64>,
     pub totals: UsageTotals,
     pub by_model: IndexMap<String, UsageTotals>,
+    #[serde(with = "indexmap::map::serde_seq")]
     pub by_agent: IndexMap<UsageAgent, UsageTotals>,
     pub main_loop_model_calls: u64,
     pub incomplete: bool,
@@ -80,7 +106,7 @@ impl UsageSegment {
             .fold_totals(call);
     }
 
-    fn fold_auxiliary_call(&mut self, model_id: &str, call: &UsageTotals) {
+    pub(crate) fn fold_auxiliary_call(&mut self, model_id: &str, call: &UsageTotals) {
         self.fold_entry(model_id, call);
         self.by_agent
             .entry(UsageAgent::Owner)
@@ -114,6 +140,10 @@ impl UsageSegment {
             .entry(model_id.to_owned())
             .or_default()
             .fold_totals(totals);
+    }
+
+    pub(crate) fn mark_incomplete(&mut self) {
+        self.incomplete = true;
     }
 }
 
@@ -224,12 +254,13 @@ fn merge_cost_ticks(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageLedger {
     pub totals: UsageTotals,
     pub by_model: IndexMap<String, UsageTotals>,
     /// Known usage by agent. This remains internal accounting; current usage
     /// wire/UI projections intentionally expose only aggregate totals.
+    #[serde(with = "indexmap::map::serde_seq")]
     pub by_agent: IndexMap<UsageAgent, UsageTotals>,
     /// Initial actor run followed by cold-resume actor incarnations.
     pub segments: Vec<UsageSegment>,
@@ -271,10 +302,49 @@ impl UsageLedger {
         self.segments.len() - 1
     }
 
+    pub(crate) fn current_segment_id(&mut self) -> UsageSegmentId {
+        self.initialize_segment(None);
+        UsageSegmentId::for_segment(self.segments.last().expect("usage segment initialized"))
+    }
+
     pub(crate) fn mark_segment_incomplete(&mut self, index: usize) {
         self.incomplete = true;
         if let Some(segment) = self.segments.get_mut(index) {
             segment.incomplete = true;
+        }
+    }
+
+    /// Keep only bounded execution aggregates and the current incarnation in
+    /// a cold checkpoint. Historical segments are published separately.
+    pub(crate) fn compact_checkpoint(&mut self) {
+        if let Some(mut current) = self.segments.pop() {
+            current
+                .by_agent
+                .retain(|agent, _| matches!(agent, UsageAgent::Owner));
+            self.segments.clear();
+            self.segments.push(current);
+        } else {
+            self.segments.clear();
+        }
+        self.by_agent
+            .retain(|agent, _| matches!(agent, UsageAgent::Owner));
+    }
+
+    pub(crate) fn compact_historical_segments(
+        &mut self,
+        segments: Vec<(UsageSegmentId, UsageSegment)>,
+    ) {
+        let mut segments = segments;
+        segments.sort_by_key(|(id, _)| *id);
+        self.segments = segments.into_iter().map(|(_, segment)| segment).collect();
+        self.by_agent.clear();
+        for segment in &self.segments {
+            for (agent, totals) in &segment.by_agent {
+                self.by_agent
+                    .entry(agent.clone())
+                    .or_default()
+                    .fold_totals(totals);
+            }
         }
     }
 
@@ -334,6 +404,22 @@ impl UsageLedger {
             .or_default()
             .fold_totals(&call);
         self.segments[segment_index].fold_auxiliary_call(model_id, &call);
+    }
+
+    pub(crate) fn record_auxiliary_call_aggregate(
+        &mut self,
+        model_id: &str,
+        usage: &TokenUsage,
+        api_duration_ms: Option<u64>,
+        cost_usd_ticks: Option<i64>,
+    ) -> UsageTotals {
+        let call = UsageTotals::from_call(usage, api_duration_ms, cost_usd_ticks);
+        self.fold_entry(model_id, &call);
+        self.by_agent
+            .entry(UsageAgent::Owner)
+            .or_default()
+            .fold_totals(&call);
+        call
     }
 
     /// Fold subagent usage without incrementing `main_loop_model_calls`.
@@ -528,6 +614,68 @@ mod tests {
                 .map(|segment| segment.totals.total_tokens())
                 .sum::<u64>(),
             ledger.totals.total_tokens()
+        );
+    }
+
+    #[test]
+    fn compact_checkpoint_keeps_aggregates_and_only_the_live_segment() {
+        let mut ledger = UsageLedger::default();
+        ledger.record_main_loop_call("model", &tu(10, 2), None, None);
+        ledger.record_subagent(
+            "closed-child",
+            &[(
+                "child-model".into(),
+                UsageTotals {
+                    input_tokens: 7,
+                    ..Default::default()
+                },
+            )],
+            false,
+        );
+        ledger.begin_resume_segment(crate::EventSeq::new(0), 123);
+        ledger.record_main_loop_call("model", &tu(3, 1), None, None);
+        let totals = ledger.totals.clone();
+        let by_model = ledger.by_model.clone();
+
+        ledger.compact_checkpoint();
+
+        assert_eq!(ledger.totals, totals);
+        assert_eq!(ledger.by_model, by_model);
+        assert_eq!(ledger.segments.len(), 1);
+        assert_eq!(
+            ledger.segments[0].resume_event_seq,
+            Some(crate::EventSeq::new(0))
+        );
+        assert!(
+            !ledger.segments[0]
+                .by_agent
+                .contains_key(&UsageAgent::Subagent("closed-child".into()))
+        );
+        assert!(
+            !ledger
+                .by_agent
+                .contains_key(&UsageAgent::Subagent("closed-child".into()))
+        );
+
+        let restored = vec![
+            (
+                UsageSegmentId::Initial,
+                UsageSegment {
+                    started_at_ms: Some(1),
+                    ..Default::default()
+                },
+            ),
+            (
+                UsageSegmentId::Resume(crate::EventSeq::new(0)),
+                ledger.segments[0].clone(),
+            ),
+        ];
+        ledger.compact_historical_segments(restored);
+        assert_eq!(ledger.segments.len(), 2);
+        assert_eq!(ledger.segments[0].started_at_ms, Some(1));
+        assert_eq!(
+            ledger.segments[1].resume_event_seq,
+            Some(crate::EventSeq::new(0))
         );
     }
 

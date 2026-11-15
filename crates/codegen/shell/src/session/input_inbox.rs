@@ -558,28 +558,38 @@ pub(crate) fn validate_submitted_payloads(
         else {
             continue;
         };
-        // The manifest is the integrity boundary. Unavailable image bytes do
-        // not invalidate the Timeline or the already-consumed conversation.
-        let payload = read_manifest(session, payload_ref).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("input {input_id} payload is unavailable or invalid: {error}"),
-            )
-        })?;
-        if !payload_matches_intent(*intent, &payload) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("input {input_id} intent does not match its payload artifact"),
-            ));
-        }
-        let InputPayload::Prompt { prompt_blocks, .. } = payload;
-        for block in prompt_blocks {
-            if let StoredBlock::Image(reference) = block
-                && let Err(error) = read_image(session, &reference.input_image)
-            {
-                tracing::warn!(%input_id, image_hash = %reference.input_image.blake3, %error,
-                    "historical input attachment unavailable; pending input will be invalidated during recovery");
-            }
+        validate_submitted_payload(session, input_id, *intent, payload_ref)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_submitted_payload(
+    session: &crate::session::storage::ContainedDirectory,
+    input_id: &str,
+    intent: chat_state::InputIntent,
+    payload_ref: &chat_state::InputPayloadRef,
+) -> io::Result<()> {
+    // The manifest is the integrity boundary. Unavailable image bytes do
+    // not invalidate the Timeline or the already-consumed conversation.
+    let payload = read_manifest(session, payload_ref).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("input {input_id} payload is unavailable or invalid: {error}"),
+        )
+    })?;
+    if !payload_matches_intent(intent, &payload) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("input {input_id} intent does not match its payload artifact"),
+        ));
+    }
+    let InputPayload::Prompt { prompt_blocks, .. } = payload;
+    for block in prompt_blocks {
+        if let StoredBlock::Image(reference) = block
+            && let Err(error) = read_image(session, &reference.input_image)
+        {
+            tracing::warn!(%input_id, image_hash = %reference.input_image.blake3, %error,
+                "historical input attachment unavailable; pending input will be invalidated during recovery");
         }
     }
     Ok(())
@@ -618,6 +628,10 @@ fn valid_hash(hash: &str) -> bool {
         && hash
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub(crate) fn input_image_directory_exists(session: &crate::session::storage::ContainedDirectory) -> bool {
+    session.open_relative(Path::new(IMAGE_DIRECTORY), "input image directory", false).is_ok()
 }
 
 /// Called under input_artifact_gate after obtaining ALL Submitted hashes.

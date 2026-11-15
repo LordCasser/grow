@@ -1564,18 +1564,23 @@ async fn drain_successful_test_persistence(
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) {
     while let Some(message) = receiver.recv().await {
-        if let PersistenceMsg::AuxiliaryGrow {
-            delivery,
-            respond_to,
-            ..
-        } = message
-        {
-            if let Some(delivery) = delivery {
-                delivery.publish();
+        match message {
+            PersistenceMsg::AuxiliaryGrow {
+                delivery,
+                respond_to,
+                ..
+            } => {
+                if let Some(delivery) = delivery {
+                    delivery.publish();
+                }
+                if let Some(respond_to) = respond_to {
+                    let _ = respond_to.send(Ok(()));
+                }
             }
-            if let Some(respond_to) = respond_to {
-                let _ = respond_to.send(Ok(()));
+            PersistenceMsg::LoadWorkflowRunHistory { respond_to } => {
+                let _ = respond_to.send(Ok((Vec::new(), std::collections::HashMap::new())));
             }
+            _ => {}
         }
     }
 }

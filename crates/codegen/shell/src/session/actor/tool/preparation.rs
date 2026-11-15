@@ -238,9 +238,10 @@ impl SessionActor {
         if !restored_waiting_operation(continuation.as_ref(), call_id)? {
             return Ok(None);
         }
+        // The working cut retains open Tool starts and their Hook facts.
         let events = self
             .chat_state_handle
-            .timeline_events()
+            .resident_timeline_events()
             .await
             .ok_or_else(|| "cannot read Timeline for restored PreToolUse decision".to_owned())?;
         restored_pre_tool_decision_from_facts(
@@ -1193,9 +1194,9 @@ impl SessionActor {
             {
                 let authority_context = self
                     .chat_state_handle
-                    .materialize_timeline(self.session_info.id.to_string())
+                    .materialize_permission_context(self.session_info.id.to_string(), true)
                     .await
-                    .map(|materialized| materialized.permission_context)
+                    .map(|(_, context)| context)
                     .unwrap_or_default();
                 let turns = super::build_classifier_turns(
                     &authority_context,

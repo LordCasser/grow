@@ -301,7 +301,7 @@ impl AgentView {
     ) -> InputOutcome {
         self.handle_input_inner(ev, registry, false, effects)
     }
-    fn request_older_history_page(
+    pub(in crate::app) fn request_history_page(
         &mut self,
         effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
@@ -325,7 +325,9 @@ impl AgentView {
             request_id,
             cursor,
         });
-        self.show_toast("Loading older history…");
+        if !self.history_latest_pending {
+            self.show_toast("Loading older history…");
+        }
         InputOutcome::Changed
     }
     /// Enable prompt-focused conversation paging on a normal full-TUI agent surface.
@@ -483,7 +485,7 @@ impl AgentView {
                             .as_ref()
                             .is_some_and(|viewer| viewer.scrollback.scroll_info().0 == 0);
                         if at_top {
-                            self.request_older_history_page(effects)
+                            self.request_history_page(effects)
                         } else {
                             if let Some(viewer) = self.history_page_viewer.as_mut() {
                                 viewer.scrollback.page_up();
@@ -865,7 +867,7 @@ impl AgentView {
         {
             let (offset, _, _) = self.scrollback.scroll_info();
             if offset == 0 && self.history_page_cursor.is_some() {
-                return self.request_older_history_page(effects);
+                return self.request_history_page(effects);
             }
         }
         if !self.permission_queue.is_empty() && self.active_pane != AgentPane::Scrollback {

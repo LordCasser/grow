@@ -133,6 +133,20 @@ type PersistedModelSelection = (
     sampling_types::ModelImageInputKey,
 );
 
+pub(crate) fn is_model_change(event: &chat_state::TimelineEvent) -> bool {
+    matches!(&event.kind, chat_state::TimelineEventKind::Observation(observation)
+        if observation.scope == MODEL_CHANGE_SCOPE && observation.name == MODEL_CHANGE_NAME)
+}
+
+/// Read the latest route from a fold whose model chain has already been checked.
+pub(crate) fn current_model_selection(
+    events: &[chat_state::TimelineEvent],
+) -> io::Result<Option<PersistedModelSelection>> {
+    events.iter().rfind(|event| is_model_change(event)).map_or(Ok(None), |event| {
+        latest_model_selection(std::slice::from_ref(event))
+    })
+}
+
 /// The checkpoint frontier binds the actual destination of the saved task;
 /// later catalog observations are not permission to redirect its continuation.
 pub(crate) fn model_selection_at_frontier(
@@ -140,7 +154,7 @@ pub(crate) fn model_selection_at_frontier(
     frontier: chat_state::EventSeq,
 ) -> io::Result<Option<PersistedModelSelection>> {
     let end = events.partition_point(|event| event.seq <= frontier);
-    latest_model_selection(&events[..end])
+    current_model_selection(&events[..end])
 }
 
 /// Fold model selection facts into the latest durable selection.
@@ -470,6 +484,12 @@ pub enum PersistenceMsg {
         corrupt_sidecar_fingerprint:
             Option<crate::session::workflow::store::WorkflowManifestFingerprint>,
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
+    LoadWorkflowRunHistory {
+        respond_to: tokio::sync::oneshot::Sender<io::Result<(
+            Vec<crate::session::workflow::store::RestoredWorkflowRun>,
+            std::collections::HashMap<String, chat_state::WorkflowLifecycle>,
+        )>>,
     },
     DeleteWorkflowRunState(String),
     /// Persist updated HEAD commit and branch to summary.
@@ -967,6 +987,9 @@ pub(crate) fn verify_timeline_prompt_blobs_from_directory(
 ) -> io::Result<usize> {
     crate::session::sampling_evidence::verify(session, timeline)?;
     let mut hashes = BTreeSet::new();
+    if timeline.has_surface_checkpoint() {
+        hashes.extend(referenced_prompt_blob_hashes(timeline.surface())?);
+    }
     for event in timeline.events() {
         if let chat_state::TimelineEventKind::Messages(messages) = &event.kind {
             hashes.extend(referenced_prompt_blob_hashes(&messages.items)?);
@@ -2681,6 +2704,10 @@ impl SessionPersistence {
                     }
                     let _ = respond_to.send(result);
                 }
+                PersistenceMsg::LoadWorkflowRunHistory { respond_to } => {
+                    let result = self.storage.load_workflow_run_history(&self.info).await;
+                    let _ = respond_to.send(result);
+                }
                 PersistenceMsg::DeleteWorkflowRunState(run_id) => {
                     if let Err(e) = self
                         .storage
@@ -3045,7 +3072,7 @@ pub(crate) async fn load_light_for_replay(
     // actor, so its replay load remains observational and must not contend with
     // that actor's lease.
     let persisted = if claim_writer && indexed_history {
-        storage.load_session_for_write_with_indexed_history(info).await?
+        storage.resume_session_with_indexed_history(info).await?
     } else if claim_writer {
         storage.load_session_for_write_without_updates(info).await?
     } else {

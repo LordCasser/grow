@@ -113,3 +113,11 @@ Workflow 测试的已记录 Unix 用户发现污染已闭合：共享 sandbox �
 ## 2026-11-12 子任务观察与 Tasks 恢复审查
 
 四项 P2 已修复。触发条件见[原审查](changes/archive/2026-11-12-wake-on-any-subagent-result/audit.md)，实现范围与测试见[修复验证](changes/archive/2026-11-12-close-observation-and-resume-gaps/verification.md)。
+
+## 2026-11-14 SkillLoad 结算审查
+
+- 同一 Surface 同时带有已消费和未消费的 SkillLoad 时，`rebuild_skill_settlement_branch` 会移除变更前所有 SkillLoad 的来源叶子。保留在替换项中的已消费 SkillLoad 随后可能按替换坐标再次判为未消费。另立 change 验证密集回放和现场快照的一致修复，并检查压缩是否仍保护真正未消费的加载。
+
+## 2026-11-15 恢复分支投影审查
+
+- 已发生 rewind 或图片投影的会话仍通过完整分支校验恢复。给这两类会话建立可执行快照需要验证 rewind 后保留的原始响应、展示位置和重新分配的 prompt 坐标，以及图片原始来源与投影脱敏关系。验收应固定选中分支、模型 Surface 与尾部，仅增加已闭合事实，并分别覆盖转换事实和分支发布之间的进程崩溃。

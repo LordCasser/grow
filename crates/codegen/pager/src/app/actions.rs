@@ -1317,6 +1317,18 @@ pub enum Effect {
         session_id: String,
         session_cwd: Option<std::path::PathBuf>,
     },
+    /// Read descendant lifecycle/history off the reducer path after the root
+    /// session is ready.
+    RestoreDescendantState {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        root_child_session_ids: Vec<String>,
+        child_control_captures: Vec<crate::app::subagent::DescendantControlCapture>,
+        ownership: Option<shell::session::storage::DescendantOwnership>,
+        grow_home: std::path::PathBuf,
+    },
     /// Read an older display page for the observational history viewer.
     ReadHistoryPage {
         agent_id: AgentId,
@@ -2310,6 +2322,15 @@ pub enum TaskResult {
         descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
         /// Opaque branch/cut-bound continuation for the older display page.
         older_history_cursor: Option<String>,
+        latest_history_cursor: Option<String>,
+    },
+    DescendantStateRestored {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        child_control_captures: Vec<crate::app::subagent::DescendantControlCapture>,
+        batch: crate::app::subagent::DescendantReplayBatch,
     },
     /// An observational older page was read independently from live delivery.
     HistoryPageLoaded {

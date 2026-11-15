@@ -632,6 +632,7 @@ pub(super) fn dispatch_rewind_success(
     // cannot reopen history from the discarded branch.
     if response.mode.as_deref() != Some("files_only") {
         agent.history_page_cursor = None;
+        agent.history_latest_pending = false;
         agent.history_page_request = None;
         agent.history_page_viewer = None;
     }

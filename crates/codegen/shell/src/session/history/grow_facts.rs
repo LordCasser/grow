@@ -591,6 +591,7 @@ impl TryFrom<SessionUpdate> for GrowHistoryFact {
                 usage,
             },
             SessionUpdate::SamplingAttempt { .. }
+            | SessionUpdate::ToolOutputFragment(_)
             | SessionUpdate::HookExecution { .. }
             | SessionUpdate::ScheduledTaskFired { .. }
             | SessionUpdate::MonitorEvent { .. }

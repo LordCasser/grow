@@ -66,6 +66,18 @@ pub(crate) struct TerminalState {
     /// Do NOT re-resolve via `theme::cache::resolve_initial_theme()` here:
     /// its OSC 11 fallback reads stdin and competes with the input reader.
     pub initial_theme: ThemeKind,
+    pub startup_start: std::time::Instant,
+    pub config_load: Duration,
+    pub pre_session_setup: Duration,
+    pub launch_policy_setup: Duration,
+    pub session_selection: Duration,
+    pub session_title_lookup: Duration,
+    pub connection_flags_setup: Duration,
+    pub terminal_policy_setup: Duration,
+    pub terminal_resources: Duration,
+    pub terminal_setup: Duration,
+    pub terminal_query: Duration,
+    pub agent_connect: Duration,
 }
 
 /// Result of the event loop run.
@@ -848,6 +860,66 @@ pub(crate) async fn run(
         unsafe { std::env::set_var("GROW_LOG_SAMPLING", "1") };
     }
     let tracing_handle = crate::tracing::init_tracing();
+    {
+        let mut timer = diagnostics::instrumentation::InstrumentationTimer::since(
+            "pager.startup.pre_event_loop",
+            term_state.startup_start,
+        );
+        timer
+            .with_field("config_load_us", term_state.config_load.as_micros() as u64)
+            .with_field(
+                "pre_session_setup_us",
+                term_state.pre_session_setup.as_micros() as u64,
+            )
+            .with_field(
+                "launch_policy_setup_us",
+                term_state.launch_policy_setup.as_micros() as u64,
+            )
+            .with_field(
+                "session_selection_us",
+                term_state.session_selection.as_micros() as u64,
+            )
+            .with_field(
+                "session_title_lookup_us",
+                term_state.session_title_lookup.as_micros() as u64,
+            )
+            .with_field(
+                "connection_flags_setup_us",
+                term_state.connection_flags_setup.as_micros() as u64,
+            )
+            .with_field(
+                "terminal_policy_setup_us",
+                term_state.terminal_policy_setup.as_micros() as u64,
+            )
+            .with_field(
+                "terminal_resources_us",
+                term_state.terminal_resources.as_micros() as u64,
+            )
+            .with_field(
+                "terminal_setup_excluding_query_us",
+                term_state
+                    .terminal_setup
+                    .saturating_sub(term_state.terminal_query)
+                    .as_micros() as u64,
+            )
+            .with_field(
+                "terminal_query_us",
+                term_state.terminal_query.as_micros() as u64,
+            )
+            .with_field(
+                "agent_connect_us",
+                term_state.agent_connect.as_micros() as u64,
+            );
+        if let Some(timings) = &connection.embedded_timings {
+            timer
+                .with_field("embedded_config_us", timings.config.as_micros() as u64)
+                .with_field("embedded_spawn_us", timings.spawn.as_micros() as u64)
+                .with_field(
+                    "embedded_initialize_us",
+                    timings.initialize.as_micros() as u64,
+                );
+        }
+    }
 
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
@@ -2390,8 +2462,12 @@ pub(crate) async fn run(
                         // Root replay only contains direct-child birth facts;
                         // restore every descendant's later model/effort/Agent
                         // controls before reconciling local pending controls.
-                        crate::app::subagent::restore_descendant_state(
-                            &mut app, *id, load.and_then(|load| load.descendant_ownership),
+                        reconnect_effects.extend(
+                            crate::app::subagent::schedule_descendant_state_restore(
+                                &mut app,
+                                *id,
+                                load.and_then(|load| load.descendant_ownership),
+                            ),
                         );
                         if let Some(agent) = app.agents.get_mut(id) {
                             reconnect_effects.extend(

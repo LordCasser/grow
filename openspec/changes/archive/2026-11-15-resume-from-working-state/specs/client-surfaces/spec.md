@@ -64,8 +64,29 @@ Session load MAY reuse root child-ownership facts already validated for the same
 - **THEN** descendant restoration uses those facts without rereading the root, and later appends cannot enter that earlier boundary or be confused with an empty result
 
 #### Scenario: Descendant ownership and control share one read
-- **WHEN** recovery visits a valid child parent containing nested lifecycle and model/Agent control facts
+- **WHEN** recovery visits a valid child parent containing nested lifecycle facts
 - **THEN** one complete validated read supplies ownership/enrichment and the ordered source-local projection, preserving identity and preventing duplicate live/replay rows
+
+#### Scenario: Indexed child replay avoids folding unrelated closed domain history
+- **WHEN** descendant restoration reads a child with a valid published working index and closed unrelated domain history
+- **THEN** the child Seed, Result, and canonical lifecycle are resolved at the captured index frontier, while indexed and suffix lifecycle presentation remains complete and ordered; an active writer or unavailable index uses the existing fully validated fallback
+
+#### Scenario: Archived child lifecycle presentation uses exact references
+- **WHEN** descendant restoration reads an indexed child with archived lifecycle presentation and unrelated closed history
+- **THEN** it resolves the complete ordered child lifecycle from exact references without materializing unrelated history bodies; Seed/Result ownership stays validated, an active writer or unavailable index uses the dense fallback, and full-history reads retain their complete projection
+
+#### Scenario: A root history page ends on a child terminal
+- **WHEN** a bounded root history page contains SubagentFinished but the canonical SubagentSpawned row is before that page
+- **THEN** the load supplies exact canonical spawn metadata for that visible child at the captured frontier without inserting a duplicate Spawned row
+- **AND** Pager creates the child view from that exact metadata, retains the terminal presentation as the sole lifecycle block, and queues no other settled child
+
+#### Scenario: Descendant history reads run after readiness
+- **WHEN** Pager has finalized a root load and is reading descendant histories, including a dense fallback for an active writer or unavailable index
+- **THEN** disk reads and descendant traversal run off the reducer path; root input admission remains governed by runtime readiness, and only the latest result for the same agent, session binding and exact child membership is applied in parent-to-child source order
+
+#### Scenario: An indexed root replays a settled direct child
+- **WHEN** a child in the emitted root history page is no longer in the executable checkpoint
+- **THEN** the server resolves the exact canonical spawn and terminal for that visible child at the captured load boundary. No other settled child is read to provide that page's ownership.
 
 #### Scenario: Lifecycle presentation disagrees with canonical child ownership
 - **WHEN** a descendant replay record names a different parent, subagent identity or child session than the validated canonical spawn
@@ -135,13 +156,38 @@ A cold executable resume SHALL prepare and reconcile the suspended tree while ex
 Interactive executable resume SHALL make the runtime available as soon as required execution state is verified. Presentation independently reads a bounded recent page of canonical history, and older pages are loaded on demand. Page reads SHALL bind session, selected branch and fixed history cut. Pages SHALL preserve ordered projection, response boundaries and exact stable identities, with positions independent of live delivery.
 
 #### Scenario: Long closed history
-- **WHEN** a session written with incremental publication first opens for interactive resume after shutdown or process loss
+- **WHEN** a session opens for interactive resume after shutdown or process loss with an executable publication covering the selected branch
 - **THEN** the runtime can become ready independently of the presentation worker. The most recent page is readable without scanning the closed prefix, and older pages are read on demand.
 
 #### Scenario: Older page and live update overlap in time
 - **WHEN** an older page completes after runtime readiness while new updates arrive
 - **THEN** historical rows appear once at their original order, viewport and selection anchors remain stable, and the older page does not change current controls or live delivery position.
 
+#### Scenario: Newest page is delayed or fails after execution readiness
+- **WHEN** the local cold runtime has reconciled and acknowledges load before the newest page completes
+- **THEN** Pager accepts ordinary input and live updates. The page is bound to the loaded session and branch, and if it arrives it is inserted ahead of those live rows without applying historical controls. A page read failure leaves execution ready and preserves the cursor for a retry.
+
 #### Scenario: Older page is unavailable or stale
 - **WHEN** a requested page cannot be verified or belongs to a retired session/branch generation
 - **THEN** it is not merged into the active view, and a ready runtime remains usable.
+
+
+#### Scenario: A large response or tool group spans pages
+- **WHEN** one response or tool group would exceed the bounded page byte budget
+- **THEN** pages preserve source order and the group's stable identity across continuation boundaries without loading the whole group as a prerequisite for the first page.
+
+#### Scenario: History scale is measured at an equal published frontier gap
+- **WHEN** release binaries run the terminal acceptance with three pairs per size and closed history above 515 MB
+- **THEN** the captured working Surface and unpublished suffix are equivalent. The harness separately measures first synchronized frame, first visible history, execution readiness, actual input echo, first accepted operation and exit. A fresh fixture also measures direct Ctrl+D from the idle prompt with no preceding operation. Executable first launch is measured independently of session first open.
+
+#### Scenario: A paged Tool terminal depends on an in-progress update
+- **WHEN** an indexed Tool update changes presentation fields while reporting an in-progress status, and a later terminal update omits those fields
+- **THEN** the terminal presentation preserves the latest committed values, including when the in-progress update is on an older page.
+
+#### Scenario: Closed Turn completion presentation grows
+- **WHEN** a published session contains many historical Turn completion updates
+- **THEN** the recent and older page readers load their original rows by position. These historical updates do not enter the resident history projection or finish a live Turn.
+
+#### Scenario: A fork inherits assistant or reasoning history
+- **WHEN** a copied session publishes display references to its own seed messages and those messages later leave the working Surface
+- **THEN** cold execution does not reopen those archived display references. Each requested page resolves the original child-local message and preserves the original display position and metadata. An oversized inherited message uses the same bounded byte continuation as an admitted response and never acquires a provider admission identity.

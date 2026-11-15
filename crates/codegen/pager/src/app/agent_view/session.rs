@@ -110,6 +110,7 @@ impl AgentView {
     ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
             self.history_page_cursor = None;
+            self.history_latest_pending = false;
             self.history_is_partial = false;
             self.history_page_request = None;
             self.history_page_viewer = None;
@@ -126,6 +127,10 @@ impl AgentView {
             }
             self.clear_behavior_switch_confirmation();
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
+            self.descendant_restore_generation = self.descendant_restore_generation.wrapping_add(1);
+            self.descendant_restore_pending = false;
+            self.descendant_model_control_generation = 0;
+            self.descendant_agent_control_generation = 0;
             self.session.last_seen_event_id = None;
             self.session.last_applied_event_seq = None;
             self.session.last_applied_grow_event_seq = None;
@@ -143,10 +148,15 @@ impl AgentView {
         self.clear_behavior_switch_confirmation();
         if self.session.session_id.take().is_some() {
             self.history_page_cursor = None;
+            self.history_latest_pending = false;
             self.history_is_partial = false;
             self.history_page_request = None;
             self.history_page_viewer = None;
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
+            self.descendant_restore_generation = self.descendant_restore_generation.wrapping_add(1);
+            self.descendant_restore_pending = false;
+            self.descendant_model_control_generation = 0;
+            self.descendant_agent_control_generation = 0;
             self.clear_minimal_btw_lifecycle();
         }
     }
@@ -226,7 +236,12 @@ impl AgentView {
         let mut view = Self {
             session,
             session_binding_epoch: 0,
+            descendant_restore_generation: 0,
+            descendant_restore_pending: false,
+            descendant_model_control_generation: 0,
+            descendant_agent_control_generation: 0,
             history_page_cursor: None,
+            history_latest_pending: false,
             history_is_partial: false,
             history_page_request: None,
             history_page_request_seq: 0,

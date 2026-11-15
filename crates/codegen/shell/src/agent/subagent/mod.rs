@@ -2874,12 +2874,8 @@ fn finish_from_durable_facts(
         .ok_or_else(|| "cannot resolve child session: session is missing".to_string())
         .map_err(|error| format!("cannot resolve child session: {error}"))?;
     validate_child_session_identity(&opened, parent_timeline_id, spawn)?;
-    let child = opened
-        .validated_timeline(&spawn.child_session_id)
-        .map_err(|error| format!("cannot validate child session entity: {error}"))?
-        .timeline;
-    let result = child
-        .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
+    let result = opened
+        .validated_child_result(parent_timeline_id, spawn_seq, spawn, terminal)
         .map_err(|error| format!("invalid child result link: {error}"))?;
     let output = result
         .output_ref
@@ -3094,74 +3090,16 @@ pub(crate) async fn durable_child_operation(
     subagent_id: &str,
     parent: &chat_state::ChatStateHandle,
 ) -> Result<DurableChildOperation, String> {
-    let (_, events) = parent
-        .runtime_tree_snapshot()
-        .await
-        .map_err(|_| "cannot query parent Timeline".to_string())?;
-    let spawn = events.iter().find_map(|event| match &event.kind {
-        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn))
-            if spawn.subagent_id == subagent_id =>
-        {
-            Some((event.seq, spawn.as_ref()))
-        }
-        _ => None,
-    });
-    let Some((spawn_seq, spawn)) = spawn else {
-        return Ok(DurableChildOperation::Missing);
-    };
-    let terminal = events.iter().find_map(|event| match &event.kind {
-        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(terminal))
-            if terminal.subagent_id == subagent_id =>
-        {
-            Some(terminal)
-        }
-        _ => None,
-    });
-    durable_child_operation_from_validated_facts(
-        parent_timeline_id,
-        subagent_id,
-        spawn_seq,
-        spawn,
-        terminal,
-    )
-}
-
-pub(crate) fn durable_child_operation_in_events(
-    parent_timeline_id: &str,
-    subagent_id: &str,
-    events: Vec<chat_state::TimelineEvent>,
-) -> Result<DurableChildOperation, String> {
-    let timeline = chat_state::Timeline::from_events(events)
-        .map_err(|error| format!("invalid parent Timeline: {error}"))?;
-    let Some((spawn_seq, spawn)) =
-        timeline
-            .events()
-            .iter()
-            .find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
-                    spawn,
-                )) if spawn.subagent_id == subagent_id => Some((event.seq, spawn)),
-                _ => None,
-            })
+    let Some((spawn_seq, spawn, terminal)) = parent.subagent_operation(subagent_id.to_owned()).await?
     else {
         return Ok(DurableChildOperation::Missing);
     };
-    let terminal =
-        timeline
-            .events()
-            .iter()
-            .find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
-                    terminal,
-                )) if terminal.subagent_id == subagent_id => Some(terminal),
-                _ => None,
-            });
     durable_child_operation_from_validated_facts(
         parent_timeline_id,
         subagent_id,
         spawn_seq,
-        spawn,
-        terminal,
+        &spawn,
+        terminal.as_ref(),
     )
 }
 
@@ -3191,12 +3129,8 @@ pub(crate) fn durable_child_operation_from_validated_facts(
                 .map_err(|error| format!("cannot resolve child session: {error}"))?
                 .ok_or_else(|| "canonical child session is missing".to_string())?;
             validate_child_session_identity(&child, parent_timeline_id, spawn)?;
-            let child_timeline = child
-                .validated_timeline(&spawn.child_session_id)
-                .map_err(|error| format!("invalid child session entity: {error}"))?
-                .timeline;
-            let result = child_timeline
-                .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
+            let result = child
+                .validated_child_result(parent_timeline_id, spawn_seq, spawn, terminal)
                 .map_err(|error| format!("invalid child result link: {error}"))?;
             let output = result
                 .output_ref
@@ -3531,12 +3465,14 @@ async fn ensure_recovered_child_result_with_opened(
             ))
         })?,
     }
-    let mut timeline = opened
-        .validated_timeline(&spawn.child_session_id)
+    let validated = storage
+        .load_recovery_writer(opened)
+        .await
         .map_err(|error| {
             ChildResultRecoveryError::Invalid(format!("invalid child session entity: {error}"))
-        })?
-        .timeline;
+        })?;
+    let (started_turns, started_tools) = validated.execution_start_counts();
+    let mut timeline = validated.timeline;
     timeline
         .validate_subagent_seed_link(parent_timeline_id, parent_spawn_seq, spawn)
         .map_err(|error| {
@@ -3597,7 +3533,7 @@ async fn ensure_recovered_child_result_with_opened(
         })
         .transpose()
         .map_err(ChildResultRecoveryError::Invalid)?;
-    let usage = chat_state::actor::state::project_timeline_usage(&timeline)
+    let usage = chat_state::actor::state::project_timeline_usage_totals(&timeline)
         .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
     // Verified runtime metadata can retain a larger known lower bound than
     // an interrupted bill. Never erase it merely because settlement failed.
@@ -3629,26 +3565,8 @@ async fn ensure_recovered_child_result_with_opened(
     if fallback_event.error.as_deref() == Some(ORPHAN_RECONCILE_REASON) {
         fallback_event.outcome = chat_state::SubagentOutcome::Failed;
         fallback_event.duration_ms = 0;
-        fallback_event.turns = timeline
-            .events()
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event.kind,
-                    chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. })
-                )
-            })
-            .count() as u32;
-        fallback_event.tool_calls = timeline
-            .events()
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event.kind,
-                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started { .. })
-                )
-            })
-            .count() as u32;
+        fallback_event.turns = started_turns;
+        fallback_event.tool_calls = started_tools;
         fallback_event.error = Some(
             "execution interrupted after previous writer exit; unsettled usage remains incomplete"
                 .into(),
@@ -3919,6 +3837,19 @@ fn released_child_matches_restore(
         })
 }
 
+async fn observe_recovery_child(child_id: &str) -> Option<chat_state::Timeline> {
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+    let opened = storage.open_session_by_id_shared_read(child_id).ok().flatten()?;
+    let result = storage.observe_execution_timeline(&opened.summary().info).await;
+    match result {
+        Ok(timeline) => Some(timeline),
+        Err(error) => {
+            tracing::warn!(%child_id, %error, "cannot observe child execution during recovery");
+            None
+        }
+    }
+}
+
 /// Reconcile parent spawn facts that have no terminal. The backend is merely
 /// an observation source: recovery first commits a child result (when the child
 /// entity exists), then closes the parent spawn, and only then emits UI state.
@@ -4013,17 +3944,8 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         if cold_recovery && runtime.phase == chat_state::session_runtime::RuntimePhase::Restoring
         {
             let child_id = spawn.child_session_id.clone();
-            let child_runtime = tokio::task::spawn_blocking(move || {
-                crate::session::storage::jsonl::JsonlStorageAdapter::new()
-                    .open_session_by_id_shared_read(&child_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|opened| opened.validated_timeline(&child_id).ok())
-                    .map(|validated| validated.timeline.runtime_lifecycle().clone())
-            })
-            .await
-            .ok()
-            .flatten();
+            let child_runtime = observe_recovery_child(&child_id).await
+                .map(|timeline| timeline.runtime_lifecycle().clone());
             if !child_runtime.as_ref().is_some_and(|child| {
                 released_child_matches_restore(
                     &runtime,
@@ -4067,15 +3989,8 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             }
         };
         if let Some(reference) = &result_ref {
-            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
-            let usage = storage
-                .open_session_by_id_shared_read(&reference.timeline_id)
-                .ok()
-                .flatten()
-                .and_then(|child| child.validated_timeline(&reference.timeline_id).ok())
-                .and_then(|validated| {
-                    chat_state::actor::state::project_timeline_usage(&validated.timeline).ok()
-                });
+            let usage = observe_recovery_child(&reference.timeline_id).await
+                .and_then(|timeline| chat_state::actor::state::project_timeline_usage_totals(&timeline).ok());
             let Some(usage) = usage else {
                 continue;
             };

@@ -214,7 +214,7 @@ impl ChatStateActor {
         }
 
         if let Some(response_admission) = response_admission.as_ref()
-            && let Some(existing) = self.state.timeline.response_admission(response_admission)
+            && let Some(existing) = self.state.timeline.exact_response_admission(response_admission)?
         {
             let same_items = serde_json::to_value(&existing.items)
                 .expect("response items must serialize")
@@ -676,11 +676,20 @@ impl ChatStateActor {
             cost_usd_ticks,
             api_duration_ms,
         };
-        if settlement.check_duplicate(
-            self.state
-                .settled_model_attempts
-                .get(&settlement.attempt_key),
-        )? {
+        let local = self
+            .state
+            .settled_model_attempts
+            .get(&settlement.attempt_key);
+        let historical = if local.is_none() {
+            super::state::historical_usage(
+                &self.state.timeline,
+                "attempt_settled",
+                &settlement.attempt_key,
+            )?
+        } else {
+            None
+        };
+        if settlement.check_duplicate(local.or(historical.as_ref()))? {
             return Ok(false);
         }
         let data = serde_json::to_value(&settlement).expect("attempt usage is serializable");
@@ -763,13 +772,28 @@ impl ChatStateActor {
             Some(_) => return Err(crate::commands::TimelineWriteError::AttemptUsageConflict),
             None => {}
         }
+        let identity = format!("{}:{}", start.key.attempt_no, start.key.sideband_id);
+        if let Some(existing) = super::state::historical_usage::<AuxiliaryAttemptStart>(
+            &self.state.timeline,
+            "aux_attempt_started",
+            &identity,
+        )? {
+            return if existing == start {
+                Ok(false)
+            } else {
+                Err(crate::TimelineWriteError::AttemptUsageConflict)
+            };
+        }
         if !self.state.timeline.events().iter().any(|event| matches!(
             &event.kind,
             crate::TimelineEventKind::Sideband(spawn) if spawn.sideband_id == start.key.sideband_id
-        )) {
+        )) && !self.state.timeline
+            .archived_sideband_before(&start.key.sideband_id, self.state.timeline.next_seq())
+            .map_err(crate::TimelineWriteError::UsageHistory)?
+        {
             return Err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage("Sideband has no durable spawn".into()));
         }
-        let segment_index = self.state.session_usage.current_segment_index();
+        let segment_id = self.state.session_usage.current_segment_id();
         let event = self
             .state
             .timeline
@@ -785,7 +809,7 @@ impl ChatStateActor {
         self.commit_timeline_event(event).await?;
         self.state
             .auxiliary_attempts
-            .insert(start.key.clone(), (start, segment_index));
+            .insert(start.key.clone(), (start, segment_id));
         Ok(true)
     }
 
@@ -809,19 +833,52 @@ impl ChatStateActor {
         settlement
             .validate()
             .map_err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage)?;
-        if let Some(existing) = self.state.settled_auxiliary_attempts.get(&settlement.key) {
+        let local = self.state.settled_auxiliary_attempts.get(&settlement.key);
+        let historical = if local.is_none() {
+            let identity = format!(
+                "{}:{}",
+                settlement.key.attempt_no, settlement.key.sideband_id
+            );
+            super::state::historical_usage(&self.state.timeline, "aux_attempt_settled", &identity)?
+        } else {
+            None
+        };
+        if let Some(existing) = local.or(historical.as_ref()) {
             if existing.matches(&settlement) {
                 return Ok(false);
             }
             return Err(crate::commands::TimelineWriteError::AttemptUsageConflict);
         }
-        let Some((start, segment_index)) =
-            self.state.auxiliary_attempts.get(&settlement.key).cloned()
+        let Some((start, segment_id)) = self.state.auxiliary_attempts.get(&settlement.key).cloned()
         else {
             return Err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage(
                 "attempt has no durable start".into(),
             ));
         };
+        let live_segment_index = self
+            .state
+            .session_usage
+            .segments
+            .iter()
+            .position(|segment| crate::usage::UsageSegmentId::for_segment(segment) == segment_id);
+        let mut archived_segment = if live_segment_index.is_none() {
+            self.state
+                .usage_segment_overrides
+                .get(&segment_id)
+                .cloned()
+                .or(self
+                    .state
+                    .timeline
+                    .historical_usage_segment(segment_id)
+                    .map_err(crate::TimelineWriteError::UsageHistory)?)
+        } else {
+            None
+        };
+        if live_segment_index.is_none() && archived_segment.is_none() {
+            return Err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage(
+                "attempt segment has no published usage row".into(),
+            ));
+        }
         let event = self
             .state
             .timeline
@@ -841,13 +898,29 @@ impl ChatStateActor {
         let current_prompt = start.captured_prompt_index.is_some()
             && self.state.timeline.current_prompt_index() == start.captured_prompt_index;
         if let Some(usage) = settlement.usage.as_ref() {
-            self.state.session_usage.record_auxiliary_call_at(
-                segment_index,
-                &start.model_id,
-                usage,
-                settlement.api_duration_ms,
-                settlement.cost_usd_ticks,
-            );
+            if let Some(segment_index) = live_segment_index {
+                self.state.session_usage.record_auxiliary_call_at(
+                    segment_index,
+                    &start.model_id,
+                    usage,
+                    settlement.api_duration_ms,
+                    settlement.cost_usd_ticks,
+                );
+            } else {
+                let call = self.state.session_usage.record_auxiliary_call_aggregate(
+                    &start.model_id,
+                    usage,
+                    settlement.api_duration_ms,
+                    settlement.cost_usd_ticks,
+                );
+                let segment = archived_segment
+                    .as_mut()
+                    .expect("an archived pending attempt has its source segment");
+                segment.fold_auxiliary_call(&start.model_id, &call);
+                self.state
+                    .usage_segment_overrides
+                    .insert(segment_id, segment.clone());
+            }
             if current_prompt {
                 self.state
                     .prompt_usage
@@ -860,9 +933,17 @@ impl ChatStateActor {
                     );
             }
         } else {
-            self.state
-                .session_usage
-                .mark_segment_incomplete(segment_index);
+            self.state.session_usage.incomplete = true;
+            if let Some(segment_index) = live_segment_index {
+                self.state
+                    .session_usage
+                    .mark_segment_incomplete(segment_index);
+            } else if let Some(segment) = archived_segment.as_mut() {
+                segment.mark_incomplete();
+                self.state
+                    .usage_segment_overrides
+                    .insert(segment_id, segment.clone());
+            }
             if current_prompt {
                 self.state
                     .prompt_usage
@@ -893,7 +974,13 @@ impl ChatStateActor {
             by_model: by_model.to_vec(),
             incomplete,
         };
-        if settlement.check_duplicate(self.state.settled_subagent_usage.get(subagent_id))? {
+        let local = self.state.settled_subagent_usage.get(subagent_id);
+        let historical = if local.is_none() {
+            super::state::historical_usage(&self.state.timeline, "subagent_settled", subagent_id)?
+        } else {
+            None
+        };
+        if settlement.check_duplicate(local.or(historical.as_ref()))? {
             return Ok(false);
         }
 

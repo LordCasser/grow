@@ -23,6 +23,41 @@ fn start_replay(app: &mut AppView) {
         .loading_replay = true;
 }
 
+fn apply_descendant_restore_effect(app: &mut AppView, effects: Vec<crate::app::actions::Effect>) {
+    let effect = effects
+        .into_iter()
+        .find(|effect| matches!(effect, crate::app::actions::Effect::RestoreDescendantState { .. }))
+        .expect("session result schedules descendant restoration");
+    let crate::app::actions::Effect::RestoreDescendantState {
+        agent_id,
+        session_id,
+        binding_epoch,
+        request_id,
+        root_child_session_ids,
+        child_control_captures,
+        ownership,
+        grow_home,
+    } = effect
+    else {
+        unreachable!();
+    };
+    let batch = crate::app::subagent::read_descendant_replay_batch(
+        session_id.0.as_ref(),
+        &root_child_session_ids,
+        ownership,
+        &grow_home,
+    );
+    crate::app::subagent::apply_descendant_state_restore(
+        app,
+        agent_id,
+        &session_id,
+        binding_epoch,
+        request_id,
+        &child_control_captures,
+        batch,
+    );
+}
+
 fn write_child_lifecycle(
     home: &std::path::Path,
     parent_sid: &str,
@@ -144,7 +179,7 @@ fn captured_ownership_enriches_existing_replayed_child_after_disk_disappears() {
             .join("timeline.jsonl");
         std::fs::remove_file(timeline).unwrap();
         // Exercise the normal load-result handoff, not only the helper API.
-        crate::app::root::dispatch::dispatch(
+        let effects = crate::app::root::dispatch::dispatch(
             crate::app::actions::Action::TaskComplete(
                 crate::app::actions::TaskResult::SessionLoaded {
                     agent_id: AgentId(0),
@@ -155,10 +190,12 @@ fn captured_ownership_enriches_existing_replayed_child_after_disk_disappears() {
                     foreground: None,
                     descendant_ownership: Some(captured),
                     older_history_cursor: None,
+                    latest_history_cursor: None,
                 },
             ),
             &mut app,
         );
+        apply_descendant_restore_effect(&mut app, effects);
 
         let root = &app.agents[&AgentId(0)];
         assert_eq!(
@@ -176,6 +213,67 @@ fn captured_ownership_enriches_existing_replayed_child_after_disk_disappears() {
             before,
             "enrichment adds no duplicate UI row"
         );
+    });
+}
+
+#[test]
+fn terminal_only_page_bootstraps_exact_child_view_without_a_started_row() {
+    with_replay_disk_home(|home| {
+        let root_sid = "terminal-page-root";
+        let child_sid = "terminal-page-child";
+        write_subagent_spawn_timeline(home, root_sid, child_sid, "canonical terminal child");
+        let ownership = shell::session::storage::load_descendant_ownership_at(root_sid, home)
+            .unwrap()
+            .unwrap();
+        let mut root_spawns = ownership.into_spawns();
+        let spawn = root_spawns.remove(child_sid).unwrap();
+
+        let mut app = make_app_with_agent(root_sid);
+        start_replay(&mut app);
+        handle(
+            make_replayed_ext_session_notification(
+                root_sid,
+                "terminal-page-finished",
+                test_subagent_finished(child_sid),
+            ),
+            &mut app,
+        );
+        let root = &app.agents[&AgentId(0)];
+        assert!(!root.session.subagent_sessions.contains_key(child_sid));
+        assert!(!root.subagent_views.contains_key(child_sid));
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = false;
+
+        crate::app::subagent::apply_descendant_replay_batch(
+            &mut app,
+            AgentId(0),
+            &[],
+            crate::app::subagent::DescendantReplayBatch {
+                root_spawns: std::collections::BTreeMap::from([(child_sid.to_owned(), spawn)]),
+                replayed_direct_children: std::collections::HashSet::from([child_sid.to_owned()]),
+                nodes: Vec::new(),
+            },
+        );
+
+        let root = &app.agents[&AgentId(0)];
+        assert!(root.subagent_views.contains_key(child_sid));
+        assert!(root.session.subagent_sessions[child_sid].finished);
+        assert!(!root.session.subagent_sessions[child_sid].child_updates_replayed);
+        let rows = root
+            .scrollback
+            .iter_entries()
+            .filter(|(_, entry)| {
+                matches!(
+                    &entry.block,
+                    crate::scrollback::block::RenderBlock::Subagent(block)
+                        if block.child_session_id == child_sid
+                )
+            })
+            .count();
+        assert_eq!(rows, 1, "the terminal row remains the only visible lifecycle block");
     });
 }
 
@@ -296,7 +394,7 @@ fn resync_ownership_is_consumed_only_after_matching_generation_finishes() {
             .begin_session_reload(9);
         replay_spawn(&mut app, root_sid, child_sid, "generation-root-1");
         for generation in [8, 9] {
-            crate::app::root::dispatch::dispatch(
+            let effects = crate::app::root::dispatch::dispatch(
                 crate::app::actions::Action::TaskComplete(
                     crate::app::actions::TaskResult::SessionResynced {
                         agent_id: AgentId(0),
@@ -308,21 +406,130 @@ fn resync_ownership_is_consumed_only_after_matching_generation_finishes() {
                 ),
                 &mut app,
             );
-            let root = &app.agents[&AgentId(0)];
             if generation == 8 {
+                let root = &app.agents[&AgentId(0)];
                 assert!(root.session_reload.is_some());
                 assert_eq!(
                     root.session.subagent_sessions[child_sid].prompt.as_deref(),
                     None
                 );
             } else {
-                assert!(root.session_reload.is_none());
+                assert!(app.agents[&AgentId(0)].session_reload.is_none());
+                apply_descendant_restore_effect(&mut app, effects);
+                let root = &app.agents[&AgentId(0)];
                 assert_eq!(
                     root.session.subagent_sessions[child_sid].prompt.as_deref(),
                     Some("current boundary prompt")
                 );
             }
         }
+    });
+}
+
+#[test]
+fn descendant_replay_is_offloaded_and_preserves_live_controls_and_cursor() {
+    with_replay_disk_home(|home| {
+        use shell::extensions::notification::{SessionNotification, SessionUpdate};
+
+        let root_sid = "async-descendant-root";
+        let child_sid = "async-descendant-child";
+        write_subagent_spawn_timeline(home, root_sid, child_sid, "canonical prompt");
+        let ownership = shell::session::storage::load_descendant_ownership_at(root_sid, home)
+            .unwrap()
+            .unwrap();
+        let mut app = make_app_with_agent(root_sid);
+        start_replay(&mut app);
+        replay_spawn(&mut app, root_sid, child_sid, "async-descendant-root-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = false;
+
+        let first = crate::app::subagent::schedule_descendant_state_restore(
+            &mut app,
+            AgentId(0),
+            Some(ownership.clone()),
+        );
+        assert_eq!(first.len(), 1);
+        let first_request = match &first[0] {
+            crate::app::actions::Effect::RestoreDescendantState { request_id, .. } => *request_id,
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        assert!(!app.agents[&AgentId(0)].session.loading_replay);
+        assert!(app.agents[&AgentId(0)].descendant_restore_pending);
+
+        let live_update = SessionNotification {
+            session_id: acp::SessionId::new(child_sid),
+            update: SessionUpdate::AgentChanged {
+                agent_name: "reviewer".into(),
+            },
+            meta: None,
+        };
+        let raw = serde_json::value::to_raw_value(&live_update).unwrap();
+        let live_ext = acp::ExtNotification::new("grow/session_notification", raw.into());
+        assert!(handle_session_notification(&live_ext, &mut app));
+
+        let second = crate::app::subagent::schedule_descendant_state_restore(
+            &mut app,
+            AgentId(0),
+            Some(ownership),
+        );
+        let (second_request, second_captures) = match &second[0] {
+            crate::app::actions::Effect::RestoreDescendantState {
+                request_id,
+                child_control_captures,
+                ..
+            } => (*request_id, child_control_captures.clone()),
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        let binding_epoch = app.agents[&AgentId(0)].session_binding_epoch;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .replay_live_cursor_seen = true;
+        let stale_control = SessionNotification {
+            session_id: acp::SessionId::new(child_sid),
+            update: SessionUpdate::AgentChanged {
+                agent_name: "coder".into(),
+            },
+            meta: Some(serde_json::json!({ "isReplay": true, "eventId": "old-agent" })),
+        };
+        let stale_batch = crate::app::subagent::DescendantReplayBatch {
+            nodes: vec![crate::app::subagent::DescendantReplayNode {
+                parent_session_id: child_sid.into(),
+                durable_children: Default::default(),
+                lifecycle: vec![stale_control],
+            }],
+            ..Default::default()
+        };
+        crate::app::subagent::apply_descendant_state_restore(
+            &mut app,
+            AgentId(0),
+            &acp::SessionId::new(root_sid),
+            binding_epoch,
+            first_request,
+            &[],
+            crate::app::subagent::DescendantReplayBatch::default(),
+        );
+        assert!(app.agents[&AgentId(0)].descendant_restore_pending);
+        assert_eq!(app.agents[&AgentId(0)].subagent_views[child_sid].session.agent_name(), Some("reviewer"));
+
+        let binding_epoch = app.agents[&AgentId(0)].session_binding_epoch;
+        crate::app::subagent::apply_descendant_state_restore(
+            &mut app,
+            AgentId(0),
+            &acp::SessionId::new(root_sid),
+            binding_epoch,
+            second_request,
+            &second_captures,
+            stale_batch,
+        );
+        let root = &app.agents[&AgentId(0)];
+        assert!(!root.descendant_restore_pending);
+        assert_eq!(root.subagent_views[child_sid].session.agent_name(), Some("reviewer"));
+        assert!(root.session.replay_live_cursor_seen);
     });
 }
 

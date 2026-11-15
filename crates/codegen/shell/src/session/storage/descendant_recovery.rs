@@ -34,7 +34,11 @@ pub struct DescendantOwnership {
     session_id: String,
     cut: u64,
     hash: String,
+    /// False when the cold snapshot intentionally omits settled child facts.
+    complete: bool,
     spawns: BTreeMap<String, ChildReplaySpawn>,
+    #[serde(default)]
+    replayed_children: std::collections::BTreeSet<String>,
 }
 
 impl DescendantOwnership {
@@ -43,8 +47,69 @@ impl DescendantOwnership {
         timeline: &chat_state::Timeline,
         history: &HistorySnapshot,
     ) -> Self {
+        Self::from_events(
+            session_id,
+            timeline.events(),
+            history,
+            history.indexed.is_none(),
+        )
+    }
+
+    pub(crate) fn include_replayed_children(
+        &mut self,
+        timeline: &chat_state::Timeline,
+        children: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), chat_state::TimelineError> {
+        for (child, subagent) in children {
+            if let Some(spawn) = self.spawns.get(child) {
+                if spawn.spawn.subagent_id == *subagent
+                    && spawn.spawn.child_session_id == *child
+                    && spawn.spawn.security_parent_session_id == self.session_id
+                {
+                    self.replayed_children.insert(child.clone());
+                }
+                continue;
+            }
+            if self.complete {
+                continue;
+            }
+            if let Some((seq, spawn, terminal)) = timeline.subagent_operation(subagent)?
+                && spawn.child_session_id == *child
+                && spawn.security_parent_session_id == self.session_id
+            {
+                self.spawns.insert(child.clone(), ChildReplaySpawn {
+                    spawn,
+                    parent_spawn_seq: seq.get(),
+                    terminal: terminal.filter(|terminal| terminal.result_ref.is_some()),
+                });
+                self.replayed_children.insert(child.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn from_exact_validated(
+        session_id: &str,
+        timeline: &chat_state::Timeline,
+        history: &HistorySnapshot,
+    ) -> io::Result<Self> {
+        let mut events = timeline.subagent_lifecycle_events().cloned().collect::<Vec<_>>();
+        if let Some(indexed) = &history.indexed {
+            events.extend(indexed.subagent_lifecycle_events()?);
+        }
+        events.sort_unstable_by_key(|event| event.seq);
+        events.dedup_by_key(|event| event.seq);
+        Ok(Self::from_events(session_id, &events, history, true))
+    }
+
+    fn from_events(
+        session_id: &str,
+        events: &[chat_state::TimelineEvent],
+        history: &HistorySnapshot,
+        complete: bool,
+    ) -> Self {
         let mut terminals = BTreeMap::new();
-        for event in timeline.events() {
+        for event in events {
             if let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
                 terminal,
             )) = &event.kind
@@ -58,8 +123,7 @@ impl DescendantOwnership {
                     .or_insert(terminal);
             }
         }
-        let spawns = timeline
-            .events()
+        let spawns = events
             .iter()
             .filter_map(|event| {
                 let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
@@ -85,11 +149,13 @@ impl DescendantOwnership {
             })
             .collect();
         Self {
-            version: 2,
+            version: 4,
             session_id: session_id.to_owned(),
             cut: history.record_count(),
             hash: history.prefix_hash.clone(),
+            complete,
             spawns,
+            replayed_children: Default::default(),
         }
     }
 
@@ -110,7 +176,11 @@ impl DescendantOwnership {
                     .saturating_add(child.len().saturating_mul(6))
                     .saturating_add(spawn_len)
             },
-        );
+        )
+        .saturating_add(self.replayed_children.iter().fold(
+            0usize,
+            |total, child| total.saturating_add(4).saturating_add(child.len().saturating_mul(6)),
+        ));
         (bound <= MAX_META_BYTES)
             .then(|| serde_json::to_value(self).expect("ownership snapshot serializes"))
     }
@@ -119,7 +189,7 @@ impl DescendantOwnership {
     /// present payload as authority. An absent or rejected payload falls back
     /// to an independent validated local read, never an assumed empty map.
     pub fn belongs_to(&self, session_id: &str) -> bool {
-        self.version == 2
+        self.version == 4
             && !session_id.is_empty()
             && self.session_id == session_id
             && self.hash.len() == 64
@@ -136,10 +206,22 @@ impl DescendantOwnership {
                             && terminal.result_ref.is_some()
                     })
             })
+            && self
+                .replayed_children
+                .iter()
+                .all(|child| self.spawns.contains_key(child))
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
     }
 
     pub fn into_spawns(self) -> BTreeMap<String, ChildReplaySpawn> {
         self.spawns
+    }
+
+    pub fn replayed_child_ids(&self) -> impl Iterator<Item = &str> {
+        self.replayed_children.iter().map(String::as_str)
     }
 }
 
@@ -179,15 +261,16 @@ pub fn load_descendant_child_replay_at(
     grow_home: &Path,
 ) -> io::Result<Option<(DescendantOwnership, Vec<SessionNotification>)>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
-    let Some(child) = storage.open_session_by_id_shared_read(child_session_id)? else {
+    let Some((child_summary, child_snapshot)) = storage
+        .validated_timeline_with_published_index_by_id(child_session_id)?
+    else {
         return Ok(None);
     };
-    let child_snapshot = child.validated_timeline(child_session_id)?;
     validate_child_parent_link(
         child_session_id,
         parent_session_id,
         owner_spawn,
-        child.summary(),
+        &child_summary,
         &child_snapshot.timeline,
     )?;
     Ok(Some(project_descendant_replay(
@@ -200,32 +283,52 @@ fn project_descendant_replay(
     session_id: &str,
     snapshot: super::jsonl::ValidatedTimeline,
 ) -> io::Result<(DescendantOwnership, Vec<SessionNotification>)> {
-    let ownership =
-        DescendantOwnership::from_validated(session_id, &snapshot.timeline, &snapshot.history);
-    let prepared = snapshot.history.into_prepare(
-        &acp_transport::protocol::SessionId::new(session_id.to_owned()),
+    let ownership = DescendantOwnership::from_exact_validated(
+        session_id,
         &snapshot.timeline,
-        None,
+        &snapshot.history,
     )?;
-    let lifecycle = prepared
-        .updates
-        .into_iter()
-        .filter_map(|update| match update {
-            SessionUpdate::Grow(notification)
-                if matches!(
-                    &notification.update,
-                    GrowUpdate::SubagentSpawned { .. }
-                        | GrowUpdate::SubagentProgress { .. }
-                        | GrowUpdate::SubagentFinished { .. }
-                        | GrowUpdate::ModelChanged { .. }
-                        | GrowUpdate::AgentChanged { .. }
-                ) =>
-            {
-                Some(*notification)
-            }
-            _ => None,
-        })
-        .collect();
+    let session = acp_transport::protocol::SessionId::new(session_id.to_owned());
+    let indexed = snapshot.history.indexed.clone();
+    let mut lifecycle = if let Some(indexed) = &indexed {
+        indexed
+            .page_reader()?
+            .read_subagent_lifecycle(&session, &snapshot.history)?
+    } else {
+        Vec::new()
+    };
+    let history = if let Some(indexed) = indexed {
+        let cut = indexed.records();
+        let mut suffix = snapshot.history.clone();
+        let rows = suffix
+            .positions
+            .iter()
+            .copied()
+            .zip(suffix.sources.iter().cloned())
+            .filter(|(position, _)| *position >= cut)
+            .collect::<Vec<_>>();
+        (suffix.positions, suffix.sources) = rows.into_iter().unzip();
+        suffix.indexed = None;
+        suffix
+    } else {
+        snapshot.history.clone()
+    };
+    let prepared = history.into_prepare(&session, &snapshot.timeline, None)?;
+    lifecycle.extend(prepared.updates.into_iter().filter_map(|update| match update {
+        SessionUpdate::Grow(notification)
+            if matches!(
+                &notification.update,
+                GrowUpdate::SubagentSpawned { .. }
+                    | GrowUpdate::SubagentProgress { .. }
+                    | GrowUpdate::SubagentFinished { .. }
+                    | GrowUpdate::ModelChanged { .. }
+                    | GrowUpdate::AgentChanged { .. }
+            ) =>
+        {
+            Some(*notification)
+        }
+        _ => None,
+    }));
     Ok((ownership, lifecycle))
 }
 

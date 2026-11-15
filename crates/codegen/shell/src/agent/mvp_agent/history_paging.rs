@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::MvpAgent;
 use crate::session::{
-    history::{HistorySnapshot, IndexedPages},
+    history::{HistorySnapshot, IndexedPages, PagePosition},
     storage::{ContainedDirectory, SessionUpdate, TIMELINE_FILE, jsonl::JsonlStorageAdapter},
 };
 
@@ -15,13 +15,18 @@ pub(super) struct HistoryPageCut {
     bytes: u64,
     hash: String,
     branch: Option<chat_state::EventSeq>,
-    older_rows: usize,
+    end: usize,
+    offset: Option<usize>,
     pages: Option<Arc<IndexedPages>>,
 }
 
 #[derive(Deserialize, Serialize)]
 struct Position {
     end: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    physical: Option<PagePosition>,
     proof: String,
 }
 
@@ -44,51 +49,80 @@ impl HistoryPageCut {
     pub(super) fn new(
         history: &HistorySnapshot,
         timeline: &chat_state::Timeline,
-        older_rows: usize,
+        (end, offset): (usize, Option<usize>),
         pages: Option<Arc<IndexedPages>>,
     ) -> Option<Self> {
-        (older_rows != 0).then(|| Self {
+        (end != 0 || pages.is_some()).then(|| Self {
             id: uuid::Uuid::new_v4(),
             bytes: history.bytes,
             hash: history.prefix_hash.clone(),
             branch: timeline.history_branch(),
-            older_rows,
+            end,
+            offset,
             pages,
         })
     }
 
     pub(super) fn first_cursor(&self) -> String {
-        self.cursor(self.older_rows)
+        self.cursor(self.end, self.offset, self.pages.as_ref().map(|_| PagePosition::newest()))
     }
 
-    fn cursor(&self, end: usize) -> String {
+    pub(super) fn indexed_cursor(&self, position: PagePosition) -> String {
+        self.cursor(self.end, None, Some(position))
+    }
+
+    fn cursor(&self, end: usize, offset: Option<usize>, physical: Option<PagePosition>) -> String {
         serde_json::to_string(&Position {
             end,
-            proof: self.position_proof(end),
+            offset,
+            physical,
+            proof: self.position_proof(end, offset, physical),
         })
         .expect("serialize history position")
     }
 
-    fn position_proof(&self, end: usize) -> String {
+    fn position_proof(&self, end: usize, offset: Option<usize>, physical: Option<PagePosition>) -> String {
         let key = blake3::derive_key("Grow session history page position", self.id.as_bytes());
-        blake3::keyed_hash(&key, &(end as u64).to_le_bytes())
-            .to_hex()
-            .to_string()
+        let mut hasher = blake3::Hasher::new_keyed(&key);
+        hasher.update(&(end as u64).to_le_bytes());
+        if let Some(offset) = offset {
+            hasher.update(&(offset as u64).to_le_bytes());
+        }
+        if let Some(physical) = physical {
+            hasher.update(&serde_json::to_vec(&physical).expect("serialize physical history cursor"));
+        }
+        hasher.finalize().to_hex().to_string()
     }
 
+    #[cfg(test)]
     fn read(
         &self,
         session_id: acp::SessionId,
         directory: &ContainedDirectory,
         end: usize,
     ) -> io::Result<Page> {
+        self.read_at(session_id, directory, end, None, None)
+    }
+
+    fn read_at(
+        &self,
+        session_id: acp::SessionId,
+        directory: &ContainedDirectory,
+        end: usize,
+        offset: Option<usize>,
+        physical: Option<PagePosition>,
+    ) -> io::Result<Page> {
         if let Some(pages) = &self.pages {
-            let (start, updates) = pages.page(&session_id, end)?;
+            let before = physical.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing indexed history position"))?;
+            let (older, updates) = pages.page_before(&session_id, before)?;
             return Ok(Page {
                 session_id,
                 updates,
-                older_cursor: (start != 0).then(|| self.cursor(start)),
+                older_cursor: older.map(|position| self.indexed_cursor(position)),
             });
+        }
+        if offset.is_some() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected history byte offset"));
         }
         let name = OsStr::new(TIMELINE_FILE);
         let file = directory.open_regular(name, "Timeline journal")?;
@@ -121,7 +155,7 @@ impl HistoryPageCut {
         Ok(Page {
             session_id,
             updates,
-            older_cursor: (start != 0).then(|| self.cursor(start)),
+            older_cursor: (start != 0).then(|| self.cursor(start, None, None)),
         })
     }
 }
@@ -131,6 +165,7 @@ impl MvpAgent {
         &self,
         args: &acp::ExtRequest,
     ) -> crate::extensions::ExtResult {
+        let mut timer = crate::instrumentation_timer!("session.history_page.read");
         let ReadPage { session_id, cursor } = crate::extensions::parse_params(args)?;
         let stale = || acp::Error::invalid_params().data("history page cursor is stale");
         let position: Position = serde_json::from_str(&cursor).map_err(|_| stale())?;
@@ -139,10 +174,12 @@ impl MvpAgent {
                 .borrow()
                 .get(&session_id)
                 .and_then(|resources| resources.history_page_cut.clone())
-                .filter(|cut| cut.position_proof(position.end) == position.proof)
+                .filter(|cut| cut.position_proof(position.end, position.offset, position.physical) == position.proof)
         };
         let cut = current_cut().ok_or_else(stale)?;
-        if position.end == 0 || position.end > cut.older_rows {
+        if position.physical.is_some() != cut.pages.is_some()
+            || (position.physical.is_none() && (position.end == 0 || position.end > cut.end))
+        {
             return Err(stale());
         }
         let handle = self
@@ -158,7 +195,9 @@ impl MvpAgent {
         let directory = handle.session_directory.clone();
         let page_session = session_id.clone();
         let end = position.end;
-        let page = tokio::task::spawn_blocking(move || cut.read(page_session, &directory, end))
+        let offset = position.offset;
+        let physical = position.physical;
+        let page = tokio::task::spawn_blocking(move || cut.read_at(page_session, &directory, end, offset, physical))
             .await
             .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
             .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
@@ -168,6 +207,7 @@ impl MvpAgent {
         {
             return Err(stale());
         }
+        timer.with_field("updates", page.updates.len());
         crate::extensions::to_raw_response(&page)
     }
 }
@@ -205,7 +245,7 @@ mod tests {
         let history = JsonlStorageAdapter::read_journal_from_directory(&directory)
             .unwrap()
             .history;
-        let cut = HistoryPageCut::new(&history, &timeline, 142, None).unwrap();
+        let cut = HistoryPageCut::new(&history, &timeline, (142, None), None).unwrap();
         let before = cut.read(session.clone(), &directory, 142).unwrap();
         assert_eq!(before.updates.len(), 128);
 

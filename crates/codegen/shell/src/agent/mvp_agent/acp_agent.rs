@@ -66,6 +66,19 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             let root = crate::util::grow_home::grow_home();
             crate::session::storage::search::SEARCH_INDEX_MANAGER.bootstrap_once(root);
         }
+        #[cfg(unix)]
+        self.spawn_owned_local(async {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let _cancel_on_drop = cancel.clone().drop_guard();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::session::storage::jsonl::JsonlStorageAdapter::new()
+                    .migrate_working_history(&cancel)
+            })
+            .await;
+            if let Ok(Err(error)) = result {
+                tracing::debug!(%error, "working history migration discovery failed");
+            }
+        });
         const PERMISSION_CLEANUP_TTL_DAYS: u64 = 30;
         static CLEANUP_PERMISSIONS_ONCE: std::sync::Once = std::sync::Once::new();
         CLEANUP_PERMISSIONS_ONCE
@@ -508,6 +521,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let (control_ack_tx, control_ack_rx) = tokio::sync::oneshot::channel();
         control_tx
             .send(SessionCommand::PublishControlState {
+                replay_hooks: true,
                 respond_to: control_ack_tx,
             })
             .map_err(|_| {
@@ -888,7 +902,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             summary.agent_name.clone_from(&persisted_agent_name);
         }
         let _persisted_goal_mode = control_snapshot.and_then(|control| control.goal);
-        let durable_model_selection = crate::session::persistence::latest_model_selection(timeline.events())
+        let durable_model_selection = crate::session::persistence::current_model_selection(timeline.events())
             .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
         let checkpoint_model_selection = if runtime_recovery_gated {
             match timeline.runtime_lifecycle().checkpoint.as_ref() {
@@ -1143,7 +1157,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         };
         // Bound to the exact validated snapshot used below, before Timeline
         // moves into actor bootstrap or child reconciliation appends new facts.
-        let descendant_ownership =
+        let mut descendant_ownership =
             crate::session::storage::DescendantOwnership::from_validated(
                 session_id.0.as_ref(), &timeline, &history,
             );
@@ -1161,12 +1175,33 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         } else {
             Vec::new()
         };
-        let (subagent_projections, older_rows, indexed_pages) = if no_replay {
+        let deferred_history = page_history && spawn_new_actor && !no_replay
+            && history.indexed.is_some()
+            && request_meta.as_ref().is_some_and(|meta| {
+                meta.get("grow/deferredHistory").and_then(serde_json::Value::as_bool) == Some(true)
+            })
+            && timeline.active_turn().is_none()
+            && timeline.subagent_lifecycle_events().next().is_none()
+            && !history.indexed.as_ref().is_some_and(|index| index.has_child_presentation())
+            && Self::find_stale_background_task_projections(&session_id, &history, timeline.events()).is_empty();
+        let (subagent_projections, page_end, indexed_pages, older_position) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
                 "Skipping session replay (noReplay requested by client)"
             );
-            (Default::default(), 0, None)
+            (Default::default(), (0, None), None, None)
+        } else if deferred_history {
+            let prepared = history.prepare_indexed(&session_id, &timeline)
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            let mut pages = history.indexed_pages(prepared)
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
+                .map(Arc::new);
+            if let Some(current) = &pages
+                && current.is_empty().map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
+            {
+                pages = None;
+            }
+            (Default::default(), (0, None), pages, None)
         } else {
             self
                 // Replay must use the already validated/pinned Timeline snapshot.
@@ -1184,7 +1219,14 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 )
                 .await?
         };
-        let history_page_cut = super::history_paging::HistoryPageCut::new(&history, &timeline, older_rows, indexed_pages);
+        if let Err(error) = descendant_ownership.include_replayed_children(
+            &timeline,
+            &subagent_projections.replayed_children,
+        ) {
+            tracing::warn!(%session_id, %error, "Unable to resolve an archived child in the replayed page");
+        }
+        let history_page_cut = super::history_paging::HistoryPageCut::new(&history, &timeline, page_end, indexed_pages);
+        let replay_hooks = history.indexed.is_none();
         if let Some(mute) = reconnect_gateway_mute.as_mut() {
             mute.restore();
         }
@@ -1339,6 +1381,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let (control_ack_tx, control_ack_rx) = tokio::sync::oneshot::channel();
         control_tx
             .send(SessionCommand::PublishControlState {
+                replay_hooks,
                 respond_to: control_ack_tx,
             })
             .map_err(|_| {
@@ -1401,7 +1444,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         self.reconcile_loaded_children(
             &session_id,
             &subagent_projections,
-            !no_replay,
+            !no_replay && !deferred_history,
             spawn_new_actor && !runtime_recovery_gated,
             &historical_workflows,
         ).await;
@@ -1410,7 +1453,9 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         // retain their live selection; reconnect is not a model-control request.
         let mut response_meta_map = serde_json::Map::new();
         if let Some(cut) = &history_page_cut {
-            response_meta_map.insert("grow/olderHistoryCursor".into(), cut.first_cursor().into());
+            let key = if deferred_history { "grow/latestHistoryCursor" } else { "grow/olderHistoryCursor" };
+            let cursor = older_position.map_or_else(|| cut.first_cursor(), |position| cut.indexed_cursor(position));
+            response_meta_map.insert(key.into(), cursor.into());
         }
         if let Some(ownership_meta) = descendant_ownership.into_load_meta() {
             response_meta_map.insert(

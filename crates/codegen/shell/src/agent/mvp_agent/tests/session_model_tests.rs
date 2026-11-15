@@ -412,11 +412,13 @@ context_window = 128000
             acp::SessionId,
             crate::extensions::notification::ControlStateUpdate,
         )>::new()));
+        let (child_turn_completed_tx, child_turn_completed_rx) = oneshot::channel();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         {
             let control_updates = control_updates.clone();
             let startup_order = startup_order.clone();
             tokio::task::spawn_local(async move {
+                let mut child_turn_completed_tx = Some(child_turn_completed_tx);
                 while let Some(message) = rx.recv().await {
                     match message {
                         acp_transport::AcpClientMessage::SessionNotification(args) => {
@@ -437,6 +439,13 @@ context_window = 128000
                                             startup_order.lock().unwrap().push("snapshot");
                                         }
                                         control_updates.lock().unwrap().push((notification.session_id, update));
+                                    }
+                                    crate::extensions::notification::SessionUpdate::TurnCompleted { prompt_id, .. }
+                                        if notification.session_id.0.as_ref() == "controlled-child" =>
+                                    {
+                                        if let Some(completed) = child_turn_completed_tx.take() {
+                                            let _ = completed.send(prompt_id);
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -792,14 +801,16 @@ context_window = 128000
                 delayed_control = Some(commands.recv().await.unwrap());
             }
             release.notify_one();
-            let usage = cold_recovery_stage("model-race.real-child-finished", held_usage_rx.recv())
+            let usage = cold_recovery_stage("model-race.parent-usage-admitted", held_usage_rx.recv())
                 .await
                 .unwrap();
-            assert!(matches!(
-                child.runtime_observation.read().lifecycle_status(),
-                crate::session::prompt_queue::PromptStatus::Settling
-                    | crate::session::prompt_queue::PromptStatus::Terminal { .. }
-            ));
+            let completed_prompt = cold_recovery_stage(
+                "model-race.child-turn-completed",
+                child_turn_completed_rx,
+            )
+            .await
+            .unwrap();
+            assert!(!completed_prompt.is_empty());
             assert!(
                 agent
                     .active_child_sessions

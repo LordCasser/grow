@@ -23,6 +23,7 @@ async fn inject(actor: &SessionActor, id: &str) {
             chat_state::NotificationSource::InquiryAnswered {
                 source_session_id: "consulting-child".into(),
                 inquiry_id: id.into(),
+                continue_if_idle: false,
             },
             chat_state::NotificationSourceVersion::Opaque {
                 value: format!("answer-{id}"),
@@ -303,7 +304,7 @@ fn queued_consultation_reaches_same_turn_successor_without_preempting_foreground
                 assert_eq!(serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(), before);
                 let pending = actor.chat_state_handle.pending_notifications().await.unwrap();
                 assert_eq!(pending.len(), 1);
-                assert!(matches!(&pending[0].source, chat_state::NotificationSource::InquiryAnswered { source_session_id, inquiry_id: id }
+                assert!(matches!(&pending[0].source, chat_state::NotificationSource::InquiryAnswered { source_session_id, inquiry_id: id, .. }
                     if source_session_id == "live-child-session" && id == &inquiry_id));
                 let receipt_id = pending[0].id.clone();
                 assert_eq!(server.requests().len(), 2, "only the in-flight foreground and InfoRequest have run");
@@ -345,6 +346,55 @@ fn queued_consultation_reaches_same_turn_successor_without_preempting_foreground
             assert_eq!(response.await.unwrap().status, InquiryStatus::Answered);
             assert_eq!(server.requests().len(), 3, "outcome retry does not rerun consultation or foreground");
             assert!(actor.chat_state_handle.pending_notifications().await.unwrap().is_empty());
+        }));
+    });
+}
+
+#[test]
+fn live_consultation_starts_one_idle_continuation() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use crate::coordination::InquiryStatus;
+            let server = MockInferenceServer::start().await.unwrap();
+            let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            communication_agent(&actor).await;
+
+            let question = "Should I keep the completed investigation?";
+            let answer = "Keep the completed investigation and its evidence.";
+            let outcome = answer_live_consultation(&actor, &server, "idle-ask", question, answer).await;
+            assert_eq!(outcome.status, InquiryStatus::Answered);
+            tokio::time::timeout(std::time::Duration::from_secs(5), actor.idle_arbiter.notified())
+                .await.unwrap();
+            let receipt = actor.chat_state_handle.pending_notifications().await.unwrap().pop().unwrap();
+            assert!(matches!(receipt.source, chat_state::NotificationSource::InquiryAnswered {
+                continue_if_idle: true, ..
+            }));
+
+            server.enqueue_response("/v1/messages", messages_turn(&[text_block("I will retain the evidence.")], END_TURN));
+            let (completion_tx, mut completions) = mpsc::unbounded_channel();
+            crate::session::actor::idle_arbitration::arbitrate_idle_wake(actor.clone(), completion_tx.clone()).await;
+            let (prompt, result) = tokio::time::timeout(std::time::Duration::from_secs(10), completions.recv())
+                .await.unwrap().unwrap();
+            assert!(result.is_ok(), "{result:?}");
+            actor.handle_completion(prompt, result).await;
+
+            let (retry, response) = live_consultation(&actor, "idle-ask", question);
+            actor.enqueue_coordination_inquiry(retry).await;
+            assert_eq!(response.await.unwrap().status, InquiryStatus::Answered);
+            crate::session::actor::idle_arbitration::arbitrate_idle_wake(actor.clone(), completion_tx).await;
+            assert!(actor.state.lock().await.foreground.is_idle());
+            assert_eq!(server.requests().len(), 2);
+            let request = server.request_bodies().last().unwrap().to_string();
+            assert!(request.contains(question));
+            assert!(request.contains(answer));
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert_eq!(events.iter().filter(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Consumed { notification_ids, .. })
+                    if notification_ids.contains(&receipt.id))).count(), 1);
         }));
     });
 }

@@ -14,14 +14,16 @@ impl ChatStateActor {
     }
 
     /// Take a full snapshot of the actor's state.
-    pub(super) fn snapshot(&self) -> ChatStateSnapshot {
-        ChatStateSnapshot {
+    pub(super) fn snapshot(&self) -> Result<ChatStateSnapshot, crate::TimelineError> {
+        let mut prompt_records = self.state.timeline.prompt_records_with_history(usize::MAX)?;
+        prompt_records.reverse();
+        Ok(ChatStateSnapshot {
             conversation: self.state.timeline.surface().to_vec(),
             sampling_config: self.state.sampling_config.clone(),
             prompt_index: self.state.timeline.next_prompt_index(),
             projected_tokens: self.state.projected_tokens,
             agent_edited_paths: self.state.agent_edited_paths.clone(),
-            prompt_records: self.state.timeline.prompt_records(),
+            prompt_records,
             stream_start_ms: self.state.stream_start_ms,
             turn_start_ms: self.state.turn_start_ms,
             last_compaction_prompt_index: self
@@ -29,7 +31,7 @@ impl ChatStateActor {
                 .timeline
                 .last_completed_compaction_prompt_index(),
             credentials: self.state.credentials.clone(),
-        }
+        })
     }
 
     /// Check if auto-compact is needed based on token utilization.

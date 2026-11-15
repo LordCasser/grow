@@ -496,6 +496,17 @@ pub enum WorkflowEvent {
     },
 }
 
+impl WorkflowEvent {
+    pub fn run_id(&self) -> &str {
+        match self {
+            Self::Spawned { run_id, .. }
+            | Self::Resumed { run_id, .. }
+            | Self::Ended { run_id, .. }
+            | Self::Closed { run_id, .. } => run_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowExecutionStatus {
@@ -609,6 +620,40 @@ pub struct ObservationEvent {
     pub step: Option<StepId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+}
+
+fn is_outgoing_inquiry(event: &TimelineEvent, id: &str) -> bool {
+    let TimelineEventKind::Observation(observation) = &event.kind else {
+        return false;
+    };
+    if observation.scope != "coordination" || observation.name != "inquiry" {
+        return false;
+    }
+    let Some(data) = observation.data.as_ref() else {
+        return false;
+    };
+    match data.get("kind").and_then(serde_json::Value::as_str) {
+        Some("outgoing_started") => {
+            data.get("inquiry_id").and_then(serde_json::Value::as_str) == Some(id)
+        }
+        Some("outgoing_completed") => {
+            data.pointer("/audit/outcome/inquiryId")
+                .and_then(serde_json::Value::as_str)
+                == Some(id)
+        }
+        _ => false,
+    }
+}
+
+fn is_incoming_inquiry(event: &TimelineEvent, sender: &str, id: &str) -> bool {
+    let TimelineEventKind::Observation(observation) = &event.kind else { return false; };
+    if observation.scope != "coordination" || observation.name != "inquiry" {
+        return false;
+    }
+    let Some(data) = observation.data.as_ref() else { return false; };
+    data.get("kind").and_then(serde_json::Value::as_str) == Some("incoming")
+        && data.get("inquiry_id").and_then(serde_json::Value::as_str) == Some(id)
+        && data.pointer("/audit/sourceSessionId").and_then(serde_json::Value::as_str) == Some(sender)
 }
 
 /// A durable identity for one UI projection that must be present in the
@@ -877,6 +922,39 @@ pub struct SubagentResultEvent {
     pub planning_summary: Option<tool_types::planning::SubagentPlanningSummary>,
 }
 
+impl SubagentTerminalEvent {
+    /// Verify the exact child-owned fact named by this parent-owned terminal.
+    pub fn validate_result_fact<'a>(
+        &self,
+        spawn: &SubagentSpawnEvent,
+        event: &'a TimelineEvent,
+    ) -> Result<&'a SubagentResultEvent, TimelineError> {
+        let reference = self
+            .result_ref
+            .as_ref()
+            .ok_or(TimelineError::MissingSubagentResult)?;
+        let TimelineEventKind::SubagentResult(result) = &event.kind else {
+            return Err(TimelineError::InvalidSubagentResultLink);
+        };
+        if reference.timeline_id != spawn.child_session_id
+            || reference.first_seq != reference.last_seq
+            || event.seq.get() != reference.first_seq
+            || self.subagent_id != spawn.subagent_id
+            || self.child_session_id != spawn.child_session_id
+            || result.subagent_id != spawn.subagent_id
+            || result.outcome != self.outcome
+            || result.duration_ms != self.duration_ms
+            || result.tool_calls != self.tool_calls
+            || result.turns != self.turns
+            || result.tokens_used != self.tokens_used
+            || result.error != self.error
+        {
+            return Err(TimelineError::InvalidSubagentResultLink);
+        }
+        Ok(result)
+    }
+}
+
 /// Domain identity of a signal delivered to this session.
 ///
 /// Payload and presentation deliberately live outside this enum. The source
@@ -892,10 +970,12 @@ pub enum PlanHandoffKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NotificationSource {
-    /// A successful consultation answered by this session, delivered without wakeup.
+    /// A successful consultation answered by this session.
     InquiryAnswered {
         source_session_id: String,
         inquiry_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        continue_if_idle: bool,
     },
     /// A non-interrupting opinion, authorized by a receipt in the sender's inbox.
     AgentReply {
@@ -994,6 +1074,22 @@ enum NotificationSourceIdentity {
 }
 
 impl NotificationSource {
+    pub fn is_task_signal(&self) -> bool {
+        matches!(
+            self,
+            Self::MonitorProgress { .. }
+                | Self::TaskStillRunning { .. }
+                | Self::TaskCompleted { .. }
+                | Self::SubagentCompleted { .. }
+        )
+    }
+
+    pub fn is_handoff(&self) -> bool {
+        matches!(
+            self,
+            Self::PlanHandoff { .. } | Self::WorkflowHandoff { .. }
+        )
+    }
     /// Runtime-attributed communication metadata; never human authorization.
     pub fn agent_message(
         &self,
@@ -1023,6 +1119,7 @@ impl NotificationSource {
             Self::InquiryAnswered {
                 source_session_id,
                 inquiry_id,
+                ..
             } => Some((source_session_id, inquiry_id, None)),
             _ => self
                 .agent_message()
@@ -1089,6 +1186,7 @@ impl NotificationSource {
             Self::InquiryAnswered {
                 source_session_id,
                 inquiry_id,
+                ..
             } => NotificationSourceIdentity::InquiryAnswered {
                 source_session_id: source_session_id.clone(),
                 inquiry_id: inquiry_id.clone(),
@@ -1489,6 +1587,18 @@ pub enum HookEvent {
     },
 }
 
+impl HookEvent {
+    pub fn occurrence_id(&self) -> &str {
+        match self {
+            Self::Triggered { occurrence_id, .. }
+            | Self::RunStarted { occurrence_id, .. }
+            | Self::RunFinished { occurrence_id, .. }
+            | Self::RunSkipped { occurrence_id, .. }
+            | Self::Completed { occurrence_id, .. } => occurrence_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum InputIntent {
@@ -1611,7 +1721,7 @@ pub struct HookLifecycleProjection {
     pub decision: Option<HookAggregateDecision>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputState {
     Submitted,
     Allowed { route: InputRoute },
@@ -1621,12 +1731,19 @@ pub enum InputState {
     Dismissed { reason: InputDismissReason },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputLifecycle {
     pub input_id: String,
     pub intent: InputIntent,
     pub payload_ref: InputPayloadRef,
     pub state: InputState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputCheckpointEntry {
+    pub lifecycle: InputLifecycle,
+    pub canonical_position: u64,
+    pub reserved_turn: Option<TurnId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1752,6 +1869,37 @@ impl<'de> Deserialize<'de> for TimelineEvent {
 }
 
 impl TimelineEvent {
+    pub fn owns_surface_id(&self, id: SurfaceId) -> bool {
+        if self.seq != id.event {
+            return false;
+        }
+        let item = usize::try_from(id.item).ok();
+        match &self.kind {
+            TimelineEventKind::Messages(messages) => {
+                item.is_some_and(|item| item < messages.items.len())
+            }
+            TimelineEventKind::Input(InputEvent::Consumed { skill_loads, .. }) => {
+                item.is_some_and(|item| item <= skill_loads.len())
+            }
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                input: Some(_), ..
+            }) => id.item == 0,
+            TimelineEventKind::ImageProjection(projection) => {
+                let slot_count = projection.shadows.len()
+                    + projection
+                        .tool_calls
+                        .iter()
+                        .map(|tool_call| 1 + tool_call.carrier_sources.len())
+                        .sum::<usize>();
+                item.is_some_and(|item| item < slot_count)
+            }
+            TimelineEventKind::Control(control) => {
+                item.is_some_and(|item| item < control.model_contexts.len())
+            }
+            _ => false,
+        }
+    }
+
     pub fn messages(&self) -> Option<&MessageEvent> {
         match &self.kind {
             TimelineEventKind::Messages(event) => Some(event),
@@ -1778,8 +1926,193 @@ impl TimelineEvent {
     }
 }
 
+/// Exact evidence outside the working set of a verified Timeline prefix.
+pub trait ExecutionHistory: std::fmt::Debug + Send + Sync {
+    fn event(&self, seq: EventSeq) -> std::io::Result<Option<TimelineEvent>>;
+
+    fn events_before(&self, end: EventSeq) -> std::io::Result<Vec<TimelineEvent>>;
+
+    fn response_admission_before(
+        &self,
+        identity: &ResponseAdmissionIdentity,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<TimelineEvent>>;
+
+    fn admitted_calls_before(
+        &self,
+        call_id: &str,
+        seq: EventSeq,
+        limit: usize,
+    ) -> std::io::Result<Vec<sampling_types::ToolCall>>;
+
+    fn turn_before(&self, id: TurnId, seq: EventSeq) -> std::io::Result<bool>;
+
+    fn step_before(&self, id: StepId, seq: EventSeq) -> std::io::Result<bool>;
+
+    fn workflow_before(
+        &self,
+        run_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<(TimelineEvent, TimelineEvent)>>;
+
+    fn workflow_spawns_before(
+        &self,
+        seq: EventSeq,
+        limit: usize,
+    ) -> std::io::Result<Vec<(EventSeq, String)>>;
+
+    fn outgoing_inquiry_before(
+        &self,
+        inquiry_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Vec<TimelineEvent>>;
+
+    fn incoming_inquiry_events(&self, sender: &str, inquiry: &str) -> std::io::Result<Vec<TimelineEvent>>;
+
+    fn agent_message_was_consumed(&self, message_id: &str, seq: EventSeq) -> std::io::Result<bool>;
+
+    fn prompts_before(&self, limit: usize) -> std::io::Result<Vec<PromptRecord>>;
+
+    fn has_prompt(&self, index: usize) -> std::io::Result<bool>;
+
+    /// Whether a call existed and whether it was open immediately before `seq`.
+    fn tool_before(
+        &self,
+        call_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<ToolHistoryState>>;
+
+    fn request_before(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<RequestHistoryState>>;
+    fn interaction_before(&self, call: &str, attempt: &str, seq: EventSeq)
+    -> std::io::Result<bool>;
+    fn compaction_before(&self, id: &str, seq: EventSeq) -> std::io::Result<bool>;
+
+    fn sideband_before(&self, id: &str, seq: EventSeq) -> std::io::Result<bool>;
+
+    fn hook_before(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<HookLifecycleProjection>>;
+
+    fn hook_run_before(&self, id: &str, seq: EventSeq) -> std::io::Result<bool>;
+
+    fn input_hook_before(
+        &self,
+        input_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<HookLifecycleProjection>>;
+
+    fn input_before(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<(TimelineEvent, InputLifecycle)>>;
+
+    fn input_payload_hashes(
+        &self,
+        candidates: Option<&[String]>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::io::Result<BTreeSet<String>>;
+
+    fn user_image_paths(&self, cancelled: &dyn Fn() -> bool) -> std::io::Result<BTreeSet<String>>;
+
+    fn usage_fact(&self, key: &str) -> std::io::Result<Option<ObservationEvent>>;
+
+    /// Read one segment from the pinned published cut, including the latest
+    /// version that was visible when that cut was committed.
+    fn usage_segment(
+        &self,
+        id: crate::usage::UsageSegmentId,
+    ) -> std::io::Result<Option<crate::UsageSegment>>;
+
+    /// Page historical incarnation summaries newest-first, bounded by encoded
+    /// bytes and a continuation identity.
+    fn usage_segments_page(
+        &self,
+        before: Option<crate::usage::UsageSegmentId>,
+        byte_limit: usize,
+    ) -> std::io::Result<crate::usage::UsageSegmentPage>;
+
+    fn subagent_spawn_before(
+        &self,
+        subagent_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<(EventSeq, SubagentSpawnEvent)>>;
+
+    fn subagent_spawn_for_child_before(
+        &self,
+        child_session_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<(EventSeq, SubagentSpawnEvent)>>;
+
+    fn subagent_terminal_before(
+        &self,
+        subagent_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<(EventSeq, SubagentTerminalEvent)>>;
+
+    fn subagent_events_for_child(
+        &self,
+        child_session_id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Vec<TimelineEvent>>;
+
+    fn subagent_events(&self) -> std::io::Result<Vec<TimelineEvent>>;
+
+    fn subagent_delivery_before(&self, id: &str, seq: EventSeq) -> std::io::Result<Option<TurnId>>;
+
+    fn notification_before(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<TimelineEvent>>;
+
+    fn agent_message_receipts(
+        &self,
+        identity: Option<(&str, &str)>,
+    ) -> std::io::Result<Vec<TimelineEvent>>;
+
+    fn notification_payload_hashes(
+        &self,
+        candidates: Option<&[String]>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::io::Result<BTreeSet<String>>;
+
+    fn notification_consumer(&self, id: &str, seq: EventSeq) -> std::io::Result<Option<TurnId>>;
+
+    fn notification_settled(&self, id: &str, seq: EventSeq) -> std::io::Result<bool>;
+
+    fn task_completion_before(
+        &self,
+        id: &str,
+        monitor: bool,
+        seq: EventSeq,
+    ) -> std::io::Result<bool>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RequestHistoryState {
+    pub turn: TurnId,
+    pub completed_attempt: Option<u32>,
+    pub provider_terminal: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolHistoryState {
+    Open,
+    Closed,
+}
+
+pub type SubagentOperation = (EventSeq, SubagentSpawnEvent, Option<SubagentTerminalEvent>);
+
 #[derive(Debug, Clone, Default)]
 struct LifecycleFold {
+    replaying_working_prefix: bool,
     /// Only the current Turn's completed provider requests may close it.
     provider_requests: BTreeSet<String>,
     active_turn: Option<TurnId>,
@@ -1789,6 +2122,7 @@ struct LifecycleFold {
     seen_steps: BTreeSet<StepId>,
     request_owners: BTreeMap<String, TurnId>,
     seen_tools: BTreeSet<String>,
+    history: Option<std::sync::Arc<dyn ExecutionHistory>>,
     seen_compactions: BTreeSet<String>,
     workflows: BTreeMap<String, WorkflowFold>,
     open_subagents: BTreeMap<String, OpenSubagent>,
@@ -1833,7 +2167,7 @@ enum InputConsumption {
 #[derive(Debug, Clone)]
 struct InputFold {
     /// Submitted ordinal, inherited from the earliest superseded input on admission.
-    canonical_position: usize,
+    canonical_position: u64,
     intent: InputIntent,
     payload_ref: InputPayloadRef,
     admission: Option<InputAdmissionDecision>,
@@ -1845,8 +2179,12 @@ struct InputFold {
 
 #[derive(Debug, Clone)]
 struct WorkflowFold {
+    spawn: EventSeq,
+    boundary: EventSeq,
+    started_at_ms: Option<i64>,
     execution_epoch: u64,
     open: bool,
+    execution_suspended: bool,
     closed: bool,
 }
 
@@ -1864,6 +2202,67 @@ pub struct WorkflowLifecycle {
     pub message: Option<String>,
     pub open: bool,
     pub closed: bool,
+}
+
+impl WorkflowFold {
+    fn from_boundaries(
+        spawn: &TimelineEvent,
+        boundary: &TimelineEvent,
+    ) -> Result<Self, TimelineError> {
+        let TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+            run_id,
+            execution_epoch: 0,
+            ..
+        }) = &spawn.kind
+        else {
+            return Err(TimelineError::InvalidWorkflow);
+        };
+        let TimelineEventKind::Workflow(workflow) = &boundary.kind else {
+            return Err(TimelineError::InvalidWorkflow);
+        };
+        if workflow.run_id() != run_id || spawn.seq > boundary.seq {
+            return Err(TimelineError::InvalidWorkflow);
+        }
+        let (execution_epoch, open, execution_suspended, closed) = match workflow {
+            WorkflowEvent::Spawned { .. } if spawn.seq == boundary.seq => (0, true, false, false),
+            WorkflowEvent::Spawned { .. } => return Err(TimelineError::InvalidWorkflow),
+            WorkflowEvent::Resumed {
+                execution_epoch, ..
+            } => (*execution_epoch, true, false, false),
+            WorkflowEvent::Ended {
+                execution_epoch,
+                status,
+                execution_suspended,
+                ..
+            } => (
+                *execution_epoch,
+                false,
+                *execution_suspended,
+                permanently_ended_workflow(*status),
+            ),
+            WorkflowEvent::Closed {
+                execution_epoch, ..
+            } => (*execution_epoch, false, false, true),
+        };
+        Ok(Self {
+            spawn: spawn.seq,
+            boundary: boundary.seq,
+            started_at_ms: open.then_some(boundary.at_ms),
+            execution_epoch,
+            open,
+            execution_suspended,
+            closed,
+        })
+    }
+}
+
+fn permanently_ended_workflow(status: WorkflowExecutionStatus) -> bool {
+    matches!(
+        status,
+        WorkflowExecutionStatus::Interrupted
+            | WorkflowExecutionStatus::Complete
+            | WorkflowExecutionStatus::Cancelled
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1892,7 +2291,7 @@ pub struct Timeline {
     runtime: crate::session_runtime::RuntimeLifecycle,
     active_turn_start: Option<usize>,
     active_turn_progress: ActiveTurnProgress,
-    suspension_waits: BTreeMap<String, (InteractionKind, String)>,
+    suspension_waits: crate::session_runtime::RuntimeWaits,
     planning: Option<PlanningSnapshot>,
     events: Vec<TimelineEvent>,
     next_seq: u64,
@@ -1907,7 +2306,11 @@ pub struct Timeline {
     prompt_indices: BTreeSet<usize>,
     user_prompt_positions: BTreeMap<usize, EventSeq>,
     next_prompt_index: usize,
-    pending_control_contexts: BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
+    archived_prompt_max: Option<usize>,
+    archived_compaction_prompt: Option<usize>,
+    notification_owner: Option<String>,
+
+    control_contexts: ControlContexts,
     pending_notifications: BTreeMap<String, PendingNotification>,
     received_notification_ids: BTreeSet<String>,
     received_notifications:
@@ -1919,17 +2322,335 @@ pub struct Timeline {
     delivered_subagent_answers: BTreeMap<String, TurnId>,
     lifecycle: LifecycleFold,
     latest_completed_attempts: HashMap<String, u32>,
+    latest_archived_effect: Option<EventSeq>,
+    last_request: Option<(EventSeq, i64)>,
+    hook_config_generation: u64,
+    archived_active_turn_had_tool: bool,
     response_admission_positions: HashMap<ResponseAdmissionIdentity, EventSeq>,
     surface_tool_identity: SurfaceToolIdentitySummary,
+    usage_checkpoint: Option<crate::actor::state::UsageCheckpoint>,
+    surface_checkpoint_cut: Option<EventSeq>,
+    seed_open_at_checkpoint: bool,
+    published_skills: SurfaceSkillSources,
 }
 
-#[derive(Debug, Clone, Default)]
-struct ActiveTurnProgress {
+/// The model-facing portion of a validated published cut. Body data for
+/// shadowed items is read from the canonical journal by explicit consumers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SurfaceCheckpoint {
+    items: Vec<ConversationItem>,
+    ids: Vec<SurfaceId>,
+    revision: u64,
+    controls: ControlContexts,
+    seed_open: bool,
+    unsupported_image_projection: bool,
+    context_rebuild: Option<EventSeq>,
+    skills: SurfaceSkillSources,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SurfaceSkillSources {
+    /// Spliced SkillLoad nodes with a leaf older than their current Surface ID.
+    origins: Vec<(SurfaceId, EventSeq)>,
+    last_response: Option<EventSeq>,
+}
+
+impl SurfaceSkillSources {
+    fn origin(&self, id: SurfaceId) -> Option<EventSeq> {
+        self.origins
+            .iter()
+            .find_map(|(current, origin)| (*current == id).then_some(*origin))
+    }
+
+    fn accept_message(
+        &mut self,
+        seq: EventSeq,
+        items: &[ConversationItem],
+        ids: &[SurfaceId],
+        message: &MessageEvent,
+        replaced: std::ops::Range<usize>,
+    ) {
+        if message.response_admission.is_some() {
+            self.last_response = Some(seq);
+        }
+        if replaced.is_empty() {
+            return;
+        }
+        let mut carried = Vec::new();
+        match message.cause {
+            MessageCause::ToolResultPrune => {
+                for (index, (id, item)) in
+                    ids[replaced.clone()].iter().zip(&message.items).enumerate()
+                {
+                    if matches!(item, ConversationItem::SkillLoad(_)) {
+                        carried.push((
+                            SurfaceId {
+                                event: seq,
+                                item: index as u32,
+                            },
+                            self.origin(*id).unwrap_or(id.event),
+                        ));
+                    }
+                }
+            }
+            MessageCause::IntegrityRepair
+                if message
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, ConversationItem::SkillLoad(_))) =>
+            {
+                let previous = &items[replaced.clone()];
+                let mut cursor = 0;
+                for (index, item) in message.items.iter().enumerate() {
+                    if let Some(offset) = previous[cursor..]
+                        .iter()
+                        .position(|old| conversation_items_match(old, item))
+                    {
+                        cursor += offset;
+                        let id = ids[replaced.start + cursor];
+                        if matches!(item, ConversationItem::SkillLoad(_)) {
+                            carried.push((
+                                SurfaceId {
+                                    event: seq,
+                                    item: index as u32,
+                                },
+                                self.origin(id).unwrap_or(id.event),
+                            ));
+                        }
+                        cursor += 1;
+                    }
+                }
+            }
+            MessageCause::ContextRebuild | MessageCause::Rewind => self.last_response = None,
+            // A settlement removes the previous SkillLoad leaves. Any
+            // remaining SkillLoad uses its replacement coordinate.
+            _ => {}
+        }
+        let shadowed = &ids[replaced];
+        self.origins.retain(|(id, _)| !shadowed.contains(id));
+        self.origins.extend(carried);
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ControlContexts {
+    active: BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
+    pending: BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
+}
+
+impl ControlContexts {
+    fn accept(
+        &mut self,
+        event: &TimelineEvent,
+        turn_active: bool,
+        step_active: bool,
+    ) -> Vec<(SurfaceId, ConversationItem)> {
+        let activate: Vec<_> = match &event.kind {
+            TimelineEventKind::Control(control) => {
+                for layer in &control.retired_context_layers {
+                    self.active.remove(layer);
+                    self.pending.remove(layer);
+                }
+                let mut activate = Vec::new();
+                for (item, context) in control.model_contexts.iter().enumerate() {
+                    let id = SurfaceId {
+                        event: event.seq,
+                        item: item as u32,
+                    };
+                    let source = (id, context.item.clone());
+                    if control_transition_waits_for_boundary(turn_active, step_active, context) {
+                        self.pending.insert(context.layer, source);
+                    } else {
+                        activate.push((context.layer, source));
+                    }
+                }
+                activate
+            }
+            TimelineEventKind::Step(StepEvent::Ended { .. }) => [
+                ControlContextLayer::AgentRole,
+                ControlContextLayer::GoalDefinition,
+                ControlContextLayer::PlanPhase,
+            ]
+            .into_iter()
+            .filter_map(|layer| self.pending.remove(&layer).map(|source| (layer, source)))
+            .collect(),
+            TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
+                std::mem::take(&mut self.pending).into_iter().collect()
+            }
+            _ => return Vec::new(),
+        };
+        let mut sources = Vec::with_capacity(activate.len());
+        for (layer, source) in activate {
+            self.active.insert(layer, source.clone());
+            sources.push(source);
+        }
+        if !matches!(&event.kind, TimelineEventKind::Control(_)) {
+            sources.sort_by_key(|(source, _)| *source);
+        }
+        sources
+    }
+}
+
+impl SurfaceCheckpoint {
+    pub fn can_restore(&self) -> bool {
+        !self.unsupported_image_projection
+    }
+
+    pub fn accept(
+        &mut self,
+        event: &TimelineEvent,
+        turn_active: bool,
+        step_active: bool,
+    ) -> Result<(), TimelineError> {
+        if matches!(event.kind, TimelineEventKind::ImageProjection(_)) {
+            self.unsupported_image_projection = true;
+            self.items.clear();
+            self.ids.clear();
+            self.controls = ControlContexts::default();
+        }
+        if !self.can_restore() {
+            return Ok(());
+        }
+        if event.seq.get() == 0 {
+            self.seed_open = true;
+        }
+        self.seed_open &= matches!(&event.kind, TimelineEventKind::Messages(message) if message.cause == MessageCause::Seed);
+        match &event.kind {
+            TimelineEventKind::Messages(message) => {
+                if message.cause == MessageCause::ContextRebuild {
+                    self.context_rebuild = Some(event.seq);
+                }
+                let range = match &message.surface {
+                    SurfaceOp::Append => self.items.len()..self.items.len(),
+                    SurfaceOp::Replace {
+                        start,
+                        end,
+                        shadowed,
+                    } => {
+                        let first = self
+                            .ids
+                            .iter()
+                            .position(|id| id == start)
+                            .ok_or(TimelineError::StaleReplacementBoundary)?;
+                        let last = self
+                            .ids
+                            .iter()
+                            .position(|id| id == end)
+                            .ok_or(TimelineError::StaleReplacementBoundary)?;
+                        if first > last || self.ids[first..=last] != *shadowed {
+                            return Err(TimelineError::IncompleteShadowSet);
+                        }
+                        first..last + 1
+                    }
+                };
+                self.skills.accept_message(
+                    event.seq,
+                    &self.items,
+                    &self.ids,
+                    message,
+                    range.clone(),
+                );
+                self.items
+                    .splice(range.clone(), message.items.iter().cloned());
+                self.ids.splice(
+                    range,
+                    (0..message.items.len()).map(|item| SurfaceId {
+                        event: event.seq,
+                        item: item as u32,
+                    }),
+                );
+                self.revision = self.revision.saturating_add(1);
+            }
+            TimelineEventKind::Input(InputEvent::Consumed {
+                item, skill_loads, ..
+            }) => {
+                self.append_batch(
+                    event.seq,
+                    std::iter::once(item.clone())
+                        .chain(skill_loads.iter().cloned().map(ConversationItem::SkillLoad)),
+                );
+            }
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                input: Some(item),
+                ..
+            }) => {
+                self.append_batch(event.seq, std::iter::once(item.clone()));
+            }
+            _ => {}
+        }
+        for (id, item) in self.controls.accept(event, turn_active, step_active) {
+            self.append(id, item);
+        }
+        Ok(())
+    }
+
+    fn append_batch(&mut self, event: EventSeq, items: impl Iterator<Item = ConversationItem>) {
+        for (item, value) in items.enumerate() {
+            self.ids.push(SurfaceId {
+                event,
+                item: item as u32,
+            });
+            self.items.push(value);
+        }
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    fn append(&mut self, id: SurfaceId, item: ConversationItem) {
+        self.items.push(item);
+        self.ids.push(id);
+        self.revision = self.revision.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ActiveTurnProgress {
     input_consumed: bool,
     latest_step: Option<EventSeq>,
     pending_stop_hooks: BTreeSet<String>,
     pending_stop_continuations: usize,
     committed_stop_continuations: usize,
+}
+
+impl ActiveTurnProgress {
+    pub fn accept(&mut self, event: &TimelineEvent, active_turn: Option<TurnId>) {
+        match &event.kind {
+            TimelineEventKind::Turn(_) => *self = Self::default(),
+            TimelineEventKind::Input(InputEvent::Consumed { turn, .. })
+                if active_turn == Some(*turn) =>
+            {
+                self.input_consumed = true;
+            }
+            TimelineEventKind::Step(StepEvent::Started { .. }) => {
+                self.latest_step = Some(event.seq);
+                self.committed_stop_continuations += self.pending_stop_continuations;
+                self.pending_stop_continuations = 0;
+            }
+            TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id,
+                event: HookEventType::Stop | HookEventType::SubagentStop,
+                gate: HookGateKind::Stop,
+                ..
+            }) => {
+                // Hook validation already binds both gates to the active Turn
+                // and (for SubagentStop) the child's canonical seed identity.
+                self.pending_stop_hooks.insert(occurrence_id.clone());
+            }
+            TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision,
+            }) if self.pending_stop_hooks.remove(occurrence_id) => {
+                if matches!(
+                    decision,
+                    HookAggregateDecision::Stop {
+                        decision: HookStopDecision::KeepWorking { .. }
+                    }
+                ) {
+                    self.pending_stop_continuations += 1;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Quarantine emits one range per malformed assistant; adjacent carrier and
@@ -2001,6 +2722,12 @@ pub enum TimelineError {
     InvalidRuntime(String),
     #[error("invalid local planning commit: {0}")]
     InvalidPlanning(String),
+    #[error("cannot verify historical Tool identity: {0}")]
+    ToolHistory(#[source] std::io::Error),
+    #[error("cannot verify historical Request identity: {0}")]
+    RequestHistory(#[source] std::io::Error),
+    #[error("cannot verify historical notification: {0}")]
+    NotificationHistory(#[source] std::io::Error),
     #[error("invalid human interaction attempt")]
     InvalidInteraction,
     #[error("invalid display projection expectation")]
@@ -2187,15 +2914,41 @@ pub enum TimelineError {
     HookNotFound(String),
     #[error("hook occurrence {0} is already completed")]
     HookAlreadyCompleted(String),
+    #[error("cannot verify historical Hook: {0}")]
+    HookHistory(#[source] std::io::Error),
     #[error("invalid input lifecycle fact")]
     InvalidInput,
     #[error("input {0} already has a submitted fact")]
     DuplicateInput(String),
     #[error("input {0} has no submitted fact")]
     InputNotFound(String),
+    #[error("cannot verify historical Input: {0}")]
+    InputHistory(#[source] std::io::Error),
+    #[error("cannot verify historical Subagent: {0}")]
+    SubagentHistory(#[source] std::io::Error),
+    #[error("cannot verify historical Turn or Step: {0}")]
+    TurnHistory(#[source] std::io::Error),
+    #[error("cannot verify historical compaction or Sideband: {0}")]
+    CompactionHistory(#[source] std::io::Error),
+    #[error("cannot verify historical Workflow: {0}")]
+    WorkflowHistory(#[source] std::io::Error),
+    #[error("cannot verify historical interaction attempt: {0}")]
+    InteractionHistory(#[source] std::io::Error),
+    #[error("cannot verify historical response admission: {0}")]
+    ResponseHistory(#[source] std::io::Error),
 }
 
 impl Timeline {
+    pub fn incoming_inquiry_events(&self, sender: &str, inquiry: &str) -> std::io::Result<Vec<TimelineEvent>> {
+        let mut facts = match &self.lifecycle.history {
+            Some(history) => history.incoming_inquiry_events(sender, inquiry)?,
+            None => Vec::new(),
+        };
+        let start = self.surface_checkpoint_cut.map_or(0, |cut| self.events.partition_point(|event| event.seq < cut));
+        facts.extend(self.events[start..].iter().filter(|event| is_incoming_inquiry(event, sender, inquiry)).cloned());
+        Ok(facts)
+    }
+
     /// True for diagnostic observations produced by the Shell event tracker.
     /// These facts are durable history and have no effect on this fold.
     pub fn is_diagnostic(event: &TimelineEvent) -> bool {
@@ -2209,10 +2962,41 @@ impl Timeline {
         next_seq: EventSeq,
         first_event_at_ms: Option<i64>,
     ) -> Result<Self, TimelineError> {
+        Self::from_working_prefix(events, next_seq, first_event_at_ms, None, None, false, None)
+    }
+
+    /// Restore an indexed prefix whose archived lifecycles were validated at
+    /// publication. The retained input includes still-open starts.
+    pub fn from_working_prefix(
+        events: Vec<TimelineEvent>,
+        next_seq: EventSeq,
+        first_event_at_ms: Option<i64>,
+        history: Option<std::sync::Arc<dyn ExecutionHistory>>,
+        latest_archived_effect: Option<EventSeq>,
+        archived_active_turn_had_tool: bool,
+        surface: Option<SurfaceCheckpoint>,
+    ) -> Result<Self, TimelineError> {
         let mut timeline = Self {
             first_event_at_ms,
+            latest_archived_effect,
+            lifecycle: LifecycleFold {
+                history,
+                ..LifecycleFold::default()
+            },
             ..Self::default()
         };
+        let sparse = timeline.lifecycle.history.is_some();
+        if let Some(surface) = surface {
+            timeline.surface = surface.items;
+            timeline.surface_ids = surface.ids;
+            timeline.surface_revision = surface.revision;
+            timeline.control_contexts = surface.controls;
+            timeline.surface_tool_identity.rebuild(&timeline.surface);
+            timeline.surface_checkpoint_cut = Some(next_seq);
+            timeline.seed_open_at_checkpoint = surface.seed_open;
+            timeline.published_skills = surface.skills;
+            timeline.last_context_rebuild_seq = surface.context_rebuild;
+        }
         for event in events {
             if event.seq.get() < timeline.next_seq || event.seq >= next_seq {
                 return Err(TimelineError::NonContiguousSeq {
@@ -2221,12 +3005,29 @@ impl Timeline {
                 });
             }
             timeline.next_seq = event.seq.get();
-            timeline.accept_replayed(event)?;
+            if sparse && matches!(&event.kind, TimelineEventKind::Runtime(_)) {
+                timeline.validate_header(&event)?;
+                timeline.next_seq += 1;
+                timeline.events.push(event);
+            } else if sparse
+                && matches!(
+                    &event.kind,
+                    TimelineEventKind::Planning(_) | TimelineEventKind::SubagentResult(_)
+                )
+            {
+                timeline.validate_header(&event)?;
+                timeline.apply_validated_event(event, false, false, false);
+            } else {
+                timeline.lifecycle.replaying_working_prefix = sparse;
+                timeline.accept_replayed(event)?;
+                timeline.lifecycle.replaying_working_prefix = false;
+            }
         }
         if timeline.subagent_result_recorded && timeline.next_seq != next_seq.get() {
             return Err(TimelineError::SubagentTimelineEnded);
         }
         timeline.next_seq = next_seq.get();
+        timeline.archived_active_turn_had_tool = archived_active_turn_had_tool;
         Ok(timeline)
     }
 
@@ -2235,8 +3036,16 @@ impl Timeline {
     }
 
     pub fn consumed_agent_messages(&self, ids: &[String]) -> BTreeSet<String> {
+        self.exact_consumed_agent_messages(ids).unwrap_or_default()
+    }
+
+    pub(crate) fn exact_consumed_agent_messages(
+        &self,
+        ids: &[String],
+    ) -> Result<BTreeSet<String>, TimelineError> {
         let requested: BTreeSet<_> = ids.iter().map(String::as_str).collect();
-        self.events
+        let mut consumed: BTreeSet<_> = self
+            .events
             .iter()
             .filter_map(|event| match &event.kind {
                 TimelineEventKind::Notification(NotificationEvent::Consumed {
@@ -2248,7 +3057,19 @@ impl Timeline {
             .flat_map(|batch| &batch.messages)
             .filter(|message| requested.contains(message.message_id.as_str()))
             .map(|message| message.message_id.clone())
-            .collect()
+            .collect();
+        if let Some(history) = &self.lifecycle.history {
+            for id in requested {
+                if !consumed.contains(id)
+                    && history
+                        .agent_message_was_consumed(id, self.next_seq())
+                        .map_err(TimelineError::NotificationHistory)?
+                {
+                    consumed.insert(id.to_owned());
+                }
+            }
+        }
+        Ok(consumed)
     }
     pub fn runtime_lifecycle(&self) -> &crate::session_runtime::RuntimeLifecycle {
         &self.runtime
@@ -2320,13 +3141,157 @@ impl Timeline {
             .map(|&position| &self.events[position])
     }
 
+    pub fn runtime_subagent_events(&self) -> Result<Vec<TimelineEvent>, TimelineError> {
+        let mut events: Vec<_> = self.subagent_lifecycle_events().cloned().collect();
+        let Some(history) = &self.lifecycle.history else {
+            return Ok(events);
+        };
+        if self.runtime.phase == crate::session_runtime::RuntimePhase::Running {
+            return Ok(events);
+        }
+        for node in &self.runtime.tree {
+            if self.runtime.root_session_id.as_deref() == Some(&node.session_id) {
+                continue;
+            }
+            events.extend(
+                history
+                    .subagent_events_for_child(&node.session_id, self.next_seq())
+                    .map_err(TimelineError::SubagentHistory)?,
+            );
+        }
+        events.sort_unstable_by_key(|event| event.seq);
+        events.dedup_by_key(|event| event.seq);
+        Ok(events)
+    }
+
+    pub(crate) fn subagent_history_sources(
+        &self,
+    ) -> (
+        Vec<TimelineEvent>,
+        Option<std::sync::Arc<dyn ExecutionHistory>>,
+    ) {
+        (
+            self.subagent_lifecycle_events().cloned().collect(),
+            self.lifecycle.history.clone(),
+        )
+    }
+
+    pub fn subagent_operation(
+        &self,
+        subagent_id: &str,
+    ) -> Result<Option<SubagentOperation>, TimelineError> {
+        let mut spawn = None;
+        let mut terminal = None;
+        for event in self.subagent_lifecycle_events() {
+            match &event.kind {
+                TimelineEventKind::Subagent(SubagentEvent::Spawned(candidate))
+                    if candidate.subagent_id == subagent_id =>
+                {
+                    spawn = Some((event.seq, candidate.as_ref().clone()));
+                }
+                TimelineEventKind::Subagent(SubagentEvent::Ended(candidate))
+                    if candidate.subagent_id == subagent_id =>
+                {
+                    terminal = Some(candidate.clone());
+                }
+                _ => {}
+            }
+        }
+        let frontier = self.next_seq();
+        let spawn = match spawn {
+            Some(spawn) => Some(spawn),
+            None => self
+                .lifecycle
+                .archived_subagent_spawn(subagent_id, frontier)?,
+        };
+        let Some((seq, spawn)) = spawn else {
+            return Ok(None);
+        };
+        let terminal = match terminal {
+            Some(terminal) => Some(terminal),
+            None => self
+                .lifecycle
+                .archived_subagent_terminal(subagent_id, frontier)?
+                .map(|(_, terminal)| terminal),
+        };
+        Ok(Some((seq, spawn, terminal)))
+    }
+
     pub fn events(&self) -> &[TimelineEvent] {
         &self.events
     }
 
+    /// Return the source audit facts for this inquiry identity in commit order.
+    pub fn outgoing_inquiry_events(&self, inquiry_id: &str) -> std::io::Result<Vec<TimelineEvent>> {
+        let mut facts = match &self.lifecycle.history {
+            Some(history) => history.outgoing_inquiry_before(inquiry_id, self.next_seq())?,
+            None => Vec::new(),
+        };
+        let start = self.surface_checkpoint_cut.map_or(0, |cut| {
+            self.events.partition_point(|event| event.seq < cut)
+        });
+        facts.extend(
+            self.events[start..]
+                .iter()
+                .filter(|event| is_outgoing_inquiry(event, inquiry_id))
+                .cloned(),
+        );
+        Ok(facts)
+    }
+
     pub fn event(&self, seq: EventSeq) -> Option<&TimelineEvent> {
-        let index = self.events.binary_search_by_key(&seq, |event| event.seq).ok()?;
+        let index = self
+            .events
+            .binary_search_by_key(&seq, |event| event.seq)
+            .ok()?;
         self.events.get(index)
+    }
+
+    pub fn exact_event(
+        &self,
+        seq: EventSeq,
+    ) -> std::io::Result<Option<std::borrow::Cow<'_, TimelineEvent>>> {
+        if let Some(event) = self.event(seq) {
+            return Ok(Some(std::borrow::Cow::Borrowed(event)));
+        }
+        match &self.lifecycle.history {
+            Some(history) => Ok(history.event(seq)?.map(std::borrow::Cow::Owned)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn has_surface_checkpoint(&self) -> bool {
+        self.surface_checkpoint_cut.is_some()
+    }
+
+    pub(crate) fn archived_sideband_before(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> std::io::Result<bool> {
+        self.lifecycle
+            .history
+            .as_ref()
+            .map_or(Ok(false), |history| history.sideband_before(id, seq))
+    }
+
+    pub(crate) fn canonical_branch(&self) -> Result<std::borrow::Cow<'_, Self>, TimelineError> {
+        let Some(cut) = self.surface_checkpoint_cut else {
+            return Ok(std::borrow::Cow::Borrowed(self));
+        };
+        let history = self
+            .lifecycle
+            .history
+            .as_ref()
+            .expect("published Surface has history");
+        let mut events = history
+            .events_before(cut)
+            .map_err(TimelineError::ResponseHistory)?;
+        events.extend(self.events.iter().filter(|event| event.seq >= cut).cloned());
+        // The live actor may already have discarded validated diagnostics
+        // from its suffix. They have no effect on branch provenance.
+        Self::from_indexed_prefix(events, self.next_seq(), self.first_event_at_ms)
+            .map(std::borrow::Cow::Owned)
     }
 
     pub fn last_seq(&self) -> Option<EventSeq> {
@@ -2349,12 +3314,35 @@ impl Timeline {
         self.last_rewind_seq.max(self.last_context_rebuild_seq)
     }
 
+    pub fn has_rewound(&self) -> bool {
+        self.last_rewind_seq.is_some()
+    }
+
     pub fn response_admission(
         &self,
         identity: &ResponseAdmissionIdentity,
     ) -> Option<&MessageEvent> {
         let seq = self.response_admission_positions.get(identity)?;
         self.event(*seq)?.messages()
+    }
+
+    pub(crate) fn exact_response_admission(
+        &self,
+        identity: &ResponseAdmissionIdentity,
+    ) -> Result<Option<std::borrow::Cow<'_, MessageEvent>>, TimelineError> {
+        if let Some(message) = self.response_admission(identity) {
+            return Ok(Some(std::borrow::Cow::Borrowed(message)));
+        }
+        let Some(history) = &self.lifecycle.history else {
+            return Ok(None);
+        };
+        Ok(history
+            .response_admission_before(identity, self.next_seq())
+            .map_err(TimelineError::ResponseHistory)?
+            .and_then(|event| match event.kind {
+                TimelineEventKind::Messages(message) => Some(std::borrow::Cow::Owned(message)),
+                _ => None,
+            }))
     }
 
     /// Check selected-branch ownership without copying the admitted body.
@@ -2396,6 +3384,41 @@ impl Timeline {
         })
     }
 
+    pub(crate) fn exact_admitted_response(
+        &self,
+        identity: &ResponseAdmissionIdentity,
+    ) -> Result<Option<AdmittedResponse>, TimelineError> {
+        if let Some(response) = self.admitted_response(identity) {
+            return Ok(Some(response));
+        }
+        if self.has_rewound() {
+            return Ok(None);
+        }
+        let Some(history) = &self.lifecycle.history else {
+            return Ok(None);
+        };
+        Ok(history
+            .response_admission_before(identity, self.next_seq())
+            .map_err(TimelineError::ResponseHistory)?
+            .filter(|event| {
+                self.last_context_rebuild_seq
+                    .is_none_or(|rebuild| event.seq > rebuild)
+            })
+            .and_then(|event| {
+                let TimelineEventKind::Messages(message) = event.kind else {
+                    return None;
+                };
+                Some(AdmittedResponse {
+                    event_seq: event.seq,
+                    identity: identity.clone(),
+                    items: message.items,
+                    quarantined_tool_exchanges: message
+                        .response_admission?
+                        .quarantined_tool_exchanges,
+                })
+            }))
+    }
+
     /// Identity-bearing assistant responses belonging to the currently
     /// selected branch, in Timeline order.
     pub fn admitted_responses(&self) -> Vec<AdmittedResponse> {
@@ -2413,22 +3436,31 @@ impl Timeline {
     /// Borrow response payloads at this exact Timeline revision, computing the
     /// selected branch once for the complete batch.
     pub fn admitted_response_views(&self) -> Vec<AdmittedResponseView<'_>> {
-        let selected_events = fold_branch_provenance(self).admitted_response_events;
-        self.events
+        self.admitted_response_views_since(EventSeq::new(0))
+    }
+
+    pub fn admitted_response_views_since(&self, from: EventSeq) -> Vec<AdmittedResponseView<'_>> {
+        let selected_events = self
+            .has_rewound()
+            .then(|| fold_branch_provenance(self).admitted_response_events);
+        let start = self.events.partition_point(|event| event.seq < from);
+        self.events[start..]
             .iter()
             .filter_map(|event| {
-                let TimelineEventKind::Messages(message) = &event.kind else {
-                    return None;
-                };
+                let message = event.messages()?;
                 let admission = message.response_admission.as_ref()?;
-                selected_events
-                    .contains(&event.seq)
-                    .then_some(AdmittedResponseView {
-                        event_seq: event.seq,
-                        identity: &admission.identity,
-                        items: &message.items,
-                        quarantined_tool_exchanges: admission.quarantined_tool_exchanges,
-                    })
+                (self
+                    .last_context_rebuild_seq
+                    .is_none_or(|rebuild| event.seq > rebuild)
+                    && selected_events
+                        .as_ref()
+                        .is_none_or(|events| events.contains(&event.seq)))
+                .then_some(AdmittedResponseView {
+                    event_seq: event.seq,
+                    identity: &admission.identity,
+                    items: &message.items,
+                    quarantined_tool_exchanges: admission.quarantined_tool_exchanges,
+                })
             })
             .collect()
     }
@@ -2438,6 +3470,20 @@ impl Timeline {
     /// side effect. This is intentionally conservative: uncertainty rejects
     /// repair instead of heuristically reordering history.
     pub fn response_projection_tail_safe(&self, response_event: EventSeq) -> bool {
+        if self
+            .surface_checkpoint_cut
+            .is_some_and(|cut| response_event < cut)
+        {
+            return self
+                .canonical_branch()
+                .is_ok_and(|timeline| timeline.response_projection_tail_safe(response_event));
+        }
+        if self
+            .latest_archived_effect
+            .is_some_and(|seq| seq > response_event)
+        {
+            return false;
+        }
         let fold = fold_branch_provenance(self);
         let selected_births = fold.leaf_birth.values().copied().collect::<BTreeSet<_>>();
         !self.events.iter().any(|event| {
@@ -2500,6 +3546,23 @@ impl Timeline {
         receipts
     }
 
+    pub fn exact_agent_message_receipts(
+        &self,
+        identity: Option<(&str, &str)>,
+    ) -> std::io::Result<Vec<TimelineEvent>> {
+        let mut receipts = self.lifecycle.history.as_ref().map_or_else(
+            || Ok(Vec::new()),
+            |history| history.agent_message_receipts(identity),
+        )?;
+        receipts.extend(self.events.iter().filter(|event| {
+            matches!(&event.kind, TimelineEventKind::Notification(NotificationEvent::Received { source, .. })
+                if source.agent_message().is_some_and(|(sender, operation, _, _)| identity.is_none_or(|key| key == (sender, operation))))
+        }).cloned());
+        receipts.sort_unstable_by_key(|event| event.seq);
+        receipts.dedup_by_key(|event| event.seq);
+        Ok(receipts)
+    }
+
     /// Pending inbox data and retained parent-message history share blob ownership.
     pub fn retained_notification_payload_hashes(&self) -> BTreeSet<String> {
         let mut hashes = self
@@ -2525,11 +3588,25 @@ impl Timeline {
         hashes
     }
 
+    pub(crate) fn notification_payload_hash_sources(
+        &self,
+        candidates: Option<&[String]>,
+    ) -> (
+        BTreeSet<String>,
+        Option<std::sync::Arc<dyn ExecutionHistory>>,
+    ) {
+        let mut hashes = self.retained_notification_payload_hashes();
+        if let Some(candidates) = candidates {
+            hashes.retain(|hash| candidates.contains(hash));
+        }
+        (hashes, self.lifecycle.history.clone())
+    }
+
     /// Raw image references belong to physical committed User messages even
     /// after compaction or rewind removes them from the model-visible Surface.
-    pub(crate) fn committed_user_image_paths(&self) -> BTreeSet<String> {
+    pub fn user_image_paths(events: &[TimelineEvent]) -> BTreeSet<String> {
         let mut paths = BTreeSet::new();
-        for event in &self.events {
+        for event in events {
             let items: &[ConversationItem] = match &event.kind {
                 TimelineEventKind::Messages(message) => &message.items,
                 TimelineEventKind::Input(InputEvent::Consumed { item, .. })
@@ -2555,6 +3632,21 @@ impl Timeline {
         paths
     }
 
+    pub(crate) fn user_image_path_sources(
+        &self,
+    ) -> (
+        BTreeSet<String>,
+        Option<std::sync::Arc<dyn ExecutionHistory>>,
+    ) {
+        let start = self.surface_checkpoint_cut.map_or(0, |cut| {
+            self.events.partition_point(|event| event.seq < cut)
+        });
+        (
+            Self::user_image_paths(&self.events[start..]),
+            self.lifecycle.history.clone(),
+        )
+    }
+
     /// Find the immutable receipt for an at-least-once source delivery.
     pub fn received_notification_id(
         &self,
@@ -2576,15 +3668,32 @@ impl Timeline {
         source: &NotificationSource,
         version: &NotificationSourceVersion,
     ) -> Option<TurnId> {
-        let received = self.received_notification_event(source, version)?;
+        self.exact_notification_consumer(source, version)
+            .ok()
+            .flatten()
+    }
+
+    pub fn exact_notification_consumer(
+        &self,
+        source: &NotificationSource,
+        version: &NotificationSourceVersion,
+    ) -> Result<Option<TurnId>, TimelineError> {
+        let Some(received) = self.exact_notification(source, version)? else {
+            return Ok(None);
+        };
         let TimelineEventKind::Notification(NotificationEvent::Received { id, .. }) =
             &received.kind
         else {
-            return None;
+            return Err(TimelineError::InvalidNotification);
         };
-        self.events
+        let archived = self.archived_notification_consumer(id, self.next_seq())?;
+        let resident = self
+            .events
             .iter()
-            .skip(self.events.partition_point(|event| event.seq <= received.seq))
+            .skip(
+                self.events
+                    .partition_point(|event| event.seq <= received.seq),
+            )
             .find_map(|event| match &event.kind {
                 TimelineEventKind::Notification(NotificationEvent::Consumed {
                     notification_ids,
@@ -2592,13 +3701,106 @@ impl Timeline {
                     ..
                 }) if notification_ids.contains(id) => Some(*turn),
                 _ => None,
-            })
-            .or_else(|| match source {
-                NotificationSource::SubagentCompleted { subagent_id, .. } => {
-                    self.delivered_subagent_answers.get(subagent_id).copied()
+            });
+        if let Some(turn) = archived.or(resident) {
+            return Ok(Some(turn));
+        }
+        if let NotificationSource::SubagentCompleted { subagent_id, .. } = source {
+            return Ok(self
+                .archived_subagent_delivery(subagent_id, self.next_seq())?
+                .or_else(|| self.delivered_subagent_answers.get(subagent_id).copied()));
+        }
+        Ok(None)
+    }
+
+    pub fn exact_notification(
+        &self,
+        source: &NotificationSource,
+        version: &NotificationSourceVersion,
+    ) -> Result<Option<std::borrow::Cow<'_, TimelineEvent>>, TimelineError> {
+        if let Some(event) = self.received_notification_event(source, version) {
+            return Ok(Some(std::borrow::Cow::Borrowed(event)));
+        }
+        let Some(owner) = &self.notification_owner else {
+            return Ok(None);
+        };
+        let id = notification_id(owner, source, version)?;
+        let event = self.archived_notification(&id, self.next_seq())?;
+        Ok(event.filter(|event| matches!(&event.kind,
+            TimelineEventKind::Notification(NotificationEvent::Received { source: original, source_version, .. })
+                if original.identity() == source.identity() && source_version == version
+        )).map(std::borrow::Cow::Owned))
+    }
+
+    fn archived_notification(
+        &self,
+        id: &str,
+        before: EventSeq,
+    ) -> Result<Option<TimelineEvent>, TimelineError> {
+        self.lifecycle.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .notification_before(id, before)
+                .map_err(TimelineError::NotificationHistory)
+        })
+    }
+
+    fn archived_notification_consumer(
+        &self,
+        id: &str,
+        before: EventSeq,
+    ) -> Result<Option<TurnId>, TimelineError> {
+        self.lifecycle.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .notification_consumer(id, before)
+                .map_err(TimelineError::NotificationHistory)
+        })
+    }
+
+    fn archived_subagent_delivery(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<TurnId>, TimelineError> {
+        self.lifecycle.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .subagent_delivery_before(id, seq)
+                .map_err(TimelineError::ToolHistory)
+        })
+    }
+
+    pub fn restore_notification_checkpoint(
+        &mut self,
+        owner: String,
+        receipts: Vec<TimelineEvent>,
+    ) -> Result<(), TimelineError> {
+        self.notification_owner = Some(owner);
+        if let Some(history) = &self.lifecycle.history {
+            let mut settled = Vec::new();
+            for (id, receipt) in &self.pending_notifications {
+                if !receipt.source.is_task_signal()
+                    && history
+                        .notification_settled(id, self.next_seq())
+                        .map_err(TimelineError::NotificationHistory)?
+                {
+                    settled.push(id.clone());
                 }
-                _ => None,
-            })
+            }
+            for id in settled {
+                self.pending_notifications.remove(&id);
+                self.lifecycle.pending_notifications.remove(&id);
+            }
+        }
+        for event in receipts {
+            let TimelineEventKind::Notification(notification) = event.kind else {
+                return Err(TimelineError::InvalidNotification);
+            };
+            let NotificationEvent::Received { id, .. } = &notification else {
+                return Err(TimelineError::InvalidNotification);
+            };
+            self.lifecycle.pending_notifications.insert(id.clone());
+            self.apply_notification(event.seq, &notification, false);
+        }
+        Ok(())
     }
 
     pub(crate) fn received_notification_event(
@@ -2612,8 +3814,11 @@ impl Timeline {
         self.event(*seq)
     }
 
-    pub(crate) fn submitted_input_event(&self, input_id: &str) -> Option<&TimelineEvent> {
-        self.events.iter().find(|event| {
+    pub(crate) fn submitted_input_event(
+        &self,
+        input_id: &str,
+    ) -> Result<Option<TimelineEvent>, TimelineError> {
+        let resident = self.events.iter().find(|event| {
             matches!(
                 &event.kind,
                 TimelineEventKind::Input(InputEvent::Submitted {
@@ -2621,11 +3826,77 @@ impl Timeline {
                     ..
                 }) if existing == input_id
             )
-        })
+        });
+        if let Some(event) = resident {
+            return Ok(Some(event.clone()));
+        }
+        Ok(self
+            .lifecycle
+            .archived_input(input_id, self.next_seq())?
+            .map(|(event, _)| event))
     }
 
     pub fn next_seq(&self) -> EventSeq {
         EventSeq(self.next_seq)
+    }
+
+    pub fn restore_last_request(&mut self, archived: Option<(EventSeq, i64)>) {
+        if archived
+            .is_some_and(|(seq, _)| self.last_request.is_none_or(|(current, _)| seq > current))
+        {
+            self.last_request = archived;
+        }
+    }
+
+    pub fn last_request_at_ms(&self) -> Option<i64> {
+        self.last_request.map(|(_, at_ms)| at_ms)
+    }
+
+    pub fn restore_hook_checkpoint(&mut self, session_id: Option<String>, generation: u64) {
+        self.lifecycle.hook_session_id = session_id.or(self.lifecycle.hook_session_id.take());
+        self.hook_config_generation = self.hook_config_generation.max(generation);
+    }
+
+    pub fn hook_config_generation(&self) -> u64 {
+        self.hook_config_generation
+    }
+
+    pub fn set_usage_checkpoint(&mut self, checkpoint: crate::actor::state::UsageCheckpoint) {
+        self.usage_checkpoint = Some(checkpoint);
+    }
+
+    pub(crate) fn usage_checkpoint(&self) -> Option<&crate::actor::state::UsageCheckpoint> {
+        self.usage_checkpoint.as_ref()
+    }
+
+    pub(crate) fn historical_usage(&self, key: &str) -> std::io::Result<Option<ObservationEvent>> {
+        self.lifecycle
+            .history
+            .as_ref()
+            .map_or(Ok(None), |history| history.usage_fact(key))
+    }
+
+    pub(crate) fn historical_usage_segment(
+        &self,
+        id: crate::usage::UsageSegmentId,
+    ) -> std::io::Result<Option<crate::UsageSegment>> {
+        self.lifecycle
+            .history
+            .as_ref()
+            .map_or(Ok(None), |history| history.usage_segment(id))
+    }
+
+    pub(crate) fn historical_usage_segments_page(
+        &self,
+        before: Option<crate::usage::UsageSegmentId>,
+        byte_limit: usize,
+    ) -> std::io::Result<crate::usage::UsageSegmentPage> {
+        self.lifecycle
+            .history
+            .as_ref()
+            .map_or(Ok(Default::default()), |history| {
+                history.usage_segments_page(before, byte_limit)
+            })
     }
 
     /// Monotonic revision of the model-visible Surface. Unlike the Timeline
@@ -2645,99 +3916,28 @@ impl Timeline {
     /// Whether an already-validated event can canonically own this historical
     /// Surface coordinate. The item need not remain on the current Surface.
     pub(crate) fn owns_surface_id(&self, id: SurfaceId) -> bool {
-        self.event(id.event)
-            .is_some_and(|event| {
-                if event.seq != id.event {
-                    return false;
-                }
-                let item = usize::try_from(id.item).ok();
-                match &event.kind {
-                    TimelineEventKind::Messages(messages) => {
-                        item.is_some_and(|item| item < messages.items.len())
-                    }
-                    TimelineEventKind::Input(InputEvent::Consumed { skill_loads, .. }) => {
-                        item.is_some_and(|item| item <= skill_loads.len())
-                    }
-                    TimelineEventKind::Notification(NotificationEvent::Consumed {
-                        input: Some(_),
-                        ..
-                    }) => id.item == 0,
-                    TimelineEventKind::ImageProjection(projection) => {
-                        let slot_count = projection.shadows.len()
-                            + projection
-                                .tool_calls
-                                .iter()
-                                .map(|tool_call| 1 + tool_call.carrier_sources.len())
-                                .sum::<usize>();
-                        item.is_some_and(|item| item < slot_count)
-                    }
-                    TimelineEventKind::Control(control) => {
-                        item.is_some_and(|item| item < control.model_contexts.len())
-                    }
-                    _ => false,
-                }
-            })
+        self.exact_event(id.event)
+            .ok()
+            .flatten()
+            .is_some_and(|event| event.owns_surface_id(id))
     }
 
-    /// Effective model context for each Control layer, whether or not its
-    /// anchor is still present on the current Surface.
-    ///
-    /// This replays the same layer-specific activation rule as Surface.
-    pub fn active_control_contexts(
-        &self,
-    ) -> std::collections::BTreeMap<ControlContextLayer, ActiveControlContext> {
-        let mut active = std::collections::BTreeMap::new();
-        let mut active_turn = false;
-        let mut active_step = false;
-        let mut pending = BTreeMap::new();
-        for event in &self.events {
-            match &event.kind {
-                TimelineEventKind::Turn(TurnEvent::Started { .. }) => active_turn = true,
-                TimelineEventKind::Step(StepEvent::Started { .. }) => active_step = true,
-                TimelineEventKind::Control(control) => {
-                    for layer in &control.retired_context_layers {
-                        pending.remove(layer);
-                        active.remove(layer);
-                    }
-                    for (item, context) in control.model_contexts.iter().enumerate() {
-                        let projection = ActiveControlContext {
-                            surface_id: SurfaceId {
-                                event: event.seq,
-                                item: item as u32,
-                            },
-                            item: context.item.clone(),
-                        };
-                        if control_transition_waits_for_boundary(active_turn, active_step, context)
-                        {
-                            pending.insert(context.layer, projection);
-                        } else {
-                            active.insert(context.layer, projection);
-                        }
-                    }
-                }
-                TimelineEventKind::Step(StepEvent::Ended { .. }) => {
-                    active_step = false;
-                    for layer in [
-                        ControlContextLayer::AgentRole,
-                        ControlContextLayer::GoalDefinition,
-                        ControlContextLayer::PlanPhase,
-                    ] {
-                        if let Some(projection) = pending.remove(&layer) {
-                            active.insert(layer, projection);
-                        }
-                    }
-                }
-                TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
-                    active_turn = false;
-                    active_step = false;
-                    for (layer, projection) in std::mem::take(&mut pending) {
-                        active.insert(layer, projection);
-                    }
-                }
-                _ => {}
-            }
-        }
-        active
+    /// Effective model context for each Control layer, including sources
+    /// that compaction has shadowed on the Surface.
+    pub fn active_control_contexts(&self) -> BTreeMap<ControlContextLayer, ActiveControlContext> {
+        self.control_contexts
+            .active
+            .iter()
+            .map(|(layer, (id, item))| {
+                (
+                    *layer,
+                    ActiveControlContext {
+                        surface_id: *id,
+                        item: item.clone(),
+                    },
+                )
+            })
+            .collect()
     }
 
     pub fn session_title(&self) -> Option<(EventSeq, &SessionTitleEvent)> {
@@ -2790,25 +3990,7 @@ impl Timeline {
         let Some(event) = self.event(EventSeq::new(result_ref.first_seq)) else {
             return Err(TimelineError::MissingSubagentResult);
         };
-        let TimelineEventKind::SubagentResult(result) = &event.kind else {
-            return Err(TimelineError::InvalidSubagentResultLink);
-        };
-        if result_ref.timeline_id != spawn.child_session_id
-            || result_ref.first_seq != result_ref.last_seq
-            || event.seq.get() != result_ref.first_seq
-            || terminal.subagent_id != spawn.subagent_id
-            || terminal.child_session_id != spawn.child_session_id
-            || result.subagent_id != spawn.subagent_id
-            || result.outcome != terminal.outcome
-            || result.duration_ms != terminal.duration_ms
-            || result.tool_calls != terminal.tool_calls
-            || result.turns != terminal.turns
-            || result.tokens_used != terminal.tokens_used
-            || result.error != terminal.error
-        {
-            return Err(TimelineError::InvalidSubagentResultLink);
-        }
-        Ok(result)
+        terminal.validate_result_fact(spawn, event)
     }
 
     /// Build the uncompressed transcript for the currently selected branch.
@@ -2855,6 +4037,9 @@ impl Timeline {
     /// erase rewind history. A Rewind replacement is different: it selects a
     /// new branch root, so earlier discarded appends must not reappear.
     pub fn rewind_surface(&self, target: usize) -> Result<Vec<ConversationItem>, TimelineError> {
+        if self.has_surface_checkpoint() {
+            return self.canonical_branch()?.rewind_surface(target);
+        }
         let mut branch = self.branch_transcript();
         if !branch.iter().any(|item| {
             matches!(item, ConversationItem::User(user) if user.prompt_index == Some(target))
@@ -2881,13 +4066,47 @@ impl Timeline {
             .collect()
     }
 
-    pub(crate) fn recent_prompt_texts(&self, limit: usize) -> Vec<String> {
-        self.user_prompt_positions
-            .values()
-            .rev()
-            .take(limit)
-            .map(|seq| self.user_prompt_at(*seq).1.to_owned())
-            .collect()
+    pub(crate) fn prompt_records_with_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PromptRecord>, TimelineError> {
+        let mut prompts = BTreeMap::new();
+        if let Some(history) = &self.lifecycle.history {
+            for prompt in history
+                .prompts_before(limit)
+                .map_err(TimelineError::TurnHistory)?
+            {
+                prompts.insert(prompt.prompt_index, prompt);
+            }
+        }
+        for seq in self.user_prompt_positions.values().rev().take(limit) {
+            let (prompt_index, text, input_kind) = self.user_prompt_at(*seq);
+            prompts.insert(
+                prompt_index,
+                PromptRecord {
+                    prompt_index,
+                    text: text.to_owned(),
+                    input_kind,
+                },
+            );
+        }
+        Ok(prompts.into_values().rev().take(limit).collect())
+    }
+
+    pub fn restore_runtime_checkpoint(
+        &mut self,
+        lifecycle: crate::session_runtime::RuntimeLifecycle,
+        waits: crate::session_runtime::RuntimeWaits,
+        progress: ActiveTurnProgress,
+    ) {
+        self.runtime = lifecycle;
+        self.suspension_waits = waits;
+        self.active_turn_progress = progress;
+    }
+
+    pub fn restore_prompt_coordinates(&mut self, next: usize, max: Option<usize>) {
+        self.next_prompt_index = next;
+        self.archived_prompt_max = max;
     }
 
     fn user_prompt_at(&self, seq: EventSeq) -> (usize, &str, TurnInputKind) {
@@ -2896,7 +4115,10 @@ impl Timeline {
             prompt_text,
             input_kind,
             ..
-        }) = &self.event(seq).expect("indexed user Turn start exists").kind
+        }) = &self
+            .event(seq)
+            .expect("indexed user Turn start exists")
+            .kind
         else {
             unreachable!("indexed user Turn start")
         };
@@ -2959,7 +4181,10 @@ impl Timeline {
     /// started on this branch. Unlike `next_prompt_index`, this remains safe
     /// when coordinates contain holes.
     pub(crate) fn current_prompt_index(&self) -> Option<usize> {
-        self.prompt_indices.iter().next_back().copied()
+        self.prompt_indices
+            .last()
+            .copied()
+            .max(self.archived_prompt_max)
     }
 
     fn apply_prompt_coordinate(&mut self, event: &TimelineEvent) {
@@ -2973,9 +4198,9 @@ impl Timeline {
                     self.user_prompt_positions.insert(*prompt_index, event.seq);
                 }
                 self.prompt_indices.insert(*prompt_index);
-                while self.prompt_indices.contains(&self.next_prompt_index) {
-                    self.next_prompt_index += 1;
-                }
+                self.next_prompt_index = self
+                    .advance_prompt_coordinate(*prompt_index)
+                    .expect("prompt coordinates were checked before publication");
             }
             TimelineEventKind::Messages(MessageEvent {
                 cause: MessageCause::Rewind,
@@ -2994,14 +4219,43 @@ impl Timeline {
                 self.prompt_indices.split_off(&next);
                 self.user_prompt_positions.split_off(&next);
                 self.next_prompt_index = self.next_prompt_index.min(next);
+                self.archived_prompt_max = self.archived_prompt_max.filter(|index| *index < next);
             }
             _ => {}
         }
     }
 
+    fn advance_prompt_coordinate(&self, prompt: usize) -> Result<usize, TimelineError> {
+        let mut next = self.next_prompt_index;
+        if next != prompt {
+            return Ok(next);
+        }
+        while let Some(candidate) = next.checked_add(1) {
+            next = candidate;
+            if self.prompt_indices.contains(&next) {
+                continue;
+            }
+            let archived = !self.lifecycle.replaying_working_prefix
+                && match &self.lifecycle.history {
+                    Some(history) => history
+                        .has_prompt(next)
+                        .map_err(TimelineError::TurnHistory)?,
+                    None => false,
+                };
+            if !archived {
+                break;
+            }
+        }
+        Ok(next)
+    }
+
+    pub fn restore_compaction_prompt_coordinate(&mut self, completed: Option<usize>) {
+        self.archived_compaction_prompt = completed;
+    }
+
     pub fn last_completed_compaction_prompt_index(&self) -> Option<usize> {
         let mut starts = BTreeMap::<&str, usize>::new();
-        let mut latest = None;
+        let mut latest = self.archived_compaction_prompt;
         for event in &self.events {
             match &event.kind {
                 TimelineEventKind::Compaction(CompactionEvent::Started {
@@ -3062,20 +4316,27 @@ impl Timeline {
     ) -> Option<&BTreeMap<String, (InteractionKind, String)>> {
         (self.runtime.operation_id.as_deref() == Some(operation_id)
             && self.runtime.phase == crate::session_runtime::RuntimePhase::Suspending)
-            .then_some(&self.suspension_waits)
+            .then_some(self.suspension_waits.as_map())
     }
 
-    pub(crate) fn suspension_turn_evidence(
+    pub fn suspension_turn_evidence(
         &self,
         turn: Option<TurnId>,
         accepted_response: Option<&ResponseAdmissionIdentity>,
     ) -> Option<crate::session_runtime::SuspendedTurnProgress> {
         let turn = turn.filter(|turn| self.active_turn() == Some(*turn))?;
         let progress = &self.active_turn_progress;
-        let response_consumed = accepted_response.is_some_and(|identity| {
-            self.admitted_response_seq(identity)
-                .is_none_or(|seq| progress.latest_step.is_some_and(|step| step > seq))
-        });
+        let response_consumed = match accepted_response {
+            Some(identity) => self
+                .exact_admitted_response(identity)
+                .ok()?
+                .is_none_or(|response| {
+                    progress
+                        .latest_step
+                        .is_some_and(|step| step > response.event_seq)
+                }),
+            None => false,
+        };
         let open_tools = self
             .lifecycle
             .open_tools
@@ -3091,8 +4352,12 @@ impl Timeline {
         })
     }
 
-    pub(crate) fn tool_was_started(&self, call: &str) -> bool {
-        self.lifecycle.seen_tools.contains(call)
+    pub(crate) fn tool_was_started(&self, call: &str) -> Result<bool, TimelineError> {
+        Ok(self.lifecycle.seen_tools.contains(call)
+            || self
+                .lifecycle
+                .archived_tool(call, self.next_seq())?
+                .is_some())
     }
 
     pub(crate) fn is_interaction_open(
@@ -3102,6 +4367,10 @@ impl Timeline {
         kind: InteractionKind,
     ) -> bool {
         self.lifecycle.open_interactions.get(&(call, attempt)) == Some(&kind)
+    }
+
+    pub fn archived_active_turn_had_tool(&self) -> bool {
+        self.archived_active_turn_had_tool
     }
 
     pub fn active_turn(&self) -> Option<TurnId> {
@@ -3114,16 +4383,57 @@ impl Timeline {
 
     pub fn hook_projection(&self, occurrence_id: &str) -> Option<HookLifecycleProjection> {
         let hook = self.lifecycle.hooks.get(occurrence_id)?;
-        Some(HookLifecycleProjection {
-            occurrence_id: occurrence_id.to_owned(),
-            event: hook.event,
-            gate: hook.gate,
-            cause: hook.cause.clone(),
-            config_generation: hook.config_generation,
-            handlers: hook.handlers.clone(),
-            runs: hook.runs.clone(),
-            decision: hook.decision.clone(),
-        })
+        Some(hook.projection(occurrence_id))
+    }
+
+    /// Fold one occurrence after its trigger's owner was validated at
+    /// publication. Every later transition uses the live lifecycle rules.
+    pub fn project_indexed_hook<'a>(
+        events: impl IntoIterator<Item = &'a TimelineEvent>,
+    ) -> Result<HookLifecycleProjection, TimelineError> {
+        let mut events = events.into_iter();
+        let Some(TimelineEventKind::Hook(HookEvent::Triggered {
+            occurrence_id,
+            event,
+            gate,
+            cause,
+            config_generation,
+            handlers,
+        })) = events.next().map(|event| &event.kind)
+        else {
+            return Err(TimelineError::InvalidHook);
+        };
+        let mut lifecycle = LifecycleFold::default();
+        lifecycle.hooks.insert(
+            occurrence_id.clone(),
+            HookFold {
+                event: *event,
+                gate: *gate,
+                cause: cause.clone(),
+                config_generation: *config_generation,
+                handlers: handlers.clone(),
+                runs: vec![HookHandlerLifecycle::Pending; handlers.len()],
+                decision: None,
+            },
+        );
+        for event in events {
+            if !matches!(&event.kind, TimelineEventKind::Hook(hook) if hook.occurrence_id() == occurrence_id && !matches!(hook, HookEvent::Triggered { .. }))
+            {
+                return Err(TimelineError::InvalidHook);
+            }
+            lifecycle.accept(event)?;
+        }
+        Ok(lifecycle.hooks[occurrence_id].projection(occurrence_id))
+    }
+
+    pub(crate) fn exact_hook_projection(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<HookLifecycleProjection>, TimelineError> {
+        match self.hook_projection(occurrence_id) {
+            Some(projection) => Ok(Some(projection)),
+            None => self.lifecycle.archived_hook(occurrence_id, self.next_seq()),
+        }
     }
 
     /// Completed Hook occurrences in their durable completion order.
@@ -3183,6 +4493,52 @@ impl Timeline {
         })
     }
 
+    pub(crate) fn exact_input_state(
+        &self,
+        input_id: &str,
+    ) -> Result<Option<InputLifecycle>, TimelineError> {
+        match self.input_state(input_id) {
+            Some(state) => Ok(Some(state)),
+            None => Ok(self
+                .lifecycle
+                .archived_input(input_id, self.next_seq())?
+                .map(|(_, state)| state)),
+        }
+    }
+
+    pub fn restore_input_checkpoint(
+        &mut self,
+        inputs: Vec<InputCheckpointEntry>,
+    ) -> Result<(), TimelineError> {
+        for input in inputs {
+            let InputLifecycle {
+                input_id,
+                intent,
+                payload_ref,
+                state,
+            } = input.lifecycle;
+            let (admission, route) = match state {
+                InputState::Submitted => (None, None),
+                InputState::Allowed { route } => (Some(InputAdmissionDecision::Allow), Some(route)),
+                _ => return Err(TimelineError::InvalidInput),
+            };
+            self.lifecycle.inputs.insert(
+                input_id,
+                InputFold {
+                    canonical_position: input.canonical_position,
+                    intent,
+                    payload_ref,
+                    admission,
+                    route,
+                    reserved_turn: input.reserved_turn,
+                    consumption: None,
+                    dismissed: None,
+                },
+            );
+        }
+        Ok(())
+    }
+
     pub fn pending_allowed_inputs(&self) -> Vec<PendingAllowedInput> {
         let mut pending: Vec<_> = self
             .lifecycle
@@ -3218,6 +4574,23 @@ impl Timeline {
             .collect()
     }
 
+    pub(crate) fn input_payload_hash_sources(
+        &self,
+        candidates: Option<&[String]>,
+    ) -> (
+        BTreeSet<String>,
+        Option<std::sync::Arc<dyn ExecutionHistory>>,
+    ) {
+        let hashes = self
+            .lifecycle
+            .inputs
+            .values()
+            .filter(|input| candidates.is_none_or(|keys| keys.contains(&input.payload_ref.blake3)))
+            .map(|input| input.payload_ref.blake3.clone())
+            .collect();
+        (hashes, self.lifecycle.history.clone())
+    }
+
     pub fn open_request_ids(&self) -> impl Iterator<Item = &str> {
         self.lifecycle.open_requests.keys().map(String::as_str)
     }
@@ -3233,87 +4606,157 @@ impl Timeline {
             .filter_map(|(run_id, lifecycle)| lifecycle.open.then_some(run_id.as_str()))
     }
 
+    /// Runs whose mutable Workflow sidecars are required before execution can
+    /// continue. This is the bounded checkpoint set: open epochs plus Runs
+    /// whose Ended boundary records process-level execution suspension.
+    pub fn execution_workflow_spawns(&self) -> Vec<(EventSeq, String)> {
+        let mut runs = self
+            .lifecycle
+            .workflows
+            .iter()
+            .filter_map(|(run_id, fold)| {
+                (fold.open || fold.execution_suspended).then_some((fold.spawn, run_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        runs.sort_unstable_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+        runs
+    }
+
     /// Canonical lifecycle projection for a Workflow owned by this Timeline.
-    /// Consumers must not reconstruct Workflow state by scanning raw events.
     pub fn workflow_lifecycle(&self, run_id: &str) -> Option<WorkflowLifecycle> {
-        let fold = self.lifecycle.workflows.get(run_id)?;
-        let (name, objective, script_hash, args_hash, initial_manifest) =
-            self.events.iter().find_map(|event| match &event.kind {
-                TimelineEventKind::Workflow(WorkflowEvent::Spawned {
-                    run_id: candidate,
-                    name,
-                    objective,
-                    script_hash,
-                    args_hash,
-                    initial_manifest,
-                    ..
-                }) if candidate == run_id => Some((
-                    name.clone(),
-                    objective.clone(),
-                    script_hash.clone(),
-                    args_hash.clone(),
-                    initial_manifest.clone(),
-                )),
-                _ => None,
-            })?;
-        let terminal = (!fold.open).then(|| {
-            self.events
-                .iter()
-                .rev()
-                .find_map(|event| match &event.kind {
-                    TimelineEventKind::Workflow(WorkflowEvent::Ended {
-                        run_id: candidate,
-                        status,
-                        handoff,
-                        message,
-                        ..
-                    })
-                    | TimelineEventKind::Workflow(WorkflowEvent::Closed {
-                        run_id: candidate,
-                        status,
-                        handoff,
-                        message,
-                        ..
-                    }) if candidate == run_id => Some((*status, *handoff, message.clone())),
-                    _ => None,
-                })
-        });
-        let (status, handoff, message) = terminal
-            .flatten()
-            .map_or((None, None, None), |(status, handoff, message)| {
-                (Some(status), Some(handoff), message)
-            });
-        Some(WorkflowLifecycle {
+        self.exact_workflow_lifecycle(run_id).ok().flatten()
+    }
+
+    pub fn exact_workflow_lifecycle(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<WorkflowLifecycle>, TimelineError> {
+        let (fold, spawn, boundary) = if let Some(fold) = self.lifecycle.workflows.get(run_id) {
+            let spawn = self
+                .exact_event(fold.spawn)
+                .map_err(TimelineError::WorkflowHistory)?
+                .ok_or(TimelineError::InvalidWorkflow)?;
+            let boundary = self
+                .exact_event(fold.boundary)
+                .map_err(TimelineError::WorkflowHistory)?
+                .ok_or(TimelineError::InvalidWorkflow)?;
+            (fold.clone(), spawn, boundary)
+        } else if let Some((spawn, boundary)) =
+            self.lifecycle.archived_workflow(run_id, self.next_seq())?
+        {
+            (
+                WorkflowFold::from_boundaries(&spawn, &boundary)?,
+                std::borrow::Cow::Owned(spawn),
+                std::borrow::Cow::Owned(boundary),
+            )
+        } else {
+            return Ok(None);
+        };
+        let TimelineEventKind::Workflow(WorkflowEvent::Spawned {
             name,
             objective,
             script_hash,
             args_hash,
             initial_manifest,
+            ..
+        }) = &spawn.kind
+        else {
+            return Err(TimelineError::InvalidWorkflow);
+        };
+        let (status, execution_suspended, handoff, message) = match &boundary.kind {
+            TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                status,
+                execution_suspended,
+                handoff,
+                message,
+                ..
+            }) => (
+                Some(*status),
+                *execution_suspended,
+                Some(*handoff),
+                message.clone(),
+            ),
+            TimelineEventKind::Workflow(WorkflowEvent::Closed {
+                status,
+                handoff,
+                message,
+                ..
+            }) => (Some(*status), false, Some(*handoff), message.clone()),
+            _ => (None, false, None, None),
+        };
+        Ok(Some(WorkflowLifecycle {
+            name: name.clone(),
+            objective: objective.clone(),
+            script_hash: script_hash.clone(),
+            args_hash: args_hash.clone(),
+            initial_manifest: initial_manifest.clone(),
             execution_epoch: fold.execution_epoch,
             status,
-            execution_suspended: !fold.open
-                && self
-                    .events
-                    .iter()
-                    .rev()
-                    .find_map(|event| match &event.kind {
-                        TimelineEventKind::Workflow(WorkflowEvent::Ended {
-                            run_id: candidate,
-                            execution_suspended,
-                            ..
-                        }) if candidate == run_id => Some(*execution_suspended),
-                        TimelineEventKind::Workflow(WorkflowEvent::Closed {
-                            run_id: candidate,
-                            ..
-                        }) if candidate == run_id => Some(false),
-                        _ => None,
-                    })
-                    .unwrap_or(false),
+            execution_suspended,
             handoff,
             message,
             open: fold.open,
             closed: fold.closed,
-        })
+        }))
+    }
+
+    pub fn workflow_spawns_before(
+        &self,
+        before: EventSeq,
+        limit: usize,
+    ) -> std::io::Result<Vec<(EventSeq, String)>> {
+        let start = self.surface_checkpoint_cut.map_or(0, |cut| {
+            self.events.partition_point(|event| event.seq < cut)
+        });
+        let end = self.events.partition_point(|event| event.seq < before);
+        let mut spawns = self.events[start.min(end)..end]
+            .iter()
+            .rev()
+            .filter_map(|event| match &event.kind {
+                TimelineEventKind::Workflow(WorkflowEvent::Spawned { run_id, .. }) => {
+                    Some((event.seq, run_id.clone()))
+                }
+                _ => None,
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
+        if spawns.len() < limit
+            && let Some(history) = &self.lifecycle.history
+        {
+            spawns.extend(history.workflow_spawns_before(before, limit - spawns.len())?);
+        }
+        Ok(spawns)
+    }
+
+    pub fn restore_open_workflows(
+        &mut self,
+        starts: Vec<(TimelineEvent, TimelineEvent)>,
+    ) -> Result<(), TimelineError> {
+        for (spawn, start) in starts {
+            let fold = WorkflowFold::from_boundaries(&spawn, &start)?;
+            let execution_suspended = matches!(
+                start.kind,
+                TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                    execution_suspended: true,
+                    ..
+                })
+            );
+            if (!fold.open && !execution_suspended) || start.seq >= self.next_seq() {
+                return Err(TimelineError::InvalidWorkflow);
+            }
+            let TimelineEventKind::Workflow(workflow) = spawn.kind else {
+                unreachable!()
+            };
+            if self
+                .lifecycle
+                .workflows
+                .insert(workflow.run_id().to_owned(), fold)
+                .is_some()
+            {
+                return Err(TimelineError::InvalidWorkflow);
+            }
+        }
+        Ok(())
     }
 
     /// Return the existing promotion only while that exact generation still
@@ -3330,8 +4773,6 @@ impl Timeline {
         ))
     }
 
-    /// Append deterministic terminal facts for work left open by an interrupted
-    /// process. Physical history is never truncated or rewritten.
     pub fn settle_open_compaction(
         &mut self,
         reason: &str,
@@ -3803,21 +5244,11 @@ impl Timeline {
     }
 
     fn workflow_started_at(&self, run_id: &str, execution_epoch: u64) -> Option<i64> {
-        self.events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                TimelineEventKind::Workflow(WorkflowEvent::Spawned {
-                    run_id: candidate,
-                    execution_epoch: epoch,
-                    ..
-                })
-                | TimelineEventKind::Workflow(WorkflowEvent::Resumed {
-                    run_id: candidate,
-                    execution_epoch: epoch,
-                }) if candidate == run_id && *epoch == execution_epoch => Some(event.at_ms),
-                _ => None,
-            })
+        self.lifecycle
+            .workflows
+            .get(run_id)
+            .filter(|fold| fold.open && fold.execution_epoch == execution_epoch)?
+            .started_at_ms
     }
 
     fn step_started_at(&self, id: StepId) -> Option<i64> {
@@ -3903,6 +5334,7 @@ impl Timeline {
             kind,
         };
         self.validate(&event)?;
+        self.archive_already_settled_notification(&event)?;
         Ok(event)
     }
 
@@ -3984,15 +5416,37 @@ impl Timeline {
     }
 
     pub fn accept(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
+        if self.has_surface_checkpoint()
+            && matches!(
+                &event.kind,
+                TimelineEventKind::ImageProjection(_)
+                    | TimelineEventKind::Messages(MessageEvent {
+                        cause: MessageCause::Rewind,
+                        ..
+                    })
+            )
+        {
+            let mut canonical = self.canonical_branch()?.into_owned();
+            canonical.accept(event)?;
+            *self = canonical;
+            return Ok(());
+        }
         let lifecycle = self.validate(&event)?;
         let active_turn = self.lifecycle.active_turn.is_some();
         let active_step = self.lifecycle.active_step.is_some();
+        let archived_settlement = self.archive_already_settled_notification(&event)?;
         if let Some(lifecycle) = lifecycle {
             self.lifecycle = lifecycle;
-        } else if let TimelineEventKind::Control(control) = &event.kind {
-            self.lifecycle.control_revision = Some(control.revision);
+        } else {
+            match &event.kind {
+                TimelineEventKind::Control(control) => {
+                    self.lifecycle.control_revision = Some(control.revision);
+                }
+                TimelineEventKind::Tool(tool) => self.lifecycle.apply_tool(tool),
+                _ => {}
+            }
         }
-        self.apply_validated_event(event, active_turn, active_step);
+        self.apply_validated_event(event, active_turn, active_step, archived_settlement);
         Ok(())
     }
 
@@ -4003,9 +5457,39 @@ impl Timeline {
         self.validate_content(&event)?;
         let active_turn = self.lifecycle.active_turn.is_some();
         let active_step = self.lifecycle.active_step.is_some();
-        self.lifecycle.accept(&event.kind)?;
-        self.apply_validated_event(event, active_turn, active_step);
+        let archived_settlement = self.archive_already_settled_notification(&event)?;
+        self.lifecycle.accept(&event)?;
+        self.apply_validated_event(event, active_turn, active_step, archived_settlement);
         Ok(())
+    }
+
+    fn archive_already_settled_notification(
+        &self,
+        event: &TimelineEvent,
+    ) -> Result<bool, TimelineError> {
+        let TimelineEventKind::Notification(NotificationEvent::Received { source, .. }) =
+            &event.kind
+        else {
+            return Ok(false);
+        };
+        let (task_id, monitor) = match source {
+            NotificationSource::MonitorProgress { task_id, .. } => (task_id, true),
+            NotificationSource::TaskStillRunning { task_id, .. } => (task_id, false),
+            NotificationSource::SubagentCompleted { subagent_id, .. } => {
+                return Ok(self
+                    .archived_subagent_delivery(subagent_id, event.seq)?
+                    .is_some());
+            }
+            _ => return Ok(false),
+        };
+        self.lifecycle
+            .history
+            .as_ref()
+            .map_or(Ok(false), |history| {
+                history
+                    .task_completion_before(task_id, monitor, event.seq)
+                    .map_err(TimelineError::NotificationHistory)
+            })
     }
 
     fn apply_validated_event(
@@ -4013,9 +5497,21 @@ impl Timeline {
         event: TimelineEvent,
         active_turn: bool,
         active_step: bool,
+        archived_settlement: bool,
     ) {
         self.update_suspension_evidence(&event);
+        let surface_is_published = self
+            .surface_checkpoint_cut
+            .is_some_and(|cut| event.seq < cut);
+        if matches!(&event.kind, TimelineEventKind::Request(_)) {
+            self.last_request = Some((event.seq, event.at_ms));
+        }
         match &event.kind {
+            TimelineEventKind::Hook(HookEvent::Triggered {
+                config_generation, ..
+            }) => {
+                self.hook_config_generation = self.hook_config_generation.max(*config_generation);
+            }
             TimelineEventKind::Request(RequestEvent::Completed { id, attempt, .. }) => {
                 self.latest_completed_attempts.insert(id.clone(), *attempt);
             }
@@ -4047,7 +5543,9 @@ impl Timeline {
                     )
                     .expect("runtime event was validated before publication");
             }
-            TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
+            TimelineEventKind::Messages(messages) => {
+                self.apply_messages(event.seq, messages, !surface_is_published)
+            }
             TimelineEventKind::ImageProjection(projection) => {
                 let branch = fold_branch_provenance(self);
                 // One completed compaction summary may own several raw image
@@ -4160,10 +5658,12 @@ impl Timeline {
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: Some(input),
                 ..
-            }) => self.append_surface_items(event.seq, std::slice::from_ref(input)),
+            }) if !surface_is_published => {
+                self.append_surface_items(event.seq, std::slice::from_ref(input))
+            }
             TimelineEventKind::Input(InputEvent::Consumed {
                 item, skill_loads, ..
-            }) => {
+            }) if !surface_is_published => {
                 let mut surface_items = Vec::with_capacity(skill_loads.len() + 1);
                 surface_items.push(item.clone());
                 surface_items.extend(skill_loads.iter().cloned().map(ConversationItem::SkillLoad));
@@ -4174,41 +5674,18 @@ impl Timeline {
             }) => {}
             TimelineEventKind::Input(InputEvent::Handled { .. }) => {}
             TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => {}
-            TimelineEventKind::Control(control) => {
-                for layer in &control.retired_context_layers {
-                    self.pending_control_contexts.remove(layer);
-                }
-                for (item, context) in control.model_contexts.iter().enumerate() {
-                    let source = SurfaceId {
-                        event: event.seq,
-                        item: item as u32,
-                    };
-                    if control_transition_waits_for_boundary(active_turn, active_step, context) {
-                        self.pending_control_contexts
-                            .insert(context.layer, (source, context.item.clone()));
-                    } else {
-                        self.append_surface_item(source, context.item.clone());
-                    }
-                }
-            }
-            TimelineEventKind::Step(StepEvent::Ended { .. }) => {
-                for (source, item) in
-                    take_pending_step_control_contexts(&mut self.pending_control_contexts)
-                {
-                    self.append_surface_item(source, item);
-                }
-            }
-            TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
-                for (source, item) in
-                    take_pending_control_contexts(&mut self.pending_control_contexts)
-                {
-                    self.append_surface_item(source, item);
-                }
-            }
             _ => {}
         }
+        if !surface_is_published {
+            for (id, item) in self
+                .control_contexts
+                .accept(&event, active_turn, active_step)
+            {
+                self.append_surface_item(id, item);
+            }
+        }
         if let TimelineEventKind::Notification(notification) = &event.kind {
-            self.apply_notification(event.seq, notification);
+            self.apply_notification(event.seq, notification, archived_settlement);
         }
         if matches!(&event.kind, TimelineEventKind::SubagentResult(_)) {
             self.subagent_result_recorded = true;
@@ -4233,107 +5710,28 @@ impl Timeline {
     }
 
     fn update_suspension_evidence(&mut self, event: &TimelineEvent) {
-        use crate::session_runtime::{SessionRuntimeEvent, SuspendedOperationState};
+        self.suspension_waits.apply(&self.runtime, &event.kind);
         match &event.kind {
             TimelineEventKind::Turn(TurnEvent::Started { .. }) => {
+                self.archived_active_turn_had_tool = false;
                 self.active_turn_start = Some(self.events.len());
-                self.active_turn_progress = ActiveTurnProgress::default();
             }
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
+                self.archived_active_turn_had_tool = false;
                 self.active_turn_start = None;
-                self.active_turn_progress = ActiveTurnProgress::default();
-            }
-            TimelineEventKind::Input(InputEvent::Consumed { turn, .. })
-                if self.active_turn() == Some(*turn) =>
-            {
-                self.active_turn_progress.input_consumed = true;
-            }
-            TimelineEventKind::Step(StepEvent::Started { .. }) => {
-                let progress = &mut self.active_turn_progress;
-                progress.latest_step = Some(event.seq);
-                progress.committed_stop_continuations += progress.pending_stop_continuations;
-                progress.pending_stop_continuations = 0;
-            }
-            TimelineEventKind::Hook(HookEvent::Triggered {
-                occurrence_id,
-                event: HookEventType::Stop | HookEventType::SubagentStop,
-                gate: HookGateKind::Stop,
-                ..
-            }) => {
-                // Hook validation already binds both gates to the active Turn
-                // and (for SubagentStop) the child's canonical seed identity.
-                self.active_turn_progress
-                    .pending_stop_hooks
-                    .insert(occurrence_id.clone());
-            }
-            TimelineEventKind::Hook(HookEvent::Completed {
-                occurrence_id,
-                decision,
-            }) if self
-                .active_turn_progress
-                .pending_stop_hooks
-                .remove(occurrence_id) =>
-            {
-                if matches!(
-                    decision,
-                    HookAggregateDecision::Stop {
-                        decision: HookStopDecision::KeepWorking { .. }
-                    }
-                ) {
-                    self.active_turn_progress.pending_stop_continuations += 1;
-                }
-            }
-            TimelineEventKind::Interaction(InteractionEvent::Opened {
-                tool_call_id,
-                attempt_id,
-                kind,
-            }) => {
-                self.suspension_waits
-                    .insert(tool_call_id.clone(), (*kind, attempt_id.clone()));
-            }
-            TimelineEventKind::Interaction(InteractionEvent::Resolved {
-                tool_call_id,
-                attempt_id,
-                kind,
-                resolution,
-            }) if *resolution != InteractionResolution::Suspended
-                && self.suspension_waits.get(tool_call_id).is_some_and(
-                    |(current_kind, current_attempt)| {
-                        current_kind == kind && current_attempt == attempt_id
-                    },
-                ) =>
-            {
-                self.suspension_waits.remove(tool_call_id);
-            }
-            TimelineEventKind::Runtime(SessionRuntimeEvent::ExecutionReleased { .. }) => {
-                let turn = self
-                    .runtime
-                    .checkpoint
-                    .as_ref()
-                    .and_then(|saved| saved.turn.as_ref());
-                self.suspension_waits.retain(|call, (kind, _)| {
-                    turn.is_some_and(|turn| {
-                        turn.operations.iter().any(|operation| {
-                            operation.call_id == *call
-                                && matches!(
-                                    (&operation.state, *kind),
-                                    (
-                                        SuspendedOperationState::AwaitPermission,
-                                        InteractionKind::Permission
-                                    ) | (
-                                        SuspendedOperationState::AwaitUser,
-                                        InteractionKind::Question | InteractionKind::PlanApproval
-                                    )
-                                )
-                        })
-                    })
-                });
             }
             _ => {}
         }
+        self.active_turn_progress
+            .accept(event, self.lifecycle.active_turn);
     }
 
-    fn apply_notification(&mut self, seq: EventSeq, event: &NotificationEvent) {
+    fn apply_notification(
+        &mut self,
+        seq: EventSeq,
+        event: &NotificationEvent,
+        archived_settlement: bool,
+    ) {
         match event {
             NotificationEvent::Received {
                 id,
@@ -4345,6 +5743,10 @@ impl Timeline {
                 self.received_notification_ids.insert(id.clone());
                 self.received_notifications
                     .insert((source.identity(), source_version.clone()), seq);
+                if archived_settlement {
+                    self.lifecycle.pending_notifications.remove(id);
+                    return;
+                }
                 let notification = PendingNotification {
                     received_seq: seq,
                     id: id.clone(),
@@ -4456,6 +5858,11 @@ impl Timeline {
                 self.validate_content(event)?;
                 return Ok(None);
             }
+            TimelineEventKind::Tool(tool) => {
+                self.lifecycle.validate_tool(tool, event.seq)?;
+                self.validate_content(event)?;
+                return Ok(None);
+            }
             TimelineEventKind::Control(control) => {
                 validate_control_revision(self.lifecycle.control_revision, control.revision)?;
                 self.validate_content(event)?;
@@ -4464,7 +5871,7 @@ impl Timeline {
             _ => {}
         }
         let mut lifecycle = self.lifecycle.clone();
-        lifecycle.accept(&event.kind)?;
+        lifecycle.accept(event)?;
         self.validate_content(event)?;
         Ok(Some(lifecycle))
     }
@@ -4492,6 +5899,7 @@ impl Timeline {
         if let TimelineEventKind::Turn(TurnEvent::Started {
             identity,
             prompt_id,
+            prompt_index,
             ..
         }) = &event.kind
         {
@@ -4512,12 +5920,16 @@ impl Timeline {
             {
                 return Err(TimelineError::InvalidTurnIdentity);
             }
+            self.advance_prompt_coordinate(*prompt_index)?;
         }
 
         Ok(())
     }
 
     fn validate_content(&self, event: &TimelineEvent) -> Result<(), TimelineError> {
+        let surface_is_published = self
+            .surface_checkpoint_cut
+            .is_some_and(|cut| event.seq < cut);
         if let TimelineEventKind::DisplayProjectionExpected(expectation) = &event.kind {
             let identifier_is_valid = |value: &str, max: usize| {
                 !value.trim().is_empty()
@@ -4536,13 +5948,15 @@ impl Timeline {
                 return Err(TimelineError::InvalidDisplayProjection);
             }
         }
-        if matches!(
-            &event.kind,
-            TimelineEventKind::Workflow(WorkflowEvent::Ended {
-                execution_suspended: true,
-                ..
-            })
-        ) && self.runtime.phase != crate::session_runtime::RuntimePhase::Suspending
+        if !self.lifecycle.replaying_working_prefix
+            && matches!(
+                &event.kind,
+                TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                    execution_suspended: true,
+                    ..
+                })
+            )
+            && self.runtime.phase != crate::session_runtime::RuntimePhase::Suspending
         {
             return Err(TimelineError::InvalidRuntime(
                 "Workflow suspension requires its session handoff".into(),
@@ -4584,6 +5998,14 @@ impl Timeline {
                 runtime
             {
                 if let Some(continuation) = checkpoint.turn.as_ref() {
+                    if self.archived_active_turn_had_tool
+                        && continuation.resume_point
+                            == crate::session_runtime::TurnResumePoint::Input
+                    {
+                        return Err(TimelineError::InvalidRuntime(
+                            "input preparation contains a previous tool preflight".into(),
+                        ));
+                    }
                     let started_prompt_id = self
                         .active_turn_events(continuation.turn_id)
                         .first()
@@ -4604,7 +6026,7 @@ impl Timeline {
                     .as_ref()
                     .and_then(|turn| turn.accepted_response.as_ref())
                 {
-                    if self.admitted_response_seq(&accepted.identity).is_none() {
+                    if self.exact_admitted_response(&accepted.identity)?.is_none() {
                         return Err(TimelineError::InvalidRuntime(
                             "checkpoint accepted response is absent from the current branch".into(),
                         ));
@@ -4613,12 +6035,15 @@ impl Timeline {
                         .turn
                         .as_ref()
                         .expect("response belongs to a continuation");
-                    if self
-                        .lifecycle
-                        .request_owners
-                        .get(&accepted.identity.request_id)
-                        != Some(&continuation.turn_id)
-                    {
+                    let request_id = &accepted.identity.request_id;
+                    let owner = match self.lifecycle.request_owners.get(request_id) {
+                        Some(owner) => Some(*owner),
+                        None => self
+                            .lifecycle
+                            .archived_request(request_id, event.seq)?
+                            .map(|request| request.turn),
+                    };
+                    if owner != Some(continuation.turn_id) {
                         return Err(TimelineError::InvalidRuntime(
                             "checkpoint accepted response belongs to another Turn".into(),
                         ));
@@ -4664,7 +6089,9 @@ impl Timeline {
             }) {
                 return Err(TimelineError::InvalidCompactionSummary(id.clone()));
             }
-            self.validate_surface_range(target)?;
+            if !surface_is_published {
+                self.validate_surface_range(target)?;
+            }
         }
         if let TimelineEventKind::ImageProjection(projection) = &event.kind {
             let replacement_count = projection.tool_calls.iter().try_fold(
@@ -4682,7 +6109,7 @@ impl Timeline {
             {
                 return Err(TimelineError::InvalidImageProjection);
             }
-            let (branch_ids, branch_items) = self.branch_transcript_with_ids();
+            let (branch_ids, branch_items) = self.canonical_branch()?.branch_transcript_with_ids();
             let groups = sampling_types::conversation::conversation_image_groups(&branch_items)
                 .into_iter()
                 .filter_map(|group| {
@@ -4796,7 +6223,7 @@ impl Timeline {
                 return Err(TimelineError::InvalidImageProjection);
             }
         }
-        if let TimelineEventKind::Messages(messages) = &event.kind {
+        if !surface_is_published && let TimelineEventKind::Messages(messages) = &event.kind {
             if messages.cause == MessageCause::ContextRebuild
                 && (self.next_prompt_index() != 0
                     || self
@@ -4806,12 +6233,16 @@ impl Timeline {
             {
                 return Err(TimelineError::ContextRebuildAfterTurn);
             }
-            self.validate_messages(messages)?;
+            self.validate_messages(messages, event.seq)?;
         }
         if let TimelineEventKind::Notification(notification) = &event.kind {
-            self.validate_notification(notification)?;
+            // The published prefix was validated with the complete inbox. A
+            // retained consume may name already-settled receipts on disk.
+            if !self.lifecycle.replaying_working_prefix {
+                self.validate_notification(notification)?;
+            }
         }
-        if let TimelineEventKind::Control(control) = &event.kind {
+        if !surface_is_published && let TimelineEventKind::Control(control) = &event.kind {
             let retired = control
                 .retired_context_layers
                 .iter()
@@ -4852,7 +6283,16 @@ impl Timeline {
                     TimelineEventKind::Sideband(existing)
                         if existing.sideband_id == sideband.sideband_id
                 )
-            }) {
+            }) || self
+                .lifecycle
+                .history
+                .as_ref()
+                .map_or(Ok(false), |history| {
+                    history
+                        .sideband_before(&sideband.sideband_id, event.seq)
+                        .map_err(TimelineError::CompactionHistory)
+                })?
+            {
                 return Err(TimelineError::DuplicateSidebandSpawn(
                     sideband.sideband_id.clone(),
                 ));
@@ -4976,11 +6416,12 @@ impl Timeline {
                     ) {
                         return Err(TimelineError::InvalidSubagent);
                     }
-                    if let Some(run_id) = &spawn.workflow_run_id {
+                    if let Some(run_id) = &spawn.workflow_run_id
+                        && !self.lifecycle.replaying_working_prefix
+                    {
                         let workflow = self
                             .lifecycle
-                            .workflows
-                            .get(run_id)
+                            .workflow_at(run_id, event.seq)?
                             .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
                         if workflow.closed {
                             return Err(TimelineError::WorkflowAlreadyClosed(run_id.clone()));
@@ -4995,7 +6436,11 @@ impl Timeline {
                             TimelineEventKind::Subagent(SubagentEvent::Spawned(existing))
                                 if existing.subagent_id == spawn.subagent_id
                         )
-                    }) {
+                    }) || self
+                        .lifecycle
+                        .archived_subagent_spawn(&spawn.subagent_id, event.seq)?
+                        .is_some()
+                    {
                         return Err(TimelineError::DuplicateSubagentSpawn(
                             spawn.subagent_id.clone(),
                         ));
@@ -5006,7 +6451,11 @@ impl Timeline {
                             TimelineEventKind::Subagent(SubagentEvent::Spawned(existing))
                                 if existing.child_session_id == spawn.child_session_id
                         )
-                    }) {
+                    }) || self
+                        .lifecycle
+                        .archived_subagent_spawn_for_child(&spawn.child_session_id, event.seq)?
+                        .is_some()
+                    {
                         return Err(TimelineError::DuplicateSubagentChild(
                             spawn.child_session_id.clone(),
                         ));
@@ -5017,11 +6466,17 @@ impl Timeline {
                         TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn))
                             if spawn.subagent_id == end.subagent_id =>
                         {
-                            Some(spawn)
+                            Some((event.seq, (**spawn).clone()))
                         }
                         _ => None,
                     });
-                    let Some(spawn) = spawn else {
+                    let spawn = match spawn {
+                        Some((seq, spawn)) => Some((seq, spawn)),
+                        None => self
+                            .lifecycle
+                            .archived_subagent_spawn(&end.subagent_id, event.seq)?,
+                    };
+                    let Some((_spawn_seq, spawn)) = spawn else {
                         return Err(TimelineError::SubagentNotOpen(end.subagent_id.clone()));
                     };
                     if spawn.child_session_id != end.child_session_id {
@@ -5043,7 +6498,11 @@ impl Timeline {
                             TimelineEventKind::Subagent(SubagentEvent::Ended(existing))
                                 if existing.subagent_id == end.subagent_id
                         )
-                    }) {
+                    }) || self
+                        .lifecycle
+                        .archived_subagent_terminal(&end.subagent_id, event.seq)?
+                        .is_some()
+                    {
                         return Err(TimelineError::SubagentAlreadyEnded(end.subagent_id.clone()));
                     }
                     let error_valid = match end.outcome {
@@ -5152,6 +6611,9 @@ impl Timeline {
                 if self.received_notification_ids.contains(id) {
                     return Err(TimelineError::InvalidNotification);
                 }
+                if self.archived_notification(id, self.next_seq())?.is_some() {
+                    return Err(TimelineError::InvalidNotification);
+                }
                 if self
                     .received_notification_id(source, source_version)
                     .is_some()
@@ -5175,7 +6637,9 @@ impl Timeline {
                     if !unique.insert(id) {
                         return Err(TimelineError::InvalidNotification);
                     }
-                    if !self.received_notification_ids.contains(id) {
+                    if !self.received_notification_ids.contains(id)
+                        && self.archived_notification(id, self.next_seq())?.is_none()
+                    {
                         return Err(TimelineError::NotificationNotFound(id.clone()));
                     }
                     if !self.pending_notifications.contains_key(id) {
@@ -5328,10 +6792,7 @@ impl Timeline {
                             }
                         },
                     );
-                    if !unique.insert(id)
-                        || !self.received_notification_ids.contains(id)
-                        || !reason_matches_owner
-                    {
+                    if !unique.insert(id) || !reason_matches_owner {
                         return Err(TimelineError::InvalidNotification);
                     }
                 }
@@ -5340,7 +6801,11 @@ impl Timeline {
         Ok(())
     }
 
-    fn validate_messages(&self, messages: &MessageEvent) -> Result<(), TimelineError> {
+    fn validate_messages(
+        &self,
+        messages: &MessageEvent,
+        seq: EventSeq,
+    ) -> Result<(), TimelineError> {
         let _ = u32::try_from(messages.items.len()).map_err(|_| TimelineError::TooManyItems)?;
         if messages.cause == MessageCause::SkillLoadModel
             && !self.valid_model_skill_load(&messages.items)
@@ -5356,16 +6821,30 @@ impl Timeline {
             {
                 return Err(TimelineError::InvalidResponseAdmissionShape);
             }
-            let completed_attempt = self
-                .latest_completed_attempts
-                .get(&admission.identity.request_id)
-                .copied();
+            let request_id = &admission.identity.request_id;
+            let completed_attempt = match self.latest_completed_attempts.get(request_id) {
+                Some(attempt) => Some(*attempt),
+                None => self
+                    .lifecycle
+                    .archived_request(request_id, seq)?
+                    .and_then(|request| request.completed_attempt),
+            };
             if completed_attempt != Some(admission.identity.attempt) {
                 return Err(TimelineError::InvalidResponseAdmissionIdentity);
             }
             if self
                 .response_admission_positions
                 .contains_key(&admission.identity)
+                || self
+                    .lifecycle
+                    .history
+                    .as_ref()
+                    .map_or(Ok(false), |history| {
+                        history
+                            .response_admission_before(&admission.identity, seq)
+                            .map(|event| event.is_some())
+                            .map_err(TimelineError::ResponseHistory)
+                    })?
             {
                 return Err(TimelineError::DuplicateResponseAdmissionIdentity);
             }
@@ -5387,16 +6866,25 @@ impl Timeline {
                 }
                 let valid = match messages.cause {
                     MessageCause::Seed => {
-                        self.events.iter().all(|event| {
-                            matches!(
-                                &event.kind,
-                                TimelineEventKind::Messages(MessageEvent {
-                                    cause: MessageCause::Seed,
-                                    surface: SurfaceOp::Append,
-                                    ..
-                                })
-                            )
-                        }) && valid_system_layout(&messages.items)
+                        (self.surface_checkpoint_cut.is_none_or(|cut| cut.get() == 0)
+                            || self.seed_open_at_checkpoint)
+                            && self.events.iter().all(|event| {
+                                if self
+                                    .surface_checkpoint_cut
+                                    .is_some_and(|cut| event.seq < cut)
+                                {
+                                    return true;
+                                }
+                                matches!(
+                                    &event.kind,
+                                    TimelineEventKind::Messages(MessageEvent {
+                                        cause: MessageCause::Seed,
+                                        surface: SurfaceOp::Append,
+                                        ..
+                                    })
+                                )
+                            })
+                            && valid_system_layout(&messages.items)
                     }
                     MessageCause::MemoryContext => {
                         matches!(
@@ -5564,17 +7052,30 @@ impl Timeline {
             .flatten()
             .filter(|call| call.id.as_ref() == skill.call_id)
             .collect::<Vec<_>>();
-        let admitted_calls = self
-            .admitted_responses()
+        let mut admitted_calls = self
+            .admitted_response_views()
             .into_iter()
             .flat_map(|response| response.items)
             .filter_map(|item| match item {
-                ConversationItem::Assistant(assistant) => Some(assistant.tool_calls),
+                ConversationItem::Assistant(assistant) => Some(assistant.tool_calls.as_slice()),
                 _ => None,
             })
             .flatten()
             .filter(|call| call.id.as_ref() == skill.call_id)
+            .take(2)
+            .cloned()
             .collect::<Vec<_>>();
+        if let Some(cut) = self.surface_checkpoint_cut
+            && let Some(history) = &self.lifecycle.history
+            && admitted_calls.len() < 2
+        {
+            let Ok(published) =
+                history.admitted_calls_before(&skill.call_id, cut, 2 - admitted_calls.len())
+            else {
+                return false;
+            };
+            admitted_calls.extend(published);
+        }
         current_calls.len() == 1
             && admitted_calls.len() == 1
             && model_skill_call_arguments(current_calls[0], skill).is_some_and(|current| {
@@ -5583,6 +7084,30 @@ impl Timeline {
     }
 
     fn unconsumed_skill_load_indices(&self) -> BTreeSet<usize> {
+        if !self
+            .surface
+            .iter()
+            .any(|item| matches!(item, ConversationItem::SkillLoad(_)))
+        {
+            return BTreeSet::new();
+        }
+        if self.has_surface_checkpoint() {
+            return self
+                .surface
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    let id = self.surface_ids[index];
+                    let origin = self.published_skills.origin(id).unwrap_or(id.event);
+                    (matches!(item, ConversationItem::SkillLoad(_))
+                        && self
+                            .published_skills
+                            .last_response
+                            .is_none_or(|last| last < origin))
+                    .then_some(index)
+                })
+                .collect();
+        }
         let fold = fold_branch_provenance(self);
         let latest_response = fold.admitted_response_events.iter().max().copied();
         self.surface
@@ -5839,7 +7364,12 @@ impl Timeline {
         Ok(())
     }
 
-    fn apply_messages(&mut self, event_seq: EventSeq, messages: &MessageEvent) {
+    fn apply_messages(
+        &mut self,
+        event_seq: EventSeq,
+        messages: &MessageEvent,
+        apply_surface: bool,
+    ) {
         if messages.cause == MessageCause::ToolResult
             && matches!(messages.surface, SurfaceOp::Append)
             && let Some(turn) = self.lifecycle.active_turn
@@ -5870,10 +7400,18 @@ impl Timeline {
                 }
             }
         }
+        if !apply_surface {
+            return;
+        }
         let item_count = u32::try_from(messages.items.len())
             .expect("message item capacity was checked during validation");
         match &messages.surface {
-            SurfaceOp::Append => self.append_surface_items(event_seq, &messages.items),
+            SurfaceOp::Append => {
+                if self.has_surface_checkpoint() && messages.response_admission.is_some() {
+                    self.published_skills.last_response = Some(event_seq);
+                }
+                self.append_surface_items(event_seq, &messages.items);
+            }
             SurfaceOp::Replace { start, end, .. } => {
                 let start_index = self
                     .surface_ids
@@ -5885,6 +7423,15 @@ impl Timeline {
                     .iter()
                     .position(|id| id == end)
                     .expect("replacement end was checked during validation");
+                if self.has_surface_checkpoint() {
+                    self.published_skills.accept_message(
+                        event_seq,
+                        &self.surface,
+                        &self.surface_ids,
+                        messages,
+                        start_index..end_index + 1,
+                    );
+                }
                 self.surface
                     .splice(start_index..=end_index, messages.items.iter().cloned());
                 self.surface_ids.splice(
@@ -5927,6 +7474,19 @@ impl Timeline {
 }
 
 impl HookFold {
+    fn projection(&self, occurrence_id: &str) -> HookLifecycleProjection {
+        HookLifecycleProjection {
+            occurrence_id: occurrence_id.to_owned(),
+            event: self.event,
+            gate: self.gate,
+            cause: self.cause.clone(),
+            config_generation: self.config_generation,
+            handlers: self.handlers.clone(),
+            runs: self.runs.clone(),
+            decision: self.decision.clone(),
+        }
+    }
+
     fn handler(&self, run_id: &str, handler_index: u32) -> Option<(usize, &HookHandlerPlan)> {
         let index = usize::try_from(handler_index).ok()?;
         let handler = self.handlers.get(index)?;
@@ -6076,6 +7636,17 @@ fn validate_control_revision(previous: Option<u64>, actual: u64) -> Result<(), T
 }
 
 impl LifecycleFold {
+    fn turn_before(&self, id: TurnId, seq: EventSeq) -> Result<bool, TimelineError> {
+        if self.seen_turns.contains(&id) {
+            return Ok(true);
+        }
+        self.history.as_ref().map_or(Ok(false), |history| {
+            history
+                .turn_before(id, seq)
+                .map_err(TimelineError::TurnHistory)
+        })
+    }
+
     fn valid_effective_hook_gate(
         &self,
         occurrence_id: &str,
@@ -6154,7 +7725,188 @@ impl LifecycleFold {
         }
     }
 
-    fn accept(&mut self, kind: &TimelineEventKind) -> Result<(), TimelineError> {
+    fn archived_tool(
+        &self,
+        call: &str,
+        seq: EventSeq,
+    ) -> Result<Option<ToolHistoryState>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .tool_before(call, seq)
+                .map_err(TimelineError::ToolHistory)
+        })
+    }
+
+    fn archived_request(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<RequestHistoryState>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .request_before(id, seq)
+                .map_err(TimelineError::RequestHistory)
+        })
+    }
+
+    fn archived_workflow(
+        &self,
+        run_id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<(TimelineEvent, TimelineEvent)>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .workflow_before(run_id, seq)
+                .map_err(TimelineError::WorkflowHistory)
+        })
+    }
+
+    fn workflow_at(
+        &self,
+        run_id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<WorkflowFold>, TimelineError> {
+        if let Some(fold) = self.workflows.get(run_id) {
+            return Ok(Some(fold.clone()));
+        }
+        self.archived_workflow(run_id, seq)?
+            .map(|(spawn, boundary)| WorkflowFold::from_boundaries(&spawn, &boundary))
+            .transpose()
+    }
+
+    fn archived_hook(
+        &self,
+        occurrence_id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<HookLifecycleProjection>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .hook_before(occurrence_id, seq)
+                .map_err(TimelineError::HookHistory)
+        })
+    }
+
+    fn archived_hook_run(&self, run_id: &str, seq: EventSeq) -> Result<bool, TimelineError> {
+        self.history.as_ref().map_or(Ok(false), |history| {
+            history
+                .hook_run_before(run_id, seq)
+                .map_err(TimelineError::HookHistory)
+        })
+    }
+
+    fn archived_input(
+        &self,
+        id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<(TimelineEvent, InputLifecycle)>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .input_before(id, seq)
+                .map_err(TimelineError::InputHistory)
+        })
+    }
+
+    fn archived_subagent_spawn(
+        &self,
+        subagent_id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<(EventSeq, SubagentSpawnEvent)>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .subagent_spawn_before(subagent_id, seq)
+                .map_err(TimelineError::SubagentHistory)
+        })
+    }
+
+    fn archived_subagent_spawn_for_child(
+        &self,
+        child_session_id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<(EventSeq, SubagentSpawnEvent)>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .subagent_spawn_for_child_before(child_session_id, seq)
+                .map_err(TimelineError::SubagentHistory)
+        })
+    }
+
+    fn archived_subagent_terminal(
+        &self,
+        subagent_id: &str,
+        seq: EventSeq,
+    ) -> Result<Option<(EventSeq, SubagentTerminalEvent)>, TimelineError> {
+        self.history.as_ref().map_or(Ok(None), |history| {
+            history
+                .subagent_terminal_before(subagent_id, seq)
+                .map_err(TimelineError::SubagentHistory)
+        })
+    }
+
+    fn validate_tool(&self, tool: &ToolEvent, seq: EventSeq) -> Result<(), TimelineError> {
+        match tool {
+            ToolEvent::Started {
+                call_id,
+                turn,
+                step,
+                ..
+            } => {
+                if self.active_turn != Some(*turn) {
+                    return Err(TimelineError::TurnMismatch {
+                        active: self.active_turn,
+                        actual: *turn,
+                    });
+                }
+                if self.active_step != Some(*step) {
+                    return Err(TimelineError::StepMismatch {
+                        active: self.active_step,
+                        actual: *step,
+                    });
+                }
+                if self.seen_tools.contains(call_id) || self.archived_tool(call_id, seq)?.is_some()
+                {
+                    return Err(TimelineError::ToolAlreadyOpen(call_id.clone()));
+                }
+            }
+            ToolEvent::Completed { call_id, name, .. } => {
+                let Some((_, _, expected)) = self.open_tools.get(call_id) else {
+                    return Err(TimelineError::ToolNotOpen(call_id.clone()));
+                };
+                if expected != name {
+                    return Err(TimelineError::ToolNameMismatch {
+                        call_id: call_id.clone(),
+                        expected: expected.clone(),
+                        actual: name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_tool(&mut self, tool: &ToolEvent) {
+        match tool {
+            ToolEvent::Started {
+                call_id,
+                turn,
+                step,
+                name,
+                ..
+            } => {
+                self.seen_tools.insert(call_id.clone());
+                self.open_tools
+                    .insert(call_id.clone(), (*turn, *step, name.clone()));
+            }
+            ToolEvent::Completed { call_id, .. } => {
+                self.open_tools.remove(call_id);
+            }
+        }
+    }
+
+    fn accept(&mut self, event: &TimelineEvent) -> Result<(), TimelineError> {
+        let TimelineEvent {
+            kind, seq, at_ms, ..
+        } = event;
+        let seq = *seq;
         match kind {
             TimelineEventKind::DisplayProjectionExpected(expectation) => {
                 match self
@@ -6177,6 +7929,12 @@ impl LifecycleFold {
                 let key = (tool_call_id.clone(), attempt_id.clone());
                 if !valid_hook_identifier(tool_call_id)
                     || !valid_hook_identifier(attempt_id)
+                    || match &self.history {
+                        Some(history) => history
+                            .interaction_before(tool_call_id, attempt_id, seq)
+                            .map_err(TimelineError::InteractionHistory)?,
+                        None => false,
+                    }
                     || !self.seen_interaction_attempts.insert(key.clone())
                 {
                     return Err(TimelineError::InvalidInteraction);
@@ -6207,13 +7965,15 @@ impl LifecycleFold {
                 {
                     return Err(TimelineError::InvalidInput);
                 }
-                if self.inputs.contains_key(input_id) {
+                if self.inputs.contains_key(input_id)
+                    || self.archived_input(input_id, seq)?.is_some()
+                {
                     return Err(TimelineError::DuplicateInput(input_id.clone()));
                 }
                 self.inputs.insert(
                     input_id.clone(),
                     InputFold {
-                        canonical_position: self.inputs.len(),
+                        canonical_position: seq.get(),
                         intent: *intent,
                         payload_ref: payload_ref.clone(),
                         admission: None,
@@ -6230,15 +7990,23 @@ impl LifecycleFold {
                 route,
                 supersedes,
             }) => {
-                let occurrence_id = self
+                let resident = self
                     .user_prompt_hooks
                     .get(input_id)
-                    .ok_or(TimelineError::InvalidInput)?;
-                let hook = self
-                    .hooks
-                    .get(occurrence_id)
-                    .ok_or(TimelineError::InvalidInput)?;
-                let Some(hook_decision) = &hook.decision else {
+                    .and_then(|id| self.hooks.get(id));
+                let archived = if resident.is_none() {
+                    self.history.as_ref().map_or(Ok(None), |history| {
+                        history
+                            .input_hook_before(input_id, seq)
+                            .map_err(TimelineError::HookHistory)
+                    })?
+                } else {
+                    None
+                };
+                let Some(hook_decision) = resident
+                    .and_then(|hook| hook.decision.as_ref())
+                    .or_else(|| archived.as_ref().and_then(|hook| hook.decision.as_ref()))
+                else {
                     return Err(TimelineError::InvalidInput);
                 };
                 let input = self
@@ -6306,13 +8074,9 @@ impl LifecycleFold {
                         .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
                     let valid_transition = match input.route.as_ref() {
                         None => valid_initial_input_route(input.intent, route, self.active_turn),
-                        Some(current) => valid_input_reroute(
-                            input.intent,
-                            current,
-                            route,
-                            self.active_turn,
-                            &self.seen_turns,
-                        ),
+                        Some(current) => {
+                            valid_input_reroute(input.intent, current, route, self, seq)?
+                        }
                     };
                     if input.consumption.is_some()
                         || input.dismissed.is_some()
@@ -6446,20 +8210,67 @@ impl LifecycleFold {
                 config_generation,
                 handlers,
             }) => {
+                if self.hooks.contains_key(occurrence_id)
+                    || self.archived_hook(occurrence_id, seq)?.is_some()
+                {
+                    return Err(TimelineError::DuplicateHookOccurrence(
+                        occurrence_id.clone(),
+                    ));
+                }
+                let valid_gate = match cause {
+                    HookCause::Tool { call_id } if !self.seen_tools.contains(call_id) => {
+                        match event {
+                            HookEventType::PreToolUse if *gate == event.gate() => {
+                                self.archived_tool(call_id, seq)? == Some(ToolHistoryState::Open)
+                            }
+                            HookEventType::PostToolUse
+                            | HookEventType::PostToolUseFailure
+                            | HookEventType::PermissionDenied
+                                if *gate == event.gate() =>
+                            {
+                                self.archived_tool(call_id, seq)? == Some(ToolHistoryState::Closed)
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ if self.replaying_working_prefix => {
+                        *gate == event.gate()
+                            || (*event == HookEventType::UserPromptSubmit
+                                && *gate == HookGateKind::Observe)
+                    }
+                    HookCause::Compaction { compaction_id }
+                        if *event == HookEventType::PostCompact =>
+                    {
+                        *gate == event.gate()
+                            && self.open_compaction.is_none()
+                            && (self.seen_compactions.contains(compaction_id)
+                                || self.history.as_ref().map_or(Ok(false), |history| {
+                                    history
+                                        .compaction_before(compaction_id, seq)
+                                        .map_err(TimelineError::CompactionHistory)
+                                })?)
+                    }
+                    HookCause::Turn { turn }
+                        if matches!(
+                            event,
+                            HookEventType::StopFailure | HookEventType::StopCancelled
+                        ) =>
+                    {
+                        *gate == event.gate()
+                            && self.active_turn != Some(*turn)
+                            && self.turn_before(*turn, seq)?
+                    }
+                    _ => self.valid_effective_hook_gate(occurrence_id, *event, *gate, cause),
+                };
                 if !valid_hook_identifier(occurrence_id)
                     || !valid_hook_cause(*event, cause)
-                    || !self.valid_effective_hook_gate(occurrence_id, *event, *gate, cause)
+                    || !valid_gate
                     || handlers.len() > MAX_HOOK_HANDLERS
-                    || self.hooks.contains_key(occurrence_id)
                 {
-                    return Err(if self.hooks.contains_key(occurrence_id) {
-                        TimelineError::DuplicateHookOccurrence(occurrence_id.clone())
-                    } else {
-                        TimelineError::InvalidHook
-                    });
+                    return Err(TimelineError::InvalidHook);
                 }
                 if let HookCause::Input { input_id } = cause {
-                    if !self.inputs.contains_key(input_id)
+                    if (!self.replaying_working_prefix && !self.inputs.contains_key(input_id))
                         || self.user_prompt_hooks.contains_key(input_id)
                     {
                         return Err(TimelineError::InvalidHook);
@@ -6490,6 +8301,7 @@ impl LifecycleFold {
                         || !valid_hook_identifier(&handler.run_id)
                         || !valid_hook_handler_name(&handler.name)
                         || !valid_hook_handler_plan(*event, handler)
+                        || self.archived_hook_run(&handler.run_id, seq)?
                         || !self.seen_hook_run_ids.insert(handler.run_id.clone())
                     {
                         return Err(TimelineError::InvalidHook);
@@ -6506,6 +8318,19 @@ impl LifecycleFold {
                         handlers: handlers.clone(),
                         runs: vec![HookHandlerLifecycle::Pending; handlers.len()],
                         decision: None,
+                    },
+                );
+            }
+            TimelineEventKind::Hook(hook) if !self.hooks.contains_key(hook.occurrence_id()) => {
+                let occurrence_id = hook.occurrence_id();
+                return Err(
+                    if self
+                        .archived_hook(occurrence_id, seq)?
+                        .is_some_and(|projection| projection.decision.is_some())
+                    {
+                        TimelineError::HookAlreadyCompleted(occurrence_id.to_owned())
+                    } else {
+                        TimelineError::HookNotFound(occurrence_id.to_owned())
                     },
                 );
             }
@@ -6623,9 +8448,10 @@ impl LifecycleFold {
                         actual: *id,
                     });
                 }
-                if !self.seen_turns.insert(*id) {
+                if self.turn_before(*id, seq)? {
                     return Err(TimelineError::TurnAlreadySeen(*id));
                 }
+                self.seen_turns.insert(*id);
                 let input_shape_valid = match identity.turn_kind.as_str() {
                     "user" => !input_ids.is_empty() && input_ids.len() <= MAX_TURN_INPUTS,
                     "internal" => input_ids.is_empty(),
@@ -6638,6 +8464,9 @@ impl LifecycleFold {
                 for input_id in input_ids {
                     if !unique_inputs.insert(input_id) {
                         return Err(TimelineError::InvalidInput);
+                    }
+                    if self.replaying_working_prefix {
+                        continue;
                     }
                     let input = self
                         .inputs
@@ -6655,10 +8484,9 @@ impl LifecycleFold {
                     }
                 }
                 for input_id in input_ids {
-                    self.inputs
-                        .get_mut(input_id)
-                        .expect("validated input must remain present")
-                        .reserved_turn = Some(*id);
+                    if let Some(input) = self.inputs.get_mut(input_id) {
+                        input.reserved_turn = Some(*id);
+                    }
                 }
                 if identity.turn_kind == "internal" {
                     self.internal_turns.insert(*id);
@@ -6684,6 +8512,9 @@ impl LifecycleFold {
                 }
                 if let TurnTerminalSource::Provider { request_id } = &terminal.source
                     && !self.provider_requests.contains(request_id)
+                    && !self
+                        .archived_request(request_id, seq)?
+                        .is_some_and(|request| request.turn == *id && request.provider_terminal)
                 {
                     return Err(TimelineError::InvalidProviderTerminalSource(
                         request_id.clone(),
@@ -6719,9 +8550,16 @@ impl LifecycleFold {
                         actual: *id,
                     });
                 }
-                if !self.seen_steps.insert(*id) {
+                if self.seen_steps.contains(id)
+                    || self.history.as_ref().map_or(Ok(false), |history| {
+                        history
+                            .step_before(*id, seq)
+                            .map_err(TimelineError::TurnHistory)
+                    })?
+                {
                     return Err(TimelineError::StepAlreadySeen(*id));
                 }
+                self.seen_steps.insert(*id);
                 self.active_step = Some(*id);
             }
             TimelineEventKind::Step(StepEvent::Ended { id, .. }) => {
@@ -6755,9 +8593,11 @@ impl LifecycleFold {
                         actual: *step,
                     });
                 }
-                if self.request_owners.insert(id.clone(), *turn).is_some() {
+                if self.request_owners.contains_key(id) || self.archived_request(id, seq)?.is_some()
+                {
                     return Err(TimelineError::RequestAlreadyOpen(id.clone()));
                 }
+                self.request_owners.insert(id.clone(), *turn);
                 if self
                     .open_requests
                     .insert(id.clone(), (*turn, *step))
@@ -6790,47 +8630,9 @@ impl LifecycleFold {
                     return Err(TimelineError::RequestNotOpen(id.clone()));
                 }
             }
-            TimelineEventKind::Tool(ToolEvent::Started {
-                call_id,
-                turn,
-                step,
-                name,
-                ..
-            }) => {
-                if self.active_turn != Some(*turn) {
-                    return Err(TimelineError::TurnMismatch {
-                        active: self.active_turn,
-                        actual: *turn,
-                    });
-                }
-                if self.active_step != Some(*step) {
-                    return Err(TimelineError::StepMismatch {
-                        active: self.active_step,
-                        actual: *step,
-                    });
-                }
-                if !self.seen_tools.insert(call_id.clone()) {
-                    return Err(TimelineError::ToolAlreadyOpen(call_id.clone()));
-                }
-                if self
-                    .open_tools
-                    .insert(call_id.clone(), (*turn, *step, name.clone()))
-                    .is_some()
-                {
-                    return Err(TimelineError::ToolAlreadyOpen(call_id.clone()));
-                }
-            }
-            TimelineEventKind::Tool(ToolEvent::Completed { call_id, name, .. }) => {
-                let Some((_, _, expected)) = self.open_tools.remove(call_id) else {
-                    return Err(TimelineError::ToolNotOpen(call_id.clone()));
-                };
-                if expected != *name {
-                    return Err(TimelineError::ToolNameMismatch {
-                        call_id: call_id.clone(),
-                        expected,
-                        actual: name.clone(),
-                    });
-                }
+            TimelineEventKind::Tool(tool) => {
+                self.validate_tool(tool, seq)?;
+                self.apply_tool(tool);
             }
             TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn)) => {
                 self.open_subagents.insert(
@@ -6862,14 +8664,18 @@ impl LifecycleFold {
                 {
                     return Err(TimelineError::InvalidWorkflow);
                 }
-                if self.workflows.contains_key(run_id) {
+                if self.workflow_at(run_id, seq)?.is_some() {
                     return Err(TimelineError::DuplicateWorkflowSpawn(run_id.clone()));
                 }
                 self.workflows.insert(
                     run_id.clone(),
                     WorkflowFold {
+                        spawn: seq,
+                        boundary: seq,
+                        started_at_ms: Some(*at_ms),
                         execution_epoch: *execution_epoch,
                         open: true,
+                        execution_suspended: false,
                         closed: false,
                     },
                 );
@@ -6881,9 +8687,8 @@ impl LifecycleFold {
                 if !valid_workflow_run_id(run_id) {
                     return Err(TimelineError::InvalidWorkflow);
                 }
-                let lifecycle = self
-                    .workflows
-                    .get_mut(run_id)
+                let mut lifecycle = self
+                    .workflow_at(run_id, seq)?
                     .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
                 if lifecycle.open {
                     return Err(TimelineError::WorkflowAlreadyOpen(run_id.clone()));
@@ -6900,6 +8705,9 @@ impl LifecycleFold {
                 }
                 lifecycle.execution_epoch = *execution_epoch;
                 lifecycle.open = true;
+                lifecycle.boundary = seq;
+                lifecycle.started_at_ms = Some(*at_ms);
+                self.workflows.insert(run_id.clone(), lifecycle);
             }
             TimelineEventKind::Workflow(WorkflowEvent::Ended {
                 run_id,
@@ -6927,9 +8735,8 @@ impl LifecycleFold {
                         boundary: "workflow",
                     });
                 }
-                let lifecycle = self
-                    .workflows
-                    .get_mut(run_id)
+                let mut lifecycle = self
+                    .workflow_at(run_id, seq)?
                     .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
                 if lifecycle.closed {
                     return Err(TimelineError::WorkflowAlreadyClosed(run_id.clone()));
@@ -6945,12 +8752,10 @@ impl LifecycleFold {
                     });
                 }
                 lifecycle.open = false;
-                lifecycle.closed = matches!(
-                    status,
-                    WorkflowExecutionStatus::Interrupted
-                        | WorkflowExecutionStatus::Complete
-                        | WorkflowExecutionStatus::Cancelled
-                );
+                lifecycle.closed = permanently_ended_workflow(*status);
+                lifecycle.boundary = seq;
+                lifecycle.started_at_ms = None;
+                self.workflows.insert(run_id.clone(), lifecycle);
             }
             TimelineEventKind::Workflow(WorkflowEvent::Closed {
                 run_id,
@@ -6981,9 +8786,8 @@ impl LifecycleFold {
                         boundary: "workflow",
                     });
                 }
-                let lifecycle = self
-                    .workflows
-                    .get_mut(run_id)
+                let mut lifecycle = self
+                    .workflow_at(run_id, seq)?
                     .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
                 if lifecycle.open || lifecycle.closed {
                     return Err(if lifecycle.closed {
@@ -7000,6 +8804,8 @@ impl LifecycleFold {
                     });
                 }
                 lifecycle.closed = true;
+                lifecycle.boundary = seq;
+                self.workflows.insert(run_id.clone(), lifecycle);
             }
             TimelineEventKind::Compaction(CompactionEvent::Started {
                 id,
@@ -7007,7 +8813,8 @@ impl LifecycleFold {
                 source_items,
                 ..
             }) => {
-                if *mode == CompactionMode::Background
+                if !self.replaying_working_prefix
+                    && *mode == CompactionMode::Background
                     && (self.active_step.is_some()
                         || !self.open_requests.is_empty()
                         || !self.open_tools.is_empty())
@@ -7016,7 +8823,12 @@ impl LifecycleFold {
                         boundary: "background compaction start",
                     });
                 }
-                if !self.seen_compactions.insert(id.clone()) {
+                if self.history.as_ref().map_or(Ok(false), |history| {
+                    history
+                        .compaction_before(id, seq)
+                        .map_err(TimelineError::CompactionHistory)
+                })? || !self.seen_compactions.insert(id.clone())
+                {
                     return Err(TimelineError::CompactionAlreadySeen(id.clone()));
                 }
                 if let Some(active) = self.open_compaction.replace(OpenCompaction {
@@ -7038,9 +8850,10 @@ impl LifecycleFold {
                 {
                     return Err(TimelineError::CompactionNotOpen(id.clone()));
                 }
-                if self.active_step.is_some()
-                    || !self.open_requests.is_empty()
-                    || !self.open_tools.is_empty()
+                if !self.replaying_working_prefix
+                    && (self.active_step.is_some()
+                        || !self.open_requests.is_empty()
+                        || !self.open_tools.is_empty())
                 {
                     return Err(TimelineError::OpenChildren {
                         boundary: "compaction promotion",
@@ -7058,7 +8871,8 @@ impl LifecycleFold {
                 if open.summaries != 0 {
                     return Err(TimelineError::DuplicateCompactionSummary(id.clone()));
                 }
-                if open.mode == CompactionMode::Background
+                if !self.replaying_working_prefix
+                    && open.mode == CompactionMode::Background
                     && (self.active_step.is_some()
                         || !self.open_requests.is_empty()
                         || !self.open_tools.is_empty())
@@ -7404,21 +9218,22 @@ fn valid_input_reroute(
     intent: InputIntent,
     current: &InputRoute,
     next: &InputRoute,
-    active_turn: Option<TurnId>,
-    seen_turns: &BTreeSet<TurnId>,
-) -> bool {
+    lifecycle: &LifecycleFold,
+    seq: EventSeq,
+) -> Result<bool, TimelineError> {
     match (intent, current, next) {
         (
             InputIntent::Prompt | InputIntent::Steer | InputIntent::Followup,
             InputRoute::Fifo,
             InputRoute::Steer { target_turn },
-        ) => active_turn == Some(*target_turn),
+        ) => Ok(lifecycle.active_turn == Some(*target_turn)),
         (
             InputIntent::Prompt | InputIntent::Steer | InputIntent::Followup,
             InputRoute::Steer { target_turn },
             InputRoute::Fifo,
-        ) => seen_turns.contains(target_turn) && active_turn != Some(*target_turn),
-        _ => false,
+        ) => Ok(lifecycle.active_turn != Some(*target_turn)
+            && lifecycle.turn_before(*target_turn, seq)?),
+        _ => Ok(false),
     }
 }
 
@@ -7617,6 +9432,7 @@ fn valid_notification_source_version(
             NotificationSource::InquiryAnswered {
                 source_session_id,
                 inquiry_id,
+                ..
             },
             NotificationSourceVersion::Opaque { value },
         ) => {
@@ -8716,8 +10532,8 @@ mod tests {
             format!("{:?}", transactional.lifecycle)
         );
         assert_eq!(
-            format!("{:?}", replay.pending_control_contexts),
-            format!("{:?}", transactional.pending_control_contexts)
+            format!("{:?}", replay.control_contexts),
+            format!("{:?}", transactional.control_contexts)
         );
         assert_eq!(replay.next_seq(), transactional.next_seq());
         assert_eq!(replay.prompt_indices, transactional.prompt_indices);
@@ -12658,6 +14474,85 @@ mod tests {
             })),
             Err(TimelineError::WorkflowAlreadyClosed(_))
         ));
+    }
+
+    #[test]
+    fn execution_workflow_spawns_include_suspended_but_exclude_closed_history() {
+        let mut timeline = Timeline::default();
+        timeline.lifecycle.workflows.insert(
+            "wf_suspended".into(),
+            WorkflowFold {
+                spawn: EventSeq::new(4),
+                boundary: EventSeq::new(5),
+                started_at_ms: None,
+                execution_epoch: 0,
+                open: false,
+                execution_suspended: true,
+                closed: false,
+            },
+        );
+        timeline.lifecycle.workflows.insert(
+            "wf_complete".into(),
+            WorkflowFold {
+                spawn: EventSeq::new(2),
+                boundary: EventSeq::new(3),
+                started_at_ms: None,
+                execution_epoch: 0,
+                open: false,
+                execution_suspended: false,
+                closed: true,
+            },
+        );
+
+        assert_eq!(
+            timeline.execution_workflow_spawns(),
+            vec![(EventSeq::new(4), "wf_suspended".into())]
+        );
+    }
+
+    #[test]
+    fn restore_open_workflows_accepts_execution_suspended_end_boundary() {
+        let mut timeline = Timeline::default();
+        for text in ["one", "two", "three"] {
+            timeline
+                .append(ConversationItem::user(text), MessageCause::User)
+                .unwrap();
+        }
+        let spawn = TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: EventSeq::new(1),
+            at_ms: 1,
+            kind: TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: "wf_suspended".into(),
+                execution_epoch: 0,
+                name: "research".into(),
+                objective: "recover".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
+            }),
+        };
+        let ended = TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: EventSeq::new(2),
+            at_ms: 2,
+            kind: TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_suspended".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Suspended,
+                execution_suspended: true,
+                handoff: WorkflowTurnHandoff::None,
+                duration_ms: 1,
+                message: None,
+            }),
+        };
+
+        timeline.restore_open_workflows(vec![(spawn, ended)]).unwrap();
+        assert_eq!(
+            timeline.execution_workflow_spawns(),
+            vec![(EventSeq::new(1), "wf_suspended".into())]
+        );
+        assert!(timeline.open_workflow_run_ids().next().is_none());
     }
 
     #[test]
@@ -17153,6 +19048,7 @@ mod tests {
         let source = NotificationSource::InquiryAnswered {
             source_session_id: "child".into(),
             inquiry_id: "inquiry".into(),
+            continue_if_idle: false,
         };
         let version = NotificationSourceVersion::Opaque {
             value: "session-1:7".into(),
@@ -17210,6 +19106,7 @@ mod tests {
         let source = NotificationSource::InquiryAnswered {
             source_session_id: "asking-session".into(),
             inquiry_id: "inquiry".into(),
+            continue_if_idle: false,
         };
         let version = NotificationSourceVersion::Opaque {
             value: "session-1:7".into(),

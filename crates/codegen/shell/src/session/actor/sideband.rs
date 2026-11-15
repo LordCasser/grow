@@ -49,6 +49,7 @@ pub(crate) struct SidebandRun {
     usage_epoch: u64,
     expected_goal_id: Option<String>,
     admitted_attempt_id: Option<String>,
+    recall_materialization: Option<(chat_state::TimelineRangeRef, u64)>,
     pending: Option<chat_state::SidebandEvent>,
     persistence_poison: Option<String>,
     activity: Option<super::tasks_cancel::SessionActivityPermit>,
@@ -479,6 +480,7 @@ impl SessionActor {
                 .current_goal_id()
                 .or_else(|| self.goal_usage_window.active_goal_id()),
             admitted_attempt_id: None,
+            recall_materialization: None,
             pending: Some(request),
             persistence_poison: None,
             activity: Some(activity),
@@ -503,6 +505,52 @@ impl SessionActor {
 }
 
 impl SidebandRun {
+    pub(crate) fn observe_recall_materialization(
+        &mut self,
+        source_ref: &chat_state::TimelineRangeRef,
+        surface_revision: u64,
+        surface_ids: &[chat_state::SurfaceId],
+        transcript_ids: &[chat_state::SurfaceId],
+        unloaded_surface_ids: &[chat_state::SurfaceId],
+    ) -> Result<(), SidebandRunError> {
+        let Some(chat_state::SidebandEventKind::Request(request)) = self
+            .timeline
+            .events()
+            .first()
+            .map(|event| &event.kind)
+        else {
+            return Err(chat_state::SidebandError::AttemptWithoutRequest.into());
+        };
+        if request.purpose != chat_state::SidebandPurpose::ContextRecall
+            || request.source_refs.as_slice() != [source_ref.clone()]
+        {
+            return Err(chat_state::SidebandError::ParentMaterializationMismatch.into());
+        }
+        let attempts = self.timeline.events().iter().filter_map(|event| match &event.kind {
+            chat_state::SidebandEventKind::Attempt(attempt) => Some(&attempt.assembly_manifest),
+            _ => None,
+        });
+        let mut found_attempt = false;
+        for manifest in attempts {
+            found_attempt = true;
+            chat_state::validate_recall_assembly_manifest(
+                surface_revision,
+                surface_ids,
+                transcript_ids,
+                unloaded_surface_ids,
+                manifest,
+            )?;
+        }
+        if !found_attempt || self.recall_materialization.is_some() {
+            return Err(chat_state::SidebandError::InvalidRecallMaterializationObservation.into());
+        }
+        self.recall_materialization = Some((
+            source_ref.clone(),
+            surface_revision,
+        ));
+        Ok(())
+    }
+
     pub(crate) fn retain_admission_permit(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
         debug_assert!(self.admission_permit.is_none());
         self.admission_permit = Some(permit);
@@ -939,6 +987,12 @@ impl SidebandRun {
                 .await?;
             }
             return Err(error);
+        }
+        if let Some((source_ref, surface_revision)) = self.recall_materialization.take() {
+            let observation = self
+                .timeline
+                .prepare_recall_materialization_observation(source_ref, surface_revision)?;
+            self.append(observation).await?;
         }
         let result_ref = chat_state::TimelineRangeRef {
             timeline_id: self.timeline.sideband_id().to_owned(),
@@ -1415,6 +1469,7 @@ mod tests {
                 usage_epoch: 0,
                 expected_goal_id: None,
                 admitted_attempt_id: None,
+                recall_materialization: None,
                 pending: None,
                 persistence_poison: None,
                 activity: None,

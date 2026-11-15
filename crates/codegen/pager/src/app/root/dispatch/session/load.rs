@@ -565,6 +565,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
     descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
     older_history_cursor: Option<String>,
+    latest_history_cursor: Option<String>,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
@@ -582,8 +583,9 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         agent.history_page_viewer = None;
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
-        agent.history_is_partial = older_history_cursor.is_some();
-        agent.history_page_cursor = older_history_cursor;
+        agent.history_latest_pending = latest_history_cursor.is_some();
+        agent.history_page_cursor = latest_history_cursor.or(older_history_cursor);
+        agent.history_is_partial = agent.history_page_cursor.is_some();
         agent.session.clear_live_feedback("session-load");
         {
             let _timer = diagnostics::instrumentation::timer("pager.replay.end_batch");
@@ -650,6 +652,9 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         let control_effects =
             reconcile_controls_after_reconnect(agent_id, agent, app.cli_effort_token.as_deref());
         let mut effects = Vec::new();
+        if agent.history_latest_pending {
+            agent.request_history_page(&mut effects);
+        }
         if let Some(directive) = agent.pending_first_prompt.take() {
             agent.session.enqueue_prompt_front(directive);
         }
@@ -701,7 +706,11 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
             crate::memory_release::release_retained_memory_with("session-load-replay");
         }
         note_peek_page_flip(app, agent_id, page_flip_entry);
-        crate::app::subagent::restore_descendant_state(app, agent_id, descendant_ownership);
+        effects.extend(crate::app::subagent::schedule_descendant_state_restore(
+            app,
+            agent_id,
+            descendant_ownership,
+        ));
         return effects;
     }
     vec![]

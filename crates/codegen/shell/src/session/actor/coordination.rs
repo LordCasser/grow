@@ -101,12 +101,12 @@ impl SessionActor {
         use crate::coordination::{CoordinationError, CoordinationErrorCode, InquiryEvent};
         let events = self
             .chat_state_handle
-            .timeline_events()
+            .incoming_inquiry_events(inquiry.source_session_id.clone(), inquiry.inquiry_id.clone())
             .await
-            .ok_or_else(|| {
+            .map_err(|error| {
                 CoordinationError::new(
                     CoordinationErrorCode::AuditFailure,
-                    "Timeline actor unavailable",
+                    error.to_string(),
                 )
             })?;
         let mut received = false;
@@ -178,7 +178,10 @@ impl SessionActor {
             };
             // Consultation success is independent of later context synchronization.
             // A failed synchronization remains a canonical obligation for the next boundary.
-            if let Err(error) = self.reconcile_coordination_answers().await {
+            if let Err(error) = self
+                .synchronize_coordination_answers(Some((&inquiry.source_session_id, &inquiry.inquiry_id)))
+                .await
+            {
                 tracing::warn!(%error, "consultation answer awaits context synchronization");
             }
             let _ = inquiry.respond_to.send(outcome);
@@ -565,12 +568,12 @@ impl SessionActor {
         {
             let events = self
                 .chat_state_handle
-                .timeline_events()
+                .outgoing_inquiry_events(inquiry_id.clone())
                 .await
-                .ok_or_else(|| {
+                .map_err(|error| {
                     crate::coordination::CoordinationError::new(
                         crate::coordination::CoordinationErrorCode::AuditFailure,
-                        "Timeline actor unavailable while admitting source inquiry",
+                        format!("could not inspect source inquiry Timeline: {error}"),
                     )
                 })?;
             for timeline_event in &events {
@@ -614,12 +617,12 @@ impl SessionActor {
         {
             let events = self
                 .chat_state_handle
-                .timeline_events()
+                .incoming_inquiry_events(audit.source_session_id.clone(), inquiry_id.clone())
                 .await
-                .ok_or_else(|| {
+                .map_err(|error| {
                     crate::coordination::CoordinationError::new(
                         crate::coordination::CoordinationErrorCode::AuditFailure,
-                        "Timeline unavailable while committing consultation answer",
+                        error.to_string(),
                     )
                 })?;
             for previous in &events {
@@ -738,6 +741,13 @@ impl SessionActor {
     /// Concurrent calls can replay a suffix, but advance only after every obligation
     /// through their own captured end is backed by an idempotent durable receipt.
     pub(super) async fn reconcile_coordination_answers(&self) -> Result<(), String> {
+        self.synchronize_coordination_answers(None).await
+    }
+
+    async fn synchronize_coordination_answers(
+        &self,
+        live_inquiry: Option<(&str, &str)>,
+    ) -> Result<(), String> {
         let events = self
             .chat_state_handle
             .resident_timeline_events_from(self.coordination_answer_next_seq.get())
@@ -757,9 +767,22 @@ impl SessionActor {
             if proof.target_session_id != self.session_info.id.to_string() {
                 continue;
             }
+            let _control_gate = self.step_control_gate.lock().await;
+            let continue_if_idle = {
+                let state = self.state.lock().await;
+                if !state.execution_open() {
+                    return Ok(());
+                }
+                live_inquiry == Some((audit.source_session_id.as_str(), inquiry_id.as_str()))
+                    && is_session_idle_for_injection(&state)
+                    && state.pending_manual_compact.is_none()
+                    && !state.behavior_control_worker_active
+                    && self.consultation_autostart_allowed()
+            };
             let source = chat_state::NotificationSource::InquiryAnswered {
                 source_session_id: audit.source_session_id.clone(),
                 inquiry_id,
+                continue_if_idle,
             };
             let version = chat_state::NotificationSourceVersion::Opaque {
                 value: format!("{}:{}", self.session_info.id, event.seq.get()),
@@ -776,15 +799,12 @@ impl SessionActor {
             let body = audit
                 .answer_context_body()
                 .ok_or("consultation proof has no answer")?;
-            let _control_gate = self.step_control_gate.lock().await;
-            if !self.state.lock().await.execution_open() {
-                // The canonical obligation survives suspension/termination;
-                // only an open original writer may admit its derived receipt.
-                return Ok(());
-            }
             self.receive_notification_detailed(source, version, body, None)
                 .await
                 .map_err(|error| error.to_string())?;
+            if continue_if_idle {
+                self.idle_arbiter.notify_one();
+            }
         }
         if let Some(next_seq) = next_seq {
             self.coordination_answer_next_seq

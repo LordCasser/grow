@@ -67,6 +67,13 @@ pub struct AcpConnection {
     pub session_recap_available: bool,
     /// Exact initialize/capability request inputs for leader reconnection.
     pub(crate) connect_flags: ConnectFlags,
+    pub(crate) embedded_timings: Option<EmbeddedConnectTimings>,
+}
+
+pub(crate) struct EmbeddedConnectTimings {
+    pub config: std::time::Duration,
+    pub spawn: std::time::Duration,
+    pub initialize: std::time::Duration,
 }
 
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
@@ -113,6 +120,7 @@ pub struct ConnectFlags {
 /// This is the main entry point for establishing an ACP connection.
 /// After this returns, the agent is ready to create sessions and receive prompts.
 pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<AcpConnection> {
+    let config_started = std::time::Instant::now();
     // Load agent config from disk
     let raw_config = shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
@@ -139,13 +147,17 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     }
 
     apply_config_writes(&flags);
+    let config_elapsed = config_started.elapsed();
 
     // Spawn the agent
+    let spawn_started = std::time::Instant::now();
     let memory_config = agent_config.memory_config.clone();
     let spawned = spawn::spawn_shell(agent_config, cancel, memory_config).await?;
+    let spawn_elapsed = spawn_started.elapsed();
     let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
 
     // Initialize
+    let initialize_started = std::time::Instant::now();
     let (
         models,
         is_shell,
@@ -157,6 +169,11 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     ) = initialize(&tx, &flags).await?;
 
     authenticate(&tx, &auth_methods, default_auth_method_id.as_ref()).await?;
+    let timings = EmbeddedConnectTimings {
+        config: config_elapsed,
+        spawn: spawn_elapsed,
+        initialize: initialize_started.elapsed(),
+    };
 
     Ok(AcpConnection {
         tx,
@@ -170,6 +187,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         cancel_rewind_enabled,
         session_recap_available,
         connect_flags: flags,
+        embedded_timings: Some(timings),
     })
 }
 
@@ -252,6 +270,7 @@ pub async fn connect_via_leader(
         cancel_rewind_enabled,
         session_recap_available,
         connect_flags: flags,
+        embedded_timings: None,
     })
 }
 

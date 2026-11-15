@@ -15,3 +15,4 @@ Confirmed exit still copies closed history to determine suspension state. Execut
 
 - `session-timeline`: working state, append continuity, and integrity verification boundaries.
 - `client-surfaces`: readiness, ordered history pagination, and complete-history operations.
+- `workflow-execution`: execution-required restoration and on-demand management of historical runs.

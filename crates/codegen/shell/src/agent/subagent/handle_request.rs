@@ -366,21 +366,22 @@ async fn run_shell_child_inner(
     let mut restored_mcp_servers = None;
     if let Some(checkpoint) = &restore {
         let source = match ctx.parent_chat_state.as_ref() {
-            Some(parent) => parent.timeline_events().await.and_then(|events| events.into_iter().find(|event| {
-                matches!(&event.kind, chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) if spawn.subagent_id == request.id && spawn.child_session_id == checkpoint.session_id && spawn.security_parent_session_id == ctx.security_parent_session_id)
-            })),
+            Some(parent) => match parent.subagent_operation(request.id.clone()).await {
+                Ok(operation) => operation.filter(|(_, spawn, _)| {
+                    spawn.child_session_id == checkpoint.session_id
+                        && spawn.security_parent_session_id == ctx.security_parent_session_id
+                }),
+                Err(error) => {
+                    return child_run_output(failure_result(&request, &error), completion_data);
+                }
+            },
             None => None,
         };
-        let Some(source) = source else {
+        let Some((spawn_seq, spawn, _)) = source else {
             return child_run_output(
                 failure_result(&request, "original parent Spawn is unavailable"),
                 completion_data,
             );
-        };
-        let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
-            &source.kind
-        else {
-            unreachable!()
         };
         if request.parent_step_id != spawn.parent_step_id {
             return child_run_output(
@@ -420,8 +421,13 @@ async fn run_shell_child_inner(
                 completion_data,
             );
         }
-        match session::persistence::load_light(&info, Some(gateway.clone()), true).await {
+        match session::persistence::load_light_for_replay(&info, Some(gateway.clone()), true, true).await {
             Ok((loaded, persistence)) => {
+                if let Err(error) = loaded.timeline.validate_subagent_seed_link(
+                    &ctx.parent_session_id, spawn_seq, &spawn,
+                ) {
+                    return child_run_output(failure_result(&request, &error.to_string()), completion_data);
+                }
                 let runtime = loaded.timeline.runtime_lifecycle();
                 if !matches!(
                     runtime.phase,
@@ -488,7 +494,7 @@ async fn run_shell_child_inner(
             }
         }
         request.cwd = Some(spawn.child_cwd.clone());
-        restored_spawn = Some(source);
+        restored_spawn = Some((spawn_seq, spawn));
     }
 
     if let Err(reason) = ctx.storage_admission.check(&ctx.parent_session_id) {
@@ -668,12 +674,7 @@ async fn run_shell_child_inner(
     {
         return child_run_output(failure_result(&request, &error), completion_data);
     }
-    let (worktree_path, worktree_materialization) = if let Some(source) = restored_spawn.as_ref() {
-        let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
-            &source.kind
-        else {
-            unreachable!()
-        };
+    let (worktree_path, worktree_materialization) = if let Some((_, spawn)) = restored_spawn.as_ref() {
         (spawn.worktree_path.as_ref().map(PathBuf::from), None)
     } else if let Some(ref source) = resume_source {
         if effective_runtime.isolation != tool_types::SubagentIsolationMode::None
@@ -1052,7 +1053,7 @@ async fn run_shell_child_inner(
         return child_run_output(failure_result(&request, &message), completion_data);
     }
     if let Some((loaded, persistence)) = restored_persistence.as_mut() {
-        let selection = match session::persistence::latest_model_selection(loaded.timeline.events())
+        let selection = match session::persistence::current_model_selection(loaded.timeline.events())
         {
             Ok(Some(selection)) => selection,
             Ok(None) => {
@@ -1193,7 +1194,7 @@ async fn run_shell_child_inner(
     // child was never admitted. Keep the original identity pending.
     completion_data.spawn_admitted = true;
     completion_data.terminal_committed = false;
-    let parent_spawn = if let Some(source) = restored_spawn.clone() {
+    let (parent_spawn_seq, spawn) = if let Some(source) = restored_spawn {
         source
     } else {
         match parent_chat_state
@@ -1232,25 +1233,23 @@ async fn run_shell_child_inner(
             ))
             .await
         {
-            Ok(event) => event,
+            Ok(event) => match event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) => (event.seq, *spawn),
+                _ => unreachable!("recorded a Subagent Spawn"),
+            },
             Err(error) => {
                 let message = format!("Cannot persist subagent spawn in parent Timeline: {error}");
                 return child_run_output(failure_result(&request, &message), completion_data);
             }
         }
     };
-    let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
-        &parent_spawn.kind
-    else {
-        unreachable!("parent_spawn is the committed or validated Spawn");
-    };
-    let delegated_parent_plan = parent_plan_binding_from_spawn(spawn);
+    let delegated_parent_plan = parent_plan_binding_from_spawn(&spawn);
     completion_data.spawn_admitted = true;
     completion_data.expected_parent_step_id = spawn.parent_step_id.clone();
     completion_data.terminal_committed = false;
     let subagent_seed = chat_state::SubagentSeedEvent {
         parent_timeline_id: ctx.parent_session_id.clone(),
-        parent_spawn_seq: parent_spawn.seq.get(),
+        parent_spawn_seq: parent_spawn_seq.get(),
         subagent_id: subagent_id.clone(),
         security_parent_session_id: ctx.security_parent_session_id.clone(),
         context_source: timeline_context_source,
@@ -1449,6 +1448,7 @@ async fn run_shell_child_inner(
     )
     .with_hunk_tracking_enabled(ctx.hunk_tracking_enabled);
     tool_ctx.subagent_event_tx = Some(ctx.subagent_event_tx.clone());
+    tool_ctx.subagent_lifecycle_root = Some((ctx.parent_session_id.clone(), parent_chat_state.clone()));
     let task_output_budget = request
         .runtime_overrides
         .output_token_budget
@@ -1988,6 +1988,7 @@ async fn run_shell_child_inner(
         if child_handle
             .cmd_tx
             .send(SessionCommand::PublishControlState {
+                replay_hooks: true,
                 respond_to: control_ack_tx,
             })
             .is_err()
@@ -2458,8 +2459,8 @@ async fn run_shell_child_inner(
             subagent_usage_incomplete,
             output_tokens_used,
             total_tokens_used,
-        ) = match child_handle.chat_state_handle.try_get_session_usage().await {
-            Ok(u) => {
+        ) = match child_handle.chat_state_handle.session_usage_summary().await {
+            Some(u) => {
                 let output_tokens = u.totals.output_tokens;
                 let total_tokens = canonical_total_tokens(&u.totals);
                 let has_usage_entries = !u.by_model.is_empty();
@@ -2476,7 +2477,7 @@ async fn run_shell_child_inner(
                     Some(total_tokens),
                 )
             }
-            Err(()) => (None, true, None, None),
+            None => (None, true, None, None),
         };
         result.total_tokens_used = total_tokens_used.unwrap_or(0);
         if let Some((task_spent, task_incomplete)) = task_budget_usage {

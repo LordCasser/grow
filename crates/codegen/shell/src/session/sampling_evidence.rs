@@ -9,7 +9,7 @@ use std::{io, path::Path, sync::Arc};
 pub(crate) const CHUNK_BYTES: usize = 64 * 1024;
 
 const DIRECTORY: &str = "artifacts/sampling";
-const SCOPE: &str = "sampling_evidence";
+pub(crate) const SCOPE: &str = "sampling_evidence";
 const LIMIT: u64 = sampler::audit::MAX_RESPONSE_EVIDENCE_BYTES as u64;
 
 #[derive(Serialize, Deserialize)]
@@ -121,8 +121,7 @@ pub(crate) fn sink(
     })
 }
 
-/// Restore/import must reject missing or altered historical evidence even
-/// though it is never used to resume a provider's native state.
+/// Full reads verify historical bodies that are independent of native resume.
 pub(crate) fn verify(
     directory: &ContainedDirectory,
     timeline: &chat_state::Timeline,
@@ -156,6 +155,15 @@ pub(crate) fn verify(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_reference(event: &chat_state::TimelineEvent) -> io::Result<()> {
+    if let chat_state::TimelineEventKind::Observation(observation) = &event.kind
+        && observation.scope == SCOPE
+    {
+        decode_record(observation)?;
     }
     Ok(())
 }

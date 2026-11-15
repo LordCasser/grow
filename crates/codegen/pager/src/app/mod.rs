@@ -488,9 +488,12 @@ pub async fn run(
     let screen_mode_control_handoffs = screen_mode_relaunch::take_screen_mode_control_handoffs();
     let cancel = CancellationToken::new();
     let startup_start = std::time::Instant::now();
+    let config_load_started = std::time::Instant::now();
     let raw_config = shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let raw_config = ensure_llm_configured(raw_config)?;
+    let config_load = config_load_started.elapsed();
+    let pre_session_setup_started = std::time::Instant::now();
     // Keep the configuration prompt on the user's real terminal. Native stderr
     // is redirected only after the fail-fast BYOK gate has passed.
     tty_utils::redirect_native_stderr();
@@ -500,8 +503,9 @@ pub async fn run(
         crate::git_info::populate_from_cwd_async(cwd);
     }
     let remote_settings = None;
-    let prefetch_elapsed = startup_start.elapsed();
+    let pre_session_setup = pre_session_setup_started.elapsed();
     let requested_confinement = sandbox::requested_confinement_profile();
+    let launch_policy_setup_started = std::time::Instant::now();
     let LeaderMode {
         use_leader,
         policy_disable_reason,
@@ -521,7 +525,7 @@ pub async fn run(
         // The other fields cannot distinguish this from leader mode being off
         // already while a sandbox is on.
         leader_disabled_by_sandbox = disabled_by_confinement.is_some(),
-        prefetch_ms = prefetch_elapsed.as_millis() as u64,
+        pre_session_setup_ms = pre_session_setup.as_millis() as u64,
         "pager TUI leader mode resolved"
     );
     if let Some(profile) = disabled_by_confinement {
@@ -538,6 +542,8 @@ pub async fn run(
     if let Some(reason) = policy_disable_reason {
         tokio::spawn(shell::leader::kill_stale_reachable_leaders(reason));
     }
+    let launch_policy_setup = launch_policy_setup_started.elapsed();
+    let select_started = std::time::Instant::now();
     let intent = args
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -546,6 +552,8 @@ pub async fn run(
         intent,
     )
     .await?;
+    let session_selection = select_started.elapsed();
+    let title_lookup_started = std::time::Instant::now();
     let mut session_title = match &materialized {
         session_startup::MaterializedStartup::Resume { title, .. }
         | session_startup::MaterializedStartup::Fork {
@@ -573,6 +581,7 @@ pub async fn run(
             session_title = Some(title);
         }
     }
+    let session_title_lookup = title_lookup_started.elapsed();
     let session_cwd = match &materialized {
         session_startup::MaterializedStartup::Resume { original_cwd, .. }
         | session_startup::MaterializedStartup::Fork {
@@ -581,6 +590,7 @@ pub async fn run(
         } => original_cwd.clone(),
         _ => None,
     };
+    let connection_flags_setup_started = std::time::Instant::now();
     let env_hunk_tracker_mode = std::env::var("GROW_HUNK_TRACKER").ok();
     let config_hunk_tracker_mode = raw_config
         .get("ui")
@@ -625,6 +635,8 @@ pub async fn run(
         ),
         default_permission_mode: launch_permission.mode,
     };
+    let connection_flags_setup = connection_flags_setup_started.elapsed();
+    let terminal_policy_setup_started = std::time::Instant::now();
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;
     let term_ctx = crate::terminal::terminal_context();
@@ -675,13 +687,17 @@ pub async fn run(
     if disabled_by_confinement.is_some() && screen_mode.is_fullscreen() {
         tokio::time::sleep(SANDBOX_NOTICE_LINGER).await;
     }
+    let terminal_policy_setup = terminal_policy_setup_started.elapsed();
+    let terminal_resources_started = std::time::Instant::now();
     engage_startup_theme(screen_mode);
     let minimal_live_rows = config_watcher.current().minimal_live_rows;
     let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
         crate::render::draw::spawn_writer_thread();
     let mut reader_thread = reader_thread::ReaderThread::absent();
     let cursor_blink = root::event_loop::load_initial_ui_config().cursor_blink;
-    let (mut terminal, screen_mode) = match init_terminal(
+    let terminal_resources = terminal_resources_started.elapsed();
+    let terminal_started = std::time::Instant::now();
+    let (mut terminal, screen_mode, terminal_query) = match init_terminal(
         screen_mode,
         minimal_live_rows,
         relaunched_into_minimal,
@@ -708,6 +724,7 @@ pub async fn run(
     if let Some(ref t) = session_title {
         set_terminal_title(t);
     }
+    let terminal_setup = terminal_started.elapsed();
     const CONNECT_UI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let fallback_flags = use_leader.then(|| connect_flags.clone());
     let primary_target = if use_leader {
@@ -715,6 +732,7 @@ pub async fn run(
     } else {
         "the embedded agent"
     };
+    let connection_started = std::time::Instant::now();
     let connect_result = bounded_connect(&cancel, CONNECT_UI_TIMEOUT, primary_target, async {
         if use_leader {
             crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await
@@ -768,6 +786,18 @@ pub async fn run(
         relaunched_into_minimal,
         relaunched_into_fullscreen,
         initial_theme: crate::theme::cache::current_kind(),
+        startup_start,
+        config_load,
+        pre_session_setup,
+        launch_policy_setup,
+        session_selection,
+        session_title_lookup,
+        connection_flags_setup,
+        terminal_policy_setup,
+        terminal_resources,
+        terminal_setup,
+        terminal_query,
+        agent_connect: connection_started.elapsed(),
     };
     let result = root::event_loop::run(
         &mut terminal,
@@ -1144,13 +1174,13 @@ fn init_terminal(
     frame_tx: crate::render::draw::WriterSender,
     writer_sync: crate::render::draw::WriterSync,
     cursor_blink: Option<bool>,
-) -> io::Result<(PagerTerminal, ScreenMode)> {
+) -> io::Result<(PagerTerminal, ScreenMode, std::time::Duration)> {
     crash_handler::enable_terminal_escape_restore();
     terminal::enable_raw_mode()?;
     #[cfg(windows)]
     configure_windows_console();
     let want_minimal = mode.is_minimal();
-    (move || -> io::Result<(PagerTerminal, ScreenMode)> {
+    let initialized = (move || -> io::Result<(PagerTerminal, ScreenMode, std::time::Duration)> {
         drain_pending_events();
         set_terminal_title("");
         if want_minimal && clear_main_screen {
@@ -1202,6 +1232,7 @@ fn init_terminal(
         MOUSE_CAPTURE_ENABLED.store(!want_minimal, Ordering::Release);
         set_panic_hook(mode);
         signal_handler::install(mode);
+        let terminal_query_started = std::time::Instant::now();
         let drain_timeout = if crate::terminal::terminal_context().vte_version.is_some() {
             std::time::Duration::from_millis(20)
         } else {
@@ -1253,6 +1284,7 @@ fn init_terminal(
             Ok((
                 ratatui_inline::Terminal::new(backend)?,
                 ScreenMode::Fullscreen,
+                terminal_query_started.elapsed(),
             ))
         } else {
             let (cols, rows) = crossterm::terminal::size()?;
@@ -1278,6 +1310,7 @@ fn init_terminal(
                     } else {
                         ScreenMode::Inline
                     },
+                    terminal_query_started.elapsed(),
                 ));
             }
             if want_minimal {
@@ -1298,7 +1331,7 @@ fn init_terminal(
                         viewport: ratatui::Viewport::Inline(rows),
                     },
                 ) {
-                    return Ok((term, ScreenMode::Inline));
+                    return Ok((term, ScreenMode::Inline, terminal_query_started.elapsed()));
                 }
             } else {
                 tracing::error!("inline viewport probe failed, using Viewport::Fixed");
@@ -1322,7 +1355,7 @@ fn init_terminal(
                     )),
                 },
             )?;
-            Ok((term, ScreenMode::Inline))
+            Ok((term, ScreenMode::Inline, terminal_query_started.elapsed()))
         }
     })()
     .inspect_err(|_| {
@@ -1333,7 +1366,8 @@ fn init_terminal(
         let _ = terminal::disable_raw_mode();
         signal_handler::mark_restored();
         crash_handler::disable_terminal_escape_restore();
-    })
+    })?;
+    Ok(initialized)
 }
 /// Drop the terminal (closing the writer mpsc channel) and give accepted
 /// frames a bounded chance to finish. Only `Joined` proves output ordering.
@@ -1417,6 +1451,7 @@ fn restore_terminal_with(
     teardown: impl FnOnce(ScreenMode, Option<u16>) -> bool + Send + 'static,
     fence: impl FnOnce(reader_thread::ReaderJoin, bool, bool),
 ) -> io::Result<()> {
+    let _timer = diagnostics::instrumentation::timer("pager.exit.restore_terminal");
     let reader_join = reader_thread.join_within(reader_thread::READER_JOIN_GRACE);
     if mode.is_fullscreen() && !writer_thread.writer_sync().failed() {
         let _ = terminal.clear();

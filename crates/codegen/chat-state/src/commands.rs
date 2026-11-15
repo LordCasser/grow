@@ -48,6 +48,8 @@ pub enum TimelineWriteError {
     InvalidAuxiliaryUsage(String),
     #[error("subagent usage was submitted with a conflicting payload")]
     SubagentUsageConflict,
+    #[error("cannot verify historical usage: {0}")]
+    UsageHistory(#[source] std::io::Error),
     #[error("invalid persisted usage observation at event {seq} ({scope}/{name}): {reason}")]
     InvalidUsageObservation {
         seq: u64,
@@ -162,11 +164,31 @@ pub enum ChatStateCommand {
         run_id: String,
         reply: oneshot::Sender<Option<crate::WorkflowLifecycle>>,
     },
+    GetOutgoingInquiry {
+        inquiry_id: String,
+        reply: oneshot::Sender<std::io::Result<Vec<crate::TimelineEvent>>>,
+    },
+    GetIncomingInquiry {
+        sender: String,
+        inquiry_id: String,
+        reply: oneshot::Sender<std::io::Result<Vec<crate::TimelineEvent>>>,
+    },
     GetRuntimeTreeSnapshot {
-        reply: oneshot::Sender<(
-            crate::session_runtime::RuntimeLifecycle,
-            Vec<crate::TimelineEvent>,
-        )>,
+        reply: oneshot::Sender<
+            Result<
+                (crate::session_runtime::RuntimeLifecycle, Vec<crate::TimelineEvent>),
+                crate::TimelineError,
+            >,
+        >,
+    },
+    GetSubagentOperation {
+        subagent_id: String,
+        reply: oneshot::Sender<
+            Result<Option<crate::timeline::SubagentOperation>, crate::TimelineError>,
+        >,
+    },
+    GetSubagentHistory {
+        reply: oneshot::Sender<Result<Vec<crate::TimelineEvent>, crate::TimelineError>>,
     },
     GetSuspensionEvidence {
         operation_id: String,
@@ -569,10 +591,12 @@ pub enum ChatStateCommand {
     },
 
     GetParentMessageReceipts {
+        identity: Option<(String, String)>,
         reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
     },
 
     GetRetainedNotificationPayloadHashes {
+        candidates: Option<Vec<String>>,
         reply: oneshot::Sender<BTreeSet<String>>,
     },
 
@@ -584,7 +608,7 @@ pub enum ChatStateCommand {
     /// Timeline fold. `None` means the identity has no committed submission.
     GetInputState {
         input_id: String,
-        reply: oneshot::Sender<Option<crate::InputLifecycle>>,
+        reply: oneshot::Sender<Result<Option<crate::InputLifecycle>, String>>,
     },
 
     GetPendingAllowedInputs {
@@ -592,6 +616,7 @@ pub enum ChatStateCommand {
     },
 
     GetSubmittedInputPayloadHashes {
+        candidates: Option<Vec<String>>,
         reply: oneshot::Sender<BTreeSet<String>>,
     },
 
@@ -607,6 +632,13 @@ pub enum ChatStateCommand {
     MaterializeTimeline {
         timeline_id: String,
         reply: oneshot::Sender<Option<crate::TimelineMaterialization>>,
+    },
+
+    /// Read permission evidence from the selected branch and its exact cut.
+    MaterializePermissionContext {
+        timeline_id: String,
+        include_tool_calls: bool,
+        reply: oneshot::Sender<Option<(crate::TimelineRangeRef, Vec<ConversationItem>)>>,
     },
 
     /// Atomically freeze the current Timeline range and materialize the
@@ -647,6 +679,10 @@ pub enum ChatStateCommand {
     },
 
     GetSessionUsage {
+        reply: oneshot::Sender<Result<crate::usage::UsageLedger, String>>,
+    },
+
+    GetSessionUsageSummary {
         reply: oneshot::Sender<crate::usage::UsageLedger>,
     },
 

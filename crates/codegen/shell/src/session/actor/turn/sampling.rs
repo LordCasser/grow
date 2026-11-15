@@ -1141,9 +1141,9 @@ impl SessionActor {
     ) -> Vec<ConversationItem> {
         let direct_user_inputs = self
             .chat_state_handle
-            .materialize_timeline(self.session_info.id.to_string())
+            .materialize_permission_context(self.session_info.id.to_string(), false)
             .await
-            .map(|materialized| materialized.direct_user_inputs)
+            .map(|(_, context)| context)
             .unwrap_or_default();
         self.child_permission_judgment_items_from_evidence(judgment, input, direct_user_inputs)
             .await
@@ -1388,7 +1388,7 @@ impl SessionActor {
                                     Some(
                                         session
                                             .chat_state_handle
-                                            .materialize_timeline(session.session_info.id.to_string())
+                                            .materialize_permission_context(session.session_info.id.to_string(), false)
                                             .await
                                             .ok_or_else(|| {
                                                 workspace::permission::ClassifierFailure::TransportError(
@@ -1400,7 +1400,7 @@ impl SessionActor {
                                 };
                                 let direct_user_inputs = materialized
                                     .as_ref()
-                                    .map(|value| value.direct_user_inputs.clone())
+                                    .map(|(_, context)| context.clone())
                                     .unwrap_or_default();
                                 let items = session
                                     .child_permission_judgment_items_from_evidence(
@@ -1410,7 +1410,7 @@ impl SessionActor {
                                     )
                                     .await;
                                 let refs = materialized
-                                    .map(|value| vec![value.input_ref])
+                                    .map(|(reference, _)| vec![reference])
                                     .unwrap_or_default();
                                 (items, refs)
                             } else {

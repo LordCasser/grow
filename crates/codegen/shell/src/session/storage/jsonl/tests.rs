@@ -879,6 +879,79 @@ pub(crate) fn response_projection_production_timeline(
         0,
     )
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn published_skill_load_uses_exact_response_and_current_surface() {
+    use chat_state::{MessageCause, MessageEvent, SurfaceOp, TimelineEventKind};
+    use sampling_types::{SkillLoadItem, SkillLoadSource, ToolCall};
+
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let skill = SkillLoadItem {
+        input_id: "model".into(),
+        reference_index: 0,
+        call_id: "load-review".into(),
+        skill_name: "review".into(),
+        source: SkillLoadSource::Model,
+        args: "focus".into(),
+        prepared_body: "skill body".into(),
+        prompt_index: Some(0),
+    };
+    let mut dense = response_projection_production_timeline_with_items(
+        "request-skill",
+        1,
+        vec![ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: skill.call_id.clone().into(),
+            name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+            arguments: r#"{"name":"review","args":"focus"}"#.into(),
+        }])],
+        0,
+    );
+    append_response_projection_production_timeline(&adapter, &info, &dense).await;
+    let publish = |dense: &mut Timeline| dense.record(TimelineEventKind::Observation(
+        chat_state::ObservationEvent {
+            scope: "shell".into(),
+            name: "artifact".into(),
+            turn: None,
+            step: None,
+            data: Some(serde_json::json!("x".repeat(1024 * 1024))),
+        },
+    )).unwrap();
+    let publication = publish(&mut dense);
+    adapter.append_timeline_event_durable(&info, &publication).await.unwrap();
+    let mut cold = adapter.load_session_for_write_with_indexed_history(&info).await.unwrap().timeline;
+    assert!(cold.has_surface_checkpoint());
+    assert!(cold.admitted_responses().is_empty());
+
+    let load = TimelineEventKind::Messages(MessageEvent {
+        cause: MessageCause::SkillLoadModel,
+        items: vec![
+            ConversationItem::tool_result(
+                skill.call_id.clone(), sampling_types::skill_load_result_content(&skill),
+            ),
+            ConversationItem::SkillLoad(skill),
+        ],
+        surface: SurfaceOp::Append,
+        response_admission: None,
+    });
+    let load = dense.record(load).unwrap();
+    cold.accept(load.clone()).unwrap();
+    adapter.append_timeline_event_durable(&info, &load).await.unwrap();
+    assert_eq!(cold.unconsumed_skill_load_ids(), dense.unconsumed_skill_load_ids());
+    assert_eq!(cold.unconsumed_skill_load_ids().len(), 1);
+
+    let publication = publish(&mut dense);
+    adapter.append_timeline_event_durable(&info, &publication).await.unwrap();
+    let mut cold = adapter.load_session_for_write_with_indexed_history(&info).await.unwrap().timeline;
+    assert_eq!(cold.unconsumed_skill_load_ids(), dense.unconsumed_skill_load_ids());
+    assert!(cold.settle_unconsumed_skill_loads().unwrap().is_some());
+    assert!(dense.settle_unconsumed_skill_loads().unwrap().is_some());
+    assert_eq!(serde_json::to_value(cold.surface()).unwrap(), serde_json::to_value(dense.surface()).unwrap());
+}
+
 async fn append_response_projection_production_timeline(
     adapter: &JsonlStorageAdapter,
     info: &Info,
@@ -2365,11 +2438,13 @@ async fn timeline_round_trip_folds_the_current_surface() {
     let info = create_test_info();
     adapter.init_session(&info, default_model_id()).await.unwrap();
 
-    let original = vec![
-        ConversationItem::user("old question"),
-        ConversationItem::assistant("old answer"),
-    ];
-    let mut timeline = chat_state::Timeline::from_seed(original).unwrap();
+    let mut question = ConversationItem::user("old question");
+    question.set_prompt_index(0);
+    let mut timeline = chat_state::Timeline::default();
+    timeline.append(question, chat_state::MessageCause::User).unwrap();
+    timeline
+        .append(ConversationItem::assistant("old answer"), chat_state::MessageCause::Assistant)
+        .unwrap();
     timeline
         .record(chat_state::TimelineEventKind::Compaction(
             chat_state::CompactionEvent::Started {
@@ -2553,6 +2628,43 @@ async fn timeline_round_trip_folds_the_current_surface() {
     assert_eq!(replayed.surface().len(), 1);
     assert_eq!(replayed.surface()[0].text_content(), replacement_content);
     assert_eq!(replayed.branch_transcript().len(), 2);
+    #[cfg(unix)]
+    {
+        let mut written = timeline.clone();
+        let publication = written.record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: "shell".into(),
+                name: "artifact".into(),
+                turn: None,
+                step: None,
+                data: Some(serde_json::json!("x".repeat(1024 * 1024))),
+            },
+        )).unwrap();
+        adapter.append_timeline_event_durable(&info, &publication).await.unwrap();
+        let cold = adapter.load_session_for_write_with_indexed_history(&info).await.unwrap();
+        assert!(cold.timeline.has_surface_checkpoint());
+        assert_eq!(cold.timeline.last_completed_compaction_prompt_index(), Some(0));
+        assert!(cold.timeline.events().iter().all(|event| !matches!(event.kind,
+            chat_state::TimelineEventKind::Compaction(_) | chat_state::TimelineEventKind::Sideband(_)
+        )));
+        assert_eq!(cold.timeline.surface_ids(), replayed.surface_ids());
+        assert_eq!(cold.timeline.surface_revision(), replayed.surface_revision());
+        assert_eq!(cold.timeline.surface()[0].text_content(), replacement_content);
+        assert_eq!(
+            serde_json::to_value(cold.timeline.rewind_surface(0).unwrap()).unwrap(),
+            serde_json::to_value(replayed.rewind_surface(0).unwrap()).unwrap()
+        );
+        let archived = chat_state::EventSeq::new(0);
+        assert!(cold.timeline.event(archived).is_none());
+        assert_eq!(cold.timeline.exact_event(archived).unwrap().unwrap().messages().unwrap().items[0].text_content(), "old question");
+        let ledger = adapter.open_session(&info).unwrap().directory().display_path()
+            .join(super::super::SIDEBANDS_DIR).join(&sideband_id).join(super::super::TIMELINE_FILE);
+        let original = std::fs::read(&ledger).unwrap();
+        std::fs::remove_file(&ledger).unwrap();
+        assert_eq!(adapter.load_session_for_write_with_indexed_history(&info).await.unwrap().timeline.surface_ids(), replayed.surface_ids());
+        assert!(adapter.load_session_without_updates(&info).await.is_err());
+        std::fs::write(ledger, original).unwrap();
+    }
     let ledgers = adapter.read_sideband_ledgers_sync(&info, &replayed).unwrap();
     assert!(crate::session::storage::validate_sideband_ledgers(
         &info.id.to_string(),
@@ -3560,6 +3672,106 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
         .collect::<Vec<_>>();
     assert_eq!(indexes, (0..MAX_RESTORED_WORKFLOW_RUNS).collect::<Vec<_>>());
 }
+#[cfg(unix)]
+#[tokio::test]
+async fn indexed_workflow_recovery_uses_current_epoch_and_exact_history() {
+    use chat_state::{TimelineEventKind, WorkflowEvent, WorkflowExecutionStatus, WorkflowTurnHandoff};
+
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut timeline = Timeline::default();
+    for index in 0..20 {
+        let run_id = format!("wf_{index}");
+        let spawn = timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+            run_id: run_id.clone(),
+            execution_epoch: 0,
+            name: "workflow".into(),
+            objective: "verify recovery".into(),
+            script_hash: "0".repeat(64),
+            args_hash: "0".repeat(64),
+            initial_manifest: serde_json::json!({}),
+        })).unwrap();
+        adapter.append_timeline_event(&info, &spawn).await.unwrap();
+        let terminal = timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+            run_id,
+            execution_epoch: 0,
+            status: if index < 18 { WorkflowExecutionStatus::Complete } else { WorkflowExecutionStatus::Failed },
+            execution_suspended: false,
+            handoff: WorkflowTurnHandoff::Completion,
+            duration_ms: 1,
+            message: None,
+        })).unwrap();
+        adapter.append_timeline_event(&info, &terminal).await.unwrap();
+    }
+    let live = timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+        run_id: "wf_18".into(),
+        execution_epoch: 1,
+    })).unwrap();
+    adapter.append_timeline_event(&info, &live).await.unwrap();
+    let publication = timeline.record(TimelineEventKind::Observation(chat_state::ObservationEvent {
+        scope: "shell".into(),
+        name: "artifact".into(),
+        turn: None,
+        step: None,
+        data: Some(serde_json::json!("x".repeat(1024 * 1024))),
+    })).unwrap();
+    adapter.append_timeline_event_durable(&info, &publication).await.unwrap();
+
+    let resume = timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+        run_id: "wf_19".into(),
+        execution_epoch: 1,
+    })).unwrap();
+    adapter.append_timeline_event(&info, &resume).await.unwrap();
+    let new_spawn = timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+        run_id: "wf_tail".into(),
+        execution_epoch: 0,
+        name: "tail workflow".into(),
+        objective: "verify newest-first paging".into(),
+        script_hash: "0".repeat(64),
+        args_hash: "0".repeat(64),
+        initial_manifest: serde_json::json!({}),
+    })).unwrap();
+    adapter.append_timeline_event(&info, &new_spawn).await.unwrap();
+    let outside = TempDir::new().unwrap();
+    let workflows_dir = adapter.session_dir(&info).join("workflows");
+    std::fs::create_dir_all(&workflows_dir).unwrap();
+    std::os::unix::fs::symlink(outside.path(), workflows_dir.join("wf_0")).unwrap();
+    let cold = adapter.load_session_for_write_with_indexed_history(&info).await.unwrap().timeline;
+    assert!(
+        adapter.load_workflow_run_history(&info).await.is_err(),
+        "an explicit history request still reaches the closed symlink candidate"
+    );
+    assert!(cold.has_surface_checkpoint());
+    assert_eq!(cold.open_workflow_run_ids().collect::<Vec<_>>(), ["wf_18", "wf_19", "wf_tail"]);
+    assert_eq!(
+        cold.events().iter().filter(|event| matches!(&event.kind, TimelineEventKind::Workflow(_)))
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        [resume.seq, new_spawn.seq],
+    );
+    for index in 0..20 {
+        let id = format!("wf_{index}");
+        assert_eq!(cold.exact_workflow_lifecycle(&id).unwrap(), timeline.workflow_lifecycle(&id));
+    }
+    let first = cold.workflow_spawns_before(cold.next_seq(), 3).unwrap();
+    assert_eq!(first.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>(), ["wf_tail", "wf_19", "wf_18"]);
+    let remaining = cold.workflow_spawns_before(first[2].0, 20).unwrap();
+    assert_eq!(remaining.len(), 18);
+    assert_eq!(remaining.last().unwrap().1, "wf_0");
+    assert!(matches!(cold.prepare(TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+        run_id: "wf_0".into(), execution_epoch: 1
+    })), Err(chat_state::TimelineError::WorkflowAlreadyClosed(_))));
+
+    let mut interrupted = cold;
+    let events = interrupted.settle_interrupted_workflows(&[("wf_18".into(), 1)]).unwrap();
+    let TimelineEventKind::Workflow(WorkflowEvent::Ended { execution_epoch, status, .. }) = &events[0].kind else {
+        panic!("interrupted Workflow must settle its actual open epoch");
+    };
+    assert_eq!((*execution_epoch, *status), (1, WorkflowExecutionStatus::Interrupted));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn workflow_restore_rejects_symlink_manifest() {
@@ -8167,7 +8379,9 @@ async fn cleanup_live_process_lease_survives_durable_append_until_process_exit()
         };
         let writer = JsonlStorageAdapter::with_timeline_sync_probe(root, move |point| {
             if point == TimelineSyncPoint::File {
-                std::fs::write(&ready, b"file sync complete; directory sync pending")?;
+                let marker = ready.with_extension("pending");
+                std::fs::write(&marker, b"file sync complete; directory sync pending")?;
+                std::fs::rename(marker, &ready)?;
                 loop {
                     std::thread::park_timeout(std::time::Duration::from_secs(60));
                 }

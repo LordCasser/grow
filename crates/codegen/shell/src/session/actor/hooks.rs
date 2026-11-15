@@ -43,18 +43,7 @@ const CLIENT_HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 const CLIENT_STOP_GATE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub(super) fn next_hook_config_generation(timeline: Option<&chat_state::Timeline>) -> Option<u64> {
-    let previous = timeline
-        .into_iter()
-        .flat_map(chat_state::Timeline::events)
-        .filter_map(|event| match &event.kind {
-            chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
-                config_generation,
-                ..
-            }) => Some(*config_generation),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
+    let previous = timeline.map_or(0, chat_state::Timeline::hook_config_generation);
     previous.checked_add(1)
 }
 

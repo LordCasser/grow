@@ -155,10 +155,10 @@ impl MvpAgent {
         inquiry_id: &str,
         source_session_id: &str,
     ) -> Result<crate::coordination::InquiryState, CoordinationError> {
-        self.require_coordination_source(source_session_id)?;
+        let source = self.require_coordination_source(source_session_id)?;
         self.coordination
             .handle()
-            .get_inquiry(inquiry_id, source_session_id)
+            .get_inquiry_with_source(inquiry_id, source_session_id, Some(&source.chat_state_handle))
             .await
     }
 
@@ -261,7 +261,7 @@ impl SessionCoordinationBackend {
                 question: task_question.clone(),
             };
             let outcome = coordination
-                .ask_session_with_admission(
+                .ask_session_with_source(
                     &task_inquiry_id,
                     &task_source_session_id,
                     &task_target_session_id,
@@ -269,6 +269,7 @@ impl SessionCoordinationBackend {
                     progress,
                     task_cancellation,
                     async move { record_coordination_inquiry(&admission_source, startup).await },
+                    Some(&task_source.chat_state_handle),
                 )
                 .await?;
             if let Err(error) = record_coordination_inquiry(
@@ -304,7 +305,12 @@ impl SessionCoordinationBackend {
         target_session_id: &str,
     ) -> Result<bool, CoordinationError> {
         self.coordination
-            .cancel_session(inquiry_id, &self.source_session_id, target_session_id)
+            .cancel_session_with_source(
+                inquiry_id,
+                &self.source_session_id,
+                target_session_id,
+                Some(&self.source.chat_state_handle),
+            )
             .await
     }
 }
@@ -391,7 +397,7 @@ impl tools::implementations::grow_build::coordination::CoordinationBackend
     > {
         let state = self
             .coordination
-            .get_inquiry(&inquiry_id, &self.source_session_id)
+            .get_inquiry_with_source(&inquiry_id, &self.source_session_id, Some(&self.source.chat_state_handle))
             .await?;
         Ok(
             tools::implementations::grow_build::coordination::CoordinationInquiryState {

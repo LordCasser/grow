@@ -410,9 +410,10 @@ impl SessionActor {
             parent_session_id: parent_session_id.clone(),
             message_id: replan_message_id(&change.id),
         };
+        let (sender, operation, _, _) = source.agent_message().expect("planning guidance source");
         let receipts = self
             .chat_state_handle
-            .parent_message_receipts()
+            .agent_message_receipts(sender, operation)
             .await
             .ok_or_else(|| {
                 AgentMessageDeliveryError::unconfirmed(

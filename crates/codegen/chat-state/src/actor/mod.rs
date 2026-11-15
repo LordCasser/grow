@@ -526,8 +526,8 @@ impl ChatStateActor {
                 let existing = self
                     .state
                     .timeline
-                    .received_notification_event(&source, &source_version)
-                    .and_then(|event| match &event.kind {
+                    .exact_notification(&source, &source_version)
+                    .map(|existing| existing.and_then(|event| match &event.kind {
                         TimelineEventKind::Notification(crate::NotificationEvent::Received {
                             owner_session_id: existing_owner,
                             source: existing_source,
@@ -535,7 +535,7 @@ impl ChatStateActor {
                             payload_ref: existing_payload,
                             ..
                         }) if existing_version == &source_version => Some((
-                            event.clone(),
+                            event.as_ref().clone(),
                             existing_owner == &owner_session_id
                                 && existing_payload == &payload_ref
                                 && (!matches!(
@@ -546,13 +546,14 @@ impl ChatStateActor {
                                 ) || existing_source == &source),
                         )),
                         _ => None,
-                    });
+                    }));
                 let result = match existing {
-                    Some((event, true)) => Ok(event),
-                    Some((_, false)) => Err(crate::commands::TimelineWriteError::Invalid(
+                    Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                    Ok(Some((event, true))) => Ok(event),
+                    Ok(Some((_, false))) => Err(crate::commands::TimelineWriteError::Invalid(
                         crate::TimelineError::InvalidNotification,
                     )),
-                    None => {
+                    Ok(None) => {
                         match crate::notification_id(&owner_session_id, &source, &source_version) {
                             Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
                             Ok(id) => {
@@ -588,7 +589,7 @@ impl ChatStateActor {
                     .state
                     .timeline
                     .submitted_input_event(&input_id)
-                    .and_then(|event| match &event.kind {
+                    .map(|event| event.and_then(|event| match &event.kind {
                         TimelineEventKind::Input(crate::InputEvent::Submitted {
                             input_id: existing_id,
                             intent: existing_intent,
@@ -600,16 +601,17 @@ impl ChatStateActor {
                                 && existing_payload == &payload_ref,
                         )),
                         _ => None,
-                    });
+                    }));
                 let result = match existing {
-                    Some((event, true)) => Ok(crate::commands::SubmitInputResult {
+                    Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                    Ok(Some((event, true))) => Ok(crate::commands::SubmitInputResult {
                         event,
                         created: false,
                     }),
-                    Some((_, false)) => Err(crate::commands::TimelineWriteError::Invalid(
+                    Ok(Some((_, false))) => Err(crate::commands::TimelineWriteError::Invalid(
                         crate::TimelineError::InvalidInput,
                     )),
-                    None => match self.state.timeline.prepare(TimelineEventKind::Input(
+                    Ok(None) => match self.state.timeline.prepare(TimelineEventKind::Input(
                         crate::InputEvent::Submitted {
                             input_id,
                             intent,
@@ -1110,7 +1112,10 @@ impl ChatStateActor {
                 occurrence_id,
                 reply,
             } => {
-                let _ = reply.send(self.state.timeline.hook_projection(&occurrence_id));
+                match self.state.timeline.exact_hook_projection(&occurrence_id) {
+                    Ok(projection) => { let _ = reply.send(projection); }
+                    Err(error) => tracing::warn!(%error, %occurrence_id, "Hook history lookup failed"),
+                }
             }
             ChatStateCommand::GetCompletedHookProjections { reply } => {
                 let _ = reply.send(self.state.timeline.completed_hook_projections());
@@ -1136,19 +1141,29 @@ impl ChatStateActor {
                 let _ = reply.send(self.state.timeline.history_branch());
             }
             ChatStateCommand::GetRecentPromptTexts { limit, reply } => {
-                let _ = reply.send(self.state.timeline.recent_prompt_texts(limit));
+                if let Ok(prompts) = self.state.timeline.prompt_records_with_history(limit) {
+                    let _ = reply.send(prompts.into_iter().map(|prompt| prompt.text).collect());
+                }
             }
             ChatStateCommand::GetPlanningState { reply } => {
                 let _ = reply.send(self.state.timeline.planning_snapshot().cloned());
             }
             ChatStateCommand::GetConsumedAgentMessages { ids, reply } => {
-                let _ = reply.send(self.state.timeline.consumed_agent_messages(&ids));
+                if let Ok(consumed) = self.state.timeline.exact_consumed_agent_messages(&ids) {
+                    let _ = reply.send(consumed);
+                }
             }
             ChatStateCommand::GetRuntimeState { reply } => {
                 let _ = reply.send(self.state.timeline.runtime_lifecycle().clone());
             }
             ChatStateCommand::GetWorkflowLifecycle { run_id, reply } => {
                 let _ = reply.send(self.state.timeline.workflow_lifecycle(&run_id));
+            }
+            ChatStateCommand::GetOutgoingInquiry { inquiry_id, reply } => {
+                let _ = reply.send(self.state.timeline.outgoing_inquiry_events(&inquiry_id));
+            }
+            ChatStateCommand::GetIncomingInquiry { sender, inquiry_id, reply } => {
+                let _ = reply.send(self.state.timeline.incoming_inquiry_events(&sender, &inquiry_id));
             }
             ChatStateCommand::GetSuspensionEvidence {
                 operation_id,
@@ -1157,7 +1172,7 @@ impl ChatStateActor {
                 reply,
             } => {
                 let timeline = &self.state.timeline;
-                let evidence = timeline.suspension_waits(&operation_id).map(|waits| {
+                let evidence = timeline.suspension_waits(&operation_id).and_then(|waits| {
                     let turn = timeline.suspension_turn_evidence(turn, accepted_response.as_ref());
                     let mut surface_calls = std::collections::BTreeMap::new();
                     let mut published_skills = std::collections::BTreeSet::new();
@@ -1166,9 +1181,12 @@ impl ChatStateActor {
                         for item in surface {
                             match item {
                                 ConversationItem::Assistant(assistant) => {
-                                    surface_calls.extend(assistant.tool_calls.iter().map(|call| {
-                                        (call.id.to_string(), timeline.tool_was_started(&call.id))
-                                    }));
+                                    surface_calls.extend(
+                                        assistant
+                                            .tool_calls
+                                            .iter()
+                                            .map(|call| (call.id.to_string(), false)),
+                                    );
                                 }
                                 ConversationItem::SkillLoad(skill) => {
                                     published_skills.insert(skill.call_id.clone());
@@ -1182,12 +1200,21 @@ impl ChatStateActor {
                             }
                         }
                     }
-                    crate::session_runtime::SuspensionEvidence {
+                    for (call_id, started) in &mut surface_calls {
+                        match timeline.tool_was_started(call_id) {
+                            Ok(value) => *started = value,
+                            Err(error) => {
+                                tracing::error!(%error, "cannot verify suspension tool evidence");
+                                return None;
+                            }
+                        }
+                    }
+                    Some(crate::session_runtime::SuspensionEvidence {
                         turn,
                         surface_calls,
                         published_skills,
                         waits: waits.clone(),
-                    }
+                    })
                 });
                 let _ = reply.send(evidence);
             }
@@ -1205,55 +1232,112 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetRuntimeTreeSnapshot { reply } => {
                 let timeline = &self.state.timeline;
-                let events = timeline.subagent_lifecycle_events().cloned().collect();
-                let _ = reply.send((timeline.runtime_lifecycle().clone(), events));
+                let snapshot = timeline.runtime_subagent_events().map(|events| {
+                    (timeline.runtime_lifecycle().clone(), events)
+                });
+                let _ = reply.send(snapshot);
+            }
+            ChatStateCommand::GetSubagentOperation { subagent_id, reply } => {
+                let _ = reply.send(self.state.timeline.subagent_operation(&subagent_id));
+            }
+            ChatStateCommand::GetSubagentHistory { reply } => {
+                let (mut events, history) = self.state.timeline.subagent_history_sources();
+                tokio::task::spawn_blocking(move || {
+                    let result = (|| {
+                        if let Some(history) = history {
+                            events.extend(history.subagent_events().map_err(crate::TimelineError::SubagentHistory)?);
+                            events.sort_unstable_by_key(|event| event.seq);
+                            events.dedup_by_key(|event| event.seq);
+                        }
+                        Ok(events)
+                    })();
+                    let _ = reply.send(result);
+                });
             }
             ChatStateCommand::GetAdmittedResponse { identity, reply } => {
-                let _ = reply.send(self.state.timeline.admitted_response(&identity));
+                if let Ok(response) = self.state.timeline.exact_admitted_response(&identity) {
+                    let _ = reply.send(response);
+                }
             }
             ChatStateCommand::GetConsumedNotificationTurn {
                 source,
                 source_version,
                 reply,
             } => {
-                let _ = reply.send(
-                    self.state
-                        .timeline
-                        .consumed_notification_turn(&source, &source_version),
-                );
+                if let Ok(turn) = self.state.timeline.exact_notification_consumer(&source, &source_version) {
+                    let _ = reply.send(turn);
+                }
             }
             ChatStateCommand::GetPendingNotifications { reply } => {
                 let _ = reply.send(self.state.timeline.pending_notifications());
             }
-            ChatStateCommand::GetParentMessageReceipts { reply } => {
-                let _ = reply.send(self.state.timeline.parent_message_receipts());
+            ChatStateCommand::GetParentMessageReceipts { identity, reply } => {
+                let identity = identity.as_ref().map(|(sender, operation)| (sender.as_str(), operation.as_str()));
+                if let Ok(receipts) = self.state.timeline.exact_agent_message_receipts(identity) {
+                    let _ = reply.send(receipts);
+                }
             }
-            ChatStateCommand::GetRetainedNotificationPayloadHashes { reply } => {
-                let _ = reply.send(self.state.timeline.retained_notification_payload_hashes());
+            ChatStateCommand::GetRetainedNotificationPayloadHashes { candidates, reply } => {
+                let (mut hashes, history) = self.state.timeline.notification_payload_hash_sources(candidates.as_deref());
+                if let Some(history) = history {
+                    tokio::task::spawn_blocking(move || {
+                        if let Ok(archived) = history.notification_payload_hashes(candidates.as_deref(), &|| reply.is_closed()) {
+                            hashes.extend(archived);
+                            let _ = reply.send(hashes);
+                        }
+                    });
+                } else {
+                    let _ = reply.send(hashes);
+                }
             }
             ChatStateCommand::GetCommittedUserImagePaths { reply } => {
-                let _ = reply.send(self.state.timeline.committed_user_image_paths());
+                let (mut paths, history) = self.state.timeline.user_image_path_sources();
+                if let Some(history) = history {
+                    tokio::task::spawn_blocking(move || {
+                        if let Ok(archived) = history.user_image_paths(&|| reply.is_closed()) {
+                            paths.extend(archived);
+                            let _ = reply.send(paths);
+                        }
+                    });
+                } else {
+                    let _ = reply.send(paths);
+                }
             }
             ChatStateCommand::GetInputState { input_id, reply } => {
-                let _ = reply.send(self.state.timeline.input_state(&input_id));
+                let _ = reply.send(self.state.timeline.exact_input_state(&input_id).map_err(|error| error.to_string()));
             }
             ChatStateCommand::GetPendingAllowedInputs { reply } => {
                 let _ = reply.send(self.state.timeline.pending_allowed_inputs());
             }
-            ChatStateCommand::GetSubmittedInputPayloadHashes { reply } => {
-                let _ = reply.send(self.state.timeline.submitted_input_payload_hashes());
+            ChatStateCommand::GetSubmittedInputPayloadHashes { candidates, reply } => {
+                let (mut hashes, history) = self.state.timeline.input_payload_hash_sources(candidates.as_deref());
+                tokio::task::spawn_blocking(move || {
+                    if let Some(history) = history {
+                        match history.input_payload_hashes(candidates.as_deref(), &|| reply.is_closed()) {
+                            Ok(archived) => hashes.extend(archived),
+                            Err(error) => {
+                                if !reply.is_closed() {
+                                    tracing::warn!(%error, "cannot verify input attachment roots");
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    let _ = reply.send(hashes);
+                });
             }
             ChatStateCommand::GetReceivedNotificationId {
                 source,
                 source_version,
                 reply,
             } => {
-                let id = self
-                    .state
-                    .timeline
-                    .received_notification_id(&source, &source_version)
-                    .map(str::to_owned);
-                let _ = reply.send(id);
+                if let Ok(event) = self.state.timeline.exact_notification(&source, &source_version) {
+                    let id = event.and_then(|event| match &event.kind {
+                        TimelineEventKind::Notification(crate::NotificationEvent::Received { id, .. }) => Some(id.clone()),
+                        _ => None,
+                    });
+                    let _ = reply.send(id);
+                }
             }
             ChatStateCommand::MaterializeTimeline { timeline_id, reply } => {
                 let materialized = self.state.timeline.last_seq().map(|seq| {
@@ -1267,17 +1351,36 @@ impl ChatStateActor {
                         surface: self.state.timeline.surface().to_vec(),
                         surface_ids: self.state.timeline.surface_ids().to_vec(),
                         unconsumed_skill_load_ids: self.state.timeline.unconsumed_skill_load_ids(),
-                        direct_user_inputs: self.state.timeline.direct_user_permission_evidence(),
-                        permission_context: self.state.timeline.permission_classifier_context(),
                         active_control_contexts: self.state.timeline.active_control_contexts(),
                     }
                 });
                 let _ = reply.send(materialized);
             }
+            ChatStateCommand::MaterializePermissionContext { timeline_id, include_tool_calls, reply } => {
+                let timeline = &self.state.timeline;
+                let materialized = timeline.last_seq().and_then(|seq| {
+                    let provenance = timeline.canonical_branch().ok()?;
+                    let evidence = if include_tool_calls {
+                        provenance.permission_classifier_context()
+                    } else {
+                        provenance.direct_user_permission_evidence()
+                    };
+                    Some((crate::TimelineRangeRef {
+                        timeline_id,
+                        first_seq: 0,
+                        last_seq: seq.get(),
+                    }, evidence))
+                });
+                let _ = reply.send(materialized);
+            }
             ChatStateCommand::MaterializeBranchTranscript { timeline_id, reply } => {
+                let Ok(provenance) = self.state.timeline.canonical_branch() else {
+                    let _ = reply.send(None);
+                    return;
+                };
                 let materialized = self.state.timeline.last_seq().map(|seq| {
                     let (transcript_ids, transcript) =
-                        self.state.timeline.branch_transcript_with_ids();
+                        provenance.branch_transcript_with_ids();
                     crate::RecallMaterialization {
                         source_ref: crate::TimelineRangeRef {
                             timeline_id,
@@ -1289,10 +1392,7 @@ impl ChatStateActor {
                         surface_ids: self.state.timeline.surface_ids().to_vec(),
                         transcript,
                         transcript_ids,
-                        unloaded_surface_ids: self
-                            .state
-                            .timeline
-                            .completed_compaction_unloaded_branch_ids(),
+                        unloaded_surface_ids: provenance.completed_compaction_unloaded_branch_ids(),
                     }
                 });
                 let _ = reply.send(materialized);
@@ -1319,7 +1419,21 @@ impl ChatStateActor {
                 let _ = reply.send(self.state.prompt_usage.clone());
             }
             ChatStateCommand::GetSessionUsage { reply } => {
-                let _ = reply.send(self.state.session_usage.clone());
+                let usage = self
+                    .state
+                    .session_usage_for_observation()
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(usage);
+            }
+            ChatStateCommand::GetSessionUsageSummary { reply } => {
+                let ledger = &self.state.session_usage;
+                let _ = reply.send(crate::usage::UsageLedger {
+                    totals: ledger.totals.clone(),
+                    by_model: ledger.by_model.clone(),
+                    main_loop_model_calls: ledger.main_loop_model_calls,
+                    incomplete: ledger.incomplete,
+                    ..Default::default()
+                });
             }
             ChatStateCommand::GetSamplingConfig { reply } => {
                 let _ = reply.send(self.state.sampling_config.clone());
@@ -1335,7 +1449,9 @@ impl ChatStateActor {
                     conversation_len = self.state.timeline.surface_len(),
                     "ChatState: cloning full state for Snapshot"
                 );
-                let _ = reply.send(self.snapshot());
+                if let Ok(snapshot) = self.snapshot() {
+                    let _ = reply.send(snapshot);
+                }
             }
             ChatStateCommand::CheckAutoCompactNeeded {
                 threshold_percent,

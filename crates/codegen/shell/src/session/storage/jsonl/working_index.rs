@@ -4,13 +4,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 const REF_BYTES: u64 = 48;
-const IDENTITY_BYTES: u64 = 40;
-
-pub(super) fn index_len(records: u64, identities: u64, notices: u64) -> Option<u64> {
-    records
-        .checked_mul(REF_BYTES)?
-        .checked_add(identities.checked_mul(IDENTITY_BYTES)?)?
-        .checked_add(notices.checked_mul(8)?)
+pub(super) fn index_len(records: u64) -> Option<u64> {
+    records.checked_mul(REF_BYTES)
 }
 
 pub(super) fn write_positions(index: &mut File, positions: &[u64]) -> io::Result<()> {
@@ -21,50 +16,14 @@ pub(super) fn write_positions(index: &mut File, positions: &[u64]) -> io::Result
     writer.flush()
 }
 
-pub(super) fn notice_position(
-    index: &mut File,
-    records: u64,
-    identities: u64,
-    rank: u64,
-) -> io::Result<u64> {
-    let offset = index_len(records, identities, rank)
-        .ok_or_else(|| invalid("invalid notice index offset"))?;
+pub(super) fn domain_position(index: &mut File, records: u64, seq: u64) -> io::Result<u64> {
+    let offset = index_len(records)
+        .and_then(|base| base.checked_add(seq.checked_mul(8)?))
+        .ok_or_else(|| invalid("invalid domain index offset"))?;
     index.seek(SeekFrom::Start(offset))?;
     let mut bytes = [0; 8];
     index.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
-}
-
-pub(super) fn domain_position(
-    index: &mut File,
-    records: u64,
-    identities: u64,
-    notices: u64,
-    seq: u64,
-) -> io::Result<u64> {
-    let rank = notices
-        .checked_add(seq)
-        .ok_or_else(|| invalid("invalid domain index offset"))?;
-    notice_position(index, records, identities, rank)
-}
-
-pub(super) fn notice_rank(
-    index: &mut File,
-    records: u64,
-    identities: u64,
-    count: u64,
-    position: u64,
-) -> io::Result<usize> {
-    let (mut low, mut high) = (0, count);
-    while low < high {
-        let mid = low + (high - low) / 2;
-        if notice_position(index, records, identities, mid)? < position {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-    Ok(low as usize)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -90,54 +49,6 @@ mod digest_bytes {
     ) -> Result<blake3::Hash, D::Error> {
         <[u8; 32]>::deserialize(deserializer).map(blake3::Hash::from_bytes)
     }
-}
-
-pub(super) fn write_identities(index: &mut File, identities: &[([u8; 32], u64)]) -> io::Result<()> {
-    let mut writer = io::BufWriter::new(index);
-    for (hash, seq) in identities {
-        writer.write_all(hash)?;
-        writer.write_all(&seq.to_le_bytes())?;
-    }
-    writer.flush()
-}
-
-pub(super) fn find_identity(
-    index: &mut File,
-    records: u64,
-    count: u64,
-    hash: [u8; 32],
-    mut resolve: impl FnMut(&mut File, u64) -> io::Result<Option<blake3::Hash>>,
-) -> io::Result<Option<blake3::Hash>> {
-    let base = records * REF_BYTES;
-    let read = |index: &mut File, slot: u64| -> io::Result<([u8; 32], u64)> {
-        let mut bytes = [0; IDENTITY_BYTES as usize];
-        index.seek(SeekFrom::Start(base + slot * IDENTITY_BYTES))?;
-        index.read_exact(&mut bytes)?;
-        let (digest, seq) = bytes.split_at(32);
-        Ok((
-            digest.try_into().unwrap(),
-            u64::from_le_bytes(seq.try_into().unwrap()),
-        ))
-    };
-    let (mut low, mut high) = (0, count);
-    while low < high {
-        let mid = low + (high - low) / 2;
-        if read(index, mid)?.0 < hash {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-    for slot in low..count {
-        let (digest, seq) = read(index, slot)?;
-        if digest != hash {
-            break;
-        }
-        if let Some(found) = resolve(index, seq)? {
-            return Ok(Some(found));
-        }
-    }
-    Ok(None)
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -208,6 +119,10 @@ pub(super) fn read_record(
     journal: &mut File,
     reference: RecordRef,
 ) -> io::Result<crate::session::history::JournalRecord> {
+    crate::session::history::decode_record(&read_record_bytes(journal, reference)?)
+}
+
+pub(super) fn read_record_bytes(journal: &mut File, reference: RecordRef) -> io::Result<Vec<u8>> {
     validate(reference)?;
     let len = usize::try_from(reference.len)
         .map_err(|_| invalid("Timeline record length does not fit memory"))?;
@@ -223,7 +138,7 @@ pub(super) fn read_record(
     if blake3::hash(&bytes) != reference.digest {
         return Err(invalid("Timeline record digest mismatch"));
     }
-    crate::session::history::decode_record(&bytes)
+    Ok(bytes)
 }
 
 #[cfg(test)]

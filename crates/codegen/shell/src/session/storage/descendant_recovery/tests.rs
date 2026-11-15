@@ -97,6 +97,358 @@ async fn add_canonical_spawn(
     event
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn settled_child_is_available_to_exact_queries_after_cold_load() {
+    use chat_state::{ObservationEvent, SubagentEvent, SubagentOutcome, SubagentTerminalEvent};
+
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let parent = info("parent-root", "/workspace/root");
+    let child = info("child-session", "/workspace/child");
+    let spawn = add_canonical_spawn(&adapter, &parent, &child).await;
+    let mut dense = chat_state::Timeline::from_events(vec![spawn.clone()]).unwrap();
+    let terminal = dense
+        .record(chat_state::TimelineEventKind::Subagent(
+            SubagentEvent::Ended(SubagentTerminalEvent {
+                subagent_id: "agent-child".into(),
+                child_session_id: child.id.to_string(),
+                outcome: SubagentOutcome::Cancelled,
+                duration_ms: 10,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                result_ref: None,
+                snapshot_ref: None,
+                error: Some("cancelled".into()),
+            }),
+        ))
+        .unwrap();
+    adapter
+        .append_update(
+            &parent,
+            &grow(
+                &parent,
+                "terminal-only-page",
+                GrowUpdate::SubagentFinished {
+                    subagent_id: "agent-child".into(),
+                    child_session_id: child.id.0.to_string(),
+                    status: "cancelled".into(),
+                    error: Some("cancelled".into()),
+                    tool_calls: 0,
+                    turns: 0,
+                    duration_ms: 10,
+                    tokens_used: 0,
+                    output: None,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let publication = dense
+        .record(chat_state::TimelineEventKind::Observation(
+            ObservationEvent {
+                scope: "shell".into(),
+                name: "artifact".into(),
+                turn: None,
+                step: None,
+                data: Some(serde_json::json!("x".repeat(1024 * 1024))),
+            },
+        ))
+        .unwrap();
+    for event in [&terminal, &publication] {
+        adapter
+            .append_timeline_event_durable(&parent, event)
+            .await
+            .unwrap();
+    }
+    drop(adapter);
+
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let restored = adapter
+        .load_session_for_write_with_indexed_history(&parent)
+        .await
+        .unwrap();
+    assert!(restored.history.indexed.is_some());
+    assert_eq!(restored.timeline.subagent_lifecycle_events().count(), 0);
+    let (seq, operation, terminal) = restored
+        .timeline
+        .subagent_operation("agent-child")
+        .unwrap()
+        .unwrap();
+    assert_eq!(seq, spawn.seq);
+    assert_eq!(operation.child_session_id, child.id.to_string());
+    assert_eq!(terminal.unwrap().outcome, SubagentOutcome::Cancelled);
+    assert!(restored.timeline.subagent_operation("missing").unwrap().is_none());
+
+    // Indexed cold ownership omits settled spawn details, while the newest
+    // replay page can still name this child. Resolve only that emitted id
+    // against the exact indexed lifecycle before enriching Pager metadata.
+    let mut ownership = DescendantOwnership::from_validated(
+        parent.id.0.as_ref(),
+        &restored.timeline,
+        &restored.history,
+    );
+    assert!(!ownership.is_complete());
+    assert!(!ownership.spawns.contains_key(child.id.0.as_ref()));
+    let prepared = restored
+        .history
+        .prepare_indexed(&parent.id, &restored.timeline)
+        .unwrap();
+    let pages = restored.history.indexed_pages(prepared).unwrap().unwrap();
+    let (_, page) = pages
+        .page_before(&parent.id, crate::session::history::PagePosition::newest())
+        .unwrap();
+    let replayed_children = page
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::Grow(notification) => match &notification.update {
+                GrowUpdate::SubagentFinished { subagent_id, child_session_id, .. } => {
+                    Some((child_session_id.clone(), subagent_id.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(replayed_children.len(), 1, "the newest page names the terminal child without its Spawned row");
+    ownership
+        .include_replayed_children(&restored.timeline, &replayed_children)
+        .unwrap();
+    assert_eq!(
+        ownership.replayed_child_ids().collect::<Vec<_>>(),
+        vec![child.id.0.as_ref()]
+    );
+    let captured = &ownership.spawns[child.id.0.as_ref()];
+    assert_eq!(captured.parent_spawn_seq, spawn.seq.get());
+    assert_eq!(captured.spawn.subagent_id, "agent-child");
+    assert_eq!(captured.spawn.child_session_id, child.id.0.as_ref());
+}
+
+#[tokio::test]
+async fn delivered_child_is_settled_but_remains_exactly_queryable_after_cold_load() {
+    use chat_state::{
+        MessageCause, MessageEvent, NotificationEvent, NotificationOwner, NotificationPayloadRef,
+        NotificationSource, NotificationSourceVersion, ObservationEvent, SubagentEvent,
+        SubagentOutcome, SubagentResultEvent, SubagentTerminalEvent, SurfaceOp, TimelineEventKind,
+        TurnEvent, TurnId, TurnIdentity, TurnInputKind,
+    };
+
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let parent = info("delivered-parent", "/workspace/root");
+    let child = info("delivered-child", "/workspace/child");
+    let spawn = add_canonical_spawn(&adapter, &parent, &child).await;
+
+    let mut child_timeline = chat_state::Timeline::default();
+    child_timeline
+        .record(TimelineEventKind::SubagentSeed(
+            chat_state::SubagentSeedEvent {
+                parent_timeline_id: parent.id.0.to_string(),
+                parent_spawn_seq: spawn.seq.get(),
+                subagent_id: "agent-child".into(),
+                security_parent_session_id: parent.id.0.to_string(),
+                context_source: chat_state::SubagentContextSource::New,
+                source_ref: None,
+                normalized: false,
+            },
+        ))
+        .unwrap();
+    let child_publication = child_timeline
+        .record(TimelineEventKind::Observation(ObservationEvent {
+            scope: "shell".into(),
+            name: "artifact".into(),
+            turn: None,
+            step: None,
+            data: Some(serde_json::json!("publish child seed".repeat(65_536))),
+        }))
+        .unwrap();
+    adapter.append_timeline_event_durable(&child, &child_publication).await.unwrap();
+    let child_result = child_timeline
+        .record(TimelineEventKind::SubagentResult(SubagentResultEvent {
+            subagent_id: "agent-child".into(),
+            outcome: SubagentOutcome::Completed,
+            duration_ms: 10,
+            tool_calls: 0,
+            turns: 1,
+            tokens_used: 12,
+            error: None,
+            output_ref: None,
+            planning_summary: None,
+        }))
+        .unwrap();
+    adapter
+        .append_timeline_event_durable(&child, &child_result)
+        .await
+        .unwrap();
+
+    let mut dense = chat_state::Timeline::from_events(vec![spawn]).unwrap();
+    let terminal = dense
+        .record(TimelineEventKind::Subagent(SubagentEvent::Ended(
+            SubagentTerminalEvent {
+                subagent_id: "agent-child".into(),
+                child_session_id: child.id.to_string(),
+                outcome: SubagentOutcome::Completed,
+                duration_ms: 10,
+                tool_calls: 0,
+                turns: 1,
+                tokens_used: 12,
+                result_ref: Some(chat_state::TimelineRangeRef {
+                    timeline_id: child.id.to_string(),
+                    first_seq: child_result.seq.get(),
+                    last_seq: child_result.seq.get(),
+                }),
+                snapshot_ref: None,
+                error: None,
+            },
+        )))
+        .unwrap();
+    let usage_settlement = dense
+        .record(TimelineEventKind::Observation(ObservationEvent {
+            scope: "session_usage".into(),
+            name: "subagent_settled".into(),
+            turn: None,
+            step: None,
+            data: Some(serde_json::json!({
+                "subagent_id": "agent-child",
+                "by_model": [["test-model", {
+                    "input_tokens": 3,
+                    "output_tokens": 2,
+                    "model_calls": 1,
+                    "cost_usd_ticks": null,
+                    "cached_read_tokens": 0,
+                    "cache_creation_tokens": 0,
+                    "cache_read_known_input_tokens": 0,
+                    "cache_read_unknown_calls": 0,
+                    "reasoning_tokens": 0,
+                    "api_duration_ms": 0,
+                    "cost_missing_calls": 0,
+                    "cache_write_unknown_calls": 0
+                }]],
+                "incomplete": false
+            })),
+        }))
+        .unwrap();
+    let source = NotificationSource::SubagentCompleted {
+        subagent_id: "agent-child".into(),
+        owner: NotificationOwner::Session,
+    };
+    let source_version = NotificationSourceVersion::Ordinal { value: 1 };
+    let receipt_id =
+        chat_state::notification_id(parent.id.0.as_ref(), &source, &source_version).unwrap();
+    let receipt = dense
+        .record(TimelineEventKind::Notification(
+            NotificationEvent::Received {
+                id: receipt_id,
+                owner_session_id: parent.id.0.to_string(),
+                source: source.clone(),
+                source_version: source_version.clone(),
+                payload_ref: NotificationPayloadRef {
+                    blake3: blake3::hash(b"completion").to_hex().to_string(),
+                    bytes: 10,
+                },
+            },
+        ))
+        .unwrap();
+    let turn = TurnId(7);
+    let turn_start = dense
+        .record(TimelineEventKind::Turn(TurnEvent::Started {
+            prompt_id: "delivery-prompt".into(),
+            id: turn,
+            input_ids: Vec::new(),
+            identity: TurnIdentity {
+                origin: "tool_result".into(),
+                turn_kind: "internal".into(),
+                goal_id: None,
+                goal_definition_revision: None,
+                stage_id: None,
+            },
+            model_id: "test-model".into(),
+            input_message_count: dense.surface_len(),
+            prompt_index: 0,
+            prompt_text: "deliver child result".into(),
+            input_kind: TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .unwrap();
+    let delivery = dense
+        .record(TimelineEventKind::Messages(MessageEvent {
+            cause: MessageCause::ToolResult,
+            items: vec![sampling_types::conversation::ConversationItem::ToolResult(
+                sampling_types::conversation::ToolResultItem {
+                    tool_call_id: "get-subagent-result".into(),
+                    content: "child result".into(),
+                    images: Vec::new(),
+                    delivered_subagent_id: Some("agent-child".into()),
+                },
+            )],
+            surface: SurfaceOp::Append,
+            response_admission: None,
+        }))
+        .unwrap();
+    assert_eq!(
+        dense.consumed_notification_turn(&source, &source_version),
+        Some(turn)
+    );
+    assert!(dense.pending_notifications().is_empty());
+
+    let publication = dense
+        .record(TimelineEventKind::Observation(ObservationEvent {
+            scope: "shell".into(),
+            name: "artifact".into(),
+            turn: None,
+            step: None,
+            data: Some(serde_json::json!("x".repeat(1024 * 1024))),
+        }))
+        .unwrap();
+    for event in [
+        &terminal,
+        &usage_settlement,
+        &receipt,
+        &turn_start,
+        &delivery,
+        &publication,
+    ] {
+        adapter
+            .append_timeline_event_durable(&parent, event)
+            .await
+            .unwrap();
+    }
+    drop(adapter);
+
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let restored = adapter
+        .load_session_for_write_with_indexed_history(&parent)
+        .await
+        .unwrap()
+        .timeline;
+    assert!(restored.subagent_lifecycle_events().count() == 0);
+    let (spawn_seq, operation, terminal) =
+        restored.subagent_operation("agent-child").unwrap().unwrap();
+    assert_eq!(
+        spawn_seq,
+        dense.subagent_operation("agent-child").unwrap().unwrap().0
+    );
+    assert_eq!(operation.child_session_id, child.id.to_string());
+    let terminal = terminal.unwrap();
+    assert_eq!(terminal.outcome, SubagentOutcome::Completed);
+    let opened_child = adapter.open_session(&child).unwrap();
+    assert_eq!(opened_child.validated_child_result(parent.id.0.as_ref(), spawn_seq, &operation, &terminal).unwrap().tokens_used, 12);
+    let mut conflicting = terminal.clone();
+    conflicting.tokens_used = 13;
+    assert!(opened_child.validated_child_result(parent.id.0.as_ref(), spawn_seq, &operation, &conflicting).is_err());
+    let expected_receipt_id =
+        chat_state::notification_id(parent.id.0.as_ref(), &source, &source_version).unwrap();
+    assert!(matches!(&restored.exact_notification(&source, &source_version).unwrap().unwrap().kind,
+        TimelineEventKind::Notification(NotificationEvent::Received { id, .. }) if id == &expected_receipt_id
+    ));
+    assert!(restored.pending_notifications().is_empty());
+    assert_eq!(
+        restored.consumed_notification_turn(&source, &source_version),
+        Some(turn)
+    );
+}
+
 fn grow(parent: &Info, event_id: &str, update: GrowUpdate) -> SessionUpdate {
     let mut meta = serde_json::Map::new();
     meta.insert("eventId".into(), serde_json::Value::String(event_id.into()));
@@ -105,6 +457,214 @@ fn grow(parent: &Info, event_id: &str, update: GrowUpdate) -> SessionUpdate {
         update,
         meta: Some(serde_json::Value::Object(meta)),
     }))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered() {
+    use chat_state::{ObservationEvent, SubagentEvent, TimelineEventKind};
+
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let parent = info("indexed-replay-parent", "/workspace/root");
+    let child = info("indexed-replay-child", "/workspace/child");
+    let grandchild = info("indexed-replay-grandchild", "/workspace/grandchild");
+    let owner_spawn_event = add_canonical_spawn(&adapter, &parent, &child).await;
+    let owner_spawn = ChildReplaySpawn {
+        spawn: spawn(&parent, &child),
+        parent_spawn_seq: owner_spawn_event.seq.get(),
+        terminal: None,
+    };
+
+    let child_opened = adapter.open_session(&child).unwrap();
+    let mut child_summary = child_opened.summary().clone();
+    child_summary.parent_session_id = Some(parent.id.0.to_string());
+    child_summary.session_kind = Some("subagent_explore".into());
+    let summary_path = child_opened
+        .directory()
+        .display_path()
+        .join("summary.json");
+    drop(child_opened);
+    std::fs::write(&summary_path, serde_json::to_vec_pretty(&child_summary).unwrap()).unwrap();
+
+    init(&adapter, &grandchild).await;
+    let mut child_timeline = chat_state::Timeline::default();
+    child_timeline
+        .record(TimelineEventKind::SubagentSeed(
+            chat_state::SubagentSeedEvent {
+                parent_timeline_id: parent.id.0.to_string(),
+                parent_spawn_seq: owner_spawn_event.seq.get(),
+                subagent_id: "agent-child".into(),
+                security_parent_session_id: parent.id.0.to_string(),
+                context_source: chat_state::SubagentContextSource::New,
+                source_ref: None,
+                normalized: false,
+            },
+        ))
+        .unwrap();
+    let nested_spawn = spawn(&child, &grandchild);
+    let nested_spawn_event = child_timeline
+        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(
+            nested_spawn.clone(),
+        ))))
+        .unwrap();
+    adapter
+        .append_timeline_event_durable(&child, &nested_spawn_event)
+        .await
+        .unwrap();
+    let mut grandchild_timeline = chat_state::Timeline::default();
+    let grandchild_seed = grandchild_timeline
+        .record(TimelineEventKind::SubagentSeed(
+            chat_state::SubagentSeedEvent {
+                parent_timeline_id: child.id.0.to_string(),
+                parent_spawn_seq: nested_spawn_event.seq.get(),
+                subagent_id: nested_spawn.subagent_id.clone(),
+                security_parent_session_id: child.id.0.to_string(),
+                context_source: nested_spawn.context_source.clone(),
+                source_ref: nested_spawn.source_ref.clone(),
+                normalized: nested_spawn.context_normalized,
+            },
+        ))
+        .unwrap();
+    adapter
+        .append_timeline_event_durable(&grandchild, &grandchild_seed)
+        .await
+        .unwrap();
+
+    let child_spawn_update = GrowUpdate::SubagentSpawned {
+        subagent_id: nested_spawn.subagent_id.clone(),
+        parent_session_id: child.id.0.to_string(),
+        parent_prompt_id: None,
+        child_session_id: grandchild.id.0.to_string(),
+        subagent_type: "explore".into(),
+        description: nested_spawn.description.clone(),
+        effective_context_source: None,
+        context_normalized: nested_spawn.context_normalized,
+        capability_mode: None,
+        permission_mode: None,
+        effective_permission_mode: None,
+        model: None,
+        reasoning_effort: None,
+        model_state: None,
+        workflow_agent_names: None,
+        resumed_from: None,
+        workflow_run_id: None,
+        goal_id: None,
+    };
+    adapter
+        .append_update(&child, &grow(&child, "child-spawn", child_spawn_update))
+        .await
+        .unwrap();
+    adapter
+        .append_update(
+            &child,
+            &grow(
+                &child,
+                "child-progress",
+                GrowUpdate::SubagentProgress {
+                    subagent_id: nested_spawn.subagent_id.clone(),
+                    parent_session_id: child.id.0.to_string(),
+                    child_session_id: grandchild.id.0.to_string(),
+                    duration_ms: 20,
+                    turn_count: 1,
+                    tool_call_count: 2,
+                    tokens_used: 3,
+                    context_window_tokens: 100,
+                    context_usage_pct: 3,
+                    tools_used: vec!["read".into()],
+                    error_count: 0,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    adapter
+        .append_update(
+            &child,
+            &grow(
+                &child,
+                "child-finish",
+                GrowUpdate::SubagentFinished {
+                    subagent_id: nested_spawn.subagent_id.clone(),
+                    child_session_id: grandchild.id.0.to_string(),
+                    status: "completed".into(),
+                    error: None,
+                    tool_calls: 2,
+                    turns: 1,
+                    duration_ms: 21,
+                    tokens_used: 3,
+                    output: Some("done".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let publication = child_timeline
+        .record(TimelineEventKind::Observation(ObservationEvent {
+            scope: "shell".into(),
+            name: "artifact".into(),
+            turn: None,
+            step: None,
+            data: Some(serde_json::json!("x".repeat(1024 * 1024))),
+        }))
+        .unwrap();
+    adapter
+        .append_timeline_event_durable(&child, &publication)
+        .await
+        .unwrap();
+    drop(adapter);
+
+    let publisher = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let loaded = publisher
+        .load_session_for_write_with_indexed_history(&child)
+        .await
+        .unwrap();
+    assert!(loaded.history.indexed.is_some());
+    let indexed = loaded.history.indexed.as_ref().unwrap();
+    assert!(indexed.has_child_presentation());
+    let mut reader = indexed.page_reader().unwrap();
+    let indexed_lifecycle = reader
+        .read_subagent_lifecycle(
+            &child.id,
+            &loaded.history,
+        )
+        .unwrap();
+    assert_eq!(indexed_lifecycle.len(), 3);
+    assert!(matches!(
+        &indexed_lifecycle[0].update,
+        GrowUpdate::SubagentSpawned { .. }
+    ));
+    assert!(matches!(
+        &indexed_lifecycle[1].update,
+        GrowUpdate::SubagentProgress { .. }
+    ));
+    assert!(matches!(
+        &indexed_lifecycle[2].update,
+        GrowUpdate::SubagentFinished { .. }
+    ));
+    drop(loaded);
+    drop(publisher);
+
+    let (ownership, presentation) = load_descendant_child_replay_at(
+        child.id.0.as_ref(),
+        parent.id.0.as_ref(),
+        &owner_spawn,
+        root.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(ownership.is_complete());
+    assert!(ownership.into_spawns().contains_key(grandchild.id.0.as_ref()));
+    let lifecycle = presentation
+        .iter()
+        .filter_map(|notification| match &notification.update {
+            GrowUpdate::SubagentSpawned { .. } => Some("spawned"),
+            GrowUpdate::SubagentProgress { .. } => Some("progress"),
+            GrowUpdate::SubagentFinished { .. } => Some("finished"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lifecycle, vec!["spawned", "progress", "finished"]);
 }
 
 #[tokio::test]
@@ -217,6 +777,7 @@ async fn ownership_payload_is_bound_to_session_version_and_valid_prefix_hash() {
         .unwrap()
         .unwrap();
     assert!(ownership.belongs_to(parent.id.0.as_ref()));
+    assert!(ownership.is_complete());
     assert!(!ownership.belongs_to("foreign-root"));
 
     let mut wire = serde_json::to_value(&ownership).unwrap();
@@ -228,6 +789,11 @@ async fn ownership_payload_is_bound_to_session_version_and_valid_prefix_hash() {
     wire["hash"] = serde_json::json!("not-a-prefix-hash");
     let wrong_hash: DescendantOwnership = serde_json::from_value(wire).unwrap();
     assert!(!wrong_hash.belongs_to(parent.id.0.as_ref()));
+
+    let mut wire = serde_json::to_value(&ownership).unwrap();
+    wire["replayed_children"] = serde_json::json!(["unowned-child"]);
+    let wrong_page_membership: DescendantOwnership = serde_json::from_value(wire).unwrap();
+    assert!(!wrong_page_membership.belongs_to(parent.id.0.as_ref()));
 
     let mut wire = serde_json::to_value(&ownership).unwrap();
     wire["session_id"] = serde_json::json!("foreign-root");

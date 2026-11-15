@@ -192,28 +192,18 @@ impl SessionActor {
         input_ids: &[String],
         prompt_index: usize,
     ) -> Result<PreparedUserSkills, acp::Error> {
-        let events = self
-            .chat_state_handle
-            .timeline_events()
-            .await
-            .ok_or_else(|| acp::Error::internal_error().data("Skill input history unavailable"))?;
         let mut references = Vec::new();
         for input_id in input_ids {
-            let payload_ref = events
-                .iter()
-                .find_map(|event| match &event.kind {
-                    chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
-                        input_id: id,
-                        payload_ref,
-                        ..
-                    }) if id == input_id => Some(payload_ref),
-                    _ => None,
-                })
+            let input = self
+                .chat_state_handle
+                .input_state(input_id)
+                .await
+                .map_err(|error| acp::Error::internal_error().data(error))?
                 .ok_or_else(|| {
                     acp::Error::internal_error().data("Skill input has no immutable payload")
                 })?;
             let payload =
-                crate::session::input_inbox::read_payload(&self.session_directory, payload_ref)
+                crate::session::input_inbox::read_payload(&self.session_directory, &input.payload_ref)
                     .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
             let crate::session::input_inbox::InputPayload::Prompt {
                 skill_invocations, ..

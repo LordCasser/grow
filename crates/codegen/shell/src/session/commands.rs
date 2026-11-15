@@ -424,6 +424,7 @@ pub enum SessionCommand {
     /// Re-publish transient Shell-authoritative control projections after a
     /// client load or renderer restart. These snapshots never enter replay.
     PublishControlState {
+        replay_hooks: bool,
         respond_to: oneshot::Sender<()>,
     },
     /// Restore live receiving-side rows after replay, independently of the

@@ -329,6 +329,12 @@ impl SessionActor {
         if op.is_empty() {
             return USAGE.to_string();
         }
+        if !matches!(op, "pause" | "resume" | "stop") {
+            return format!("Unknown op '{op}'. {USAGE}");
+        }
+        if let Err(error) = manager.load_history_for_management().await {
+            return format!("Could not load Workflow run history: {error}");
+        }
 
         let matches: Vec<(String, WorkflowRunStatus, String)> = {
             let tracker = manager.tracker();
@@ -485,6 +491,15 @@ impl SessionActor {
                 "The Workflow workspace is available only in Workflow behavior. Use /workflow [prompt] (current: {}).",
                 behavior.display_label()
             );
+        }
+        if let Err(error) = self
+            .workflow_manager
+            .lock()
+            .await
+            .load_history_for_management()
+            .await
+        {
+            return format!("Workflow run history unavailable: {error}");
         }
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
         let catalog =

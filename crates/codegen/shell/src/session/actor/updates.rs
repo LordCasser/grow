@@ -4,7 +4,7 @@
 use super::*;
 use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
 
-fn timeline_hook_event_name(event: chat_state::HookEventType) -> &'static str {
+pub(crate) fn timeline_hook_event_name(event: chat_state::HookEventType) -> &'static str {
     match event {
         chat_state::HookEventType::SessionStart => "session_start",
         chat_state::HookEventType::UserPromptSubmit => "user_prompt_submit",

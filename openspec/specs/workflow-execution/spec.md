@@ -53,25 +53,37 @@ Workflow resume SHALL await the previous execution terminal acknowledgment befor
 - **THEN** resume returns that failure and does not open a new execution epoch.
 
 ### Requirement: Workflow restore retains the latest valid runs
-Workflow 恢复 SHALL 至多返回最新 128 个通过既有恢复校验的 run，并按 Timeline 顺序交付。cleared、缺失或不满足既有恢复校验而被跳过的候选 SHALL NOT 占用有效恢复名额。恢复 SHALL 保留目录能力校验、单文件读取上限和既有致命错误处理。
+Workflow writer cold recovery SHALL restore only Workflow runs whose Timeline lifecycle is open or whose latest boundary marks execution suspended. It SHALL NOT scan closed Workflow history or open historical run sidecars merely to initialize execution readiness. Historical Workflow operations SHALL retain the existing complete-history restore path when explicitly requested. Execution-required runs SHALL retain directory capability checks, per-file read bounds, lifecycle validation, Timeline-seed repair, and existing fatal error behavior.
+
+#### Scenario: Closed Workflow history does not delay writer readiness
+- **WHEN** a session has fixed execution state and an increasing number of closed Workflow runs
+- **THEN** writer cold recovery opens no historical Workflow sidecars and restores the execution-required set without scanning closed candidates
+
+#### Scenario: Active and suspended Workflow runs restore for execution
+- **WHEN** Timeline contains open runs or runs whose latest Ended boundary is execution-suspended
+- **THEN** writer cold recovery restores and validates each such run; an absent sidecar uses the Timeline seed and follows the existing queued repair behavior
 
 #### Scenario: More valid runs than capacity
-- **WHEN** Timeline 中存在超过 128 个有效恢复 run
-- **THEN** 返回最新 128 个，顺序与 Timeline 一致。
+- **WHEN** an explicit full-history restore sees more than 128 valid runs
+- **THEN** it returns the latest 128 in Timeline order; this capacity does not restrict execution-required cold recovery
 
 #### Scenario: Recent candidates are unusable
-- **WHEN** 较新候选因 cleared、文件缺失或校验失败被跳过，但较旧候选有效
-- **THEN** 继续检查较旧候选，直至获得 128 个有效 run 或候选耗尽。
+- **WHEN** an explicit full-history restore skips newer cleared, missing, or invalid candidates while older candidates remain valid
+- **THEN** it continues until it returns 128 valid runs or exhausts history; cold execution recovery considers only its required run IDs
 
 #### Scenario: Corrupt sidecar is repaired before writer startup completes
-- **WHEN** 冷恢复使用 Timeline seed 替代无法解码的 Workflow sidecar，且 sidecar 自读取后未变化
-- **THEN** 将 reconciled seed 以持久化 ACK 写回后才完成 actor 初始化。
+- **WHEN** execution-required cold recovery uses the Timeline seed for a corrupt Workflow sidecar whose bytes were fingerprinted
+- **THEN** it persists and acknowledges the repair before actor initialization completes; an explicit full-history restore retains the same repair behavior for runs it visits
 
 #### Scenario: Sidecar changes during repair
-- **WHEN** 冷恢复读取到损坏 sidecar 后，该文件在修复锁取得前被替换或删除
-- **THEN** 修复返回可观察的错误，不覆盖新内容，也不把 actor 初始化报告为成功。
+- **WHEN** a visited run's sidecar changes after it was read as corrupt but before the repair lock is acquired
+- **THEN** repair reports an observable error and neither overwrites the new contents nor reports successful actor initialization
 
-证据：`crates/codegen/shell/src/session/storage/jsonl/mod.rs` — `load_workflow_runs_sync`；`crates/codegen/shell/src/session/workflow/store.rs` — `WorkflowRunStore::from_restored` 和 manifest 写入；`crates/codegen/shell/src/session/persistence.rs` — Workflow persistence ACK；`crates/codegen/shell/src/session/actor/spawn.rs` — restored store 初始化。
+#### Scenario: Historical Workflow management is requested
+- **WHEN** a caller requests the existing full Workflow history view
+- **THEN** it uses the complete-history restore path and retains the existing latest-valid-runs ordering, capacity, and validation behavior
+
+证据：`crates/codegen/chat-state/src/timeline.rs` — Workflow lifecycle projection；`crates/codegen/shell/src/session/storage/jsonl/mod.rs` — writer and full-history restore paths。
 
 ### Requirement: Workflow listing has a bounded execution boundary
 Asynchronous workflow listing SHALL isolate filesystem scans from runtime worker threads, bound concurrent scans to one, and apply a five-second deadline that includes waiting for scan capacity and scan completion. A timeout SHALL NOT claim to have interrupted an already-running filesystem operation.

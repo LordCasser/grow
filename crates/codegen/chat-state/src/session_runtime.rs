@@ -184,7 +184,8 @@ pub enum SessionRuntimeEvent {
     },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeLifecycle {
     pub phase: RuntimePhase,
     pub operation_id: Option<String>,
@@ -197,6 +198,43 @@ pub struct RuntimeLifecycle {
     /// execution admission is still closed pending `ExecutionReleased`.
     pub resume_committed: bool,
     pub commands: Option<Vec<RuntimeCommandSettlement>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeWaits(std::collections::BTreeMap<String, (crate::InteractionKind, String)>);
+
+impl RuntimeWaits {
+    pub fn as_map(&self) -> &std::collections::BTreeMap<String, (crate::InteractionKind, String)> {
+        &self.0
+    }
+
+    pub fn apply(&mut self, runtime: &RuntimeLifecycle, event: &crate::TimelineEventKind) {
+        use crate::{InteractionEvent, InteractionKind, InteractionResolution, TimelineEventKind};
+        match event {
+            TimelineEventKind::Interaction(InteractionEvent::Opened { tool_call_id, attempt_id, kind }) => {
+                self.0.insert(tool_call_id.clone(), (*kind, attempt_id.clone()));
+            }
+            TimelineEventKind::Interaction(InteractionEvent::Resolved { tool_call_id, attempt_id, kind, resolution })
+                if *resolution != InteractionResolution::Suspended
+                    && self.0.get(tool_call_id).is_some_and(|(current_kind, current_attempt)| current_kind == kind && current_attempt == attempt_id) =>
+            {
+                self.0.remove(tool_call_id);
+            }
+            TimelineEventKind::Runtime(SessionRuntimeEvent::ExecutionReleased { .. }) => {
+                let turn = runtime.checkpoint.as_ref().and_then(|saved| saved.turn.as_ref());
+                self.0.retain(|call, (kind, _)| {
+                    turn.is_some_and(|turn| turn.operations.iter().any(|operation| {
+                        operation.call_id == *call && matches!(
+                            (&operation.state, *kind),
+                            (SuspendedOperationState::AwaitPermission, InteractionKind::Permission)
+                                | (SuspendedOperationState::AwaitUser, InteractionKind::Question | InteractionKind::PlanApproval)
+                        )
+                    }))
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 fn valid_id(id: &str) -> bool {

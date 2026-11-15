@@ -3097,6 +3097,18 @@ fn sideband_row(
                     duration,
                 )
             }
+            chat_state::SidebandEventKind::RecallMaterializationObserved(observation) => (
+                "sideband.recall_materialization_observed",
+                "validated".into(),
+                "core",
+                format!(
+                    "frozen cut {}..{} · revision {}",
+                    observation.source_ref.first_seq,
+                    observation.source_ref.last_seq,
+                    observation.surface_revision,
+                ),
+                None,
+            ),
             chat_state::SidebandEventKind::End(end) => (
                 "sideband.end",
                 match end.outcome {

@@ -425,7 +425,7 @@ impl SessionActor {
         };
         let events = self
             .chat_state_handle
-            .timeline_events()
+            .resident_timeline_events_from(accepted.event_seq.get() + 1)
             .await
             .ok_or_else(|| "could not read Timeline to verify restored Stop gate".to_owned())?;
         let subagent_id = self

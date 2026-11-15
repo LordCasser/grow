@@ -12,7 +12,7 @@ use sampling_types::{
 };
 
 use crate::types::Credentials;
-use crate::usage::UsageLedger;
+use crate::usage::{UsageLedger, UsageSegment, UsageSegmentId};
 use crate::{EventSeq, SurfaceId, Timeline};
 
 /// Bytes/4 estimate of the system prompt portion of a [`ConversationItem`].
@@ -315,12 +315,15 @@ pub(crate) struct ChatState {
     pub prompt_usage: Option<UsageLedger>,
     /// Lifetime session usage rebuilt from durable Timeline settlement facts.
     pub session_usage: UsageLedger,
+    /// Historical rows changed by replay beyond the pinned history cut.
+    pub(crate) usage_segment_overrides: BTreeMap<UsageSegmentId, UsageSegment>,
     /// Durable attempt facts already applied in this actor epoch. This is
     /// reconstructed from Timeline observations so a replay cannot charge a
     /// settled attempt a second time.
     pub(crate) settled_model_attempts: BTreeMap<String, AttemptUsageSettlement>,
     /// Auxiliary requests admitted and settled under this session's Timeline.
-    pub(crate) auxiliary_attempts: BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, usize)>,
+    pub(crate) auxiliary_attempts:
+        BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, UsageSegmentId)>,
     pub(crate) settled_auxiliary_attempts:
         BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
     /// Durable child bills already folded into the parent lifetime ledger.
@@ -356,7 +359,7 @@ pub(crate) struct AttemptUsageSettlement {
     pub(crate) api_duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AuxiliaryAttemptKey {
     pub(crate) sideband_id: String,
@@ -495,31 +498,293 @@ fn token_usage_matches(left: Option<&TokenUsage>, right: Option<&TokenUsage>) ->
 
 type TimelineUsageProjection = (
     BTreeMap<String, AttemptUsageSettlement>,
-    BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, usize)>,
+    BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, UsageSegmentId)>,
     BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
     BTreeMap<String, SubagentUsageSettlement>,
     UsageLedger,
+    BTreeMap<UsageSegmentId, UsageSegment>,
 );
+
+/// Published accounting state. Exact settlement identities stay in the
+/// journal index; only auxiliary attempts that can still settle are resident.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageCheckpoint {
+    frontier: Option<EventSeq>,
+    ledger: UsageLedger,
+    #[serde(with = "indexmap::map::serde_seq")]
+    pending: indexmap::IndexMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, UsageSegmentId)>,
+    current_segment: Option<UsageSegmentId>,
+    #[serde(skip)]
+    changed_segments: Vec<(UsageSegmentId, UsageSegment)>,
+}
+
+pub fn usage_history_key(observation: &crate::ObservationEvent) -> Option<String> {
+    let key = match (observation.scope.as_str(), observation.name.as_str()) {
+        ("sampling_usage", "attempt_settled") => observation
+            .data
+            .as_ref()?
+            .get("attempt_key")?
+            .as_str()?
+            .to_owned(),
+        ("session_usage", "subagent_settled") => observation
+            .data
+            .as_ref()?
+            .get("subagent_id")?
+            .as_str()?
+            .to_owned(),
+        ("sampling_usage", "aux_attempt_started" | "aux_attempt_settled") => {
+            let key = observation.data.as_ref()?.get("key")?;
+            let attempt = key.get("attempt_no")?.as_u64()?;
+            let sideband = key.get("sideband_id")?.as_str()?;
+            format!("{attempt}:{sideband}")
+        }
+        _ => return None,
+    };
+    Some(format!("{}:{key}", observation.name))
+}
+
+pub fn is_usage_fact(observation: &crate::ObservationEvent) -> bool {
+    matches!(
+        (observation.scope.as_str(), observation.name.as_str()),
+        (
+            "sampling_usage",
+            "attempt_settled" | "aux_attempt_started" | "aux_attempt_settled"
+        ) | (
+            "session_usage",
+            "subagent_settled" | "resume_started" | "incomplete"
+        )
+    )
+}
+
+pub(crate) fn decode_historical_usage<T: serde::de::DeserializeOwned>(
+    observation: Option<crate::ObservationEvent>,
+) -> Result<Option<T>, crate::TimelineWriteError> {
+    observation
+        .map(|observation| {
+            let data = observation.data.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "indexed usage fact has no payload",
+                )
+            })?;
+            serde_json::from_value(data).map_err(std::io::Error::other)
+        })
+        .transpose()
+        .map_err(crate::TimelineWriteError::UsageHistory)
+}
+
+pub(crate) fn historical_usage<T: serde::de::DeserializeOwned>(
+    timeline: &Timeline,
+    name: &str,
+    identity: &str,
+) -> Result<Option<T>, crate::TimelineWriteError> {
+    decode_historical_usage(
+        timeline
+            .historical_usage(&format!("{name}:{identity}"))
+            .map_err(crate::TimelineWriteError::UsageHistory)?,
+    )
+}
 
 fn usage_from_timeline(
     timeline: &Timeline,
 ) -> Result<TimelineUsageProjection, crate::TimelineWriteError> {
-    let mut attempts = BTreeMap::new();
-    let mut auxiliary_attempts: BTreeMap<_, (AuxiliaryAttemptStart, usize)> = BTreeMap::new();
-    let mut settled_auxiliary_attempts: BTreeMap<_, AuxiliaryAttemptSettlement> = BTreeMap::new();
-    let mut spawned_sidebands = BTreeSet::new();
-    let mut subagents = BTreeMap::new();
-    let mut ledger = UsageLedger::default();
-    ledger.initialize_segment(timeline.first_event_at_ms());
-
+    let mut checkpoint = timeline.usage_checkpoint().cloned().unwrap_or_default();
+    let mut local = UsageFacts::default();
+    checkpoint
+        .ledger
+        .initialize_segment(timeline.first_event_at_ms());
+    checkpoint
+        .current_segment
+        .get_or_insert(UsageSegmentId::Initial);
+    let mut sidebands = BTreeSet::new();
     for event in timeline.events() {
         if let crate::TimelineEventKind::Sideband(spawn) = &event.kind {
-            spawned_sidebands.insert(spawn.sideband_id.clone());
+            sidebands.insert(spawn.sideband_id.as_str());
+        }
+        if checkpoint.contains(event.seq) {
             continue;
         }
-        let crate::TimelineEventKind::Observation(observation) = &event.kind else {
-            continue;
+        let lookup = |key: &str| timeline.historical_usage(key);
+        let segment_lookup = |id| timeline.historical_usage_segment(id);
+        let sideband_exists = |id: &str| {
+            if sidebands.contains(id) {
+                return Ok(true);
+            }
+            timeline.archived_sideband_before(id, event.seq)
         };
+        checkpoint.accept(event, &mut local, lookup, segment_lookup, sideband_exists)?;
+    }
+    for (_, segment_id) in checkpoint.pending.values() {
+        checkpoint.ledger.incomplete = true;
+        if Some(*segment_id) == checkpoint.current_segment {
+            checkpoint.ledger.mark_segment_incomplete(0);
+        }
+    }
+    let segment_overrides = checkpoint.take_changed_segments().into_iter().collect();
+    let mut auxiliary_attempts: BTreeMap<_, _> = checkpoint.pending.into_iter().collect();
+    auxiliary_attempts.extend(local.auxiliary_starts);
+    Ok((
+        local.attempts,
+        auxiliary_attempts,
+        local.auxiliary_settlements,
+        local.subagents,
+        checkpoint.ledger,
+        segment_overrides,
+    ))
+}
+
+#[derive(Default)]
+struct UsageFacts {
+    attempts: BTreeMap<String, AttemptUsageSettlement>,
+    auxiliary_starts: BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, UsageSegmentId)>,
+    auxiliary_settlements: BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
+    subagents: BTreeMap<String, SubagentUsageSettlement>,
+}
+
+fn archived<T: serde::de::DeserializeOwned>(
+    lookup: &mut impl FnMut(&str) -> std::io::Result<Option<crate::ObservationEvent>>,
+    key: &str,
+) -> Result<Option<T>, crate::TimelineWriteError> {
+    decode_historical_usage(lookup(key).map_err(crate::TimelineWriteError::UsageHistory)?)
+}
+
+fn archived_segment(
+    lookup: &mut impl FnMut(UsageSegmentId) -> std::io::Result<Option<UsageSegment>>,
+    id: UsageSegmentId,
+) -> Result<Option<UsageSegment>, crate::TimelineWriteError> {
+    lookup(id).map_err(crate::TimelineWriteError::UsageHistory)
+}
+
+fn materialize_usage_segments(
+    timeline: &Timeline,
+    ledger: &mut UsageLedger,
+    published_frontier: Option<EventSeq>,
+    pending: impl Iterator<Item = UsageSegmentId>,
+    overrides: impl Iterator<Item = (UsageSegmentId, UsageSegment)>,
+) -> Result<(), crate::TimelineWriteError> {
+    let live_segments = ledger.segments.clone();
+    let live_agents = ledger.by_agent.clone();
+    let mut rows = Vec::new();
+    let mut before = None;
+    loop {
+        let page = timeline
+            .historical_usage_segments_page(before, 4 * 1024 * 1024)
+            .map_err(crate::TimelineWriteError::UsageHistory)?;
+        if page.segments.is_empty() {
+            break;
+        }
+        before = page.next_before;
+        let has_more = before.is_some();
+        rows.extend(page.segments);
+        if !has_more {
+            break;
+        }
+    }
+    if rows.is_empty()
+        && (timeline.next_seq().get() == 0
+            || published_frontier.is_some_and(|frontier| frontier.get() == 0))
+    {
+        return Ok(());
+    }
+    if rows.is_empty() {
+        return Err(crate::TimelineWriteError::UsageHistory(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "usage checkpoint has no published segment rows",
+            ),
+        ));
+    }
+    let mut by_id: BTreeMap<_, _> = rows.into_iter().collect();
+    let mut merge_segment = |id, mut incoming: UsageSegment| {
+        if let Some(previous) = by_id.get(&id) {
+            for (agent, totals) in &previous.by_agent {
+                if matches!(agent, crate::UsageAgent::Subagent(_)) {
+                    incoming
+                        .by_agent
+                        .entry(agent.clone())
+                        .or_insert_with(|| totals.clone());
+                }
+            }
+        }
+        by_id.insert(id, incoming);
+    };
+    for (id, segment) in overrides {
+        merge_segment(id, segment);
+    }
+    for segment in live_segments {
+        merge_segment(UsageSegmentId::for_segment(&segment), segment);
+    }
+    for id in pending {
+        if let Some(segment) = by_id.get_mut(&id) {
+            segment.mark_incomplete();
+            ledger.incomplete = true;
+        }
+    }
+    ledger.compact_historical_segments(by_id.into_iter().collect());
+    for (agent, totals) in live_agents {
+        ledger.by_agent.insert(agent, totals);
+    }
+    Ok(())
+}
+
+impl UsageCheckpoint {
+    pub fn set_frontier(&mut self, frontier: EventSeq) {
+        self.frontier = Some(frontier);
+        self.ledger.compact_checkpoint();
+    }
+
+    pub fn take_changed_segments(&mut self) -> Vec<(UsageSegmentId, UsageSegment)> {
+        std::mem::take(&mut self.changed_segments)
+    }
+
+    pub fn frontier(&self) -> Option<EventSeq> {
+        self.frontier
+    }
+
+    fn contains(&self, seq: EventSeq) -> bool {
+        self.frontier.is_some_and(|frontier| seq < frontier)
+    }
+
+    pub fn publish_fact(
+        &mut self,
+        event: &crate::TimelineEvent,
+        lookup: impl FnMut(&str) -> std::io::Result<Option<crate::ObservationEvent>>,
+        segment_lookup: impl FnMut(UsageSegmentId) -> std::io::Result<Option<UsageSegment>>,
+        sideband_exists: impl Fn(&str) -> std::io::Result<bool>,
+    ) -> Result<(), crate::TimelineWriteError> {
+        self.ledger.initialize_segment(Some(event.at_ms));
+        let new_segment = self.current_segment.is_none();
+        self.current_segment.get_or_insert(UsageSegmentId::Initial);
+        self.accept(
+            event,
+            &mut UsageFacts::default(),
+            lookup,
+            segment_lookup,
+            sideband_exists,
+        )?;
+        let creates_resume = matches!(&event.kind,
+            crate::TimelineEventKind::Observation(observation)
+                if observation.scope == "session_usage" && observation.name == "resume_started");
+        if (new_segment || creates_resume)
+            && let (Some(id), Some(segment)) = (self.current_segment, self.ledger.segments.last())
+        {
+            self.changed_segments.push((id, segment.clone()));
+        }
+        Ok(())
+    }
+
+    fn accept(
+        &mut self,
+        event: &crate::TimelineEvent,
+        local: &mut UsageFacts,
+        mut lookup: impl FnMut(&str) -> std::io::Result<Option<crate::ObservationEvent>>,
+        mut segment_lookup: impl FnMut(UsageSegmentId) -> std::io::Result<Option<UsageSegment>>,
+        sideband_exists: impl Fn(&str) -> std::io::Result<bool>,
+    ) -> Result<(), crate::TimelineWriteError> {
+        let crate::TimelineEventKind::Observation(observation) = &event.kind else {
+            return Ok(());
+        };
+        let ledger = &mut self.ledger;
         let invalid = |reason: String| crate::TimelineWriteError::InvalidUsageObservation {
             seq: event.seq.get(),
             scope: observation.scope.clone(),
@@ -532,14 +797,36 @@ fn usage_from_timeline(
                     return Err(invalid("marker must not contain data".into()));
                 }
                 if observation.name == "resume_started" {
-                    for (start, segment_index) in auxiliary_attempts.values() {
-                        if !settled_auxiliary_attempts.contains_key(&start.key) {
-                            ledger.mark_segment_incomplete(*segment_index);
+                    let mut current_segment_changed = false;
+                    for (_, segment_id) in self.pending.values() {
+                        ledger.incomplete = true;
+                        if Some(*segment_id) == self.current_segment {
+                            ledger.mark_segment_incomplete(ledger.segments.len() - 1);
+                            current_segment_changed = true;
+                        } else {
+                            let mut segment = archived_segment(&mut segment_lookup, *segment_id)?
+                                .ok_or_else(|| {
+                                invalid("pending usage segment is missing".into())
+                            })?;
+                            segment.mark_incomplete();
+                            self.changed_segments.push((*segment_id, segment));
                         }
                     }
+                    if current_segment_changed
+                        && let (Some(id), Some(segment)) =
+                            (self.current_segment, ledger.segments.last())
+                    {
+                        self.changed_segments.push((id, segment.clone()));
+                    }
                     ledger.begin_resume_segment(event.seq, event.at_ms);
+                    self.current_segment = Some(UsageSegmentId::Resume(event.seq));
                 } else {
                     ledger.mark_incomplete();
+                    if let (Some(id), Some(segment)) =
+                        (self.current_segment, ledger.segments.last())
+                    {
+                        self.changed_segments.push((id, segment.clone()));
+                    }
                 }
             }
             ("sampling_usage", "aux_attempt_started") => {
@@ -550,18 +837,37 @@ fn usage_from_timeline(
                 let start = AuxiliaryAttemptStart::deserialize(data)
                     .map_err(|error| invalid(error.to_string()))?;
                 start.validate().map_err(invalid)?;
-                if !spawned_sidebands.contains(&start.key.sideband_id) {
+                if !sideband_exists(&start.key.sideband_id)
+                    .map_err(crate::TimelineWriteError::UsageHistory)?
+                {
                     return Err(invalid(
                         "auxiliary attempt has no preceding Sideband spawn".into(),
                     ));
                 }
-                match auxiliary_attempts.get(&start.key) {
-                    Some((existing, _)) if existing == &start => continue,
+                match self
+                    .pending
+                    .get(&start.key)
+                    .or_else(|| local.auxiliary_starts.get(&start.key))
+                {
+                    Some((existing, _)) if existing == &start => return Ok(()),
                     Some(_) => return Err(crate::TimelineWriteError::AttemptUsageConflict),
                     None => {}
                 }
-                let segment_index = ledger.current_segment_index();
-                auxiliary_attempts.insert(start.key.clone(), (start, segment_index));
+                if let Some(existing) = archived::<AuxiliaryAttemptStart>(
+                    &mut lookup,
+                    &usage_history_key(observation).expect("validated usage identity"),
+                )? {
+                    return if existing == start {
+                        Ok(())
+                    } else {
+                        Err(crate::TimelineWriteError::AttemptUsageConflict)
+                    };
+                }
+                let segment_id = self.current_segment.unwrap_or(UsageSegmentId::Initial);
+                local
+                    .auxiliary_starts
+                    .insert(start.key.clone(), (start.clone(), segment_id));
+                self.pending.insert(start.key.clone(), (start, segment_id));
             }
             ("sampling_usage", "aux_attempt_settled") => {
                 let data = observation
@@ -571,29 +877,66 @@ fn usage_from_timeline(
                 let settlement = AuxiliaryAttemptSettlement::deserialize(data)
                     .map_err(|error| invalid(error.to_string()))?;
                 settlement.validate().map_err(invalid)?;
-                if let Some(existing) = settled_auxiliary_attempts.get(&settlement.key) {
+                let historical = if local.auxiliary_settlements.contains_key(&settlement.key) {
+                    None
+                } else {
+                    archived::<AuxiliaryAttemptSettlement>(
+                        &mut lookup,
+                        &usage_history_key(observation).expect("validated usage identity"),
+                    )?
+                };
+                if let Some(existing) = local
+                    .auxiliary_settlements
+                    .get(&settlement.key)
+                    .or(historical.as_ref())
+                {
                     if existing.matches(&settlement) {
-                        continue;
+                        return Ok(());
                     }
                     return Err(crate::TimelineWriteError::AttemptUsageConflict);
                 }
-                let Some((start, segment_index)) = auxiliary_attempts.get(&settlement.key) else {
+                let Some((start, segment_id)) = self.pending.shift_remove(&settlement.key) else {
                     return Err(invalid(
                         "auxiliary settlement has no preceding start".into(),
                     ));
                 };
                 if let Some(usage) = settlement.usage.as_ref() {
-                    ledger.record_auxiliary_call_at(
-                        *segment_index,
+                    let call = ledger.record_auxiliary_call_aggregate(
                         &start.model_id,
                         usage,
                         settlement.api_duration_ms,
                         settlement.cost_usd_ticks,
                     );
+                    if Some(segment_id) == self.current_segment {
+                        let segment = ledger
+                            .segments
+                            .last_mut()
+                            .expect("current usage segment exists");
+                        segment.fold_auxiliary_call(&start.model_id, &call);
+                        self.changed_segments.push((segment_id, segment.clone()));
+                    } else {
+                        let mut segment = archived_segment(&mut segment_lookup, segment_id)?
+                            .ok_or_else(|| invalid("pending usage segment is missing".into()))?;
+                        segment.fold_auxiliary_call(&start.model_id, &call);
+                        self.changed_segments.push((segment_id, segment));
+                    }
                 } else {
-                    ledger.mark_segment_incomplete(*segment_index);
+                    ledger.incomplete = true;
+                    if Some(segment_id) == self.current_segment {
+                        let index = ledger.segments.len() - 1;
+                        ledger.mark_segment_incomplete(index);
+                        self.changed_segments
+                            .push((segment_id, ledger.segments[index].clone()));
+                    } else {
+                        let mut segment = archived_segment(&mut segment_lookup, segment_id)?
+                            .ok_or_else(|| invalid("pending usage segment is missing".into()))?;
+                        segment.mark_incomplete();
+                        self.changed_segments.push((segment_id, segment));
+                    }
                 }
-                settled_auxiliary_attempts.insert(settlement.key.clone(), settlement);
+                local
+                    .auxiliary_settlements
+                    .insert(settlement.key.clone(), settlement);
             }
             ("sampling_usage", "attempt_settled") => {
                 let data = observation
@@ -602,8 +945,21 @@ fn usage_from_timeline(
                     .ok_or_else(|| invalid("missing settlement data".into()))?;
                 let payload = AttemptUsageSettlement::deserialize(data)
                     .map_err(|error| invalid(error.to_string()))?;
-                if payload.check_duplicate(attempts.get(&payload.attempt_key))? {
-                    continue;
+                let historical = if local.attempts.contains_key(&payload.attempt_key) {
+                    None
+                } else {
+                    archived::<AttemptUsageSettlement>(
+                        &mut lookup,
+                        &usage_history_key(observation).expect("validated usage identity"),
+                    )?
+                };
+                if payload.check_duplicate(
+                    local
+                        .attempts
+                        .get(&payload.attempt_key)
+                        .or(historical.as_ref()),
+                )? {
+                    return Ok(());
                 }
                 if let Some(usage) = payload.usage.as_ref() {
                     ledger.record_main_loop_call(
@@ -615,7 +971,10 @@ fn usage_from_timeline(
                 } else {
                     ledger.mark_incomplete();
                 }
-                attempts.insert(payload.attempt_key.clone(), payload);
+                if let (Some(id), Some(segment)) = (self.current_segment, ledger.segments.last()) {
+                    self.changed_segments.push((id, segment.clone()));
+                }
+                local.attempts.insert(payload.attempt_key.clone(), payload);
             }
             ("session_usage", "subagent_settled") => {
                 let data = observation
@@ -624,36 +983,234 @@ fn usage_from_timeline(
                     .ok_or_else(|| invalid("missing settlement data".into()))?;
                 let payload = SubagentUsageSettlement::deserialize(data)
                     .map_err(|error| invalid(error.to_string()))?;
-                if payload.check_duplicate(subagents.get(&payload.subagent_id))? {
-                    continue;
+                let historical = if local.subagents.contains_key(&payload.subagent_id) {
+                    None
+                } else {
+                    archived::<SubagentUsageSettlement>(
+                        &mut lookup,
+                        &usage_history_key(observation).expect("validated usage identity"),
+                    )?
+                };
+                if payload.check_duplicate(
+                    local
+                        .subagents
+                        .get(&payload.subagent_id)
+                        .or(historical.as_ref()),
+                )? {
+                    return Ok(());
                 }
                 ledger.record_subagent(&payload.subagent_id, &payload.by_model, payload.incomplete);
-                subagents.insert(payload.subagent_id.clone(), payload);
+                if let (Some(id), Some(segment)) = (self.current_segment, ledger.segments.last()) {
+                    self.changed_segments.push((id, segment.clone()));
+                }
+                local.subagents.insert(payload.subagent_id.clone(), payload);
             }
             _ => {}
         }
+        Ok(())
     }
-
-    for (start, segment_index) in auxiliary_attempts.values() {
-        if !settled_auxiliary_attempts.contains_key(&start.key) {
-            ledger.mark_segment_incomplete(*segment_index);
-        }
-    }
-    Ok((
-        attempts,
-        auxiliary_attempts,
-        settled_auxiliary_attempts,
-        subagents,
-        ledger,
-    ))
 }
 
 /// The same accounting fold used by actor restoration, available to recovery
 /// without constructing a sampler or activating a session.
+pub fn project_timeline_usage_totals(
+    timeline: &Timeline,
+) -> Result<UsageLedger, crate::TimelineWriteError> {
+    Ok(usage_from_timeline(timeline)?.4)
+}
+
+/// Include historical segments and attribution for callers displaying them.
 pub fn project_timeline_usage(
     timeline: &Timeline,
 ) -> Result<UsageLedger, crate::TimelineWriteError> {
-    usage_from_timeline(timeline).map(|(_, _, _, _, ledger)| ledger)
+    let projection = usage_from_timeline(timeline)?;
+    let pending_segments = projection
+        .1
+        .iter()
+        .filter(|(key, _)| !projection.2.contains_key(*key))
+        .map(|(_, (_, id))| *id)
+        .collect::<Vec<_>>();
+    let mut ledger = projection.4;
+    if let Some(checkpoint) = timeline.usage_checkpoint() {
+        materialize_usage_segments(
+            timeline,
+            &mut ledger,
+            checkpoint.frontier(),
+            pending_segments.into_iter(),
+            projection.5.into_iter(),
+        )?;
+    }
+    Ok(ledger)
+}
+
+#[cfg(test)]
+mod usage_checkpoint_tests {
+    use super::*;
+    use crate::{ObservationEvent, TimelineEvent, TimelineEventKind};
+
+    fn event(
+        seq: u64,
+        at_ms: i64,
+        scope: &str,
+        name: &str,
+        data: Option<serde_json::Value>,
+    ) -> TimelineEvent {
+        TimelineEvent {
+            version: crate::TIMELINE_SCHEMA_VERSION,
+            seq: EventSeq::new(seq),
+            at_ms,
+            kind: TimelineEventKind::Observation(ObservationEvent {
+                scope: scope.into(),
+                name: name.into(),
+                turn: None,
+                step: None,
+                data,
+            }),
+        }
+    }
+
+    #[test]
+    fn pending_auxiliary_settlement_updates_its_closed_segment() {
+        let key = AuxiliaryAttemptKey {
+            sideband_id: "00000000-0000-4000-8000-000000000001".into(),
+            attempt_no: 1,
+        };
+        let start = AuxiliaryAttemptStart {
+            key: key.clone(),
+            model_id: "model-a".into(),
+            captured_prompt_index: None,
+        };
+        let mut checkpoint = UsageCheckpoint::default();
+        let mut rows = BTreeMap::new();
+        let first = event(
+            0,
+            100,
+            "sampling_usage",
+            "aux_attempt_started",
+            Some(serde_json::to_value(&start).unwrap()),
+        );
+        checkpoint
+            .publish_fact(&first, |_| Ok(None), |_| Ok(None), |_| Ok(true))
+            .unwrap();
+        rows.extend(checkpoint.take_changed_segments());
+        checkpoint.set_frontier(EventSeq::new(1));
+
+        let resumed = event(1, 200, "session_usage", "resume_started", None);
+        checkpoint
+            .publish_fact(
+                &resumed,
+                |_| Ok(None),
+                |id| Ok(rows.get(&id).cloned()),
+                |_| Ok(true),
+            )
+            .unwrap();
+        rows.extend(checkpoint.take_changed_segments());
+        checkpoint.set_frontier(EventSeq::new(2));
+
+        let settlement = AuxiliaryAttemptSettlement {
+            key,
+            usage: Some(TokenUsage {
+                prompt_tokens: 30,
+                ..Default::default()
+            }),
+            cost_usd_ticks: Some(4),
+            api_duration_ms: Some(8),
+        };
+        let settled = event(
+            2,
+            300,
+            "sampling_usage",
+            "aux_attempt_settled",
+            Some(serde_json::to_value(&settlement).unwrap()),
+        );
+        checkpoint
+            .publish_fact(
+                &settled,
+                |_| Ok(None),
+                |id| Ok(rows.get(&id).cloned()),
+                |_| Ok(true),
+            )
+            .unwrap();
+        rows.extend(checkpoint.take_changed_segments());
+
+        let initial = &rows[&UsageSegmentId::Initial];
+        assert_eq!(initial.totals.input_tokens, 30);
+        assert!(initial.incomplete);
+        assert_eq!(checkpoint.ledger.totals.input_tokens, 30);
+        assert_eq!(checkpoint.ledger.segments.len(), 1);
+        assert_eq!(checkpoint.ledger.segments[0].totals.input_tokens, 0);
+    }
+
+    #[test]
+    fn many_closed_segments_keep_checkpoint_bounded_and_match_dense_fold() {
+        let mut checkpoint = UsageCheckpoint::default();
+        let mut rows = BTreeMap::new();
+        let mut dense = UsageLedger::default();
+        let mut sizes = Vec::new();
+        let count = 128_u64;
+
+        for index in 0..count {
+            if index == 0 {
+                dense.initialize_segment(Some(0));
+            }
+            if index > 0 {
+                let seq = index * 2 - 1;
+                let resumed = event(seq, index as i64, "session_usage", "resume_started", None);
+                checkpoint
+                    .publish_fact(
+                        &resumed,
+                        |_| Ok(None),
+                        |id| Ok(rows.get(&id).cloned()),
+                        |_| Ok(true),
+                    )
+                    .unwrap();
+                rows.extend(checkpoint.take_changed_segments());
+                dense.begin_resume_segment(EventSeq::new(seq), index as i64);
+            }
+
+            let child = format!("child-{index}");
+            let settlement = SubagentUsageSettlement {
+                subagent_id: child.clone(),
+                by_model: vec![(
+                    "model".into(),
+                    crate::usage::UsageTotals {
+                        input_tokens: 3,
+                        model_calls: 1,
+                        ..Default::default()
+                    },
+                )],
+                incomplete: false,
+            };
+            let seq = index * 2;
+            let event = event(
+                seq,
+                index as i64,
+                "session_usage",
+                "subagent_settled",
+                Some(serde_json::to_value(&settlement).unwrap()),
+            );
+            checkpoint
+                .publish_fact(
+                    &event,
+                    |_| Ok(None),
+                    |id| Ok(rows.get(&id).cloned()),
+                    |_| Ok(true),
+                )
+                .unwrap();
+            rows.extend(checkpoint.take_changed_segments());
+            checkpoint.set_frontier(EventSeq::new(seq + 1));
+            dense.record_subagent(&child, &settlement.by_model, false);
+
+            assert_eq!(checkpoint.ledger.segments.len(), 1);
+            sizes.push(serde_json::to_vec(&checkpoint).unwrap().len());
+        }
+
+        let mut recovered = checkpoint.ledger.clone();
+        recovered.compact_historical_segments(rows.into_iter().collect());
+        assert_eq!(recovered, dense);
+        assert!(sizes.last().unwrap() <= &(sizes[0] + 64));
+        assert!(sizes.last().unwrap() < &2_000);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -833,6 +1390,30 @@ pub(super) struct TurnCaptureState {
 }
 
 impl ChatState {
+    pub(crate) fn session_usage_for_observation(
+        &self,
+    ) -> Result<UsageLedger, crate::TimelineWriteError> {
+        let mut usage = self.session_usage.clone();
+        if let Some(checkpoint) = self.timeline.usage_checkpoint() {
+            let pending_segments = self
+                .auxiliary_attempts
+                .iter()
+                .filter(|(key, _)| !self.settled_auxiliary_attempts.contains_key(*key))
+                .map(|(_, (_, id))| *id)
+                .collect::<Vec<_>>();
+            materialize_usage_segments(
+                &self.timeline,
+                &mut usage,
+                checkpoint.frontier(),
+                pending_segments.into_iter(),
+                self.usage_segment_overrides
+                    .iter()
+                    .map(|(id, segment)| (*id, segment.clone())),
+            )?;
+        }
+        Ok(usage)
+    }
+
     /// Create a new `ChatState` with the given conversation and sampling config,
     /// all other fields defaulted.
     ///
@@ -878,6 +1459,7 @@ impl ChatState {
             settled_auxiliary_attempts,
             settled_subagent_usage,
             session_usage,
+            usage_segment_overrides,
         ) = usage_from_timeline(&timeline)?;
 
         let mut state = Self {
@@ -900,6 +1482,7 @@ impl ChatState {
             last_turn_usage: None,
             prompt_usage: None,
             session_usage,
+            usage_segment_overrides,
             settled_model_attempts,
             auxiliary_attempts,
             settled_auxiliary_attempts,

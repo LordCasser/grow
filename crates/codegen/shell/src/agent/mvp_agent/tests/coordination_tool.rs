@@ -29,22 +29,47 @@ fn ask_session_tool_blank_ids_create_inquiries_and_explicit_ids_remain_strict() 
                 .collect(),
         );
         let mut incoming = agent.coordination.take_inquiry_receiver().unwrap();
-        let (source, mut commands) = make_test_handle_with_receiver("test/default", None);
+        let (mut source, mut commands) = make_test_handle_with_receiver("test/default", None);
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence, _records) = chat_state::MockTimelinePersistence::new();
+        source.chat_state_handle = chat_state::ChatStateActor::spawn(
+            Vec::new(),
+            sampling_types::SamplingConfig {
+                model: "test".into(),
+                base_url: "http://127.0.0.1".into(),
+                output_limit: None,
+                temperature: None,
+                top_p: None,
+                api_backend: Default::default(),
+                extra_headers: Default::default(),
+                query_params: Default::default(),
+                env_http_headers: Default::default(),
+                context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+                reasoning_effort: None,
+                stream_tool_calls: None,
+            },
+            Box::new(persistence),
+            events,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let source_timeline = source.chat_state_handle.clone();
         let mut resources = Resources::new();
         resources.insert(agent.coordination_backend_resource(source));
         resources.insert(NotificationHandle(
             tools::notification::ToolNotificationHandle::noop(),
         ));
         let resources = resources.into_shared();
-        // Acknowledge the source audit boundary without touching a live session.
+        // Use the real source Timeline while isolating the coordination test
+        // from a full SessionActor and model provider.
         let audit_task = tokio::spawn(async move {
             while let Some(command) = commands.recv().await {
                 let crate::session::SessionCommand::RecordCoordinationInquiry {
-                    respond_to, ..
+                    event, respond_to,
                 } = command
                 else {
                     panic!("unexpected source command");
                 };
+                source_timeline.record_timeline_event_durably(event.timeline_kind()).await.unwrap();
                 respond_to.send(Ok(())).unwrap();
             }
         });

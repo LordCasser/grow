@@ -1164,6 +1164,7 @@ fn run_and_shutdown<F: std::future::Future>(
     grace: std::time::Duration,
 ) -> F::Output {
     let output = runtime.block_on(fut);
+    let _timer = diagnostics::instrumentation::timer("cli.exit.runtime_shutdown");
     runtime.shutdown_timeout(grace);
     output
 }

@@ -473,7 +473,7 @@ source 的 durable startup 与 runtime 登记使用同一 admission 边界，查
 
 模型 `ask_session` 的空白 inquiry_id 会按未提供处理并生成新 ID，非空值与外部协议 ID 继续严格校验；详见 [询问身份契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-scoped-operations)。
 
-Sideband 成功回答后，回答方在下一次获准采样时，从同一条 `InquiryAnswered` 收件事实读取提问者、问题和自己的完整回答。Chat Completions 和 Messages 将这份记录投影为配对的 `receive_agent_message` 结果，Responses 沿用带来源的运行时上下文投影。见 [询问双方的上下文契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-context-visibility-is-scoped-to-each-participant)。
+Sideband 成功回答后，回答方在下一次获准采样时，从同一条 `InquiryAnswered` 收件事实读取提问者、问题和自己的完整回答。实时回执在空闲准入条件满足时携带一次内部续跑资格，收件落盘后唤醒既有空闲仲裁。用户输入、前台 owner、Goal 和挂起准入先于该续跑。Chat Completions 和 Messages 将这份记录投影为配对的 `receive_agent_message` 结果，Responses 沿用带来源的运行时上下文投影。见 [询问双方的上下文契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-context-visibility-is-scoped-to-each-participant)。
 
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。
 
@@ -521,7 +521,7 @@ Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗
 
 挂起先关闭 compaction lease 的新准入，再取消并按共享 deadline 等待活动 lease 释放；释放代表压缩持久化和 Sideband/Goal 结算已返回，此后由挂起 owner 中止并 join foreground。`handle_prompt` 在 handoff park 等待该收回操作，不能用整个 foreground 的 stopped 代替压缩排空。未确认 ACK 超时保留原 owner；恢复执行才重新开放 lease。见 [压缩排空与前台收回](../openspec/specs/session-timeline/spec.md#requirement-suspension-drains-compaction-before-retiring-the-foreground)。
 
-挂起性能排查可按 `session suspension progress` 的 started、sampler_settled、commands_settled、draining_services、draining_auxiliary_owners、owners_drained、checkpoint_committed 阶段与 elapsed_ms 核对节点，再看整树确认日志。root 身份及已退役节点状态查询不再复制用不到的完整历史；需要 child 事实的快照仍完整验证，不能以缓存跳过校验。测量范围见 [挂起观察成本](../openspec/changes/archive/2026-10-19-streamline-suspension-runtime-observation/verification.md)。
+挂起性能排查可按 `session suspension progress` 的 started、sampler_settled、commands_settled、draining_services、draining_auxiliary_owners、owners_drained、checkpoint_committed 阶段与 elapsed_ms 核对节点，再看整树确认日志。`session.runtime.durable_sync` 单独记录 Runtime 确认的文件与目录同步开销，并标明该次提交是否达到快照发布阈值。root 身份及已退役节点状态查询不再复制用不到的完整历史。子任务中断结算使用已验证的现场、尾部和累计计数，仍检查原始 Seed/Result 绑定。测量范围见 [挂起观察成本](../openspec/changes/archive/2026-10-19-streamline-suspension-runtime-observation/verification.md)。
 
 若 Timeline 停在 `CommandsSettled` 且有后台命令，先核对其 `TaskCompleted` 通知是否以终态 `Ordinal` source version 接纳，再查节点 checkpoint；通知身份不合法会使挂起保持未确认。契约见 [后台命令挂起通知](../openspec/specs/session-timeline/spec.md#requirement-suspension-acknowledges-a-durable-tree-boundary)。 正常完成回执若已接纳（包括已消费），挂起复用其原正文与身份，不再次提交结算 JSON；见 [完成回执重试](../openspec/specs/session-timeline/spec.md#requirement-suspension-retries-reuse-canonical-completion-receipts)。挂起超时后，人工等待从当前 `SuspendRequested` 边界的 `Interaction` 事实重建，不能从已清空的运行时 registry 推断结果未知；仅本次挂起的 `Suspended` 保留等待，真实已解决的交互和之前操作的旧等待不复活。见 [人工等待保全](../openspec/specs/session-timeline/spec.md#requirement-suspension-retries-retain-human-wait-evidence)。
 
@@ -789,15 +789,27 @@ Settings 的完整键鼠回归由 `cargo test --locked -p pager --test settings_
 
 PTY 对应 `resume_modern_admission_projection_128_512_turns` 和 `resume_modern_history_progress_with_slow_writer`，沿用 `PAGER_BINARY` 和精确枚举/执行方式。探针分别测末尾历史首次可见与实际 SessionLoaded 边界；模型标签或稳定画面不足以判断输入已经启用。热点定位与CPU采样见 [现代恢复分析](../openspec/changes/archive/2026-10-21-profile-modern-session-resume/analysis.md)。R5 writer前缀恢复复用私有bulk fold，仍对完整原始字节验证hash、seq及lifecycle；R6将同次writer规划的canonical集合移交初次回放，模型路由补写后弃用，resident/delta不跨快照复用。raw仍逐条核对exact payload，借用的重排行保留合成来源和cursor回退语义。基准与验证分别见 [R5](../openspec/changes/archive/2026-10-21-optimize-timeline-writer-prefix/verification.md)、[R6](../openspec/changes/archive/2026-10-21-reuse-resume-canonical-projections/verification.md)。现代中途退出再恢复用 `ctrl_d_exits_during_modern_session_loading`。这些是合成 dev/test 数据，不是 release 延迟承诺。
 
-固定 Surface 的终端 A/B 使用 `cargo test --locked -p pager-pty-harness --test release_resume_comparison -- fixed_surface_resume_size_curve_acceptance --ignored --exact --nocapture`。分别通过 `GROW_COMPARE_BASELINE_BINARY` 和 `GROW_COMPARE_CANDIDATE_BINARY` 指定同配置的两个构建，设置 `GROW_COMPARE_ACCEPT_SIZE_CURVE=1`，并为 `GROW_COMPARE_OUTPUT` 提供一个新输出目录。默认生成约 1、131 和 394 MiB 的会话，仅增加携带 `eventId` 的已提交展示通知，并核对模型 Surface 哈希。首次打开和同一会话的新进程再次打开分别记录首屏、键入回显、翻旧页和 Ctrl+D 到进程退出的耗时。现场与历史的预期边界见 [恢复验收场景](../openspec/changes/resume-from-working-state/specs/session-timeline/spec.md#requirement-executable-resume-hydrates-committed-working-state)。
+固定 Surface 的终端 A/B 使用 `cargo test --release --locked -p pager-pty-harness --test release_resume_comparison -- fixed_surface_resume_size_curve_acceptance --ignored --exact --nocapture`。通过 `GROW_COMPARE_BASELINE_BINARY` 和 `GROW_COMPARE_CANDIDATE_BINARY` 指定同配置的两个构建，设置 `GROW_COMPARE_ACCEPT_SIZE_CURVE=1`，并为 `GROW_COMPARE_OUTPUT` 提供一个新输出目录。每个队列先写好全部独立夹具，再预热两边的二进制，最后交错测量每档三对样本。首次打开和同一会话的新进程再次打开分别记录终端首帧、最近历史页首屏、执行就绪、键入回显、首次提交、翻旧页和 Ctrl+D 到进程退出的耗时。现场与历史的预期边界见 [恢复验收场景](../openspec/specs/session-timeline/spec.md#requirement-executable-resume-hydrates-committed-working-state)。
 
-设置 `GROW_COMPARE_CLOSED_HISTORY_KIND=domain-observation` 可改为增长 `shell/artifact` 诊断事实。该夹具保持相同的模型 Surface 并跳过展示翻页探针。
+Unix 下，新建会话与 fork 在发布会话目录前建立 Timeline 索引。正常写入达到字节或记录数阈值后先同步事实，再发布工作现场和精确引用，最后替换 `working-history.json`。冷恢复从同一发布边界读取当前模型 Surface、原始 item ID、生效和待激活的 Control 上下文、Runtime 生命周期和挂起进度，再应用未发布尾部。已归档的 Turn、Step、Tool、Request、Hook、Input 与响应接纳身份通过引用核对原日志。子任务由 ToolResult 交付时，原交付轮次可按子任务 ID 核对。已结算 compaction 的替换项随 Surface 恢复，其证明由完整验证读取。最新 Planning、分析与能力公告，以及仍待处理的交互和任务回执按发布截点恢复。未迁移会话首次打开仍需验证原日志，派生索引在后台构建。迁移发布与正常追加共享锁，发布前复核截点和 writer epoch。符合条件的全屏冷启动在执行就绪后请求最近页，完整导出与 rewind 使用完整验证路径。见 [恢复设计](../openspec/changes/archive/2026-11-15-resume-from-working-state/design.md)。
 
-Unix 下，新建会话与 fork 在发布会话目录前建立 Timeline 索引。正常写入累计约 1 MiB 后先同步事实，再追加领域和驻留引用，最后替换固定大小的 `working-history.json`。冷恢复保留原领域序号，折叠驻留事实和未发布尾部。展示翻页和显式领域范围读取校验所选记录。缺少有效索引的旧会话在阻塞工作线程上验证原日志，执行准入等待验证。闭合工具生命周期等领域事实仍在驻留集合内，完整导出与 rewind 使用完整验证路径。当前实现范围及迁移成本见 [恢复设计](../openspec/changes/resume-from-working-state/design.md)。
+Request 按原领域序号查询起点和终态，冷恢复保留未完成起点与最近请求时间。用量从同一发布截点的累计值及未结算辅助请求恢复，历史分段和子任务归因在查询时读取。已发布响应按物理 anchor 与 part 排序，从 Timeline 中按片段校验并读取正文，跨发布的候选 anchor 按 Request 与 attempt 点查。闭合 Turn 的完成通知由磁盘页按原位置读取。超大 Tool 展示使用带 call ID 和字节坐标的只读续页，索引页更新数组上限为 4 MiB。完整导出仍使用 canonical reader。见 [恢复契约](../openspec/specs/session-timeline/spec.md#requirement-executable-resume-hydrates-committed-working-state) 和 [分页契约](../openspec/specs/client-surfaces/spec.md#requirement-session-history-loads-from-the-newest-page-on-demand)。
 
-设置 `GROW_COMPARE_NORMAL_WRITES=1` 和 `GROW_COMPARE_CLOSED_HISTORY_KIND=domain-observation` 可对比旧式无索引日志与由普通写入路径提交的同一合成现场。候选会话在 PTY 首次打开前已有正常写入发布的索引，样本创建不发送退出信号。
+Fork 继承的回复和思考展示按子会话的原始 seed 消息引用分页。发布时验证来源并记录正文片段，保留会话内的消息身份，子会话不继承原 provider 的接纳身份。Pager 在后台读取子任务 lifecycle 的精确索引引用并验证父子 Seed/Result 链接。最近页仅含子任务终态时，Pager 根据该页的精确 spawn 归属建立子视图，保留原终态展示。旧页以只读历史查看器显示。
 
-分页会话的 `/copy N` 在目标超出驻留页时走完整历史读取。复制、导出和转录的异步完成均核对根视图与目标会话的绑定。见 [历史分页契约](../openspec/changes/resume-from-working-state/specs/client-surfaces/spec.md#requirement-interactive-export-waits-for-history-replay-completion)。
+已发生 rewind 或图片投影、且发布现场未覆盖该分支转换的会话，仍通过完整 Timeline 验证恢复。性能对照使用普通可执行分支。分支快照的后续工作记录在 [恢复分支投影审查](../openspec/backlog.md#2026-11-15-恢复分支投影审查)。
+
+历史 Goal 展示、重试结束和压缩与记忆处理结果使用普通展示页。现行 Goal 由 Control 恢复。常规 ask、查询和取消从持有源会话的 actor 按询问 ID 读取已发布审计和后续事实，保留原启动、终态及重试冲突判断。用户图片孤儿清理从已发布索引验证原消息引用并合并尾部，清理期间继续持有图片发布 gate。见 [恢复契约](../openspec/specs/session-timeline/spec.md#requirement-executable-resume-hydrates-committed-working-state)。
+
+Agent 消息的历史展示保留原物理锚点，无锚点时使用原回执所在位置。重试和回复按发送方与操作 ID 核对回执，附件清理只查本批候选引用。收端 ask 恢复待答的询问、尚未注入的终态和当前 inbox；已注入的问答通过索引按原身份和历史位置读取。Workflow 在冷启动时只恢复当前开放或挂起的执行，`/workflows` 和 `/workflow-run` 使用显式历史查询。见 [Workflow 恢复契约](../openspec/specs/workflow-execution/spec.md#requirement-workflow-restore-retains-the-latest-valid-runs)。
+
+闭合 Tool lifecycle 的对照设置 `GROW_COMPARE_NORMAL_WRITES=1`、`GROW_COMPARE_CLOSED_HISTORY_KIND=tool-lifecycle` 和 `GROW_COMPARE_HISTORY_POINTS=64,8192,30000`。在基线 checkout 构建同一测试文件的 `commit_comparison_fixture` 入口，将测试二进制路径传给 `GROW_COMPARE_BASELINE_FIXTURE_WRITER`，以两边各自的存储写入路径保留自然发布的索引。夹具包含普通会话进入第一轮前的 `ContextRebuild`，最大样本超过 515 MB。首次打开前核对模型 Surface 哈希，以及两条已经同步、仍在发布边界外的尾部记录。测试在就绪后立即验证键入，独立记录最近页到达时间，以及显式提交第一条 prompt 到 mock 应答出现在完整终端帧的耗时。使用 `GROW_COMPARE_STAGE_LOGS=1` 可采集各次启动的内部计时。
+
+单测从空闲输入框直接退出时，使用相同的写入和二进制设置，改跑 `fixed_surface_resume_cold_exit_acceptance`，设置 `GROW_COMPARE_COLD_EXIT=1`。每个尺寸交错运行三对样本。测试等待加载完成并显示最近页，然后发送两次 Ctrl+D，全程无模型请求。
+
+空闲退出的计时截止到观察到进程退出，之后才读取剩余终端输出。开启阶段计时后，日志分别记录 Shell 树和节点挂起、Pager 等待确认与恢复终端，以及 CLI 关闭运行时的耗时。Workflow 现场保留当前执行 epoch，历史边界按 run ID 查询。模型请求从 Surface 恢复未消费 SkillLoad，并按原始响应查验新的加载调用。
+
+分页会话的 `/copy N` 在目标超出驻留页时走完整历史读取。复制、导出和转录的异步完成均核对根视图与目标会话的绑定。见 [历史分页契约](../openspec/specs/client-surfaces/spec.md#requirement-interactive-export-waits-for-history-replay-completion)。
 
 Responses 下用户主动加载的技能以独立 user 上下文传入，保留结构化来源、加载身份及完整正文；不再生成需要模型 reasoning 的模拟 `load_skill` 调用。真实模型技能调用仍使用原工具往返。排查 thinking `reasoning_text` 400 时，应区分历史 reasoning 缺失与 Runtime 事实被错误编码成模型调用。见 [技能请求投影](../openspec/specs/model-sampling/spec.md#requirement-runtime-skill-results-have-legal-provider-projections)。
 

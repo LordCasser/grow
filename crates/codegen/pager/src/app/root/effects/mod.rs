@@ -317,6 +317,7 @@ pub(crate) fn execute(
         Effect::SuspendForExit { exit_id } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
+                let started = std::time::Instant::now();
                 let params = serde_json::json!({ "exit_id": exit_id });
                 let request = acp::ExtRequest::new(
                     "grow/session/suspend_for_exit",
@@ -348,6 +349,10 @@ pub(crate) fn execute(
                     }
                     Err(error) => Err(sanitize_user_error(&error.to_string())),
                 };
+                let _timer = diagnostics::instrumentation::InstrumentationTimer::since(
+                    "pager.exit.suspend_rpc",
+                    started,
+                );
                 TaskResult::ExitSuspensionResolved { exit_id, result }
             });
             return (false, meta);
@@ -891,11 +896,53 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::RestoreDescendantState {
+            agent_id,
+            session_id,
+            binding_epoch,
+            request_id,
+            root_child_session_ids,
+            child_control_captures,
+            ownership,
+            grow_home,
+        } => {
+            tasks.spawn(async move {
+                let read_session_id = session_id.0.to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::app::subagent::read_descendant_replay_batch(
+                        &read_session_id,
+                        &root_child_session_ids,
+                        ownership,
+                        &grow_home,
+                    )
+                })
+                .await;
+                let batch = match result {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        tracing::warn!(?error, "descendant replay worker failed");
+                        crate::app::subagent::DescendantReplayBatch::default()
+                    }
+                };
+                TaskResult::DescendantStateRestored {
+                    agent_id,
+                    session_id,
+                    binding_epoch,
+                    request_id,
+                    child_control_captures,
+                    batch,
+                }
+            });
+        }
         Effect::LoadSession { agent_id, session_id, session_cwd } => {
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
             meta.get_or_insert_with(acp::Meta::new)
                 .insert("grow/historyPaging".into(), serde_json::Value::Bool(true));
+            if session_flags.screen_mode_label == Some("fullscreen") {
+                meta.get_or_insert_with(acp::Meta::new)
+                    .insert("grow/deferredHistory".into(), serde_json::Value::Bool(true));
+            }
             if let Some(true) = session_flags.restore_code {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("grow/restore_code".into(), serde_json::Value::Bool(true));
@@ -962,6 +1009,10 @@ pub(crate) fn execute(
                                 restore_summary,
                                 foreground,
                                 older_history_cursor,
+                                latest_history_cursor: resp.meta.as_ref()
+                                    .and_then(|meta| meta.get("grow/latestHistoryCursor"))
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned),
                             }
                         }
                         Err(e) => {

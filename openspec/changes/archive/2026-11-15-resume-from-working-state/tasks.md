@@ -1,0 +1,58 @@
+## Implementation
+
+- [x] Project current Turn, unresolved waits and model-visible tool calls from the canonical actor in one read.
+- [x] Reuse validated root child facts in suspension and remove the redundant parent fold during child reconciliation.
+- [x] Add fixed-Surface suspension evidence scaling and an abrupt process-exit regression for the existing torn journal tail.
+- [x] Measure this increment at the Shell load and exit boundaries against the frozen baseline.
+- [x] Fold current Turn progress and open tools as facts commit; do not gate confirmed-session exit on prompt-history reads.
+- [x] Wire newest/older page delivery, isolate history from live controls, and preserve complete export through the validated history reader.
+- [x] Bound current-Turn suspension queries and resolve required child-tree evidence by the active barrier and exact child identity, including an active Turn containing many already-closed operations.
+- [x] Persist and hydrate exact working state and apply only the validated tail on the normal cold path.
+- [x] Serve indexed recent and older history pages through the ordinary session and Pager paths.
+- [x] Preserve canonical identity, execution authority, rewind, and full-history operations.
+- [x] Verify message-ordinal copy beyond the resident page and stale completion after rebinding.
+- [x] Add crash publication and fixed-working-state cold resume scaling regressions for the new durable protocol.
+- [x] Cover subprocess exit on both sides of display-index publication, complete and torn tails, exact notice identity, and page-local corruption checks.
+- [x] Run paired A/B with fixed working state and report exit, resume, input-ready and first-page outcomes.
+- [x] Repeat the paired terminal sweep through 394 MiB for indexed presentation history and measure the unoptimized domain-history case separately.
+- [x] Preserve original domain coordinates with a sparse resident fold and index Shell diagnostic observations for exact history reads.
+- [x] Cover subprocess exit before and after an incremental manifest publication, including the original runtime fact, exact retry and torn tail.
+- [x] Establish the initial index when the session is written and cover ordinary appends without opening or gracefully closing the session.
+- [x] Restore the published open Tool set, check exact closed Tool identities, and exercise process loss on both sides of its manifest publication.
+- [x] Move closed execution identities and evidence behind exact lookups, and publish only the working set as the executable checkpoint.
+- [x] Keep only unresolved Hook and Input owners in the checkpoint. Resolve settled Hook decisions and durable Input identities by key, preserve attachment retention roots, and page historical Hook presentation.
+- [x] Checkpoint child obligations until result, parent terminal, usage, planning and notification settlement complete. Read settled child lifecycles on demand.
+- [x] Read child Seed, Result and canonical lifecycle from a validated published index when safe, preserving complete ordered lifecycle/control presentation and the dense fallback.
+- [x] Run Pager descendant disk traversal off the reducer path and apply only the latest binding-matched batch in source order, preserving live child control updates.
+- [x] Read complete archived child lifecycle presentation through exact indexed journal references without materializing unrelated history bodies; preserve child Seed/Result validation, ordered replay, dense fallback and complete full-history reads.
+- [x] Keep historical usage segments and per-child attribution outside the cold accounting checkpoint.
+- [x] Move closed Request facts behind an exact predecessor lookup and check a published open Request with a terminal in the replayed suffix.
+- [x] Persist accounting aggregates and unsettled auxiliary attempts, then check typed exact settlement retries and segment continuity against dense replay.
+- [x] Index only displayable terminal Tool groups in the ordered page table. Keep their source fields and hidden intermediate identities separately queryable.
+- [x] Add a stable byte offset to response continuation cursors and cap encoded indexed-page payloads without changing full transcript reads.
+- [x] Store response row order and individually verifiable payload fragments on disk, then verify oversized Tool and response groups through byte continuations.
+- [x] Exercise a crash and reopen at a large index size to distinguish database recovery from the verified journal suffix.
+- [x] Run the fixed-suffix terminal comparison at three closed-history sizes, three pairs per size and a maximum above 497 MB. Record each phase and the remaining first-open size signal.
+- [x] Keep published sampling audit bodies out of indexed execution load and verify them during full audit or transfer. Keep execution-required artifact validation before release.
+- [x] Read Tool display bodies and cross-page predecessor fields from their verified journal references.
+- [x] Preserve the fields from in-progress Tool updates when a terminal crosses a page boundary.
+- [x] Read response bodies by canonical admission coordinate for indexed pages and reject changed source records.
+- [x] Exercise a live submission and page retry on the indexed fullscreen idle-root path while the newest page is pending.
+- [x] Exercise background index migration against a competing writer without changing the canonical journal.
+- [x] Verify execution readiness when recent-page delivery is delayed or fails, with an independent live cursor.
+- [x] Rebuild pre-existing unindexed journals outside the normal interactive recovery path and measure direct open before migration separately.
+- [x] Keep only the current title and model selection, the saved suspension route and terminal Sampling receipts in indexed recovery. Check older revisions by canonical coordinate.
+- [x] Move historical Goal snapshots and standalone retry, compaction, and memory terminal notices into ordered display pages.
+- [x] Resolve source coordination requests and terminals by exact identity and exclude their published bodies from cold execution.
+- [x] Persist settled agent-message receipt and display indexes. Resolve cross-publication anchors, reply attribution and payload retention by exact identity.
+- [x] Keep only unresolved incoming consultation and answer-injection obligations in executable recovery.
+- [x] Route idempotent retries of all published presentation families through the exact identity index.
+- [x] Restore active and execution-suspended Workflow runs before readiness. Load the latest valid historical runs on demand for management.
+- [x] Remove the unrelated Timeline scan from background image asset reconciliation.
+- [x] Page inherited Assistant and Reasoning text from verified journal fragments after Surface replacement.
+- [x] Seal completed ContextRecall Sidebands against their exact pre-End ledger prefix after validating attempts against the captured canonical materialization; keep unsealed and legacy ledgers in execution recovery and retain full-history canonical validation.
+- [x] Apply an unpublished startup ContextRebuild to the working Surface and bind indexed response pages to the resulting branch.
+- [x] Repeat terminal A/B after storage and index changes and verify the closed-history scaling bound.
+- [x] Update developer documentation, validate and archive the implemented contracts.
+
+- [x] Exercise a production-written closed Tool lifecycle fixture above 418 MB and measure the first operation as well as resume, older-page and Ctrl+D latency.

@@ -24,6 +24,7 @@ use std::time::Duration;
 use config_types::{BoolFlag, ConfigSource, Resolved, SessionSearchConfig};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::search_fts::{
     self, BootstrapClaimResult, SessionDoc, SessionSearchIndex, SessionSearchRow,
@@ -1064,8 +1065,12 @@ async fn upsert_session(
     // replay stream is deliberately excluded from content reconstruction.
     let reader = storage.open_timeline_reader(info)?;
     let bytes_read = reader.snapshot_len();
+    // This projection is rebuildable. Stop scanning when its owner exits so
+    // process shutdown does not wait for an unrelated closed journal prefix.
+    let cancel = CancellationToken::new();
+    let _cancel_on_exit = cancel.clone().drop_guard();
     let (next, content) = tokio::task::spawn_blocking(move || {
-        let next = reader.read_timeline_projection(previous)?;
+        let next = reader.read_timeline_projection(previous, &cancel)?;
         let content = timeline_indexable_content(&next.timeline);
         Ok::<_, io::Error>((next, content))
     })
@@ -2903,7 +2908,7 @@ mod tests {
         path: &Path,
         previous: Option<super::super::TimelineReadProjection>,
     ) -> io::Result<super::super::TimelineReadProjection> {
-        reader_for(path).read_timeline_projection(previous)
+        reader_for(path).read_timeline_projection(previous, &CancellationToken::new())
     }
 
     fn assert_projection_matches_full(
@@ -3260,7 +3265,9 @@ mod tests {
             .unwrap();
         file.write_all(&appended_tail[..split]).unwrap();
         file.flush().unwrap();
-        let captured_projection = captured.read_timeline_projection(Some(appended)).unwrap();
+        let captured_projection = captured
+            .read_timeline_projection(Some(appended), &CancellationToken::new())
+            .unwrap();
         assert_eq!(
             timeline_indexable_content(&captured_projection.timeline),
             captured_expected,

@@ -478,15 +478,7 @@ impl TimelineBootstrap {
     /// Seeded tasks have their own API activity domain, even with inherited text.
     pub(super) fn last_api_request_at(&self) -> i64 {
         match self {
-            Self::Existing { timeline, .. } => timeline
-                .events()
-                .iter()
-                .rev()
-                .find_map(|event| {
-                    matches!(event.kind, chat_state::TimelineEventKind::Request(_))
-                        .then_some(event.at_ms)
-                })
-                .unwrap_or(0),
+            Self::Existing { timeline, .. } => timeline.last_request_at_ms().unwrap_or(0),
             Self::Fresh { .. } | Self::Seeded { .. } => 0,
         }
     }
@@ -494,7 +486,7 @@ impl TimelineBootstrap {
     /// Restore only explicit frozen coverage. Notification order is not input
     /// order: a new prompt can arrive while the recap notification is persisted.
     pub(super) fn last_recap_main_turn(&self) -> usize {
-        use crate::session::history::{GrowHistoryFact, HistoryContent, HistorySource};
+        use crate::session::history::HistorySource;
         let Self::Existing { history, .. } = self else {
             return 0;
         };
@@ -502,25 +494,11 @@ impl TimelineBootstrap {
             .sources
             .iter()
             .rev()
-            .find_map(|source| {
-                let HistorySource::Presentation { fact, .. } = source else {
-                    return None;
-                };
-                if !matches!(
-                    &fact.content,
-                    HistoryContent::Grow(value)
-                        if matches!(value.as_ref(), GrowHistoryFact::SessionRecap { .. })
-                ) {
-                    return None;
-                }
-                usize::try_from(
-                    fact.meta
-                        .as_ref()?
-                        .get("recapCoveredMainTurns")?
-                        .as_u64()?,
-                )
-                .ok()
+            .find_map(|source| match source {
+                HistorySource::Presentation { fact, .. } => fact.recap_covered_main_turns(),
+                _ => None,
             })
+            .or_else(|| history.indexed.as_ref()?.recap_covered_main_turns())
             .unwrap_or(0)
     }
 
@@ -631,7 +609,9 @@ fn restored_control_presentations(
 ) -> std::io::Result<Vec<crate::session::storage::SessionUpdate>> {
     use crate::session::history::{GrowHistoryFact, HistoryContent, HistorySource};
 
-    let updates = history
+    let mut prefix = history.indexed.as_ref().map(|index| index.control_presentations())
+        .transpose()?.unwrap_or_default();
+    prefix.extend(history
         .sources
         .iter()
         .filter_map(|source| {
@@ -646,8 +626,9 @@ fn restored_control_presentations(
                 ),
                 _ => false,
             };
-            retain.then(|| fact.clone())
-        })
+            retain.then(|| fact.as_ref().clone())
+        }));
+    let updates = prefix.into_iter()
         .map(|fact| fact.into_update(session_id))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()

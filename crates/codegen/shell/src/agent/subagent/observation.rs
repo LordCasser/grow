@@ -83,10 +83,9 @@ where
     let events = match source_state {
         Some(state) => Some(
             state
-                .runtime_tree_snapshot()
+                .subagent_history_events()
                 .await
-                .map_err(|_| SubagentObservationError::Unavailable)?
-                .1,
+                .map_err(|_| SubagentObservationError::Unavailable)?,
         ),
         None => None,
     };

@@ -392,7 +392,10 @@ fn steer_targets_the_existing_turn_and_emits_no_new_prompt() {
         "steering is rendered after durable consumption"
     );
     assert_ne!(
-        app.agents[&id].toast.as_ref().map(|(text, _)| text.as_str()),
+        app.agents[&id]
+            .toast
+            .as_ref()
+            .map(|(text, _)| text.as_str()),
         Some("Interjection sent"),
         "dispatch alone must not claim delivery"
     );

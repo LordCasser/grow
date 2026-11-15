@@ -238,6 +238,14 @@ async fn advance(
                     if tokio::time::Instant::now() >= deadline {
                         return Err("finalization deadline elapsed after child writer claim".into());
                     }
+                    let mut durable_child = storage
+                        .load_recovery_writer(&opened)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .timeline;
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("finalization deadline elapsed after child validation".into());
+                    }
                     if let Some(event) = pending_child_event {
                         let append = storage.append_timeline_event_durable(
                             &opened.summary().info,
@@ -250,13 +258,8 @@ async fn advance(
                                     .to_owned()
                             })?
                             .map_err(|error| format!("exact pending child event: {error}"))?;
-                    }
-                    let durable_child = opened
-                        .validated_timeline(&child_session_id)
-                        .map_err(|error| error.to_string())?
-                        .timeline;
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err("finalization deadline elapsed after child validation".into());
+                        durable_child = storage.load_recovery_writer(&opened).await
+                            .map_err(|error| error.to_string())?.timeline;
                     }
                     let canonical_result_exists = durable_child.events().iter().any(|event| {
                         matches!(
@@ -285,14 +288,15 @@ async fn advance(
                     if tokio::time::Instant::now() >= deadline {
                         return Err(format!("finalization deadline elapsed after child result recovery for {subagent_id}"));
                     }
-                    let child_timeline = opened
-                        .validated_timeline(&child_session_id)
+                    let child_timeline = storage
+                        .load_recovery_writer(&opened)
+                        .await
                         .map_err(|error| error.to_string())?
                         .timeline;
                     if tokio::time::Instant::now() >= deadline {
                         return Err("finalization deadline elapsed after child usage validation".into());
                     }
-                    let usage = chat_state::actor::state::project_timeline_usage(&child_timeline)
+                    let usage = chat_state::actor::state::project_timeline_usage_totals(&child_timeline)
                         .map_err(|error| error.to_string())?;
                     Ok((
                         storage,

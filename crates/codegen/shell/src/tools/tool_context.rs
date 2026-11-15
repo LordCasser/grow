@@ -201,6 +201,7 @@ pub struct ToolContext {
     pub(crate) watcher_runtime: Option<tokio::runtime::Handle>,
     /// Shared storage-domain admission gate inherited by child sessions.
     pub(crate) storage_admission: Option<Arc<crate::session::storage_admission::StorageAdmission>>,
+    pub(crate) subagent_lifecycle_root: Option<(String, chat_state::ChatStateHandle)>,
 }
 impl ToolContext {
     pub(crate) fn clamp_task_model_request(
@@ -258,6 +259,7 @@ impl ToolContext {
             process_scope: None,
             watcher_runtime: None,
             storage_admission: None,
+            subagent_lifecycle_root: None,
         }
     }
     pub fn with_preloaded_env(
@@ -295,6 +297,7 @@ impl ToolContext {
             process_scope: None,
             watcher_runtime: None,
             storage_admission: None,
+            subagent_lifecycle_root: None,
         }
     }
     pub fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
@@ -385,6 +388,7 @@ mod tests {
                 process_scope: None,
                 watcher_runtime: None,
                 storage_admission: None,
+                subagent_lifecycle_root: None,
             }
         }
     }

@@ -71,12 +71,6 @@ pub struct TimelineMaterialization {
     /// Exact identities whose full skill content still awaits a canonical
     /// consuming response, derived with the Surface in this actor snapshot.
     pub unconsumed_skill_load_ids: Vec<crate::SurfaceId>,
-    /// Branch-selected sanitized first-party authority. Derived Surface text
-    /// (including image transcriptions) can never enter it.
-    pub direct_user_inputs: Vec<ConversationItem>,
-    /// Branch-ordered main Auto permission context: typed authority plus
-    /// assistant tool-use, without projected user text or model prose.
-    pub permission_context: Vec<ConversationItem>,
     pub active_control_contexts:
         std::collections::BTreeMap<crate::ControlContextLayer, crate::ActiveControlContext>,
 }
@@ -204,6 +198,38 @@ pub struct SidebandAttempt {
     pub feedback: Option<String>,
 }
 
+pub fn validate_recall_assembly_manifest(
+    surface_revision: u64,
+    surface_ids: &[crate::SurfaceId],
+    transcript_ids: &[crate::SurfaceId],
+    unloaded_surface_ids: &[crate::SurfaceId],
+    manifest: &SidebandAssemblyManifest,
+) -> Result<(), SidebandError> {
+    let live = surface_ids.iter().copied().collect::<BTreeSet<_>>();
+    let unloaded = unloaded_surface_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let readable = transcript_ids
+        .iter()
+        .copied()
+        .filter(|id| unloaded.contains(id))
+        .collect::<BTreeSet<_>>();
+    if manifest.source_revision != Some(surface_revision)
+        || manifest
+            .context_surface_ids
+            .iter()
+            .any(|id| !live.contains(id))
+        || manifest
+            .selected_surface_ids
+            .iter()
+            .any(|id| !readable.contains(id))
+    {
+        return Err(SidebandError::ParentMaterializationMismatch);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidebandUsage {
@@ -240,6 +266,17 @@ pub struct SidebandEnd {
     pub error: Option<String>,
 }
 
+/// Write-time proof that a successful ContextRecall ledger was assembled from
+/// the exact canonical materialization named by its parent request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecallMaterializationObservation {
+    pub source_ref: TimelineRangeRef,
+    pub surface_revision: u64,
+    pub prefix_last_seq: u64,
+    pub prefix_blake3: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -251,6 +288,7 @@ pub enum SidebandEventKind {
     Request(SidebandRequest),
     Attempt(SidebandAttempt),
     Result(SidebandResult),
+    RecallMaterializationObserved(RecallMaterializationObservation),
     End(SidebandEnd),
 }
 
@@ -270,6 +308,7 @@ pub struct SidebandTimeline {
     events: Vec<SidebandEvent>,
     last_attempt: Option<u64>,
     result_seq: Option<u64>,
+    recall_materialization_observed: bool,
     ended: bool,
 }
 
@@ -337,6 +376,8 @@ pub enum SidebandError {
     StructuredOutputSchemaMismatch(String),
     #[error("sideband result evidence is not covered by the successful attempt input refs")]
     EvidenceOutsideInput,
+    #[error("ContextRecall materialization observation does not bind the exact preceding ledger")]
+    InvalidRecallMaterializationObservation,
     #[error("sideband already has a result")]
     DuplicateResult,
     #[error("sideband already ended")]
@@ -380,6 +421,32 @@ impl SidebandTimeline {
         self.ended
     }
 
+    pub fn has_recall_materialization_observation(&self) -> bool {
+        self.recall_materialization_observed
+    }
+
+    pub fn prepare_recall_materialization_observation(
+        &self,
+        source_ref: TimelineRangeRef,
+        surface_revision: u64,
+    ) -> Result<SidebandEventKind, SidebandError> {
+        let prefix_last_seq = self
+            .events
+            .len()
+            .checked_sub(1)
+            .and_then(|seq| u64::try_from(seq).ok())
+            .ok_or(SidebandError::InvalidRecallMaterializationObservation)?;
+        let prefix_blake3 = sideband_prefix_blake3(&self.events)?;
+        Ok(SidebandEventKind::RecallMaterializationObserved(
+            RecallMaterializationObservation {
+                source_ref,
+                surface_revision,
+                prefix_last_seq,
+                prefix_blake3,
+            },
+        ))
+    }
+
     /// Validate this independent ledger against the one immutable fact held by
     /// its initiating Timeline. This is the trust boundary used by resume,
     /// import, and Trajectory; none of those consumers may infer parentage from
@@ -390,6 +457,29 @@ impl SidebandTimeline {
         parent: &crate::Timeline,
         spawn_seq: u64,
         spawn: &SidebandSpawnEvent,
+    ) -> Result<(), SidebandError> {
+        if !parent.event(crate::EventSeq::new(spawn_seq)).is_some_and(|event| {
+            matches!(&event.kind, crate::TimelineEventKind::Sideband(original) if original == spawn)
+        }) {
+            return Err(SidebandError::ParentRequestMismatch);
+        }
+        self.validate_spawn(parent_timeline_id, spawn, |id| parent.owns_surface_id(id))?;
+        if spawn.purpose == SidebandPurpose::ContextRecall {
+            let SidebandEventKind::Request(request) = &self.events[0].kind else {
+                unreachable!("validated Sideband has a request")
+            };
+            self.validate_recall_materialization(parent, request)?;
+        }
+        Ok(())
+    }
+
+    /// Validate the immutable spawn binding and exact assembly coordinates.
+    /// Context recall also requires its separate selected-branch validation.
+    pub fn validate_spawn(
+        &self,
+        parent_timeline_id: &str,
+        spawn: &SidebandSpawnEvent,
+        mut owns_surface_id: impl FnMut(crate::SurfaceId) -> bool,
     ) -> Result<(), SidebandError> {
         if let Some(source_ref) = spawn
             .source_refs
@@ -414,15 +504,6 @@ impl SidebandTimeline {
             || request.source_refs != spawn.source_refs
             || request.initiator_ref
                 != format!("t:{parent_timeline_id}/sideband:{}", spawn.sideband_id)
-            || !parent.event(crate::EventSeq::new(spawn_seq))
-                .is_some_and(|event| {
-                    event.seq.get() == spawn_seq
-                        && matches!(
-                            &event.kind,
-                            crate::TimelineEventKind::Sideband(parent_spawn)
-                                if parent_spawn == spawn
-                        )
-                })
         {
             return Err(SidebandError::ParentRequestMismatch);
         }
@@ -435,13 +516,10 @@ impl SidebandTimeline {
                 .context_surface_ids
                 .iter()
                 .chain(&attempt.assembly_manifest.selected_surface_ids)
-                .any(|id| !parent.owns_surface_id(*id))
+                .any(|id| !owns_surface_id(*id))
             {
                 return Err(SidebandError::InvalidSurfaceSelection);
             }
-        }
-        if request.purpose == SidebandPurpose::ContextRecall {
-            self.validate_recall_materialization(parent, request)?;
         }
         Ok(())
     }
@@ -459,47 +537,29 @@ impl SidebandTimeline {
             .ok_or(SidebandError::ParentMaterializationMismatch)?;
         let high_water = usize::try_from(high_water)
             .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
-        let prefix = parent
-            .events()
-            .get(..=high_water)
-            .ok_or(SidebandError::ParentMaterializationMismatch)?;
-        let frozen = crate::Timeline::from_events(prefix.to_vec())
+        let source = parent.canonical_branch().map_err(|_| SidebandError::ParentMaterializationMismatch)?;
+        let prefix = source.events().iter().take_while(|event| event.seq.get() <= high_water as u64)
+            .cloned().collect::<Vec<_>>();
+        if prefix.len() != high_water.saturating_add(1) {
+            return Err(SidebandError::ParentMaterializationMismatch);
+        }
+        let frozen = crate::Timeline::from_events(prefix)
             .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
-        let branch_ids = frozen
-            .branch_transcript_with_ids()
-            .0
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let unloaded = frozen
-            .completed_compaction_unloaded_branch_ids()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let live = frozen
-            .surface_ids()
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let readable = branch_ids
-            .intersection(&unloaded)
-            .copied()
-            .collect::<BTreeSet<_>>();
+        let transcript_ids = frozen.branch_transcript_with_ids().0;
+        let unloaded = frozen.completed_compaction_unloaded_branch_ids();
+        let live = frozen.surface_ids();
 
         for manifest in self.events.iter().filter_map(|event| match &event.kind {
             SidebandEventKind::Attempt(attempt) => Some(&attempt.assembly_manifest),
             _ => None,
         }) {
-            if manifest.source_revision != Some(frozen.surface_revision())
-                || manifest
-                    .context_surface_ids
-                    .iter()
-                    .any(|id| !live.contains(id))
-                || manifest
-                    .selected_surface_ids
-                    .iter()
-                    .any(|id| !readable.contains(id))
-            {
-                return Err(SidebandError::ParentMaterializationMismatch);
-            }
+            validate_recall_assembly_manifest(
+                frozen.surface_revision(),
+                live,
+                &transcript_ids,
+                &unloaded,
+                manifest,
+            )?;
         }
         Ok(())
     }
@@ -521,6 +581,11 @@ impl SidebandTimeline {
         self.validate_header(&event)?;
         if self.ended {
             return Err(SidebandError::AlreadyEnded);
+        }
+        if self.recall_materialization_observed
+            && !matches!(&event.kind, SidebandEventKind::End(_))
+        {
+            return Err(SidebandError::InvalidRecallMaterializationObservation);
         }
         match &event.kind {
             SidebandEventKind::Request(request) => {
@@ -659,6 +724,33 @@ impl SidebandTimeline {
                 }
                 self.result_seq = Some(event.seq);
             }
+            SidebandEventKind::RecallMaterializationObserved(observation) => {
+                let Some(SidebandEventKind::Request(request)) =
+                    self.events.first().map(|event| &event.kind)
+                else {
+                    return Err(SidebandError::InvalidRequestBoundary);
+                };
+                if request.purpose != SidebandPurpose::ContextRecall
+                    || self.result_seq.is_none()
+                    || !matches!(
+                        self.events.last().map(|event| &event.kind),
+                        Some(SidebandEventKind::Result(_))
+                    )
+                    || request.source_refs.as_slice() != [observation.source_ref.clone()]
+                    || observation.prefix_last_seq.checked_add(1) != Some(event.seq)
+                    || sideband_prefix_blake3(&self.events)? != observation.prefix_blake3
+                    || self.events.iter().filter_map(|event| match &event.kind {
+                        SidebandEventKind::Attempt(attempt) => {
+                            Some(attempt.assembly_manifest.source_revision)
+                        }
+                        _ => None,
+                    }).any(|revision| revision != Some(observation.surface_revision))
+                {
+                    return Err(SidebandError::InvalidRecallMaterializationObservation);
+                }
+                observation.source_ref.validate()?;
+                self.recall_materialization_observed = true;
+            }
             SidebandEventKind::End(end) => match end.outcome {
                 SidebandOutcome::Completed => {
                     if self.result_seq.is_none() || end.error.is_some() {
@@ -667,6 +759,11 @@ impl SidebandTimeline {
                     self.ended = true;
                 }
                 SidebandOutcome::Failed | SidebandOutcome::Cancelled => {
+                    if self.recall_materialization_observed
+                        && end.outcome != SidebandOutcome::Cancelled
+                    {
+                        return Err(SidebandError::InvalidRecallMaterializationObservation);
+                    }
                     if end
                         .error
                         .as_deref()
@@ -720,6 +817,17 @@ fn range_covers(outer: &TimelineRangeRef, inner: &TimelineRangeRef) -> bool {
     outer.timeline_id == inner.timeline_id
         && outer.first_seq <= inner.first_seq
         && inner.last_seq <= outer.last_seq
+}
+
+fn sideband_prefix_blake3(events: &[SidebandEvent]) -> Result<String, SidebandError> {
+    let mut hasher = blake3::Hasher::new();
+    for event in events {
+        let encoded = serde_json::to_vec(event)
+            .map_err(|_| SidebandError::InvalidRecallMaterializationObservation)?;
+        hasher.update(&(encoded.len() as u64).to_le_bytes());
+        hasher.update(&encoded);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn surface_ids_are_unique(ids: &[crate::SurfaceId]) -> bool {
@@ -1168,6 +1276,109 @@ mod tests {
             }))
             .unwrap_err();
         assert!(matches!(error, SidebandError::EvidenceOutsideInput));
+    }
+
+    #[test]
+    fn recall_materialization_observation_binds_exact_completed_prefix() {
+        let sideband_id = uuid::Uuid::now_v7().to_string();
+        let source_ref = TimelineRangeRef {
+            timeline_id: "parent".into(),
+            first_seq: 0,
+            last_seq: 4,
+        };
+        let mut request = request();
+        request.purpose = SidebandPurpose::ContextRecall;
+        request.source_refs = vec![source_ref.clone()];
+        request.output_schema = None;
+        request.initiator_ref = format!("t:parent/sideband:{sideband_id}");
+        let mut timeline = SidebandTimeline::new(sideband_id).unwrap();
+        for kind in [
+            SidebandEventKind::Request(request),
+            SidebandEventKind::Attempt(SidebandAttempt {
+                attempt_no: 1,
+                input_refs: vec![source_ref.clone()],
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "hybrid-causal-units".into(),
+                    strategy_version: 1,
+                    source_revision: Some(7),
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: Vec::new(),
+                    materialized_input_tokens: 8,
+                    max_output_tokens: Some(8),
+                },
+                feedback: None,
+            }),
+            SidebandEventKind::Result(SidebandResult {
+                raw_output: "recall result".into(),
+                structured_output: None,
+                usage: SidebandUsage::default(),
+                finish: "stop".into(),
+                source_event_seqs: [0, 1],
+                evidence_refs: Vec::new(),
+            }),
+        ] {
+            let event = timeline.prepare(kind).unwrap();
+            timeline.accept(event).unwrap();
+        }
+
+        let observation = timeline
+            .prepare_recall_materialization_observation(source_ref, 7)
+            .unwrap();
+        let event = timeline.prepare(observation).unwrap();
+        timeline.accept(event).unwrap();
+        assert!(timeline.has_recall_materialization_observation());
+        let end = timeline
+            .prepare(SidebandEventKind::End(SidebandEnd {
+                outcome: SidebandOutcome::Completed,
+                error: None,
+            }))
+            .unwrap();
+        timeline.accept(end).unwrap();
+
+        let mut tampered = timeline.events().to_vec();
+        let SidebandEventKind::Result(result) = &mut tampered[2].kind else {
+            unreachable!();
+        };
+        result.raw_output.push_str(" changed");
+        assert!(matches!(
+            SidebandTimeline::from_events(tampered),
+            Err(SidebandError::InvalidRecallMaterializationObservation)
+        ));
+    }
+
+    #[test]
+    fn recall_assembly_seal_uses_the_same_live_and_unloaded_membership_rule() {
+        let live = crate::SurfaceId {
+            event: crate::EventSeq::new(2),
+            item: 0,
+        };
+        let unloaded = crate::SurfaceId {
+            event: crate::EventSeq::new(1),
+            item: 3,
+        };
+        let mut manifest = SidebandAssemblyManifest {
+            strategy: "hybrid-causal-units".into(),
+            strategy_version: 1,
+            source_revision: Some(9),
+            context_surface_ids: vec![live],
+            selected_surface_ids: vec![unloaded],
+            materialized_input_tokens: 8,
+            max_output_tokens: Some(8),
+        };
+        validate_recall_assembly_manifest(9, &[live], &[live, unloaded], &[unloaded], &manifest)
+            .unwrap();
+
+        manifest.selected_surface_ids.push(live);
+        assert!(matches!(
+            validate_recall_assembly_manifest(
+                9,
+                &[live],
+                &[live, unloaded],
+                &[unloaded],
+                &manifest,
+            ),
+            Err(SidebandError::ParentMaterializationMismatch)
+        ));
     }
 
     #[test]

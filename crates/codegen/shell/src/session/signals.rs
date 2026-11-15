@@ -405,8 +405,8 @@ pub struct SessionSignals {
 }
 
 const TIMELINE_SIGNALS_VERSION: u32 = 1;
-const TIMELINE_SIGNALS_SCOPE: &str = "analytics";
-const TIMELINE_SIGNALS_NAME: &str = "session_signals_snapshot";
+pub(super) const TIMELINE_SIGNALS_SCOPE: &str = "analytics";
+pub(super) const TIMELINE_SIGNALS_NAME: &str = "session_signals_snapshot";
 
 #[derive(Serialize, Deserialize)]
 struct TimelineSignalsSnapshot {

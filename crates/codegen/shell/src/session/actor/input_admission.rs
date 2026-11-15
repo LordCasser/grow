@@ -729,13 +729,12 @@ impl SessionActor {
             hashes = batch_rx.recv() => hashes,
         } {
             let _guard = self.input_artifact_gate.lock().await;
-            let Some(retained) = self
-                .chat_state_handle
-                .submitted_input_payload_hashes()
-                .await
-            else {
-                break;
+            let retained = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => None,
+                retained = self.chat_state_handle.retained_input_payloads(hashes.clone()) => retained,
             };
+            let Some(retained) = retained else { break };
             // Submitted payloads remain part of the immutable audit record even
             // after the input is blocked, consumed, or dismissed. Only blobs with
             // no Timeline reference are orphans.
@@ -766,16 +765,16 @@ impl SessionActor {
         // Includes crashes after image writes but before the manifest exists.
         // Hold the same gate across the root snapshot and the attachment sweep.
         let _guard = self.input_artifact_gate.lock().await;
-        let Some(retained) = self
-            .chat_state_handle
-            .submitted_input_payload_hashes()
-            .await
-        else {
+        let Ok(directory) = self.session_directory.try_clone() else { return };
+        if !crate::session::input_inbox::input_image_directory_exists(&directory) {
             return;
+        }
+        let retained = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            retained = self.chat_state_handle.submitted_input_payload_hashes() => retained,
         };
-        let Ok(directory) = self.session_directory.try_clone() else {
-            return;
-        };
+        let Some(retained) = retained else { return };
         let shutdown = shutdown.clone();
         match tokio::task::spawn_blocking(move || {
             crate::session::input_inbox::reconcile_image_blobs(&directory, &retained, || {
@@ -803,6 +802,18 @@ impl SessionActor {
         };
         if shutdown.is_cancelled() {
             return;
+        }
+        match self.session_directory.open_relative(
+            std::path::Path::new("assets"),
+            "session image asset directory",
+            false,
+        ) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(%error, "user image asset directory unavailable");
+                return;
+            }
         }
         // The live owner has already validated every committed physical User
         // reference, including those no longer in the current Surface. Keep

@@ -1231,8 +1231,8 @@ async fn writer_load_candidate_rejects_rewrite_replacement_and_truncation_before
         let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
         writer.ensure_writer_lease(&info).unwrap();
         let opened = writer.open_session(&info).unwrap();
-        let (_, prefix) = writer
-            .load_validated_writer_timeline(&opened, &info, false)
+        let (_, prefix, _) = writer
+            .load_validated_writer_timeline(&opened, &info, false, false)
             .unwrap();
         let path = writer.timeline_file(&info);
         let bytes = std::fs::read(&path).unwrap();

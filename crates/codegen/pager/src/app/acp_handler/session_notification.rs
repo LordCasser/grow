@@ -556,6 +556,12 @@ fn handle_session_notification_inner(
                 agent
                     .subagent_views
                     .contains_key(session_notif.session_id.0.as_ref())
+                    || (agent.session.session_id.as_ref() == Some(&session_notif.session_id)
+                        && matches!(
+                            &session_notif.update,
+                            GrowSessionUpdate::SubagentSpawned { parent_session_id, .. }
+                                if parent_session_id == session_notif.session_id.0.as_ref()
+                        ))
             })
         })
         .map(SessionMatch::Child)
@@ -647,6 +653,21 @@ fn handle_session_notification_inner(
                 "child grow/session update dropped by dedup highwater"
             );
             return false;
+        }
+        if !meta.is_replay {
+            match &session_notif.update {
+                GrowSessionUpdate::ModelChanged { .. } => {
+                    child.descendant_model_control_generation = child
+                        .descendant_model_control_generation
+                        .wrapping_add(1);
+                }
+                GrowSessionUpdate::AgentChanged { .. } => {
+                    child.descendant_agent_control_generation = child
+                        .descendant_agent_control_generation
+                        .wrapping_add(1);
+                }
+                _ => {}
+            }
         }
         let controls_pending_before = child.session.controls_pending();
         let changed = handle_child_session_notification(
@@ -1170,7 +1191,10 @@ fn handle_session_notification_inner(
                 .subagent_sessions
                 .get(&child_session_id)
                 .is_some_and(|info| info.child_updates_replayed);
-            if !agent.session.loading_replay && !child_updates_replayed {
+            if forced_descendant_owner.is_none()
+                && !agent.session.loading_replay
+                && !child_updates_replayed
+            {
                 let replayed =
                     agent
                         .subagent_views

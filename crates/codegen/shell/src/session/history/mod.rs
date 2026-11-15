@@ -6,10 +6,23 @@
 
 mod grow_facts;
 pub(crate) use grow_facts::GrowHistoryFact;
+
+pub(crate) fn indexes_background_task(event: &HistoryFact) -> bool {
+    matches!(&event.content, HistoryContent::Grow(value)
+        if matches!(value.as_ref(), GrowHistoryFact::TaskBackgrounded { .. } | GrowHistoryFact::TaskCompleted { .. }))
+        && event.meta.as_ref().is_none_or(|meta| {
+            !meta.contains_key("grow/displayProjectionSource")
+                && !meta.contains_key("grow/displayProjectionRevision")
+        })
+}
 mod projector;
 pub(crate) use projector::{
-    HISTORY_CURSOR_KEY, IndexedPages, PreparedHistory, background_command_settlements,
+    HISTORY_CURSOR_KEY, IndexedPages, PagePosition, PreparedHistory, background_command_settlements,
 };
+#[cfg(unix)]
+pub(crate) use projector::command_settlement_update;
+#[cfg(test)]
+pub(crate) use projector::{HISTORY_PAGE_BYTES, HISTORY_PAGE_ROWS};
 mod seed;
 pub(crate) use seed::SeedPresentation;
 
@@ -93,7 +106,74 @@ pub(crate) enum TextChannel {
     Reasoning,
 }
 
+pub(crate) fn user_echo_identity(chunk: &acp::ContentChunk) -> Option<(&str, usize)> {
+    let meta = chunk.meta.as_ref()?;
+    let id = meta.get("messageId")?.as_str()?;
+    let prompt = usize::try_from(meta.get("promptIndex")?.as_u64()?).ok()?;
+    Some((id, prompt))
+}
+
+pub(crate) fn provisional_user_echo(chunk: &acp::ContentChunk) -> bool {
+    chunk.meta.as_ref()
+        .and_then(|meta| meta.get("grow/consumedInputEcho"))
+        .and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+pub(crate) fn verify_user_echo(
+    expected: &chat_state::UserDisplayEcho,
+    blocks: &[(usize, serde_json::Value)],
+) -> io::Result<()> {
+    let mut value = serde_json::Value::Array(
+        blocks.iter().map(|(_, content)| content.clone()).collect(),
+    );
+    value.sort_all_objects();
+    let bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
+    if blocks.len() != expected.block_count
+        || blocks.iter().any(|(prompt, _)| *prompt != expected.prompt_index)
+        || blake3::hash(&bytes).to_hex().as_str() != expected.blake3
+    {
+        return Err(invalid("committed user echo differs from its source fingerprint"));
+    }
+    Ok(())
+}
+
 impl HistoryFact {
+    pub(crate) fn inherited_item<'a>(
+        &self,
+        source: &'a chat_state::TimelineEvent,
+    ) -> io::Result<&'a sampling_types::ConversationItem> {
+        use sampling_types::ConversationItem;
+        let HistoryContent::Message { event, item, channel, .. } = &self.content else {
+            unreachable!("only inherited history refers to another message");
+        };
+        let item = source.messages()
+            .filter(|message| source.seq.get() == *event && message.response_admission.is_none())
+            .and_then(|message| message.items.get(*item))
+            .ok_or_else(|| invalid("invalid inherited history source or item"))?;
+        match (channel, item) {
+            (TextChannel::User, ConversationItem::User(_))
+            | (TextChannel::Assistant, ConversationItem::Assistant(_))
+            | (TextChannel::Reasoning, ConversationItem::Reasoning(_)) => Ok(item),
+            _ => Err(invalid("inherited history channel differs from canonical item")),
+        }
+    }
+
+    pub(crate) fn validate_projection_identity(&self) -> io::Result<()> {
+        if let Some(meta) = &self.meta {
+            match (
+                meta.get("grow/displayProjectionSource"),
+                meta.get("grow/displayProjectionRevision"),
+            ) {
+                (None, None) => {}
+                (Some(source), Some(revision))
+                    if source.as_str().is_some_and(|source| !source.is_empty())
+                        && revision.as_u64().is_some() => {}
+                _ => return Err(invalid("invalid snapshot source identity or revision")),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn event_id(&self) -> Option<&str> {
         self.meta.as_ref()?.get("eventId")?.as_str()
     }
@@ -260,6 +340,28 @@ struct FactHeader<'a> {
     at_ms: Option<i64>,
 }
 
+#[cfg(unix)]
+pub(crate) fn response_item_tokens(bytes: &[u8]) -> io::Result<Vec<&RawValue>> {
+    #[derive(Deserialize)]
+    struct Domain<'a> {
+        #[serde(borrow)]
+        event: Message<'a>,
+    }
+    #[derive(Deserialize)]
+    struct Message<'a> {
+        #[serde(borrow)]
+        event: Items<'a>,
+    }
+    #[derive(Deserialize)]
+    struct Items<'a> {
+        #[serde(borrow)]
+        items: Vec<&'a RawValue>,
+    }
+    let record: Record<'_> = serde_json::from_slice(bytes)?;
+    let domain: Domain<'_> = serde_json::from_str(record.fact.get())?;
+    Ok(domain.event.event.items)
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "A journal fact is a transient decode/append value, not a retained history slot; keep presentation payloads inline to avoid an allocation per record"
@@ -407,10 +509,9 @@ impl AppendState {
     pub(crate) fn index_receipt(&mut self, event: &chat_state::TimelineEvent) -> io::Result<()> {
         if let Some(identity) =
             crate::session::storage::communication_history::receipt_identity(event)?
+            && let std::collections::btree_map::Entry::Vacant(entry) = self.receipts.entry(identity)
         {
-            self.receipts.entry(identity).or_insert(
-                crate::session::storage::communication_history::ReceiptSource::from_event(event)?,
-            );
+            entry.insert(crate::session::storage::communication_history::ReceiptSource::from_event(event)?);
         }
         Ok(())
     }
@@ -438,14 +539,54 @@ impl AppendState {
     }
 
     pub(crate) fn bind_presentation(&self, fact: &mut HistoryFact) -> io::Result<()> {
+        self.bind_indexed_presentation(fact, None)
+    }
+
+    pub(crate) fn bind_indexed_presentation(
+        &self, fact: &mut HistoryFact,
+        index: Option<&crate::session::storage::jsonl::IndexedHistory>,
+    ) -> io::Result<()> {
         if let HistoryContent::Grow(value) = &fact.content
             && let GrowHistoryFact::UiNotice(notice) = value.as_ref()
-            && let Some(source) = self.receipt_for_notice(notice)?
+            && let Some(source) = self.find_notice_source(notice, index)?
         {
             source.validate_notice(notice)?;
             fact.content = HistoryContent::Notice {
                 event: source.event,
             };
+        }
+        Ok(())
+    }
+
+    fn find_notice_source(
+        &self, notice: &crate::extensions::notification::UiNotice,
+        index: Option<&crate::session::storage::jsonl::IndexedHistory>,
+    ) -> io::Result<Option<crate::session::storage::communication_history::ReceiptSource>> {
+        if let Some(index) = index {
+            let identity = crate::session::storage::communication_history::notice_identity(notice);
+            if let Some(source) = index.notice_source(&identity, false)? {
+                return Ok(Some(source));
+            }
+        }
+        if let Some(source) = self.receipt_for_notice(notice)? {
+            return Ok(Some(source.clone()));
+        }
+        match index {
+            Some(index) => index.notice_source(
+                &crate::session::storage::communication_history::notice_identity(notice), true,
+            ),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn validate_indexed_presentation(
+        &self, fact: &HistoryFact, index: &crate::session::storage::jsonl::IndexedHistory,
+    ) -> io::Result<()> {
+        if let HistoryContent::Grow(value) = &fact.content
+            && let GrowHistoryFact::UiNotice(notice) = value.as_ref()
+            && self.find_notice_source(notice, Some(index))?.is_some()
+        {
+            return Err(invalid("canonical receipt must use its validated history reference"));
         }
         Ok(())
     }
@@ -566,6 +707,20 @@ pub(crate) struct HistorySnapshot {
     pub notices: BTreeMap<u64, crate::extensions::notification::UiNotice>,
     pub indexed: Option<crate::session::storage::jsonl::IndexedHistory>,
     pub positions: Vec<u64>,
+    pub(crate) notice_anchors_in_tail: std::collections::BTreeSet<u64>,
+    pub(crate) response_branch: Option<chat_state::EventSeq>,
+}
+
+impl HistoryFact {
+    pub(crate) fn recap_covered_main_turns(&self) -> Option<usize> {
+        if let HistoryContent::Grow(value) = &self.content
+            && matches!(value.as_ref(), GrowHistoryFact::SessionRecap { .. })
+        {
+            usize::try_from(self.meta.as_ref()?.get("recapCoveredMainTurns")?.as_u64()?).ok()
+        } else {
+            None
+        }
+    }
 }
 
 impl HistorySnapshot {
@@ -581,6 +736,12 @@ impl HistorySnapshot {
             if let Some(identity) =
                 crate::session::storage::communication_history::receipt_identity(event)?
             {
+                if let Some(index) = &self.indexed
+                    && (event.seq.get() < index.published_domain()
+                        || index.notice_source(&identity, false)?.is_some())
+                {
+                    continue;
+                }
                 if !seen.insert(identity) {
                     continue;
                 }
@@ -588,6 +749,22 @@ impl HistorySnapshot {
                     crate::session::storage::communication_history::read_notice(directory, event)?
                 {
                     self.notices.insert(event.seq.get(), notice);
+                }
+            }
+        }
+        if let Some(index) = &self.indexed {
+            for source in &self.sources {
+                let HistorySource::Presentation { fact, .. } = source else { continue };
+                let HistoryContent::Notice { event } = fact.content else { continue };
+                if event < index.published_domain() {
+                    self.notice_anchors_in_tail.insert(event);
+                    if let std::collections::btree_map::Entry::Vacant(entry) = self.notices.entry(event) {
+                        let source = timeline.exact_event(chat_state::EventSeq::new(event))?
+                            .ok_or_else(|| invalid("notice source is missing"))?;
+                        let notice = crate::session::storage::communication_history::read_notice(directory, &source)?
+                            .ok_or_else(|| invalid("notice source is not a communication receipt"))?;
+                        entry.insert(notice);
+                    }
                 }
             }
         }
@@ -617,88 +794,45 @@ impl HistorySnapshot {
                 receipt_sources.entry(identity).or_insert(event.seq.get());
             }
         }
-        let mut echoes = BTreeMap::<String, (usize, Vec<serde_json::Value>)>::new();
+        let mut echoes = BTreeMap::<String, Vec<(usize, serde_json::Value)>>::new();
         for source in &self.sources {
             let HistorySource::Presentation { fact, .. } = source else {
                 continue;
             };
-            if let Some(meta) = &fact.meta {
-                match (
-                    meta.get("grow/displayProjectionSource"),
-                    meta.get("grow/displayProjectionRevision"),
-                ) {
-                    (None, None) => {}
-                    (Some(source), Some(revision))
-                        if source.as_str().is_some_and(|source| !source.is_empty())
-                            && revision.as_u64().is_some() => {}
-                    _ => return Err(invalid("invalid snapshot source identity or revision")),
-                }
-            }
+            fact.validate_projection_identity()?;
             if let HistoryContent::Notice { event } = &fact.content {
                 let event = timeline
-                    .event(chat_state::EventSeq::new(*event))
+                    .exact_event(chat_state::EventSeq::new(*event))?
                     .ok_or_else(|| invalid("notice source is missing"))?;
                 let identity =
-                    crate::session::storage::communication_history::receipt_identity(event)?
+                    crate::session::storage::communication_history::receipt_identity(&event)?
                         .ok_or_else(|| invalid("notice source is not a communication receipt"))?;
-                if receipt_sources.get(&identity) != Some(&event.seq.get()) {
+                let canonical = match &self.indexed {
+                    Some(index) => index.notice_source(&identity, false)?.map(|source| source.event),
+                    None => None,
+                }.or_else(|| receipt_sources.get(&identity).copied());
+                if canonical != Some(event.seq.get()) {
                     return Err(invalid(
                         "notice reference does not select its original receipt",
                     ));
                 }
             }
-            if let HistoryContent::Message {
-                event,
-                item,
-                channel,
-                ..
-            } = &fact.content
-            {
-                let message = timeline
-                    .event(chat_state::EventSeq::new(*event))
-                    .and_then(|event| event.messages())
-                    .filter(|message| message.response_admission.is_none())
-                    .ok_or_else(|| invalid("invalid inherited history source"))?;
-                if !matches!(
-                    (channel, message.items.get(*item)),
-                    (
-                        TextChannel::User,
-                        Some(sampling_types::ConversationItem::User(_))
-                    ) | (
-                        TextChannel::Assistant,
-                        Some(sampling_types::ConversationItem::Assistant(_))
-                    ) | (
-                        TextChannel::Reasoning,
-                        Some(sampling_types::ConversationItem::Reasoning(_))
-                    )
-                ) {
-                    return Err(invalid("inherited history item or channel is invalid"));
-                }
+            if let HistoryContent::Message { event, .. } = &fact.content {
+                let source = timeline.exact_event(chat_state::EventSeq::new(*event))?
+                    .ok_or_else(|| invalid("inherited history source is absent"))?;
+                fact.inherited_item(&source)?;
             }
             let HistoryContent::User(chunk) = &fact.content else {
                 continue;
             };
-            let Some(meta) = &chunk.meta else { continue };
-            let Some(prompt) = meta
-                .get("promptIndex")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-            else {
+            let Some((message, prompt)) = user_echo_identity(chunk) else {
                 continue;
             };
-            let Some(message) = meta.get("messageId").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let echo = echoes
-                .entry(message.to_owned())
-                .or_insert_with(|| (prompt, Vec::new()));
-            if echo.0 != prompt {
-                return Err(invalid(
-                    "user echo identity carries multiple prompt indices",
-                ));
+            let blocks = echoes.entry(message.to_owned()).or_default();
+            if blocks.first().is_some_and(|(old_prompt, _)| *old_prompt != prompt) {
+                return Err(invalid("user echo identity carries multiple prompt indices"));
             }
-            echo.1
-                .push(serde_json::to_value(&chunk.content).map_err(io::Error::other)?);
+            blocks.push((prompt, serde_json::to_value(&chunk.content).map_err(io::Error::other)?));
         }
         let has_committed_echoes = timeline.events().iter().any(|event| {
             matches!(
@@ -709,7 +843,7 @@ impl HistorySnapshot {
                 })
             )
         });
-        let selected_echo_events = if has_committed_echoes {
+        let selected_echo_events = if has_committed_echoes && !timeline.has_surface_checkpoint() {
             timeline
                 .branch_transcript_with_ids()
                 .0
@@ -733,23 +867,13 @@ impl HistorySnapshot {
             else {
                 continue;
             };
-            if !selected_echo_events.contains(&event.seq.get()) {
+            if !timeline.has_surface_checkpoint() && !selected_echo_events.contains(&event.seq.get()) {
                 continue;
             }
-            let (prompt, blocks) = echoes
+            let blocks = echoes
                 .get(&expected.message_id)
                 .ok_or_else(|| invalid("committed user echo is missing"))?;
-            let mut value = serde_json::Value::Array(blocks.clone());
-            value.sort_all_objects();
-            let bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
-            if *prompt != expected.prompt_index
-                || blocks.len() != expected.block_count
-                || blake3::hash(&bytes).to_hex().as_str() != expected.blake3
-            {
-                return Err(invalid(
-                    "committed user echo differs from its source fingerprint",
-                ));
-            }
+            verify_user_echo(expected, blocks)?;
         }
         Ok(())
     }
@@ -757,11 +881,19 @@ impl HistorySnapshot {
     pub(crate) fn display_record_count(&self) -> usize {
         self.indexed
             .as_ref()
-            .map_or(0, |index| index.omitted_count())
+            .map_or(0, |index| index.omitted_display_record_count())
             + self
                 .sources
                 .iter()
-                .filter(|source| match source {
+                .enumerate()
+                .filter(|(offset, source)| {
+                    !self.indexed.as_ref().is_some_and(|index| self.positions.get(*offset).is_some_and(|position| *position < index.records())
+                        && matches!(source, HistorySource::Presentation { fact, .. }
+                            if matches!(&fact.content, HistoryContent::User(chunk)
+                                if user_echo_identity(chunk).is_some() && !provisional_user_echo(chunk))
+                                || indexes_background_task(fact)))
+                })
+                .filter(|(_, source)| match source {
                     HistorySource::Domain {
                         response_anchor, ..
                     } => response_anchor.is_some(),

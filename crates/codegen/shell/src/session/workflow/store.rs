@@ -155,6 +155,30 @@ impl WorkflowRunStore {
         (store, states, corrupt_sidecar_repairs)
     }
 
+    pub(crate) async fn restore_historical_runs(
+        &self,
+    ) -> io::Result<Vec<WorkflowRunState>> {
+        let (respond_to, response) = oneshot::channel();
+        self.persistence_tx
+            .send(PersistenceMsg::LoadWorkflowRunHistory { respond_to })
+            .map_err(io::Error::other)?;
+        let (restored, lifecycles) = response.await.map_err(io::Error::other)??;
+        let (restored_store, states, corrupt_repairs) = Self::from_restored(
+            self.session_directory.clone(),
+            self.persistence_tx.clone(),
+            restored,
+            &lifecycles,
+        );
+        for (state, fingerprint) in corrupt_repairs {
+            restored_store
+                .repair_corrupt_sidecar_ack(&state, fingerprint)
+                .await?;
+        }
+        let mut loaded_sources = restored_store.sources.lock();
+        self.sources.lock().extend(loaded_sources.drain());
+        Ok(states)
+    }
+
     pub(crate) fn register(
         &self,
         run_id: &str,

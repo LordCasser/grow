@@ -54,10 +54,11 @@ pub use persistence::{
     TimelinePersistence, persistence_error_is_permanent,
 };
 pub use sideband::{
-    RecallMaterialization, SIDEBAND_SCHEMA_VERSION, SidebandAssemblyManifest, SidebandAttempt,
-    SidebandBudgetPolicy, SidebandEnd, SidebandError, SidebandEvent, SidebandEventKind,
-    SidebandOutcome, SidebandPurpose, SidebandRequest, SidebandResult, SidebandRoute,
-    SidebandSpawnEvent, SidebandTimeline, SidebandUsage, TimelineMaterialization, TimelineRangeRef,
+    RecallMaterialization, RecallMaterializationObservation, SIDEBAND_SCHEMA_VERSION,
+    SidebandAssemblyManifest, SidebandAttempt, SidebandBudgetPolicy, SidebandEnd, SidebandError,
+    SidebandEvent, SidebandEventKind, SidebandOutcome, SidebandPurpose, SidebandRequest,
+    SidebandResult, SidebandRoute, SidebandSpawnEvent, SidebandTimeline, SidebandUsage,
+    TimelineMaterialization, TimelineRangeRef, validate_recall_assembly_manifest,
     validate_sideband_id,
 };
 pub use timeline::{
@@ -68,7 +69,7 @@ pub use timeline::{
     HookHandlerKind, HookHandlerLifecycle, HookHandlerPlan, HookHandlerPlanAction,
     HookHandlerProvenance, HookLifecycleProjection, HookRunControl, HookRunOutcome,
     HookRunSkipReason, HookStopDecision, ImageProjectionEvent, ImageShadow, ImageShadowSource,
-    ImageToolCallShadow, InputAdmissionDecision, InputBlockReason, InputDismissReason, InputEvent,
+    ImageToolCallShadow, InputAdmissionDecision, InputBlockReason, InputCheckpointEntry, InputDismissReason, InputEvent,
     InputIntent, InputLifecycle, InputPayloadRef, InputRoute, InputState, InteractionEvent,
     InteractionKind, InteractionResolution, MAX_HOOK_CONTROL_TEXT_BYTES,
     MAX_HOOK_HANDLER_NAME_BYTES, MAX_HOOK_HANDLERS, MAX_HOOK_ID_BYTES, MAX_INPUT_PAYLOAD_BYTES,
@@ -92,4 +93,4 @@ pub use trajectory::{
     TrajectoryRow, TrajectorySnapshot, trajectory_issue_severity,
 };
 pub use types::*;
-pub use usage::{UsageAgent, UsageLedger, UsageSegment, UsageTotals};
+pub use usage::{UsageAgent, UsageLedger, UsageSegment, UsageSegmentId, UsageSegmentPage, UsageTotals};

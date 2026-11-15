@@ -354,6 +354,7 @@ fn suspended_consultation_stays_pending_through_replacement_prepare_commit_and_r
                 let server = MockInferenceServer::start().await.unwrap();
                 let (original, events) = lifecycle_actor(&server, None).await;
                 super::super::super::support::record_test_model_route(&original).await;
+                original.state.lock().await.notifications_suppressed = true;
                 let (commands, old_loop) = start_lifecycle_mailbox(original.clone(), events).await;
                 let receipt =
                     lifecycle_answer(&original, &commands, &server, "idle-before-suspend").await;

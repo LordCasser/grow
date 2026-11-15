@@ -19,7 +19,7 @@ pub(super) async fn run(
         } => {
             let verified = match (
                 source.chat_state_handle.planning_state().await,
-                source.chat_state_handle.parent_message_receipts().await,
+                source.chat_state_handle.agent_message_receipts(&reply_to.source_session_id, &reply_to.message_id).await,
             ) {
                 (Ok(Some(snapshot)), Some(receipts)) => {
                     authorizes_reply(&receipts, &request.source_session_id, reply_to)
@@ -261,7 +261,7 @@ async fn send(
                 "A reply cannot interrupt or change its recipient",
             );
         }
-        let Some(receipts) = source.chat_state_handle.parent_message_receipts().await else {
+        let Some(receipts) = source.chat_state_handle.agent_message_receipts(&reference.source_session_id, &reference.message_id).await else {
             return AgentInteractionOutput::message_unconfirmed(
                 &request.id,
                 "reply_history_unavailable",
@@ -292,10 +292,11 @@ async fn send(
         return confirm_closed_target(request, target_id, notification_source, message.to_owned())
             .await;
     };
+    let (sender, operation, _, _) = notification_source.agent_message().expect("agent message source");
     if request.receipt_only || request.cancellation.is_cancelled() {
         let receipts = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            target.chat_state_handle.parent_message_receipts(),
+            target.chat_state_handle.agent_message_receipts(sender, operation),
         )
         .await;
         match receipts {
@@ -350,7 +351,7 @@ async fn send(
     // One bounded read can recover an ACK lost after commit without waking the target.
     if let Ok(Some(receipts)) = tokio::time::timeout(
         std::time::Duration::from_millis(250),
-        target.chat_state_handle.parent_message_receipts(),
+        target.chat_state_handle.agent_message_receipts(sender, operation),
     )
     .await
     {

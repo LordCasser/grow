@@ -86,8 +86,27 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Capture runtime state and all original Subagent Spawned/Ended/Seed events in
-    /// one owner operation, preserving their payloads, headers and sequence order.
+    pub async fn outgoing_inquiry_events(
+        &self,
+        inquiry_id: String,
+    ) -> std::io::Result<Vec<crate::TimelineEvent>> {
+        self.query("GetOutgoingInquiry", |reply| {
+            ChatStateCommand::GetOutgoingInquiry { inquiry_id, reply }
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("Timeline actor unavailable while admitting source inquiry"))?
+    }
+
+    pub async fn incoming_inquiry_events(
+        &self, sender: String, inquiry_id: String,
+    ) -> std::io::Result<Vec<crate::TimelineEvent>> {
+        self.query("GetIncomingInquiry", |reply| ChatStateCommand::GetIncomingInquiry {
+            sender, inquiry_id, reply,
+        }).await.ok_or_else(|| std::io::Error::other("Timeline actor unavailable while resolving incoming inquiry"))?
+    }
+
+    /// Capture runtime state and the resident Subagent Spawned/Ended/Seed events
+    /// with any archived lifecycle facts named by the current runtime barrier.
     /// The owner has already validated these facts on live admission or recovery.
     /// This projection is for Shell tree coordination, not a complete Timeline;
     /// it must not be replayed with `Timeline::from_events` as a standalone ledger.
@@ -105,7 +124,29 @@ impl ChatStateHandle {
             ChatStateCommand::GetRuntimeTreeSnapshot { reply }
         })
         .await
-        .ok_or_else(|| "runtime tree authority is unavailable".into())
+        .ok_or_else(|| "runtime tree authority is unavailable".to_owned())?
+        .map_err(|error| error.to_string())
+    }
+
+    pub async fn subagent_operation(
+        &self,
+        subagent_id: String,
+    ) -> Result<Option<crate::timeline::SubagentOperation>, String> {
+        self.query("GetSubagentOperation", |reply| {
+            ChatStateCommand::GetSubagentOperation { subagent_id, reply }
+        })
+        .await
+        .ok_or_else(|| "subagent authority is unavailable".to_owned())?
+        .map_err(|error| error.to_string())
+    }
+
+    pub async fn subagent_history_events(&self) -> Result<Vec<crate::TimelineEvent>, String> {
+        self.query("GetSubagentHistory", |reply| {
+            ChatStateCommand::GetSubagentHistory { reply }
+        })
+        .await
+        .ok_or_else(|| "subagent history is unavailable".to_owned())?
+        .map_err(|error| error.to_string())
     }
 
     pub async fn suspension_evidence(
@@ -156,7 +197,7 @@ impl ChatStateHandle {
             ChatStateCommand::GetInputState { input_id, reply }
         })
         .await
-        .ok_or_else(|| "input lifecycle authority is unavailable".into())
+        .ok_or_else(|| "input lifecycle authority is unavailable".to_owned())?
     }
 
     /// The Timeline owner selects the frontier in the same mailbox operation
@@ -1168,16 +1209,32 @@ impl ChatStateHandle {
         .await
     }
 
+    pub async fn agent_message_receipts(&self, sender: &str, operation: &str) -> Option<Vec<crate::TimelineEvent>> {
+        self.message_receipts(Some((sender.to_owned(), operation.to_owned()))).await
+    }
+
     pub async fn parent_message_receipts(&self) -> Option<Vec<crate::TimelineEvent>> {
+        self.message_receipts(None).await
+    }
+
+    async fn message_receipts(&self, identity: Option<(String, String)>) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetParentMessageReceipts", |reply| {
-            ChatStateCommand::GetParentMessageReceipts { reply }
+            ChatStateCommand::GetParentMessageReceipts { identity, reply }
         })
         .await
     }
 
     pub async fn retained_notification_payload_hashes(&self) -> Option<BTreeSet<String>> {
+        self.retained_notification_payloads(None).await
+    }
+
+    pub async fn retained_notification_payload_candidates(&self, candidates: Vec<String>) -> Option<BTreeSet<String>> {
+        self.retained_notification_payloads(Some(candidates)).await
+    }
+
+    async fn retained_notification_payloads(&self, candidates: Option<Vec<String>>) -> Option<BTreeSet<String>> {
         self.query("GetRetainedNotificationPayloadHashes", |reply| {
-            ChatStateCommand::GetRetainedNotificationPayloadHashes { reply }
+            ChatStateCommand::GetRetainedNotificationPayloadHashes { candidates, reply }
         })
         .await
     }
@@ -1203,7 +1260,15 @@ impl ChatStateHandle {
 
     pub async fn submitted_input_payload_hashes(&self) -> Option<BTreeSet<String>> {
         self.query("GetSubmittedInputPayloadHashes", |reply| {
-            ChatStateCommand::GetSubmittedInputPayloadHashes { reply }
+            ChatStateCommand::GetSubmittedInputPayloadHashes { candidates: None, reply }
+        })
+        .await
+    }
+
+    /// Check only the candidate payload hashes in this reclamation batch.
+    pub async fn retained_input_payloads(&self, candidates: Vec<String>) -> Option<BTreeSet<String>> {
+        self.query("GetSubmittedInputPayloadHashes", |reply| {
+            ChatStateCommand::GetSubmittedInputPayloadHashes { candidates: Some(candidates), reply }
         })
         .await
     }
@@ -1234,6 +1299,18 @@ impl ChatStateHandle {
     ) -> Option<crate::TimelineMaterialization> {
         self.query("MaterializeTimeline", |reply| {
             ChatStateCommand::MaterializeTimeline { timeline_id, reply }
+        })
+        .await
+        .flatten()
+    }
+
+    pub async fn materialize_permission_context(
+        &self,
+        timeline_id: String,
+        include_tool_calls: bool,
+    ) -> Option<(crate::TimelineRangeRef, Vec<ConversationItem>)> {
+        self.query("MaterializePermissionContext", |reply| {
+            ChatStateCommand::MaterializePermissionContext { timeline_id, include_tool_calls, reply }
         })
         .await
         .flatten()
@@ -1328,7 +1405,16 @@ impl ChatStateHandle {
             ChatStateCommand::GetSessionUsage { reply }
         })
         .await
-        .ok_or(())
+        .ok_or(())?
+        .map_err(|_| ())
+    }
+
+    /// Read lifetime totals for live status and billing without loading segment history.
+    pub async fn session_usage_summary(&self) -> Option<crate::usage::UsageLedger> {
+        self.query("GetSessionUsageSummary", |reply| {
+            ChatStateCommand::GetSessionUsageSummary { reply }
+        })
+        .await
     }
 
     /// Bytes/4 estimate of all non-system conversation items.

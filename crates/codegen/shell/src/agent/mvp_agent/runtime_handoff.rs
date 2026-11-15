@@ -34,7 +34,8 @@ impl CanonicalChildFacts {
     }
 
     fn from_validated_timeline(timeline: &chat_state::Timeline) -> Result<Self, String> {
-        Self::scan(timeline.subagent_lifecycle_events())
+        let events = timeline.runtime_subagent_events().map_err(|error| error.to_string())?;
+        Self::scan(&events)
     }
 
     fn scan<'a>(
@@ -353,19 +354,29 @@ impl MvpAgent {
         task_id: &str,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, String> {
-        let (_, events) = wait_before(
+        let facts = wait_before(
             deadline,
-            root_handle.chat_state_handle.runtime_tree_snapshot(),
+            root_handle.chat_state_handle.subagent_operation(task_id.to_owned()),
         )
         .await
         .map_err(|_| "root Timeline query exceeded suspension deadline")?
         .map_err(|_| "root Timeline unavailable while reconciling child completion")?;
-        let facts = CanonicalChildFacts::scan(events.iter())?;
-        let candidates = std::collections::BTreeSet::from([task_id.to_owned()]);
-        Ok(self
-            .verify_ended_children(root_session_id, &facts, &candidates, deadline)
-            .await?
-            .contains(task_id))
+        let Some((seq, spawn, Some(terminal))) = facts else {
+            return Ok(false);
+        };
+        if terminal.result_ref.is_none() {
+            return Err(format!("ended child {task_id:?} has no canonical result reference"));
+        }
+        let operation = wait_before(deadline, async {
+            crate::agent::subagent::durable_child_operation_from_validated_facts(
+                root_session_id, task_id, seq, &spawn, Some(&terminal),
+            )
+        }).await.map_err(|_| "child terminal verification exceeded suspension deadline")??;
+        match operation {
+            crate::agent::subagent::DurableChildOperation::Completed(result)
+                if result.child_session_id == spawn.child_session_id => Ok(true),
+            _ => Err(format!("child {task_id:?} terminal could not be verified")),
+        }
     }
 
     /// An executable child load belongs to the original tree. Resolve before
@@ -407,11 +418,11 @@ impl MvpAgent {
                 .resolve_original_workspace_alias(arguments, &summary.info)
                 .await;
         }
-        let (child, observer) = crate::session::persistence::load_light(&summary.info, None, false)
+        let child = crate::session::storage::jsonl::JsonlStorageAdapter::new()
+            .observe_execution_timeline(&summary.info)
             .await
             .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-        drop(observer);
-        let runtime = child.timeline.runtime_lifecycle();
+        let runtime = child.runtime_lifecycle();
         if runtime.phase == RuntimePhase::Running {
             return self
                 .resolve_original_workspace_alias(arguments, &summary.info)
@@ -434,19 +445,18 @@ impl MvpAgent {
         .ok_or_else(|| {
             acp::Error::internal_error().data("suspended child's original root is missing")
         })?;
-        let (root, observer) =
-            crate::session::persistence::load_light(&root_summary.info, None, false)
+        let root = crate::session::storage::jsonl::JsonlStorageAdapter::new()
+                .observe_execution_timeline(&root_summary.info)
                 .await
                 .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-        drop(observer);
-        let root_runtime = root.timeline.runtime_lifecycle();
+        let root_runtime = root.runtime_lifecycle();
         let root_identity_matches = root_runtime.root_session_id.as_deref() == Some(&root_id)
             && root_runtime.operation_id == runtime.operation_id;
         let existing_barrier_matches = root_runtime.tree.iter().any(|node| {
             node.session_id == arguments.session_id.0.as_ref()
                 && Some(node.checkpoint_seq) == runtime.checkpoint_seq
         });
-        let root_facts = CanonicalChildFacts::from_validated_timeline(&root.timeline)
+        let root_facts = CanonicalChildFacts::from_validated_timeline(&root)
             .map_err(|error| acp::Error::internal_error().data(error))?;
         let canonical_open_child = root_facts.open().any(|(_, spawn)| {
             spawn.child_session_id == arguments.session_id.0.as_ref()
@@ -483,22 +493,14 @@ impl MvpAgent {
         if !handle.cmd_tx.is_closed() {
             let (runtime, events) = handle.chat_state_handle.runtime_tree_snapshot().await?;
             // The canonical owner already validated this source. This is the
-            // complete Spawned/Ended projection, not a standalone ledger.
+            // resident and current barrier projection, not a standalone ledger.
             return Ok((runtime, CanonicalChildFacts::scan(&events)?));
         }
-        let (loaded, observer) = crate::session::persistence::load_light(
-            &handle.info,
-            Some(self.gateway.clone()),
-            false,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        let snapshot = (
-            loaded.timeline.runtime_lifecycle().clone(),
-            CanonicalChildFacts::from_validated_timeline(&loaded.timeline)?,
-        );
-        drop(observer);
-        Ok(snapshot)
+        let timeline = crate::session::storage::jsonl::JsonlStorageAdapter::new()
+            .observe_execution_timeline(&handle.info)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((timeline.runtime_lifecycle().clone(), CanonicalChildFacts::from_validated_timeline(&timeline)?))
     }
 
     pub(super) async fn runtime_state_before(
@@ -511,16 +513,11 @@ impl MvpAgent {
             if !handle.cmd_tx.is_closed() {
                 return handle.chat_state_handle.runtime_state().await;
             }
-            let (loaded, observer) = crate::session::persistence::load_light(
-                &handle.info,
-                Some(self.gateway.clone()),
-                false,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            let runtime = loaded.timeline.runtime_lifecycle().clone();
-            drop(observer);
-            Ok(runtime)
+            let timeline = crate::session::storage::jsonl::JsonlStorageAdapter::new()
+                .observe_execution_timeline(&handle.info)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(timeline.runtime_lifecycle().clone())
         })
         .await
         .map_err(|_| "runtime state query exceeded suspension deadline".to_string())?
@@ -735,11 +732,14 @@ impl MvpAgent {
                 id: acp::SessionId::new(spawn.child_session_id.clone()),
                 cwd: spawn.child_cwd.clone(),
             };
-            let (loaded, observer) =
-                crate::session::persistence::load_light(&info, Some(self.gateway.clone()), false)
+            let child_runtime = match self.control_session_handle(&info.id) {
+                Some(handle) if !handle.cmd_tx.is_closed() => handle.chat_state_handle.runtime_state().await?,
+                _ => crate::session::storage::jsonl::JsonlStorageAdapter::new()
+                    .observe_execution_timeline(&info)
                     .await
-                    .map_err(|error| error.to_string())?;
-            let child_runtime = loaded.timeline.runtime_lifecycle().clone();
+                    .map_err(|error| error.to_string())?
+                    .runtime_lifecycle().clone(),
+            };
             let already_released = child_runtime.phase == RuntimePhase::Running
                 && child_runtime.resume_committed
                 && child_runtime.operation_id.as_ref() == Some(&operation_id)
@@ -752,7 +752,6 @@ impl MvpAgent {
             if already_released {
                 // A lost release ACK in this process does not transfer or
                 // replay the live child's already-consumed execution right.
-                drop(observer);
                 continue;
             }
             if !matches!(
@@ -769,7 +768,6 @@ impl MvpAgent {
                     spawn.subagent_id
                 ));
             }
-            drop(observer);
             let request = SubagentRequest {
                 id: spawn.subagent_id.clone(),
                 origin_tool_call_id: spawn.origin_tool_call_id.clone(),
@@ -990,7 +988,7 @@ impl MvpAgent {
                 ));
             }
             let info = claim_partial_child_writer(&storage, spawn)?;
-            let (loaded, observer) = crate::session::persistence::load_light(&info, None, false)
+            let loaded = storage.observe_execution_timeline(&info)
                 .await
                 .map_err(|error| {
                     format!(
@@ -998,8 +996,7 @@ impl MvpAgent {
                         spawn.subagent_id
                     )
                 })?;
-            let child_runtime = loaded.timeline.runtime_lifecycle().clone();
-            drop(observer);
+            let child_runtime = loaded.runtime_lifecycle().clone();
             if child_runtime.phase != RuntimePhase::Suspended
                 || child_runtime.operation_id.as_deref() != Some(operation_id)
                 || child_runtime.root_session_id.as_deref() != Some(root.0.as_ref())
@@ -1113,6 +1110,8 @@ impl MvpAgent {
     ) -> Result<(String, Vec<RuntimeNodeRef>), String> {
         let started = std::time::Instant::now();
         let root = root.clone();
+        let mut timer = crate::instrumentation_timer!("session.exit.suspend_tree");
+        timer.with_field("session_id", root.0.as_ref());
         let root_handle = self
             .control_session_handle(&root)
             .ok_or_else(|| "the owning root session is not resident".to_string())?;
@@ -1195,6 +1194,7 @@ impl MvpAgent {
         let mut coordinator_task_ids = frozen_ids;
         coordinator_task_ids.extend(initial_open_ids);
         coordinator_task_ids.extend(open.keys().cloned());
+        timer.with_field("runtime_children", coordinator_task_ids.len());
         for id in &coordinator_task_ids {
             if !open.contains_key(id) && !verified_terminal_ids.contains(id) {
                 return Err(format!(

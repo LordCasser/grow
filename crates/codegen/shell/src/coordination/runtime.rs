@@ -433,6 +433,29 @@ impl CoordinationHandle {
         cancellation: CancellationToken,
         admission: impl std::future::Future<Output = Result<(), CoordinationError>> + Send + 'static,
     ) -> Result<InquiryOutcome, CoordinationError> {
+        self.ask_session_with_source(
+            inquiry_id,
+            source_session_id,
+            target_session_id,
+            question,
+            progress,
+            cancellation,
+            admission,
+            None,
+        ).await
+    }
+
+    pub(crate) async fn ask_session_with_source(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+        target_session_id: &str,
+        question: &str,
+        progress: Option<mpsc::UnboundedSender<InquiryPhase>>,
+        cancellation: CancellationToken,
+        admission: impl std::future::Future<Output = Result<(), CoordinationError>> + Send + 'static,
+        source_timeline: Option<&chat_state::ChatStateHandle>,
+    ) -> Result<InquiryOutcome, CoordinationError> {
         validate_inquiry_id(inquiry_id)
             .map_err(|e| CoordinationError::new(CoordinationErrorCode::InvalidRequest, e))?;
         self.require_source(source_session_id)?;
@@ -469,7 +492,7 @@ impl CoordinationHandle {
             Arc::clone(record)
         } else {
             let mut may_have_dispatched = false;
-            if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id).await? {
+            if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id, source_timeline).await? {
                 let (target, original_question, outcome) = match fact {
                     super::InquiryEvent::OutgoingStarted {
                         target_session_id,
@@ -676,6 +699,15 @@ impl CoordinationHandle {
         inquiry_id: &str,
         source_session_id: &str,
     ) -> Result<InquiryState, CoordinationError> {
+        self.get_inquiry_with_source(inquiry_id, source_session_id, None).await
+    }
+
+    pub(crate) async fn get_inquiry_with_source(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+        source_timeline: Option<&chat_state::ChatStateHandle>,
+    ) -> Result<InquiryState, CoordinationError> {
         self.require_source(source_session_id)?;
         validate_inquiry_id(inquiry_id)
             .map_err(|e| CoordinationError::new(CoordinationErrorCode::InvalidRequest, e))?;
@@ -698,7 +730,7 @@ impl CoordinationHandle {
         // Keep the absence check and durable fallback in one critical section.
         // Otherwise a startup could commit between these two observations.
         let fact = self
-            .durable_inquiry(inquiry_id, source_session_id)
+            .durable_inquiry(inquiry_id, source_session_id, source_timeline)
             .await?
             .ok_or_else(|| {
                 CoordinationError::new(
@@ -737,7 +769,14 @@ impl CoordinationHandle {
         &self,
         id: &str,
         source: &str,
+        source_timeline: Option<&chat_state::ChatStateHandle>,
     ) -> Result<Option<super::InquiryEvent>, CoordinationError> {
+        if let Some(timeline) = source_timeline {
+            let events = timeline.outgoing_inquiry_events(id.to_owned()).await.map_err(|error| {
+                CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
+            })?;
+            return Self::resolve_durable_inquiry(id, &events);
+        }
         let id = id.to_owned();
         let source = source.to_owned();
         let home = self.shared.grow_home.clone();
@@ -746,51 +785,10 @@ impl CoordinationHandle {
                 .map_err(|error| {
                     CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
                 })?;
-            let mut found = None;
-            if let Some(timeline) = timeline {
-                for event in timeline.events() {
-                    let fact =
-                        super::inquiry::InquiryEvent::from_timeline(event).map_err(|error| {
-                            CoordinationError::new(CoordinationErrorCode::AuditFailure, error)
-                        })?;
-                    match fact {
-                        Some(super::InquiryEvent::OutgoingStarted {
-                            inquiry_id,
-                            target_session_id,
-                            question,
-                        }) if inquiry_id == id && found.is_none() => {
-                            found = Some(super::InquiryEvent::OutgoingStarted {
-                                inquiry_id,
-                                target_session_id,
-                                question,
-                            });
-                        }
-                        Some(super::InquiryEvent::OutgoingCompleted { audit })
-                            if audit.outcome.inquiry_id == id =>
-                        {
-                            if let Some(super::InquiryEvent::OutgoingStarted {
-                                target_session_id,
-                                question,
-                                ..
-                            }) = &found
-                                && (target_session_id != &audit.target_session_id
-                                    || question != &audit.question)
-                            {
-                                return Err(CoordinationError::new(
-                                    CoordinationErrorCode::AuditFailure,
-                                    "inquiry completion conflicts with its first durable request",
-                                ));
-                            }
-                            if !matches!(found, Some(super::InquiryEvent::OutgoingCompleted { .. }))
-                            {
-                                found = Some(super::InquiryEvent::OutgoingCompleted { audit });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+            match timeline {
+                Some(timeline) => Self::resolve_durable_inquiry(&id, timeline.events()),
+                None => Ok(None),
             }
-            Ok(found)
         })
         .await
         .map_err(|_| {
@@ -801,11 +799,70 @@ impl CoordinationHandle {
         })?
     }
 
+    pub(crate) fn resolve_durable_inquiry(
+        id: &str,
+        events: &[chat_state::TimelineEvent],
+    ) -> Result<Option<super::InquiryEvent>, CoordinationError> {
+        let mut found = None;
+        for event in events {
+            let fact =
+                super::inquiry::InquiryEvent::from_timeline(event).map_err(|error| {
+                    CoordinationError::new(CoordinationErrorCode::AuditFailure, error)
+                })?;
+            match fact {
+                Some(super::InquiryEvent::OutgoingStarted {
+                    inquiry_id,
+                    target_session_id,
+                    question,
+                }) if inquiry_id == id && found.is_none() => {
+                    found = Some(super::InquiryEvent::OutgoingStarted {
+                        inquiry_id,
+                        target_session_id,
+                        question,
+                    });
+                }
+                Some(super::InquiryEvent::OutgoingCompleted { audit })
+                    if audit.outcome.inquiry_id == id =>
+                {
+                    if let Some(super::InquiryEvent::OutgoingStarted {
+                        target_session_id,
+                        question,
+                        ..
+                    }) = &found
+                        && (target_session_id != &audit.target_session_id
+                            || question != &audit.question)
+                    {
+                        return Err(CoordinationError::new(
+                            CoordinationErrorCode::AuditFailure,
+                            "inquiry completion conflicts with its first durable request",
+                        ));
+                    }
+                    if !matches!(found, Some(super::InquiryEvent::OutgoingCompleted { .. }))
+                    {
+                        found = Some(super::InquiryEvent::OutgoingCompleted { audit });
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(found)
+    }
+
     pub async fn cancel_session(
         &self,
         inquiry_id: &str,
         source_session_id: &str,
         target_session_id: &str,
+    ) -> Result<bool, CoordinationError> {
+        self.cancel_session_with_source(inquiry_id, source_session_id, target_session_id, None).await
+    }
+
+    pub(crate) async fn cancel_session_with_source(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+        target_session_id: &str,
+        source_timeline: Option<&chat_state::ChatStateHandle>,
     ) -> Result<bool, CoordinationError> {
         self.require_source(source_session_id)?;
         validate_inquiry_id(inquiry_id)
@@ -830,7 +887,7 @@ impl CoordinationHandle {
                 return Ok(true);
             }
         }
-        if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id).await? {
+        if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id, source_timeline).await? {
             let target = match &fact {
                 super::InquiryEvent::OutgoingStarted {
                     target_session_id, ..

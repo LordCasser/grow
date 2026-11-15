@@ -166,6 +166,7 @@ mod teardown;
 use teardown::*;
 mod session_setup;
 mod updates;
+pub(crate) use updates::timeline_hook_event_name;
 use run_loop::*;
 pub(crate) mod sideband;
 mod spawn;

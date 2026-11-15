@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read as _, Seek as _, Write as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -217,6 +217,7 @@ pub(crate) struct WorkflowManager {
     /// definitions are copied into that Run's immutable route.
     agent_catalog_source: WorkflowAgentCatalogSource,
     active: HashMap<String, ActiveRun>,
+    history_loaded: bool,
     /// Session teardown closes this gate before draining executors.  The
     /// generation makes an admission snapshot explicit: a launch must verify
     /// it again after every await before mutating the run store/tracker.
@@ -549,6 +550,7 @@ impl WorkflowManager {
             next_run_route,
             agent_catalog_source,
             active: HashMap::new(),
+            history_loaded: false,
             admission_open: true,
             admission_generation: 0,
         }
@@ -607,6 +609,19 @@ impl WorkflowManager {
 
     pub(crate) fn tracker(&self) -> Arc<parking_lot::Mutex<WorkflowTracker>> {
         self.tracker.clone()
+    }
+
+    pub(crate) async fn load_history_for_management(&mut self) -> io::Result<()> {
+        if self.history_loaded {
+            return Ok(());
+        }
+        let restored = self.store.restore_historical_runs().await?;
+        self.tracker
+            .lock()
+            .append_restored_history(restored)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.history_loaded = true;
+        Ok(())
     }
 
     fn signal_terminal_failure(&self, run_id: &str, error: impl Into<String>) {
@@ -1320,12 +1335,20 @@ impl WorkflowManager {
         let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
         tokio::task::spawn_local(async move {
             while let Some(message) = persist_rx.recv().await {
-                if let crate::session::persistence::PersistenceMsg::WorkflowRunStateAndAck {
-                    respond_to,
-                    ..
-                } = message
-                {
-                    let _ = respond_to.send(Ok(()));
+                match message {
+                    crate::session::persistence::PersistenceMsg::WorkflowRunStateAndAck {
+                        respond_to,
+                        ..
+                    } => {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                    crate::session::persistence::PersistenceMsg::LoadWorkflowRunHistory {
+                        respond_to,
+                    } => {
+                        let _ = respond_to
+                            .send(Ok((Vec::new(), std::collections::HashMap::new())));
+                    }
+                    _ => {}
                 }
             }
         });
@@ -1452,7 +1475,26 @@ impl WorkflowManager {
     ) {
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
-        let (persist_tx, _persist_rx) = mpsc::unbounded_channel();
+        let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(message) = persist_rx.recv().await {
+                match message {
+                    crate::session::persistence::PersistenceMsg::WorkflowRunStateAndAck {
+                        respond_to,
+                        ..
+                    } => {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                    crate::session::persistence::PersistenceMsg::LoadWorkflowRunHistory {
+                        respond_to,
+                    } => {
+                        let _ = respond_to
+                            .send(Ok((Vec::new(), std::collections::HashMap::new())));
+                    }
+                    _ => {}
+                }
+            }
+        });
         let session_directory = test_session_directory(session_dir);
         let store = WorkflowRunStore::new(session_directory.clone(), persist_tx.clone());
         let notify = super::notify::WorkflowNotifySender::new(

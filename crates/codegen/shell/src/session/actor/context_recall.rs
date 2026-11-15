@@ -178,6 +178,9 @@ impl SessionActor {
                         .to_string()
                 })?;
         let max_result_tokens = result_wrapper_tokens.saturating_add(u64::from(output_budget));
+        let recall_source_ref = materialized.source_ref.clone();
+        let frozen_surface_revision = materialized.surface_revision;
+        let frozen_surface_ids = materialized.surface_ids.clone();
         let need_context = select_recall_need_context(
             materialized.surface,
             materialized.surface_ids,
@@ -196,7 +199,7 @@ impl SessionActor {
             "the recall sideband has insufficient context headroom for archived evidence"
                 .to_string()
         })?;
-        let timeline_id = materialized.source_ref.timeline_id.clone();
+        let timeline_id = recall_source_ref.timeline_id.clone();
         let frozen_transcript = materialized.transcript;
         let frozen_transcript_ids = materialized.transcript_ids;
         let frozen_unloaded_ids = materialized.unloaded_surface_ids;
@@ -218,7 +221,7 @@ impl SessionActor {
             );
             return Ok(ContextRecallOutput {
                 text: result,
-                frozen_surface_revision: materialized.surface_revision,
+                frozen_surface_revision,
                 context_window,
                 max_result_tokens,
             });
@@ -241,7 +244,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::ContextRecall,
                 sideband_prompt,
-                SidebandSource::Frozen(vec![materialized.source_ref]),
+                SidebandSource::Frozen(vec![recall_source_ref.clone()]),
                 chat_state::SidebandBudgetPolicy {
                     max_attempts: MAX_RECALL_SYNTHESIS_ATTEMPTS as u32,
                     max_input_tokens_per_attempt: context_window
@@ -470,6 +473,15 @@ impl SessionActor {
                 .expect("validated recall synthesis is JSON-serializable");
             let result = render_recall_result(&synthesis);
             sideband
+                .observe_recall_materialization(
+                    &recall_source_ref,
+                    frozen_surface_revision,
+                    &frozen_surface_ids,
+                    &frozen_transcript_ids,
+                    &frozen_unloaded_ids,
+                )
+                .map_err(|error| error.to_string())?;
+            sideband
                 .complete(
                     raw_output,
                     Some(structured_output),
@@ -482,7 +494,7 @@ impl SessionActor {
 
             return Ok(ContextRecallOutput {
                 text: result,
-                frozen_surface_revision: materialized.surface_revision,
+                frozen_surface_revision,
                 context_window,
                 max_result_tokens,
             });

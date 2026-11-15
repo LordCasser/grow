@@ -640,8 +640,13 @@ pub(crate) type InlineMediaCompletions =
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
+    pub(crate) descendant_restore_generation: u64,
+    pub(crate) descendant_restore_pending: bool,
+    pub(crate) descendant_model_control_generation: u64,
+    pub(crate) descendant_agent_control_generation: u64,
     /// Branch-bound cursor and request ownership for observational older pages.
     pub(crate) history_page_cursor: Option<String>,
+    pub(crate) history_latest_pending: bool,
     /// The resident scrollback is only a display window, even if its older
     /// cursor has been exhausted. Complete-history actions must reject it.
     pub(crate) history_is_partial: bool,

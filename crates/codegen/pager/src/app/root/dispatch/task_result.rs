@@ -555,6 +555,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             foreground,
             descendant_ownership,
             older_history_cursor,
+            latest_history_cursor,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -565,7 +566,27 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             foreground,
             descendant_ownership,
             older_history_cursor,
+            latest_history_cursor,
         ),
+        TaskResult::DescendantStateRestored {
+            agent_id,
+            session_id,
+            binding_epoch,
+            request_id,
+            child_control_captures,
+            batch,
+        } => {
+            crate::app::subagent::apply_descendant_state_restore(
+                app,
+                agent_id,
+                &session_id,
+                binding_epoch,
+                request_id,
+                &child_control_captures,
+                batch,
+            );
+            vec![]
+        }
         TaskResult::HistoryPageLoaded {
             agent_id,
             session_id,
@@ -584,13 +605,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 return vec![];
             }
             agent.history_page_request = None;
-            if app.active_view != crate::app::root::ActiveView::Agent(agent_id) {
+            let latest = agent.history_latest_pending;
+            if !latest && app.active_view != crate::app::root::ActiveView::Agent(agent_id) {
                 return vec![];
             }
+            let mut timer = diagnostics::instrumentation::timer("pager.history_page.apply");
+            timer.with_field("latest", latest);
             match result {
                 Ok(updates) => {
+                    timer.with_field("updates", updates.len());
                     let mut projection =
                         crate::transcript_projection::TranscriptProjection::default();
+                    if latest {
+                        projection.scrollback = agent.scrollback.fresh_continuation();
+                    }
+                    projection.scrollback.begin_batch();
                     for update in updates {
                         projection.apply(shell::session::storage::transcript::TranscriptEvent {
                             update,
@@ -598,13 +627,25 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             simulated_source: false,
                         });
                     }
+                    projection.finish_snapshot();
+                    projection.scrollback.end_batch();
                     agent.history_page_cursor = older_cursor;
-                    agent.history_page_viewer = Some(projection);
+                    if latest {
+                        projection.finish_display_page();
+                        agent.scrollback.prepend_entries_from(projection.scrollback);
+                        agent.history_latest_pending = false;
+                        agent.history_is_partial = agent.history_page_cursor.is_some();
+                    } else {
+                        agent.history_page_viewer = Some(projection);
+                    }
                 }
-                Err(error) => agent.show_toast(&format!(
-                    "Could not load older history: {}",
-                    crate::app::root::effects::sanitize_user_error(&error)
-                )),
+                Err(error) => {
+                    timer.with_field("error", error.as_str());
+                    agent.show_toast(&format!(
+                        "Could not load history: {}",
+                        crate::app::root::effects::sanitize_user_error(&error)
+                    ));
+                }
             }
             vec![]
         }
@@ -668,10 +709,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.show_toast(&format!("Session resync failed: {error}. Reload to retry."));
                 return vec![];
             }
-            crate::app::subagent::restore_descendant_state(app, agent_id, descendant_ownership);
-            app.agents
-                .get_mut(&agent_id)
-                .map_or_else(Vec::new, |agent| maybe_drain_queue(agent).effects)
+            let mut effects = crate::app::subagent::schedule_descendant_state_restore(
+                app,
+                agent_id,
+                descendant_ownership,
+            );
+            effects.extend(
+                app.agents
+                    .get_mut(&agent_id)
+                    .map_or_else(Vec::new, |agent| maybe_drain_queue(agent).effects),
+            );
+            effects
         }
         TaskResult::SessionListLoaded {
             sessions,

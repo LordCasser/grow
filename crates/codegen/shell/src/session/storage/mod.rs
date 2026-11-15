@@ -2357,14 +2357,140 @@ pub(crate) fn serialize_summary(summary: &Summary) -> io::Result<Vec<u8>> {
 
 /// Validate every persisted independent ledger against its parent Timeline,
 /// including title events whose provenance crosses the ledger boundary.
+fn validate_compaction_replacement(
+    replacement: &[ConversationItem],
+    result_ref: &chat_state::TimelineRangeRef,
+    raw_output: &str,
+) -> io::Result<()> {
+    let [ConversationItem::User(user)] = replacement else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "compaction replacement for sideband {}/{} is not one user item",
+                result_ref.timeline_id, result_ref.first_seq
+            ),
+        ));
+    };
+    let valid_metadata = user.synthetic_reason
+        == Some(sampling_types::SyntheticReason::CompactionMeta)
+        && user.permission_evidence.is_none()
+        && user.goal_directive.is_none()
+        && user.cwd_generation.is_none()
+        && user.prior_turn_interrupt.is_none()
+        && user.prompt_index.is_none()
+        && !user.content.is_empty()
+        && user
+            .content
+            .iter()
+            .all(|part| matches!(part, sampling_types::ContentPart::Text { .. }));
+    if !valid_metadata {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "compaction replacement for sideband {}/{} is not a pure CompactionMeta user item",
+                result_ref.timeline_id, result_ref.first_seq
+            ),
+        ));
+    }
+    let expected_prefix = compaction::format_compact_summary_content(raw_output);
+    let replacement_text = replacement[0].text_content();
+    let canonical_suffix = replacement_text
+        .strip_prefix(&expected_prefix)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with("\n\n"));
+    if !canonical_suffix {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "compaction replacement for sideband {}/{} does not preserve the canonical summary prefix",
+                result_ref.timeline_id, result_ref.first_seq
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_consultation_result(
+    audit: &crate::coordination::IncomingInquiryAudit,
+    result_ref: &chat_state::TimelineRangeRef,
+    ledgers: &SidebandLedgers,
+) -> io::Result<String> {
+    let expected_prompt = crate::coordination::inquiry_prompt(
+        &audit.source_session_id,
+        &audit.source_cwd,
+        &audit.question,
+    );
+    if !matches!(ledgers.get(&result_ref.timeline_id).and_then(|events| events.first()).map(|event| &event.kind),
+        Some(chat_state::SidebandEventKind::Request(request)) if request.prompt == expected_prompt)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "consultation proof belongs to a different question or source",
+        ));
+    }
+    let result = completed_sideband_result(
+        ledgers,
+        &result_ref.timeline_id,
+        result_ref.first_seq,
+        "consultation",
+    )?;
+    if audit
+        .outcome
+        .as_ref()
+        .and_then(|outcome| outcome.answer.as_deref())
+        != Some(result.raw_output.as_str())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "consultation answer differs from its completed Sideband result",
+        ));
+    }
+    let body = audit.answer_context_body().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "consultation proof has no answer",
+        )
+    })?;
+    if body.len() as u64 > chat_state::MAX_NOTIFICATION_PAYLOAD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "consultation context exceeds the notification payload limit",
+        ));
+    }
+    if audit.direction == crate::coordination::InquiryDirection::Peer {
+        crate::coordination::validate_peer_inquiry_outcome(
+            audit
+                .outcome
+                .as_ref()
+                .expect("validated consultation has an outcome"),
+        )
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("consultation result exceeds its IPC frame: {error}"),
+            )
+        })?;
+    }
+    Ok(body)
+}
+
 pub(crate) fn validate_sideband_ledgers(
     parent_timeline_id: &str,
     parent: &chat_state::Timeline,
     ledgers: &SidebandLedgers,
 ) -> io::Result<()> {
+    validate_sideband_ledgers_with_spawns(parent_timeline_id, parent, ledgers, &[])
+}
+
+fn validate_sideband_ledgers_with_spawns(
+    parent_timeline_id: &str,
+    parent: &chat_state::Timeline,
+    ledgers: &SidebandLedgers,
+    extra_spawns: &[chat_state::TimelineEvent],
+) -> io::Result<()> {
     let spawns = parent
         .events()
         .iter()
+        .chain(extra_spawns)
         .filter_map(|event| match &event.kind {
             chat_state::TimelineEventKind::Sideband(spawn) => {
                 Some((spawn.sideband_id.as_str(), (event.seq.get(), spawn)))
@@ -2388,9 +2514,27 @@ pub(crate) fn validate_sideband_ledgers(
         }
         let timeline = chat_state::SidebandTimeline::from_events(events.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        timeline
-            .validate_parent(parent_timeline_id, parent, spawn_seq, spawn)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let validation = if parent.event(chat_state::EventSeq::new(spawn_seq)).is_none()
+            && spawn.purpose == chat_state::SidebandPurpose::InfoRequest
+        {
+            let mut read_error = None;
+            let validation = timeline.validate_spawn(parent_timeline_id, spawn, |id| {
+                match parent.exact_event(id.event) {
+                    Ok(event) => event.is_some_and(|event| event.owns_surface_id(id)),
+                    Err(error) => {
+                        read_error = Some(error);
+                        false
+                    }
+                }
+            });
+            if let Some(error) = read_error {
+                return Err(error);
+            }
+            validation
+        } else {
+            timeline.validate_parent(parent_timeline_id, parent, spawn_seq, spawn)
+        };
+        validation.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     }
 
     // New receipt identities must be backed by the exact original terminal,
@@ -2412,7 +2556,14 @@ pub(crate) fn validate_sideband_ledgers(
         if proof.target_session_id != parent_timeline_id {
             continue;
         }
-        if previous_terminal {
+        if previous_terminal || (parent.has_surface_checkpoint()
+            && parent.incoming_inquiry_events(&audit.source_session_id, &inquiry_id)?
+                .into_iter().take_while(|original| original.seq < event.seq)
+                .try_fold(false, |seen, original| {
+                    crate::coordination::InquiryEvent::from_timeline(&original)
+                        .map(|fact| seen || matches!(fact, Some(crate::coordination::InquiryEvent::Incoming { audit, .. }) if audit.outcome.is_some()))
+                        .map_err(io::Error::other)
+                })?) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "duplicate canonical consultation answer",
@@ -2430,62 +2581,7 @@ pub(crate) fn validate_sideband_ledgers(
                 "consultation proof does not reference its InfoRequest Sideband",
             ));
         }
-        let expected_prompt = crate::coordination::inquiry_prompt(
-            &audit.source_session_id,
-            &audit.source_cwd,
-            &audit.question,
-        );
-        if !matches!(ledgers.get(&proof.result_ref.timeline_id).and_then(|events| events.first()).map(|event| &event.kind),
-            Some(chat_state::SidebandEventKind::Request(request)) if request.prompt == expected_prompt)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "consultation proof belongs to a different question or source",
-            ));
-        }
-        let result = completed_sideband_result(
-            ledgers,
-            &proof.result_ref.timeline_id,
-            proof.result_ref.first_seq,
-            "consultation",
-        )?;
-        if audit
-            .outcome
-            .as_ref()
-            .and_then(|outcome| outcome.answer.as_deref())
-            != Some(result.raw_output.as_str())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "consultation answer differs from its completed Sideband result",
-            ));
-        }
-        let body = audit.answer_context_body().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "consultation proof has no answer",
-            )
-        })?;
-        if body.len() as u64 > chat_state::MAX_NOTIFICATION_PAYLOAD_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "consultation context exceeds the notification payload limit",
-            ));
-        }
-        if audit.direction == crate::coordination::InquiryDirection::Peer {
-            crate::coordination::validate_peer_inquiry_outcome(
-                audit
-                    .outcome
-                    .as_ref()
-                    .expect("validated consultation has an outcome"),
-            )
-            .map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("consultation result exceeds its IPC frame: {error}"),
-                )
-            })?;
-        }
+        let body = validate_consultation_result(&audit, &proof.result_ref, ledgers)?;
         consultation_proofs.insert(
             format!("{parent_timeline_id}:{}", event.seq.get()),
             (event.seq, audit.source_session_id, inquiry_id, body),
@@ -2498,6 +2594,7 @@ pub(crate) fn validate_sideband_ledgers(
                 chat_state::NotificationSource::InquiryAnswered {
                     source_session_id,
                     inquiry_id,
+                    ..
                 },
             source_version: chat_state::NotificationSourceVersion::Opaque { value },
             payload_ref,
@@ -2636,50 +2733,7 @@ pub(crate) fn validate_sideband_ledgers(
                 ));
             }
         };
-        let [ConversationItem::User(user)] = replacement else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "compaction replacement for sideband {}/{} is not one user item",
-                    result_ref.timeline_id, result_ref.first_seq
-                ),
-            ));
-        };
-        let valid_metadata = user.synthetic_reason
-            == Some(sampling_types::SyntheticReason::CompactionMeta)
-            && user.permission_evidence.is_none()
-            && user.goal_directive.is_none()
-            && user.cwd_generation.is_none()
-            && user.prior_turn_interrupt.is_none()
-            && user.prompt_index.is_none()
-            && !user.content.is_empty()
-            && user
-                .content
-                .iter()
-                .all(|part| matches!(part, sampling_types::ContentPart::Text { .. }));
-        if !valid_metadata {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "compaction replacement for sideband {}/{} is not a pure CompactionMeta user item",
-                    result_ref.timeline_id, result_ref.first_seq
-                ),
-            ));
-        }
-        let expected_prefix = compaction::format_compact_summary_content(&result.raw_output);
-        let replacement_text = replacement[0].text_content();
-        let canonical_suffix = replacement_text
-            .strip_prefix(&expected_prefix)
-            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with("\n\n"));
-        if !canonical_suffix {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "compaction replacement for sideband {}/{} does not preserve the canonical summary prefix",
-                    result_ref.timeline_id, result_ref.first_seq
-                ),
-            ));
-        }
+        validate_compaction_replacement(replacement, result_ref, &result.raw_output)?;
     }
 
     for event in parent.events() {
@@ -3500,6 +3554,21 @@ impl std::fmt::Display for AppendUpdateError {
 /// Abstracts over different storage backends (JSONL, SQLite, etc.)
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
+    /// Load the full recent Workflow run history for an explicit management
+    /// request. Ordinary writer startup uses the execution-only checkpoint.
+    async fn load_workflow_run_history(
+        &self,
+        _info: &Info,
+    ) -> io::Result<(
+        Vec<crate::session::workflow::store::RestoredWorkflowRun>,
+        std::collections::HashMap<String, chat_state::WorkflowLifecycle>,
+    )> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Workflow history loading is unsupported",
+        ))
+    }
+
     /// Initialize a new session or load existing one
     /// Returns the Summary (creates if needed, loads if exists)
     async fn init_session(
@@ -4264,6 +4333,7 @@ pub(crate) fn read_committed_jsonl_text_lines_from_reader(
 pub(crate) struct SubagentProjectionState {
     pub spawned: std::collections::BTreeSet<String>,
     pub finished: std::collections::BTreeSet<String>,
+    pub replayed_children: std::collections::BTreeMap<String, String>,
 }
 
 // ============================================================================

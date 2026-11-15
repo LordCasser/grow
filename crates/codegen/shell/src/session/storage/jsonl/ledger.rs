@@ -193,7 +193,7 @@ impl JsonlStorageAdapter {
             path,
             remaining_bytes,
             remaining_records,
-            None::<fn(&history::JournalRecord, working_index::RecordRef) -> bool>,
+            None::<fn(&history::JournalRecord, working_index::RecordRef) -> io::Result<bool>>,
         )
     }
 
@@ -203,7 +203,9 @@ impl JsonlStorageAdapter {
         path: &Path,
         remaining_bytes: Option<&mut u64>,
         remaining_records: Option<&mut usize>,
-        mut retain: Option<impl FnMut(&history::JournalRecord, working_index::RecordRef) -> bool>,
+        mut retain: Option<
+            impl FnMut(&history::JournalRecord, working_index::RecordRef) -> io::Result<bool>,
+        >,
     ) -> io::Result<(JournalData, blake3::Hasher)> {
         let mut events = Vec::new();
         let mut history = HistorySnapshot::default();
@@ -218,7 +220,7 @@ impl JsonlStorageAdapter {
             remaining_bytes,
             remaining_records,
             |record, offset, json| {
-                let retained = retain.as_mut().is_none_or(|retain| {
+                let retained = if let Some(retain) = retain.as_mut() {
                     retain(
                         &record,
                         working_index::RecordRef {
@@ -226,8 +228,10 @@ impl JsonlStorageAdapter {
                             len: json.len() as u64,
                             digest: blake3::hash(json),
                         },
-                    )
-                });
+                    )?
+                } else {
+                    true
+                };
                 if retained {
                     if !history.positions.is_empty() || record.seq != history.sources.len() as u64 {
                         if history.positions.is_empty() {
@@ -381,18 +385,19 @@ impl JsonlStorageAdapter {
         let prefix = self.timeline_prefix_state(info)?;
         let owner = self.clone();
         tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            let probe = owner.timeline_sync_probe.as_deref();
-            #[cfg(not(test))]
-            let _owner = owner;
-            Self::append_journal_fact_sync(
+            let result = Self::append_journal_fact_sync(
                 &directory,
                 &prefix,
                 fact,
                 durability,
                 #[cfg(test)]
-                probe,
-            )
+                owner.timeline_sync_probe.as_deref(),
+            );
+            // The prefix may own the exclusive Tool index. Drop the local
+            // prefix reference before releasing the adapter's writer lease.
+            drop(prefix);
+            drop(owner);
+            result
         })
         .await
         .map_err(io::Error::other)?
@@ -460,13 +465,16 @@ impl JsonlStorageAdapter {
                     std::sync::Arc::new(directory.try_clone()?),
                     &mut file,
                     &mut prefix,
+                    cached
+                        .as_ref()
+                        .and_then(|previous| previous.indexed.clone()),
                 )?;
                 *cached = Some(prefix);
             }
             let prefix = cached.as_mut().expect("validated Timeline prefix");
             prefix.stamp = stamp;
             if let AppendFact::Presentation(event) = &mut fact {
-                prefix.state.bind_presentation(event)?;
+                prefix.state.bind_indexed_presentation(event, prefix.indexed.as_ref())?;
             }
             // Preserve the exact original source identity on an ambiguous ACK.
             // Presentation timestamps are write metadata, not a second payload.
@@ -502,22 +510,32 @@ impl JsonlStorageAdapter {
                             "Timeline domain append sequence mismatch",
                         ));
                     }
-                    event
+                    if let Some(admission) = event
                         .messages()
                         .and_then(|message| message.response_admission.as_ref())
-                        .map(|admission| {
-                            let key = ResponseKey {
-                                request_id: admission.identity.request_id.clone(),
-                                attempt: admission.identity.attempt,
-                            };
+                    {
+                        let key = ResponseKey {
+                            request_id: admission.identity.request_id.clone(),
+                            attempt: admission.identity.attempt,
+                        };
+                        if !prefix.state.anchors.contains_key(&key)
+                            && let Some(index) = &prefix.indexed
+                            && let Some(candidate) = index.response_candidate(&key)?
+                        {
+                            prefix.state.anchors.insert(key.clone(), candidate.seq);
+                        }
+                        Some(
                             prefix
                                 .state
                                 .anchors
                                 .get(&key)
                                 .map_or(ResponseAnchor::Admission, |record| {
                                     ResponseAnchor::Candidate { record: *record }
-                                })
-                        })
+                                }),
+                        )
+                    } else {
+                        None
+                    }
                 }
             } else {
                 let AppendFact::Presentation(event) = &fact else {
@@ -540,13 +558,20 @@ impl JsonlStorageAdapter {
                     }
                 }
                 if let HistoryContent::Candidate(key) = &event.content
-                    && prefix.state.anchors.contains_key(key)
+                    && (prefix.state.anchors.contains_key(key)
+                        || match &prefix.indexed {
+                            Some(index) => index.response_candidate(key)?.is_some(),
+                            None => false,
+                        })
                 {
                     // Only the first provisional chunk owns a display position.
                     repeated = true;
                 }
                 None
             };
+            let runtime_event = domain.is_some_and(|event| {
+                matches!(event.kind, chat_state::TimelineEventKind::Runtime(_))
+            });
             if !repeated {
                 let seq = prefix.state.records;
                 let line = if domain.is_some() {
@@ -592,9 +617,7 @@ impl JsonlStorageAdapter {
                     if matches!(&record.fact, JournalFact::Domain { .. }) {
                         prefix.unpublished_domain.push(reference);
                     }
-                    if working_snapshot::classify(&record)
-                        != working_snapshot::RecordClass::Diagnostic
-                    {
+                    if working_snapshot::retains_reference(&record) {
                         prefix.unpublished_records.push(reference);
                     }
                 }
@@ -607,8 +630,15 @@ impl JsonlStorageAdapter {
             let publish = prefix
                 .indexed
                 .as_ref()
-                .is_some_and(|index| index.should_advance(prefix.len));
+                .is_some_and(|index| index.should_advance(prefix));
             if matches!(durability, AppendDurability::Durable) {
+                let mut runtime_sync = runtime_event
+                    .then(|| crate::instrumentation_timer!("session.runtime.durable_sync"));
+                if let Some(timer) = &mut runtime_sync {
+                    timer.with_field("journal_bytes", prefix.len);
+                    #[cfg(unix)]
+                    timer.with_field("publish_snapshot", publish);
+                }
                 Self::sync_file_durable(&file)?;
                 #[cfg(test)]
                 if let Some(probe) = sync_probe {
@@ -625,20 +655,21 @@ impl JsonlStorageAdapter {
                 let advanced = if matches!(durability, AppendDurability::Buffered) {
                     Self::sync_file_durable(&file)
                         .and_then(|()| directory.sync())
-                        .and_then(|()| indexed.advance(prefix))
+                        .and_then(|()| indexed.advance(&mut file, prefix))
                 } else {
-                    indexed.advance(prefix)
+                    indexed.advance(&mut file, prefix)
                 };
                 match advanced {
                     Ok(Some(indexed)) => {
+                        prefix.state.anchors.clear();
+                        prefix.state.receipts.clear();
+                        prefix.state.identities.clear();
                         prefix.indexed = Some(indexed);
                         prefix.unpublished_records.clear();
                         prefix.unpublished_domain.clear();
                     }
                     Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "Timeline committed; working frontier publication deferred")
-                    }
+                    Err(error) => return Err(error),
                 }
             }
             Ok(!repeated)
@@ -655,7 +686,16 @@ impl super::super::TimelineLedgerReader {
     pub(crate) fn read_timeline_projection(
         mut self,
         mut previous: Option<super::super::TimelineReadProjection>,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> io::Result<super::super::TimelineReadProjection> {
+        let check_cancelled = || {
+            if cancel.is_cancelled() {
+                Err(io::Error::other("Timeline search projection cancelled"))
+            } else {
+                Ok(())
+            }
+        };
+        check_cancelled()?;
         let complete_len =
             JsonlStorageAdapter::find_previous_newline(&mut self.file, self.snapshot_len)?
                 .map_or(0, |position| position + 1);
@@ -665,7 +705,18 @@ impl super::super::TimelineLedgerReader {
             .filter(|prior| prior.complete_len <= complete_len)
         {
             self.file.seek(io::SeekFrom::Start(0))?;
-            let read = io::copy(&mut (&mut self.file).take(prior.complete_len), &mut hash)?;
+            let mut reader = (&mut self.file).take(prior.complete_len);
+            let mut buffer = [0; 32 * 1024];
+            let mut read = 0u64;
+            loop {
+                check_cancelled()?;
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                read += count as u64;
+                hash.update(&buffer[..count]);
+            }
             read == prior.complete_len && hash.finalize() == prior.prefix_hash
         } else {
             false
@@ -694,12 +745,14 @@ impl super::super::TimelineLedgerReader {
             None,
             None,
             |record, _, _| {
+                check_cancelled()?;
                 if let JournalFact::Domain { event, .. } = record.fact {
                     events.push(event);
                 }
                 Ok(())
             },
         )?;
+        check_cancelled()?;
         // Preserve the full reader's error order: validate all physical
         // records before applying any new domain lifecycle facts.
         timeline = timeline

@@ -1,6 +1,7 @@
 //! Upgrade legacy replay fixtures with canonical admitted-response history.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
 
@@ -29,9 +30,33 @@ pub async fn commit_fixture_through_normal_writer(
     source_directory: &Path,
     model_id: &str,
 ) {
+    commit_fixture_through_normal_writer_with_unpublished_tail(
+        root,
+        info,
+        source_directory,
+        model_id,
+        0,
+    )
+    .await;
+}
+
+/// Commit a synthetic journal through the storage adapter while leaving its
+/// final `unpublished_tail_records` as a durable suffix beyond the manifest.
+/// The benchmark uses the final Step/Turn terminal facts so every arm resumes
+/// the same completed Surface from the same small unpublished tail.
+pub async fn commit_fixture_through_normal_writer_with_unpublished_tail(
+    root: &Path,
+    info: &Info,
+    source_directory: &Path,
+    model_id: &str,
+    unpublished_tail_records: usize,
+) {
+    assert!(
+        matches!(unpublished_tail_records, 0 | 2),
+        "benchmark writer supports no tail or the terminal Step/Turn pair"
+    );
     use std::io::BufRead;
 
-    use crate::session::history::JournalFact;
     use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
 
     let storage = JsonlStorageAdapter::with_root(root.to_path_buf());
@@ -44,42 +69,122 @@ pub async fn commit_fixture_through_normal_writer(
     let mut remaining = source.metadata().expect("stat synthetic journal").len();
     let mut reader = std::io::BufReader::new(source);
     let mut line = Vec::new();
+    let mut pending = VecDeque::with_capacity(unpublished_tail_records + 1);
     let mut unpublished = 0;
     while remaining != 0 {
         line.clear();
-        let read = reader.read_until(b'\n', &mut line).expect("read fixture fact");
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .expect("read fixture fact");
         assert_eq!(line.last(), Some(&b'\n'));
         remaining -= read as u64;
-        unpublished += read;
-        let durable = unpublished >= 1024 * 1024 || remaining == 0;
-        let record = crate::session::history::decode_record(&line[..read - 1])
-            .expect("validate synthetic fact");
-        match record.fact {
-            JournalFact::Domain { event, .. } => {
-                if durable {
-                    storage.append_timeline_event_durable(info, &event).await
-                } else {
-                    storage.append_timeline_event(info, &event).await
-                }
-                .expect("commit domain fact");
+        pending.push_back(std::mem::take(&mut line));
+        if pending.len() > unpublished_tail_records {
+            let next = pending.pop_front().expect("prefix fact is buffered");
+            unpublished += next.len();
+            let durable = unpublished >= 1024 * 1024 || remaining == 0;
+            append_fixture_record(&storage, info, next, durable).await;
+            if durable {
+                unpublished = 0;
             }
-            JournalFact::Presentation { event, .. } => {
-                let update = if let crate::session::history::HistoryContent::Candidate(key) =
-                    &event.content
-                {
+        }
+    }
+
+    assert_eq!(pending.len(), unpublished_tail_records);
+    if unpublished_tail_records == 2 {
+        let first_terminal_line = pending.front().expect("Step terminal is held");
+        let crate::session::history::JournalFact::Domain {
+            event: first_terminal,
+            ..
+        } = crate::session::history::decode_record(
+            &first_terminal_line[..first_terminal_line.len() - 1],
+        )
+        .expect("decode held Step terminal")
+        .fact
+        else {
+            panic!("benchmark unpublished tail must contain domain records");
+        };
+        assert!(matches!(
+            first_terminal.kind,
+            TimelineEventKind::Step(StepEvent::Ended { .. })
+        ));
+        let padding = chat_state::TimelineEvent {
+            version: first_terminal.version,
+            seq: first_terminal.seq,
+            at_ms: 1_794_571_200_000,
+            kind: TimelineEventKind::Observation(chat_state::ObservationEvent {
+                scope: "shell".into(),
+                name: "artifact".into(),
+                turn: None,
+                step: None,
+                data: Some(serde_json::json!({
+                    "payload": "x".repeat(1024 * 1024),
+                    "fixture": "unpublished-terminal-tail",
+                })),
+            }),
+        };
+        storage
+            .append_timeline_event_durable(info, &padding)
+            .await
+            .expect("durably publish benchmark tail padding");
+    }
+    for (index, line) in pending.into_iter().enumerate() {
+        let crate::session::history::JournalFact::Domain { mut event, .. } =
+            crate::session::history::decode_record(&line[..line.len() - 1])
+                .expect("decode buffered fixture tail")
+                .fact
+        else {
+            panic!("benchmark unpublished tail must contain domain records");
+        };
+        match (index, &event.kind) {
+            (0, TimelineEventKind::Step(StepEvent::Ended { .. }))
+            | (1, TimelineEventKind::Turn(TurnEvent::Ended { .. })) => {}
+            _ => panic!("benchmark unpublished tail must end the fixed Step and Turn"),
+        }
+        event.seq = chat_state::EventSeq::new(event.seq.get() + 1);
+        event.at_ms = 1_794_571_200_000;
+        storage
+            .append_timeline_event_durable(info, &event)
+            .await
+            .expect("durably append unpublished terminal fixture fact");
+    }
+}
+
+async fn append_fixture_record(
+    storage: &crate::session::storage::JsonlStorageAdapter,
+    info: &Info,
+    line: Vec<u8>,
+    durable: bool,
+) {
+    use crate::session::history::JournalFact;
+    use crate::session::storage::StorageAdapter;
+
+    let record = crate::session::history::decode_record(&line[..line.len() - 1])
+        .expect("validate synthetic fact");
+    match record.fact {
+        JournalFact::Domain { event, .. } => {
+            if durable {
+                storage.append_timeline_event_durable(info, &event).await
+            } else {
+                storage.append_timeline_event(info, &event).await
+            }
+            .expect("commit domain fact");
+        }
+        JournalFact::Presentation { event, .. } => {
+            let update =
+                if let crate::session::history::HistoryContent::Candidate(key) = &event.content {
                     candidate_anchor(info, &key.request_id, event.event_id().unwrap())
                 } else {
                     event.into_update(&info.id).unwrap().unwrap()
                 };
-                if durable {
-                    storage.append_update_durable_commit_aware(info, &update).await.unwrap();
-                } else {
-                    storage.append_update(info, &update).await.unwrap();
-                }
+            if durable {
+                storage
+                    .append_update_durable_commit_aware(info, &update)
+                    .await
+                    .unwrap();
+            } else {
+                storage.append_update(info, &update).await.unwrap();
             }
-        }
-        if durable {
-            unpublished = 0;
         }
     }
 }
@@ -135,6 +240,7 @@ pub enum ClosedHistoryKind {
     #[default]
     PresentationNotice,
     DomainObservation,
+    ToolLifecycle,
 }
 
 /// Variant of the fixed-surface fixture that can grow closed history as inert
@@ -191,6 +297,12 @@ pub fn write_admitted_history_with_closed_observations_kind(
             MessageCause::Seed,
         )
         .expect("record seed");
+    if closed_history_kind == ClosedHistoryKind::ToolLifecycle {
+        timeline.replace_all(
+            vec![ConversationItem::system("admitted response resume fixture")],
+            MessageCause::ContextRebuild,
+        ).expect("record the production startup context boundary");
+    }
     if let Some((provider_model, transport)) = model_route {
         let model = crate::agent::models::ModelId::new(model_id);
         timeline
@@ -228,9 +340,88 @@ pub fn write_admitted_history_with_closed_observations_kind(
         }
     }
 
+    let fixed_turn_offset = usize::from(closed_history_kind == ClosedHistoryKind::ToolLifecycle);
+    if closed_history_kind == ClosedHistoryKind::ToolLifecycle {
+        let turn = chat_state::TurnId(1);
+        let step = chat_state::StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                prompt_id: "grow-closed-tool-history".into(),
+                input_ids: Vec::new(),
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: model_id.to_owned(),
+                input_message_count: timeline.surface_len(),
+                prompt_index: 0,
+                prompt_text: "closed tool lifecycle history fixture".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .expect("start closed tool-history turn");
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .expect("start closed tool-history step");
+        for observation in 0..closed_observations {
+            let call_id = format!("grow-closed-tool-{observation:08}");
+            timeline
+                .record(TimelineEventKind::Tool(chat_state::ToolEvent::Started {
+                    call_id: call_id.clone(),
+                    turn,
+                    step,
+                    name: "shell.exec".into(),
+                    input: Some(serde_json::json!({
+                        "command": "inspect workspace and summarize the result",
+                        "context": "x".repeat(8 * 1024),
+                    })),
+                }))
+                .expect("record closed tool start");
+            timeline
+                .record(TimelineEventKind::Tool(chat_state::ToolEvent::Completed {
+                    call_id,
+                    name: "shell.exec".into(),
+                    outcome: "completed".into(),
+                    duration_ms: 12,
+                    details: Some(serde_json::json!({
+                        "exit_code": 0,
+                        "stdout": "x".repeat(8 * 1024),
+                    })),
+                }))
+                .expect("record closed tool completion");
+        }
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "completed".into(),
+                duration_ms: 12,
+            }))
+            .expect("end closed tool-history step");
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 12,
+                tool_count: u32::try_from(closed_observations).expect("closed tool count fits u32"),
+                terminal: TurnTerminal {
+                    source: TurnTerminalSource::Host,
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .expect("end closed tool-history turn");
+    }
+
     let mut requests = Vec::with_capacity(spec.turns);
     for (turn_index, (_, user, _, assistant)) in groups.iter().enumerate() {
-        let turn_number = u64::try_from(turn_index + 1).expect("turn index fits u64");
+        let turn_number =
+            u64::try_from(turn_index + fixed_turn_offset + 1).expect("turn index fits u64");
         let turn = chat_state::TurnId(turn_number);
         let step = chat_state::StepId { turn, index: 0 };
         let request_id = format!("grow-admitted-{}-{turn_number:06}", info.id.0);
@@ -383,12 +574,18 @@ pub fn write_admitted_history_with_closed_observations_kind(
             .checked_add(1)
             .expect("physical position does not overflow");
 
-        if closed_history_kind == ClosedHistoryKind::PresentationNotice
-            && event
-                .messages()
-                .is_some_and(|message| message.cause == MessageCause::Seed)
+        if event
+            .messages()
+            .is_some_and(|message| message.cause == MessageCause::Seed)
         {
-            for observation in 0..closed_observations {
+            let (notice_count, notice_bytes) = match closed_history_kind {
+                ClosedHistoryKind::PresentationNotice => (closed_observations, 16 * 1024),
+                // A fixed older page lets both arms exercise paging. Only
+                // Tool lifecycle facts vary across the Tool size curve.
+                ClosedHistoryKind::ToolLifecycle => (144, 32),
+                ClosedHistoryKind::DomainObservation => (0, 0),
+            };
+            for observation in 0..notice_count {
                 let fact = HistoryFact {
                     meta: Some(acp::Meta::from_iter([
                         (
@@ -409,7 +606,7 @@ pub fn write_admitted_history_with_closed_observations_kind(
                                 tone: crate::extensions::notification::UiNoticeTone::Info,
                                 details: Some(format!(
                                     "Closed-history observation {observation:08}: {}",
-                                    "x".repeat(16 * 1024)
+                                    "x".repeat(notice_bytes)
                                 )),
                             },
                         ),

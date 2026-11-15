@@ -36,6 +36,25 @@ pub struct SessionNotification {
     pub meta: Option<serde_json::Value>,
 }
 
+/// One passive slice of a large historical Tool display payload. `json` is a
+/// UTF-8 slice of the canonical JSON object containing the Tool's display
+/// fields; concatenate slices with matching `source_position` and `digest` to
+/// reconstruct it. The slice is never sent as ACP `rawOutput`, because a
+/// partial JSON value would not preserve ACP semantics.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutputFragment {
+    pub tool_call_id: acp::ToolCallId,
+    pub source_position: u64,
+    pub digest: String,
+    pub title: String,
+    pub kind: acp::ToolKind,
+    pub status: acp::ToolCallStatus,
+    pub byte_start: u64,
+    pub total_bytes: u64,
+    pub json: String,
+}
+
 /// The client projection uses the same immutable turn ownership identity as
 /// Timeline; it does not define a second terminal schema.
 pub use chat_state::TurnIdentity;
@@ -712,6 +731,8 @@ pub enum ImageRecoveryOperationState {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "sessionUpdate", deny_unknown_fields)]
 pub enum SessionUpdate {
+    /// A byte page from an oversized historical Tool display group.
+    ToolOutputFragment(ToolOutputFragment),
     /// Lifecycle of provisional model output. Accepted follows durable admission.
     SamplingAttempt {
         request_id: String,

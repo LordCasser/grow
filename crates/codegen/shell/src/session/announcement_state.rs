@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 const TIMELINE_ANNOUNCEMENT_VERSION: u32 = 1;
-const TIMELINE_ANNOUNCEMENT_SCOPE: &str = "runtime";
-const TIMELINE_ANNOUNCEMENT_NAME: &str = "announcement_snapshot";
+pub(super) const TIMELINE_ANNOUNCEMENT_SCOPE: &str = "runtime";
+pub(super) const TIMELINE_ANNOUNCEMENT_NAME: &str = "announcement_snapshot";
 
 #[derive(Serialize, Deserialize)]
 struct TimelineAnnouncementSnapshot {

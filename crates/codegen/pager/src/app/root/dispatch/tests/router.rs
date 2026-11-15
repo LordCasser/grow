@@ -197,7 +197,10 @@ fn exit_does_not_wait_for_read_only_prompt_history() {
     agent.session.prompt_history_loading = true;
 
     let effects = dispatch(Action::Quit, &mut app);
-    assert!(matches!(effects.as_slice(), [Effect::SuspendForExit { .. }]));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SuspendForExit { .. }]
+    ));
 }
 
 #[test]

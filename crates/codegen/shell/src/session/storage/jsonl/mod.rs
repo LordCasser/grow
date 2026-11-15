@@ -16,10 +16,40 @@ use std::io::{self, BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use workspace::session::file_state::RewindPoint;
 
+#[cfg(unix)]
+mod boundary_history;
+#[cfg(unix)]
+mod compaction_history;
+#[cfg(unix)]
+mod consultation_history;
+#[cfg(unix)]
+mod hook_history;
+#[cfg(unix)]
+mod input_history;
 mod ledger;
+#[cfg(unix)]
+mod notification_history;
+#[cfg(unix)]
+mod outgoing_inquiry_history;
+#[cfg(unix)]
+mod response_history;
+#[cfg(unix)]
+mod subagent_history;
+#[cfg(unix)]
+mod tool_fragments;
+#[cfg(unix)]
+mod tool_history;
+#[cfg(unix)]
+mod usage_history;
+#[cfg(unix)]
+mod user_echo_history;
+#[cfg(unix)]
+mod workflow_history;
 mod working_index;
 mod working_snapshot;
-pub(crate) use working_snapshot::IndexedHistory;
+pub(crate) use working_snapshot::{
+    IndexedHistory, IndexedResponseRow, IndexedTaskTerminal, IndexedUserEchoRow,
+};
 
 /// Hard limits for diagnostic and maintenance validation. Normal session
 /// loading keeps its existing semantics; bounded callers use this aggregate
@@ -54,6 +84,9 @@ pub(crate) enum AppendDurability {
 type TimelinePrefix = std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>;
 type TimelinePrefixCache =
     std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, TimelinePrefix>>>;
+type WriterLeases = std::sync::Mutex<std::collections::BTreeMap<String, SessionWriterLease>>;
+#[cfg(unix)]
+type WeakWriterLeases = std::sync::Weak<WriterLeases>;
 
 /// The shared adapter owner, not an inherited descriptor, owns this lease.
 struct SessionWriterLease {
@@ -82,9 +115,9 @@ pub struct JsonlStorageAdapter {
             std::collections::BTreeMap<String, std::sync::Arc<super::ContainedDirectory>>,
         >,
     >,
-    writer_leases:
-        std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, SessionWriterLease>>>,
+    // Index handles must be dropped before releasing the writer lease.
     timeline_prefixes: TimelinePrefixCache,
+    writer_leases: std::sync::Arc<WriterLeases>,
     #[cfg(test)]
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
     #[cfg(test)]
@@ -219,6 +252,32 @@ pub(crate) struct ValidatedTimeline {
     pub(crate) sidebands: super::SidebandLedgers,
 }
 
+impl ValidatedTimeline {
+    pub(crate) fn execution_start_counts(&self) -> (u32, u32) {
+        let (before, counts) = match &self.history.indexed {
+            #[cfg(unix)]
+            Some(indexed) => {
+                let cut = indexed.execution_frontier();
+                (cut.domain, (cut.started_turns, cut.started_tools))
+            }
+            _ => (0, (0, 0)),
+        };
+        self.timeline
+            .events()
+            .iter()
+            .filter(|event| event.seq.get() >= before)
+            .fold(counts, |(turns, tools), event| match event.kind {
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. }) => {
+                    (turns.saturating_add(1), tools)
+                }
+                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started { .. }) => {
+                    (turns, tools.saturating_add(1))
+                }
+                _ => (turns, tools),
+            })
+    }
+}
+
 impl OpenedSession {
     pub(crate) fn directory(&self) -> &super::ContainedDirectory {
         &self.directory
@@ -333,12 +392,45 @@ impl OpenedSession {
         self.validate_timeline_evidence(timeline_id, timeline, history)
     }
 
+    pub(crate) fn validated_child_result(
+        &self,
+        parent_timeline_id: &str,
+        spawn_seq: chat_state::EventSeq,
+        spawn: &chat_state::SubagentSpawnEvent,
+        terminal: &chat_state::SubagentTerminalEvent,
+    ) -> io::Result<chat_state::SubagentResultEvent> {
+        let invalid = |error| io::Error::new(io::ErrorKind::InvalidData, error);
+        #[cfg(unix)]
+        if let Some(reference) = terminal.result_ref.as_ref()
+            && let Some((seed, result)) =
+                working_snapshot::read_child_result(self, reference.first_seq)?
+        {
+            let chat_state::TimelineEventKind::SubagentSeed(seed) = seed.kind else {
+                return Err(invalid(chat_state::TimelineError::MissingSubagentSeed));
+            };
+            seed.validate_spawn_link(parent_timeline_id, spawn_seq, spawn)
+                .map_err(invalid)?;
+            return terminal
+                .validate_result_fact(spawn, &result)
+                .cloned()
+                .map_err(invalid);
+        }
+        self.validated_timeline(&spawn.child_session_id)?
+            .timeline
+            .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
+            .cloned()
+            .map_err(invalid)
+    }
+
     fn validate_timeline_evidence(
         &self,
         timeline_id: &str,
         timeline: Timeline,
         mut history: crate::session::history::HistorySnapshot,
     ) -> io::Result<ValidatedTimeline> {
+        if history.indexed.is_none() {
+            crate::session::persistence::latest_model_selection(timeline.events())?;
+        }
         history.validate(&timeline)?;
         history.load_notices(&self.directory, &timeline, timeline_id)?;
         let _timer = crate::instrumentation_timer!("session.load.timeline_evidence");
@@ -346,7 +438,34 @@ impl OpenedSession {
             &self.directory,
             &timeline,
         )?;
-        let sidebands = self.sideband_ledgers(timeline_id, &timeline)?;
+        let sidebands = match &history.indexed {
+            Some(index) => {
+                let mut required = std::collections::BTreeMap::new();
+                let resident = timeline.events().iter().filter_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Sideband(spawn) => Some(spawn.sideband_id.as_str()),
+                    _ => None,
+                }).collect::<std::collections::BTreeSet<_>>();
+                for event in timeline.events() {
+                    let Some(crate::coordination::InquiryEvent::Incoming { audit, .. }) =
+                        crate::coordination::InquiryEvent::from_timeline(event).map_err(io::Error::other)?
+                    else { continue; };
+                    let Some(proof) = audit.answer_context.filter(|proof| proof.target_session_id == timeline_id)
+                    else { continue; };
+                    let id = proof.result_ref.timeline_id;
+                    if !resident.contains(id.as_str()) && !required.contains_key(&id)
+                        && let Some(spawn) = index.sideband_spawn(&id)?
+                        && timeline.event(spawn.seq).is_none()
+                    {
+                        required.insert(id, spawn);
+                    }
+                }
+                let spawns = required.into_values().collect::<Vec<_>>();
+                JsonlStorageAdapter::read_sideband_ledgers_with_spawns(
+                    &self.directory, timeline_id, &timeline, &spawns,
+                )?
+            }
+            None => self.sideband_ledgers(timeline_id, &timeline)?,
+        };
         Ok(ValidatedTimeline {
             history,
             timeline,
@@ -617,8 +736,6 @@ impl OpenedSession {
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
             unconsumed_skill_load_ids: timeline.unconsumed_skill_load_ids(),
-            direct_user_inputs: timeline.direct_user_permission_evidence(),
-            permission_context: timeline.permission_classifier_context(),
             active_control_contexts: timeline.active_control_contexts(),
         })
     }
@@ -647,6 +764,29 @@ impl Default for JsonlStorageAdapter {
     }
 }
 impl JsonlStorageAdapter {
+    #[cfg(unix)]
+    pub(crate) fn migrate_working_history(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> io::Result<()> {
+        let mut candidates = self.scan_opened_sessions(None, |opened| opened)?;
+        candidates.sort_by_key(|opened| {
+            let summary = opened.summary();
+            std::cmp::Reverse(summary.last_active_at.unwrap_or(summary.updated_at))
+        });
+        for opened in candidates {
+            if cancel.is_cancelled() {
+                break;
+            }
+            if let Err(error) = working_snapshot::migrate(self, &opened, cancel)
+                && error.kind() != io::ErrorKind::Interrupted
+            {
+                tracing::debug!(%error, session_id = %opened.summary().info.id, "working history migration skipped");
+            }
+        }
+        Ok(())
+    }
+
     /// Claim this session's exclusive writer epoch before reading any mutable
     /// projection. The same adapter is subsequently moved into the
     /// persistence actor, so the lease covers replay, reconciliation, and all
@@ -659,6 +799,7 @@ impl JsonlStorageAdapter {
         self.load_light_data(info, true, false).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn load_session_for_write_with_indexed_history(
         &self,
         info: &Info,
@@ -667,11 +808,128 @@ impl JsonlStorageAdapter {
         self.load_light_data(info, true, true).await
     }
 
+    /// Admit a production writer without waiting for a legacy index build.
+    pub(crate) async fn resume_session_with_indexed_history(
+        &self,
+        info: &Info,
+    ) -> io::Result<super::PersistedDataLight> {
+        self.ensure_writer_lease(info)?;
+        self.load_light_data_with_migration(info, true, true, true)
+            .await
+    }
+
+    /// Observe an execution boundary under a temporary writer lease so an
+    /// indexed open can recover its derived database without racing a writer.
+    /// Only the eventual adopter may reconcile or append session facts.
+    pub(crate) async fn observe_execution_timeline(&self, info: &Info) -> io::Result<Timeline> {
+        let storage = self.clone();
+        let info = info.clone();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                let cached_index = storage
+                    .timeline_prefix_state(&info)?
+                    .lock()
+                    .map_err(|_| io::Error::other("Timeline prefix cache poisoned"))?
+                    .as_ref()
+                    .and_then(|prefix| prefix.indexed.clone());
+                if let Some(indexed) = cached_index {
+                    let opened = storage.open_session_for_observation(&info)?;
+                    let directory = opened.directory();
+                    let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+                    let path = directory.display_path().join(name);
+                    let _lock = Self::lock_append_contained(directory, name, &path)?;
+                    let mut file = directory.open_regular(name, "mandatory Timeline ledger")?;
+                    let file_len = file.metadata()?.len();
+                    let complete_len = Self::timeline_complete_len(&mut file, file_len)?;
+                    if let Some((validated, _)) =
+                        working_snapshot::load(&opened, &mut file, complete_len, &path, Some(indexed))?
+                    {
+                        return Ok(validated.timeline);
+                    }
+                }
+            }
+            #[cfg(unix)]
+            if storage.try_acquire_writer_lease(&info)? {
+                let opened = storage.open_session(&info)?;
+                let directory = opened.directory();
+                let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+                let path = directory.display_path().join(name);
+                let result = (|| {
+                    let _lock = Self::lock_append_contained(directory, name, &path)?;
+                    let mut file = directory.open_regular(name, "mandatory Timeline ledger")?;
+                    let file_len = file.metadata()?.len();
+                    let complete_len = Self::timeline_complete_len(&mut file, file_len)?;
+                    working_snapshot::load(&opened, &mut file, complete_len, &path, None)
+                })()?;
+                if let Some((validated, _)) = result {
+                    return Ok(validated.timeline);
+                }
+                return opened
+                    .validated_timeline(info.id.0.as_ref())
+                    .map(|validated| validated.timeline);
+            }
+            storage
+                .open_session_for_observation(&info)?
+                .validated_timeline(info.id.0.as_ref())
+                .map(|validated| validated.timeline)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    /// Read a child while using an already-published working index only when
+    /// this adapter can hold its writer lease. This path never creates or
+    /// repairs an index; a resident writer therefore uses dense validation.
+    pub(crate) fn validated_timeline_with_published_index_by_id(
+        &self,
+        timeline_id: &str,
+    ) -> io::Result<Option<(Summary, ValidatedTimeline)>> {
+        let Some(observed) = self.open_session_by_id_shared_read(timeline_id)? else {
+            return Ok(None);
+        };
+        let info = observed.summary().info.clone();
+        let summary = observed.summary().clone();
+        drop(observed);
+        #[cfg(unix)]
+        if self.try_acquire_writer_lease(&info)? {
+            let opened = self.open_session(&info)?;
+            let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+            let path = opened.directory().display_path().join(name);
+            let _lock = Self::lock_append_contained(opened.directory(), name, &path)?;
+            let mut file = opened.directory().open_regular(name, "mandatory Timeline ledger")?;
+            let file_len = file.metadata()?.len();
+            let complete_len = Self::timeline_complete_len(&mut file, file_len)?;
+            if let Some((validated, _)) =
+                working_snapshot::load(&opened, &mut file, complete_len, &path, None)?
+            {
+                return Ok(Some((summary, validated)));
+            }
+            return opened
+                .validated_timeline(timeline_id)
+                .map(|validated| Some((summary, validated)));
+        }
+        self.open_session_for_observation(&info)?
+            .validated_timeline(timeline_id)
+            .map(|validated| Some((summary, validated)))
+    }
+
     async fn load_light_data(
         &self,
         info: &Info,
         restore_for_write: bool,
         indexed_history: bool,
+    ) -> io::Result<super::PersistedDataLight> {
+        self.load_light_data_with_migration(info, restore_for_write, indexed_history, false)
+            .await
+    }
+
+    async fn load_light_data_with_migration(
+        &self,
+        info: &Info,
+        restore_for_write: bool,
+        indexed_history: bool,
+        background_migration: bool,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
         let opened = {
@@ -683,17 +941,22 @@ impl JsonlStorageAdapter {
             }
         };
         let summary = opened.summary().clone();
-        let (validated, prefix) = {
+        let (validated, prefix, migration) = {
             let storage = self.clone();
             let opened = opened.clone();
             let info = info.clone();
             tokio::task::spawn_blocking(move || {
                 if restore_for_write {
-                    storage.load_validated_writer_timeline(&opened, &info, indexed_history)
+                    storage.load_validated_writer_timeline(
+                        &opened,
+                        &info,
+                        indexed_history,
+                        background_migration,
+                    )
                 } else {
                     opened
                         .validated_timeline(info.id.0.as_ref())
-                        .map(|validated| (validated, None))
+                        .map(|validated| (validated, None, None))
                 }
             })
             .await
@@ -727,12 +990,28 @@ impl JsonlStorageAdapter {
             crate::session::announcement_state::AnnouncementState::latest_from_timeline(
                 timeline.events(),
             )?;
-        let workflow_runs = self.load_workflow_runs_sync(info, &timeline, opened.directory())?;
+        let workflow_runs = if restore_for_write {
+            self.load_execution_workflow_runs_sync(info, &timeline, opened.directory())?
+        } else {
+            self.load_workflow_runs_sync(info, &timeline, opened.directory(), false)?
+        };
         // Publish only after every required load validation has succeeded. No
         // parent Timeline write occurs in the reconciliation steps above.
         if let Some(prefix) = prefix {
             self.install_validated_writer_prefix(&opened, info, prefix)?;
         }
+        #[cfg(unix)]
+        if let Some(migration) = migration {
+            let owner = std::sync::Arc::downgrade(&self.writer_leases);
+            let state = self.timeline_prefix_state(info)?;
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = migration.publish_for_writer(&opened, &state, &owner) {
+                    tracing::debug!(%error, session_id = %opened.summary().info.id, "legacy working history migration skipped");
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        let _ = migration;
         let mut summary = summary;
         summary.num_messages = history.display_record_count();
         let result = super::PersistedDataLight {
@@ -759,14 +1038,19 @@ impl JsonlStorageAdapter {
         opened: &OpenedSession,
         info: &Info,
         indexed_history: bool,
-    ) -> io::Result<(ValidatedTimeline, Option<LedgerPrefix>)> {
+        background_migration: bool,
+    ) -> io::Result<(
+        ValidatedTimeline,
+        Option<LedgerPrefix>,
+        Option<working_snapshot::LegacyMigration>,
+    )> {
         // Unix stamps carry device/inode/change time. Other platforms retain
         // the original full writer verification rather than borrowing a
         // prefix without equivalent file identity evidence.
         #[cfg(not(unix))]
         {
-            let _ = indexed_history;
-            return Ok((opened.validated_timeline(&info.id.to_string())?, None));
+            let _ = (indexed_history, background_migration);
+            return Ok((opened.validated_timeline(&info.id.to_string())?, None, None));
         }
         #[cfg(unix)]
         {
@@ -786,27 +1070,44 @@ impl JsonlStorageAdapter {
                         error
                     }
                 })?;
+            let cached = self
+                .timeline_prefix_state(info)?
+                .lock()
+                .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?
+                .as_ref()
+                .and_then(|prefix| prefix.indexed.clone());
             let mut references = Vec::new();
             let (events, history, mut prefix) = {
                 let _timer = crate::instrumentation_timer!("session.load.timeline_read_decode");
                 let file_len = file.metadata()?.len();
                 let complete_len = Self::timeline_complete_len(&mut file, file_len)?;
                 if indexed_history {
-                    if let Some((validated, prefix)) =
-                        working_snapshot::load(opened, &mut file, complete_len, &path)?
-                    {
-                        return Ok((validated, Some(prefix)));
+                    if let Some((validated, prefix)) = working_snapshot::load(
+                        opened,
+                        &mut file,
+                        complete_len,
+                        &path,
+                        cached.clone(),
+                    )? {
+                        return Ok((validated, Some(prefix), None));
                     }
                     Self::read_timeline_prefix_with_index(
                         &mut file,
                         complete_len,
                         &path,
-                        Some(|record: &crate::session::history::JournalRecord, reference| {
-                            let entry = working_snapshot::IndexedRecord::new(record, reference);
-                            let retained = entry.is_retained();
-                            references.push(entry);
-                            retained
-                        }),
+                        Some(
+                            |record: &crate::session::history::JournalRecord, reference| {
+                                let entry = working_snapshot::IndexedRecord::new(record, reference);
+                                let retained = entry.needs_legacy_fold()
+                                    || (background_migration
+                                        && matches!(
+                                            record.fact,
+                                            crate::session::history::JournalFact::Presentation { .. }
+                                        ));
+                                references.push(entry);
+                                Ok(retained)
+                            },
+                        ),
                     )?
                 } else {
                     Self::read_timeline_prefix(&mut file, complete_len, &path)?
@@ -816,11 +1117,15 @@ impl JsonlStorageAdapter {
                 let _timer = crate::instrumentation_timer!("session.load.timeline_fold");
                 let domain_frontier = chat_state::EventSeq::new(prefix.state.events);
                 if indexed_history {
-                    Timeline::from_indexed_prefix(events, domain_frontier, prefix.state.first_domain_at_ms)
+                    Timeline::from_indexed_prefix(
+                        events,
+                        domain_frontier,
+                        prefix.state.first_domain_at_ms,
+                    )
                 } else {
                     Timeline::from_events(events)
                 }
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
             };
             let mut validated =
                 opened.validate_timeline_evidence(&info.id.to_string(), timeline, history)?;
@@ -829,18 +1134,41 @@ impl JsonlStorageAdapter {
                     opened.directory_handle(),
                     &mut file,
                     &mut prefix,
+                    cached,
                 )?;
             }
-            if indexed_history && references.iter().any(|entry| !entry.is_retained()) {
+            if indexed_history {
                 // A rewind can invalidate older notices. Preserve the dense
                 // branch projection until this dependency is indexed too.
-                let supported = validated.timeline.history_branch().is_none()
-                    && !validated.history.sources.iter().any(working_snapshot::is_rewind_marker);
+                let supported = !validated.timeline.has_rewound()
+                    && !validated.timeline.events().iter().any(|event| {
+                        matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::ImageProjection(_)
+                        )
+                    })
+                    && !validated
+                        .history
+                        .sources
+                        .iter()
+                        .any(working_snapshot::is_rewind_marker);
+                if background_migration {
+                    if supported {
+                        let migration =
+                            working_snapshot::LegacyMigration::new(directory, &prefix, references)?;
+                        return Ok((validated, Some(prefix), Some(migration)));
+                    }
+                    return Ok((
+                        opened.validated_timeline(info.id.0.as_ref())?,
+                        Some(prefix),
+                        None,
+                    ));
+                }
                 let indexed = if supported {
                     working_snapshot::publish(
                         opened.directory_handle(),
                         info.id.0.as_ref(),
-                        &file,
+                        &mut file,
                         &prefix,
                         &references,
                     )?
@@ -848,13 +1176,20 @@ impl JsonlStorageAdapter {
                     None
                 };
                 if let Some(indexed) = indexed {
-                    validated.history.indexed = Some(indexed.clone());
-                    prefix.indexed = Some(indexed);
+                    if let Some((hydrated, writer_prefix)) =
+                        working_snapshot::load(opened, &mut file, prefix.len, &path, Some(indexed))?
+                    {
+                        return Ok((hydrated, Some(writer_prefix), None));
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "new working publication cannot be hydrated",
+                    ));
                 } else {
                     validated = opened.validated_timeline(info.id.0.as_ref())?;
                 }
             }
-            Ok((validated, Some(prefix)))
+            Ok((validated, Some(prefix), None))
         }
     }
 
@@ -1029,8 +1364,6 @@ impl JsonlStorageAdapter {
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
             unconsumed_skill_load_ids: timeline.unconsumed_skill_load_ids(),
-            direct_user_inputs: timeline.direct_user_permission_evidence(),
-            permission_context: timeline.permission_classifier_context(),
             active_control_contexts: timeline.active_control_contexts(),
         })
     }
@@ -1244,49 +1577,62 @@ impl JsonlStorageAdapter {
         parent_timeline_id: &str,
         parent: &chat_state::Timeline,
     ) -> io::Result<super::SidebandLedgers> {
+        Self::read_sideband_ledgers_with_spawns(session, parent_timeline_id, parent, &[])
+    }
+
+    fn read_sideband_ledgers_with_spawns(
+        session: &super::ContainedDirectory,
+        parent_timeline_id: &str,
+        parent: &chat_state::Timeline,
+        extra_spawns: &[chat_state::TimelineEvent],
+    ) -> io::Result<super::SidebandLedgers> {
         let mut ledgers = super::SidebandLedgers::new();
         let sideband_ids = parent
             .events()
             .iter()
+            .chain(extra_spawns)
             .filter_map(|event| match &event.kind {
                 chat_state::TimelineEventKind::Sideband(spawn) => Some(spawn.sideband_id.clone()),
                 _ => None,
             })
             .collect::<std::collections::BTreeSet<_>>();
         for sideband_id in sideband_ids {
-            chat_state::validate_sideband_id(&sideband_id)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let sideband = match session.open_relative(
-                &Path::new(super::SIDEBANDS_DIR).join(&sideband_id),
-                "sideband entity directory",
-                false,
-            ) {
-                Ok(sideband) => sideband,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            let component = format!("Sideband schema for {sideband_id}");
-            let events = match Self::read_versioned_jsonl_from_directory::<chat_state::SidebandEvent>(
-                &sideband,
-                std::ffi::OsStr::new(super::TIMELINE_FILE),
-                "sideband Timeline ledger",
-                super::MAX_JSONL_ENTRY_BYTES,
-                &component,
-                u64::from(chat_state::SIDEBAND_SCHEMA_VERSION),
-            ) {
-                Ok(events) => events,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            // A zero-length file can be left only before request seq 0 commits;
-            // it is not a ledger fact and is therefore omitted from mirrors.
-            if events.is_empty() {
-                continue;
+            if let Some(events) = Self::read_sideband_ledger(session, &sideband_id)? {
+                ledgers.insert(sideband_id, events);
             }
-            ledgers.insert(sideband_id, events);
         }
-        super::validate_sideband_ledgers(parent_timeline_id, parent, &ledgers)?;
+        super::validate_sideband_ledgers_with_spawns(parent_timeline_id, parent, &ledgers, extra_spawns)?;
         Ok(ledgers)
+    }
+
+    fn read_sideband_ledger(
+        session: &super::ContainedDirectory,
+        sideband_id: &str,
+    ) -> io::Result<Option<Vec<chat_state::SidebandEvent>>> {
+        chat_state::validate_sideband_id(sideband_id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let sideband = match session.open_relative(
+            &Path::new(super::SIDEBANDS_DIR).join(sideband_id),
+            "sideband entity directory",
+            false,
+        ) {
+            Ok(sideband) => sideband,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let component = format!("Sideband schema for {sideband_id}");
+        match Self::read_versioned_jsonl_from_directory::<chat_state::SidebandEvent>(
+            &sideband,
+            std::ffi::OsStr::new(super::TIMELINE_FILE),
+            "sideband Timeline ledger",
+            super::MAX_JSONL_ENTRY_BYTES,
+            &component,
+            u64::from(chat_state::SIDEBAND_SCHEMA_VERSION),
+        ) {
+            Ok(events) => Ok((!events.is_empty()).then_some(events)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     async fn recover_interrupted_sidebands(
@@ -1780,16 +2126,17 @@ impl JsonlStorageAdapter {
     ) -> io::Result<()> {
         let event = event.clone();
         tokio::task::spawn_blocking(move || {
-            let _owner = writer_owner;
-            Self::append_journal_fact_sync(
+            let result = Self::append_journal_fact_sync(
                 &directory,
                 &prefix_state,
                 ledger::AppendFact::Domain(event),
                 durability,
                 #[cfg(test)]
-                _owner.timeline_sync_probe.as_deref(),
-            )
-            .map(|_| ())
+                writer_owner.timeline_sync_probe.as_deref(),
+            );
+            drop(prefix_state);
+            drop(writer_owner);
+            result.map(|_| ())
         })
         .await
         .map_err(io::Error::other)?
@@ -1969,7 +2316,12 @@ impl JsonlStorageAdapter {
             file,
             complete_len,
             path,
-            None::<fn(&crate::session::history::JournalRecord, working_index::RecordRef) -> bool>,
+            None::<
+                fn(
+                    &crate::session::history::JournalRecord,
+                    working_index::RecordRef,
+                ) -> io::Result<bool>,
+            >,
         )
     }
 
@@ -1977,7 +2329,12 @@ impl JsonlStorageAdapter {
         file: &mut std::fs::File,
         complete_len: u64,
         path: &Path,
-        index: Option<impl FnMut(&crate::session::history::JournalRecord, working_index::RecordRef) -> bool>,
+        index: Option<
+            impl FnMut(
+                &crate::session::history::JournalRecord,
+                working_index::RecordRef,
+            ) -> io::Result<bool>,
+        >,
     ) -> io::Result<(
         Vec<chat_state::TimelineEvent>,
         crate::session::history::HistorySnapshot,
@@ -2017,15 +2374,17 @@ impl JsonlStorageAdapter {
             &mut file,
             bytes,
             &directory.display_path().join(name),
-            Some(|record: &crate::session::history::JournalRecord, reference| {
-                references.push(working_snapshot::IndexedRecord::new(record, reference));
-                false
-            }),
+            Some(
+                |record: &crate::session::history::JournalRecord, reference| {
+                    references.push(working_snapshot::IndexedRecord::new(record, reference));
+                    Ok(false)
+                },
+            ),
         )?;
         working_snapshot::publish(
             std::sync::Arc::new(directory.try_clone()?),
             session_id,
-            &file,
+            &mut file,
             &prefix,
             &references,
         )?;
@@ -3732,6 +4091,26 @@ impl JsonlStorageAdapter {
         self.ensure_writer_lease(info)
     }
 
+    pub(crate) async fn load_recovery_writer(
+        &self,
+        opened: &OpenedSession,
+    ) -> io::Result<ValidatedTimeline> {
+        let storage = self.clone();
+        let opened = opened.clone();
+        tokio::task::spawn_blocking(move || {
+            let info = &opened.summary().info;
+            storage.ensure_writer_lease(info)?;
+            let (validated, prefix, _) =
+                storage.load_validated_writer_timeline(&opened, info, true, true)?;
+            if let Some(prefix) = prefix {
+                storage.install_validated_writer_prefix(&opened, info, prefix)?;
+            }
+            Ok(validated)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     pub(crate) async fn sync_recovery_prefix(&self, info: &Info) -> io::Result<()> {
         self.ensure_writer_lease(info)?;
         let directory = self.bound_session_directory(info)?;
@@ -4616,163 +4995,222 @@ impl JsonlStorageAdapter {
         info: &Info,
         timeline: &Timeline,
         session: &super::ContainedDirectory,
+        execution_only: bool,
     ) -> io::Result<Vec<crate::session::workflow::store::RestoredWorkflowRun>> {
         use crate::session::workflow::store::{
             MAX_RESTORED_WORKFLOW_RUNS, MAX_WORKFLOW_ARGS_BYTES, MAX_WORKFLOW_MANIFEST_BYTES,
         };
-        let run_ids = timeline
-            .events()
-            .iter()
-            .rev()
-            .filter_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
-                    run_id,
-                    ..
-                }) => Some(run_id.as_str()),
-                _ => None,
-            });
+        let mut before = timeline.next_seq();
         let mut restored = Vec::new();
-        // Validate newest candidates first, but count only successfully restored
-        // runs toward the cap. Invalid/cleared/missing sidecars must not crowd
-        // out an older valid run. Reverse again below so callers retain Timeline
-        // order.
-        for run_id in run_ids {
-            let lifecycle = timeline.workflow_lifecycle(run_id).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Workflow Timeline spawn has no lifecycle projection: {run_id}"),
-                )
-            })?;
-            let run_relative = Path::new("workflows").join(run_id);
-            let run_dir =
-                match session.open_relative_shared_read(&run_relative, "Workflow run directory") {
+        let execution_spawns = execution_only.then(|| timeline.execution_workflow_spawns());
+        let mut execution_offset = 0;
+        // A missing or invalid sidecar does not consume a recent-list slot.
+        'pages: loop {
+            let spawns = if let Some(execution_spawns) = &execution_spawns {
+                let end =
+                    (execution_offset + MAX_RESTORED_WORKFLOW_RUNS).min(execution_spawns.len());
+                let page = execution_spawns[execution_offset..end].to_vec();
+                execution_offset = end;
+                page
+            } else {
+                timeline.workflow_spawns_before(before, MAX_RESTORED_WORKFLOW_RUNS)?
+            };
+            if spawns.is_empty() {
+                break;
+            }
+            for (seq, run_id) in &spawns {
+                before = *seq;
+                let run_id = run_id.as_str();
+                let run_relative = Path::new("workflows").join(run_id);
+                let run_dir = match session
+                    .open_relative_shared_read(&run_relative, "Workflow run directory")
+                {
                     Ok(run_dir) => run_dir,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
                 };
-            match run_dir.read_bounded(
-                std::ffi::OsStr::new("cleared"),
-                "Workflow cleared marker",
-                0,
-            ) {
-                Ok(_) => continue,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            let manifest_path = run_dir.display_path().join("state.json");
-            let mut corrupt_sidecar_fingerprint = None;
-            let sidecar = match run_dir.read_bounded(
-                std::ffi::OsStr::new("state.json"),
-                "Workflow manifest",
-                MAX_WORKFLOW_MANIFEST_BYTES,
-            ) {
-                Ok(bytes) => {
-                    match crate::session::workflow::store::decode_workflow_manifest(&bytes) {
-                        Ok(manifest) => Some(manifest),
-                        Err(error) => {
-                            corrupt_sidecar_fingerprint = Some(
-                                crate::session::workflow::store::WorkflowManifestFingerprint::of(
-                                    &bytes,
-                                ),
-                            );
-                            tracing::warn!(path = %manifest_path.display(), %error, "using the Timeline seed for an invalid Workflow manifest");
-                            None
+                match run_dir.read_bounded(
+                    std::ffi::OsStr::new("cleared"),
+                    "Workflow cleared marker",
+                    0,
+                ) {
+                    Ok(_) => continue,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                let lifecycle = timeline
+                    .exact_workflow_lifecycle(run_id)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Workflow Timeline spawn has no lifecycle projection: {run_id}"
+                            ),
+                        )
+                    })?;
+                let manifest_path = run_dir.display_path().join("state.json");
+                let mut corrupt_sidecar_fingerprint = None;
+                let sidecar = match run_dir.read_bounded(
+                    std::ffi::OsStr::new("state.json"),
+                    "Workflow manifest",
+                    MAX_WORKFLOW_MANIFEST_BYTES,
+                ) {
+                    Ok(bytes) => {
+                        match crate::session::workflow::store::decode_workflow_manifest(&bytes) {
+                            Ok(manifest) => Some(manifest),
+                            Err(error) => {
+                                corrupt_sidecar_fingerprint = Some(
+                                    crate::session::workflow::store::WorkflowManifestFingerprint::of(
+                                        &bytes,
+                                    ),
+                                );
+                                tracing::warn!(path = %manifest_path.display(), %error, "using the Timeline seed for an invalid Workflow manifest");
+                                None
+                            }
                         }
                     }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        tracing::warn!(path = %manifest_path.display(), "using the Timeline seed for a missing Workflow manifest");
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %manifest_path.display(),
+                            %error,
+                            "skipping inaccessible Workflow manifest"
+                        );
+                        continue;
+                    }
+                };
+                let resolution =
+                    crate::session::workflow::store::resolve_workflow_restore_manifest(
+                        run_id, &lifecycle, sidecar,
+                    )?;
+                if resolution.used_timeline_seed {
+                    tracing::warn!(path = %manifest_path.display(), "using the Timeline seed instead of Workflow sidecar progress");
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    tracing::warn!(path = %manifest_path.display(), "using the Timeline seed for a missing Workflow manifest");
-                    None
+                let manifest = resolution.manifest;
+                let scripts = match run_dir.open_relative(
+                    Path::new("scripts"),
+                    "Workflow scripts directory",
+                    false,
+                ) {
+                    Ok(scripts) => scripts,
+                    Err(error) => {
+                        tracing::warn!(%run_id, %error, "skipping workflow with missing scripts directory");
+                        continue;
+                    }
+                };
+                let script_name = format!("{:04}.rhai", manifest.script_revision);
+                let script_path = scripts.display_path().join(&script_name);
+                let script = match scripts
+                    .read_bounded(
+                        std::ffi::OsStr::new(&script_name),
+                        "Workflow immutable script",
+                        crate::session::workflow::registry::MAX_WORKFLOW_SOURCE_BYTES,
+                    )
+                    .and_then(|bytes| {
+                        String::from_utf8(bytes)
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                    }) {
+                    Ok(script) => script,
+                    Err(error) => {
+                        tracing::warn!(path = %script_path.display(), %error, "skipping workflow with missing immutable script");
+                        continue;
+                    }
+                };
+                if crate::session::workflow::store::workflow_script_hash(&script)
+                    != lifecycle.script_hash
+                {
+                    tracing::warn!(path = %script_path.display(), "skipping Workflow with an immutable script hash mismatch");
+                    continue;
                 }
-                Err(error) => {
+                let args_path = run_dir.display_path().join("args.json");
+                let args = match run_dir
+                    .read_bounded(
+                        std::ffi::OsStr::new("args.json"),
+                        "Workflow immutable args",
+                        MAX_WORKFLOW_ARGS_BYTES,
+                    )
+                    .and_then(|bytes| {
+                        serde_json::from_slice(&bytes)
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                    }) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        tracing::warn!(path = %args_path.display(), %error, "skipping workflow with missing immutable args");
+                        continue;
+                    }
+                };
+                if crate::session::workflow::store::workflow_args_hash(&args)?
+                    != lifecycle.args_hash
+                {
+                    tracing::warn!(path = %args_path.display(), "skipping Workflow with an immutable args hash mismatch");
+                    continue;
+                }
+                restored.push(crate::session::workflow::store::RestoredWorkflowRun {
+                    manifest,
+                    script,
+                    args,
+                    corrupt_sidecar_fingerprint,
+                });
+                if !execution_only && restored.len() == MAX_RESTORED_WORKFLOW_RUNS {
                     tracing::warn!(
-                        path = %manifest_path.display(),
-                        %error,
-                        "skipping inaccessible Workflow manifest"
+                        session_id = %info.id,
+                        limit = MAX_RESTORED_WORKFLOW_RUNS,
+                        "workflow restore cap reached; restoring the most recent valid Timeline-owned runs"
                     );
-                    continue;
+                    break 'pages;
                 }
-            };
-            let resolution = crate::session::workflow::store::resolve_workflow_restore_manifest(
-                run_id, &lifecycle, sidecar,
-            )?;
-            if resolution.used_timeline_seed {
-                tracing::warn!(path = %manifest_path.display(), "using the Timeline seed instead of Workflow sidecar progress");
-            }
-            let manifest = resolution.manifest;
-            let scripts = match run_dir.open_relative(
-                Path::new("scripts"),
-                "Workflow scripts directory",
-                false,
-            ) {
-                Ok(scripts) => scripts,
-                Err(error) => {
-                    tracing::warn!(%run_id, %error, "skipping workflow with missing scripts directory");
-                    continue;
-                }
-            };
-            let script_name = format!("{:04}.rhai", manifest.script_revision);
-            let script_path = scripts.display_path().join(&script_name);
-            let script = match scripts
-                .read_bounded(
-                    std::ffi::OsStr::new(&script_name),
-                    "Workflow immutable script",
-                    crate::session::workflow::registry::MAX_WORKFLOW_SOURCE_BYTES,
-                )
-                .and_then(|bytes| {
-                    String::from_utf8(bytes)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-                }) {
-                Ok(script) => script,
-                Err(error) => {
-                    tracing::warn!(path = %script_path.display(), %error, "skipping workflow with missing immutable script");
-                    continue;
-                }
-            };
-            if crate::session::workflow::store::workflow_script_hash(&script)
-                != lifecycle.script_hash
-            {
-                tracing::warn!(path = %script_path.display(), "skipping Workflow with an immutable script hash mismatch");
-                continue;
-            }
-            let args_path = run_dir.display_path().join("args.json");
-            let args = match run_dir
-                .read_bounded(
-                    std::ffi::OsStr::new("args.json"),
-                    "Workflow immutable args",
-                    MAX_WORKFLOW_ARGS_BYTES,
-                )
-                .and_then(|bytes| {
-                    serde_json::from_slice(&bytes)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-                }) {
-                Ok(args) => args,
-                Err(error) => {
-                    tracing::warn!(path = %args_path.display(), %error, "skipping workflow with missing immutable args");
-                    continue;
-                }
-            };
-            if crate::session::workflow::store::workflow_args_hash(&args)? != lifecycle.args_hash {
-                tracing::warn!(path = %args_path.display(), "skipping Workflow with an immutable args hash mismatch");
-                continue;
-            }
-            restored.push(crate::session::workflow::store::RestoredWorkflowRun {
-                manifest,
-                script,
-                args,
-                corrupt_sidecar_fingerprint,
-            });
-            if restored.len() == MAX_RESTORED_WORKFLOW_RUNS {
-                tracing::warn!(
-                    session_id = %info.id,
-                    limit = MAX_RESTORED_WORKFLOW_RUNS,
-                    "workflow restore cap reached; restoring the most recent valid Timeline-owned runs"
-                );
-                break;
             }
         }
         restored.reverse();
         Ok(restored)
+    }
+
+    fn load_execution_workflow_runs_sync(
+        &self,
+        info: &Info,
+        timeline: &Timeline,
+        session: &super::ContainedDirectory,
+    ) -> io::Result<Vec<crate::session::workflow::store::RestoredWorkflowRun>> {
+        self.load_workflow_runs_sync(info, timeline, session, true)
+    }
+
+    pub(crate) async fn load_workflow_run_history(
+        &self,
+        info: &Info,
+    ) -> io::Result<(
+        Vec<crate::session::workflow::store::RestoredWorkflowRun>,
+        std::collections::HashMap<String, chat_state::WorkflowLifecycle>,
+    )> {
+        let timeline = self.observe_execution_timeline(info).await?;
+        let opened = self.open_session_for_observation(info)?;
+        let session = opened.directory_handle();
+        let storage = self.clone();
+        let info = info.clone();
+        tokio::task::spawn_blocking(move || {
+            let runs = storage.load_workflow_runs_sync(
+                &info,
+                &timeline,
+                &session,
+                false,
+            )?;
+            let mut lifecycles = std::collections::HashMap::new();
+            for run in &runs {
+                let run_id = &run.manifest.state.run_id;
+                if let Some(lifecycle) = timeline
+                    .exact_workflow_lifecycle(run_id)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+                {
+                    lifecycles.insert(run_id.clone(), lifecycle);
+                }
+            }
+            Ok((runs, lifecycles))
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     /// Apply a typed [`SummaryPatch`](super::summary_write::SummaryPatch) to
     /// this session's `summary.json` under an exclusive sidecar lock, so the
@@ -4925,7 +5363,7 @@ impl JsonlStorageAdapter {
         repair: bool,
     ) -> io::Result<Summary> {
         let Some((model_id, reasoning_effort, _, _)) =
-            crate::session::persistence::latest_model_selection(timeline.events())?
+            crate::session::persistence::current_model_selection(timeline.events())?
         else {
             return Ok(summary);
         };
@@ -5280,6 +5718,16 @@ impl JsonlStorageAdapter {
 }
 #[async_trait]
 impl StorageAdapter for JsonlStorageAdapter {
+    async fn load_workflow_run_history(
+        &self,
+        info: &Info,
+    ) -> io::Result<(
+        Vec<crate::session::workflow::store::RestoredWorkflowRun>,
+        std::collections::HashMap<String, chat_state::WorkflowLifecycle>,
+    )> {
+        JsonlStorageAdapter::load_workflow_run_history(self, info).await
+    }
+
     async fn init_session(
         &self,
         info: &Info,
@@ -5496,7 +5944,8 @@ impl StorageAdapter for JsonlStorageAdapter {
             crate::session::announcement_state::AnnouncementState::latest_from_timeline(
                 timeline.events(),
             )?;
-        let workflow_runs = self.load_workflow_runs_sync(info, &timeline, opened.directory())?;
+        let workflow_runs =
+            self.load_workflow_runs_sync(info, &timeline, opened.directory(), false)?;
         let rewind_points = Self::read_jsonl_from_directory::<RewindPoint>(
             opened.directory(),
             std::ffi::OsStr::new("rewind_points.jsonl"),

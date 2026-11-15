@@ -87,6 +87,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -143,6 +144,7 @@ fn session_loaded_models_do_not_overwrite_new_session_default() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -178,6 +180,7 @@ fn session_reload_reissues_matching_deferred_behavior_to_clear_confirmation() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -216,6 +219,7 @@ fn session_reload_reissues_unresolved_deferred_behavior_before_prompt_drain() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -331,6 +335,7 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -339,6 +344,99 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
         !agent.scrollback.has_running_entries(),
         "replayed running entries must be finished when no turn is adopted"
     );
+}
+
+#[test]
+fn deferred_latest_history_can_fail_and_retry_after_live_input() {
+    let mut app = test_app();
+    dispatch(Action::LoadSession("deferred-page".into(), None), &mut app);
+    let id = AgentId(0);
+    let session_id = acp::SessionId::new("deferred-page");
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: session_id.clone(),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            foreground: None,
+            descendant_ownership: None,
+            older_history_cursor: None,
+            latest_history_cursor: Some("latest".into()),
+        }),
+        &mut app,
+    );
+    let Some((binding_epoch, request_id)) = effects.iter().find_map(|effect| match effect {
+        Effect::ReadHistoryPage {
+            binding_epoch,
+            request_id,
+            cursor,
+            ..
+        } if cursor == "latest" => Some((*binding_epoch, *request_id)),
+        _ => None,
+    }) else {
+        panic!("runtime readiness must schedule a separate page read");
+    };
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert!(!agent.session.loading_replay);
+    let live = agent.scrollback.push_block(RenderBlock::notice("live"));
+    let submission = dispatch(
+        Action::SubmitFollowUp("first live request".into()),
+        &mut app,
+    );
+    assert!(submission.iter().any(|effect| matches!(effect,
+        Effect::SendPrompt { text, .. } if text == "first live request"
+    )));
+    dispatch(
+        Action::TaskComplete(TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch,
+            request_id,
+            older_cursor: None,
+            result: Err("page read failed".into()),
+        }),
+        &mut app,
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert!(!agent.session.loading_replay);
+    assert!(agent.history_is_partial);
+    let mut effects = Vec::new();
+    agent.request_history_page(&mut effects);
+    let [
+        Effect::ReadHistoryPage {
+            request_id, cursor, ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("failed latest page must be retryable");
+    };
+    assert_eq!(cursor, "latest");
+    let historical = acp::SessionNotification::new(
+        session_id.clone(),
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("plan"),
+        )),
+    );
+    let live_index = agent.scrollback.index_of_id(live).unwrap();
+    dispatch(
+        Action::TaskComplete(TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id,
+            binding_epoch,
+            request_id: *request_id,
+            older_cursor: Some("older".into()),
+            result: Ok(vec![shell::session::storage::SessionUpdate::Acp(Box::new(
+                historical,
+            ))]),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(!agent.session.plan_mode_active);
+    assert!(!agent.history_latest_pending);
+    assert_eq!(agent.history_page_cursor.as_deref(), Some("older"));
+    assert_eq!(agent.scrollback.index_of_id(live), Some(live_index + 1));
 }
 /// Cross-cwd resume anchors the agent cwd to the resolved origin cwd.
 #[test]
@@ -393,6 +491,7 @@ fn session_loaded_purges_replay_transient() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -418,6 +517,7 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -475,6 +575,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -514,6 +615,7 @@ fn session_loaded_without_restore_no_summary() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -560,6 +662,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -652,6 +755,7 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -723,6 +827,7 @@ fn session_loaded_combines_pending_first_prompt_before_typed_prompt() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -833,6 +938,7 @@ fn loading_replay_ignores_input_and_preserves_existing_draft_until_session_loade
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -916,6 +1022,7 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
@@ -1019,6 +1126,7 @@ fn session_loaded_clears_stale_running_entries() {
             foreground: None,
             descendant_ownership: None,
             older_history_cursor: None,
+            latest_history_cursor: None,
         }),
         &mut app,
     );
