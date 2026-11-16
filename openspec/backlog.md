@@ -4,7 +4,7 @@
 
 ## 2026-11-17 恢复修复收尾（已关闭）
 
-- **全仓 Rustfmt 基线**：固定Rustfmt1.93.1的全仓检查已通过，此前28个路径的格式差异已收敛，机械整理保持非格式token数量。见[发布验证](changes/prepare-release-v2-6-15/verification.md)。
+- **全仓 Rustfmt 基线**：固定Rustfmt1.93.1的全仓检查已通过，此前28个路径的格式差异已收敛，机械整理保持非格式token数量。见[发布验证](changes/archive/2026-11-17-prepare-release-v2-6-15/verification.md)。
 - **条目后 gap 的滚动锚点往返**：由Scrollback布局owner单独修复；gap偏移随原entry末尾保位，正文逻辑行仍夹紧。三个新增回归覆盖同几何、实际历史前缀安装和双向换宽，连同原正文及follow保护通过固定1.93.1的Pager7719项全库。见[gap验收](changes/archive/2026-11-17-fix-scrollback-gap-anchor/verification.md)。
 
 ## 2026-11-07 发布前范围收拢

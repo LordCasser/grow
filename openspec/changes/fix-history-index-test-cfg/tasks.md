@@ -1,0 +1,3 @@
+- [x] 1.1 对齐测试helper与Unix索引字段/测试mod的cfg，保持非Unix运行时不变。
+- [x] 1.2 在1.93.1验证Unix原generation回归和静态检查。
+- [ ] 1.3 核对新候选Windows storage/native门禁通过，记录并归档。

@@ -1,0 +1,5 @@
+- [x] 1.1 闭合仅Unix测试helper的cfg修复并同步2.6.16本地包版本、notes和旧候选状态。
+- [ ] 1.2 完成相关本地检查，提交、annotated tag和validate-release.sh。
+- [ ] 2.1 推送并执行官方全平台publish流程，确认所有同SHA门禁通过。
+- [ ] 2.2 核对公开release、十archive、checksum/attestation与原生version/help。
+- [ ] 3.1 更新文档、归档当前发布与测试修复，校验并保持main/工作树干净。

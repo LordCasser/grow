@@ -6,6 +6,6 @@
 
 ## 2. 正式发布
 
-- [ ] 2.1 提交干净候选，创建annotated v2.6.15并通过validate-release.sh。
-- [ ] 2.2 推送main/tag并执行官方所有平台和publish=true流程，等待同SHA门禁与构建。
-- [ ] 2.3 核对公开release、十平台资产、checksum/attestation和原生version/help，记录结果并保持工作树干净。
+- [x] 2.1 提交干净候选，创建annotated v2.6.15并通过validate-release.sh。
+- [x] 2.2 执行官方全平台流程并记录Windows门禁失败；发行被阻止，剩余运行已取消。
+- [x] 2.3 确认无公开release，保留已推送tag，转交下一个可用patch v2.6.16并归档此失败候选。

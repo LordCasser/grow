@@ -877,7 +877,7 @@ impl IndexedHistory {
 
     /// Tests prove a consecutive consume extends the published generation
     /// instead of rebuilding ranks.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn timeline_generation(&self, bytes: u64) -> io::Result<u64> {
         self.tools.timeline_generation(bytes)
     }

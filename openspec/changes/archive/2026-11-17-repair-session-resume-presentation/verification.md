@@ -4,7 +4,7 @@
 
 调查日期：2026-11-16；最终本地归档日期：2026-11-17。调查与实现基线为 `733d2c72ed0436dc27f050ee2149dd41432be552`。四项功能均已完成代码 review、模块回归和适用的进程级验收；Git 未提交、未发布。下方「方案与实施过程」保留曾经失败和修订的原因，其中的“待验证”只描述当时状态，最终结果以本节为准。
 
-该功能验收阶段默认PATH使用Homebrew Rust/Cargo1.99.1，测试线程按开发指南设置 `RUST_MIN_STACK=16777216`；正式1.93.1工具链的发布前复核由后续 `prepare-release-v2-6-15` 记录。真实终端测试显式设置 `PAGER_BINARY="$PWD/target/debug/grow"`，使用本工作树构建的 CLI；没有以旧发行版替代。
+该功能验收阶段默认PATH使用Homebrew Rust/Cargo1.99.1，测试线程按开发指南设置 `RUST_MIN_STACK=16777216`；正式1.93.1工具链的发布前复核由后续 `prepare-release-v2-6-15` 归档记录；该候选未通过Windows测试编译门禁，正式发行由 `prepare-release-v2-6-16` 承接。真实终端测试显式设置 `PAGER_BINARY="$PWD/target/debug/grow"`，使用本工作树构建的 CLI；没有以旧发行版替代。
 
 | 验收层 | 最终结果 | 证明的边界 |
 | --- | --- | --- |

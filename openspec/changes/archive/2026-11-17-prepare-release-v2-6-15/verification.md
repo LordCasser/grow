@@ -26,4 +26,16 @@
 
 ## 正式发布
 
-候选本地验收已通过；提交、tag、官方运行及资产结果将在实际完成后追加。
+- 正式候选提交`5f0a8bf92c5a1c13136f06be6902969fdedf8a5d`：Release Grow v2.6.15 with reliable session resume presentation。
+- 在干净已提交候选建立annotated `v2.6.15`，固定1.93.1执行`bash scripts/validate-release.sh v2.6.15`退出0，核对tag/HEAD/workspace/notes及十资产发布契约。
+- 使用显式HTTP/1.1原子推送main与tag成功，无force或历史重写。默认main dispatch所有平台组和publish=true。
+- [官方run43923085996](https://github.com/LordCasser/grow/actions/runs/43923085996) 已启动，headSha确认为上述完整SHA，event为workflow_dispatch；矩阵和输入检查成功。后续门禁、构建和公开资产以该运行完成事实为准。
+
+## 候选结论：未发布，转交v2.6.16
+
+官方Windows两个必需门禁在编译shell lib tests时均失败：working_snapshot.rs:882的timeline_generation仅有cfg(test)，却访问IndexedHistory在Unix才有的tools字段，错误E0609。两个caller测试均为cfg(all(test, unix))，这项macOS无法暴露的测试平台资格遗漏由fix-history-index-test-cfg单独闭合；不是授权忽略Windows测试的依据。
+
+- Windows native协调job133495510825和storage job133495510856的原始日志均确认相同编译错误；没有进入对应测试行为验收。
+- 已请求取消本次不再能发布的run，最终status=completed、conclusion=cancelled，两个失败job保留failure。其余取消项不计通过。
+- GitHub release-by-tag v2.6.15返回404，未产生公开或draft release。annotated tag仍指向5f0a8bf92，未删除、重打或force push。
+- 下一个未占用patch v2.6.16已确认tag不存在，将由prepare-release-v2-6-16重新执行完整正式门禁、构建和公开资产验收。本候选以失败尝试归档，不宣称正式发布完成。
