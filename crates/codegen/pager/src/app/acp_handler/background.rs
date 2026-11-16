@@ -76,13 +76,12 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         tracing::warn!("Failed to parse grow/task_backgrounded");
         return false;
     };
-    let replay =
-        NotificationMeta::from_json(notification.meta.as_ref().and_then(|meta| meta.as_object()))
-            .is_replay;
+    let meta =
+        NotificationMeta::from_json(notification.meta.as_ref().and_then(|meta| meta.as_object()));
     let Some((matched, active, agent)) = resolve_notif_agent(app, &notification.session_id) else {
         return false;
     };
-    if !replay
+    if !meta.is_replay
         && matches!(&matched, SessionMatch::Child(_))
         && !crate::app::subagent::ensure_subagent_child_replayed(
             agent,
@@ -91,12 +90,24 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
     {
         return active;
     }
+    // Paged full load replays the task lifecycle ahead of the transcript so
+    // the Tasks center restores even when a start lives in an unloaded body
+    // page. Only the central store is touched — the transcript body is owned
+    // by HistoryRow pagination.
+    if meta.is_task_state_only_replay() {
+        let Some(session) =
+            resolve_target_session(agent, matched, notification.session_id.0.as_ref())
+        else {
+            return false;
+        };
+        return apply_task_backgrounded_state(notification.update, session) && active;
+    }
     let Some((session, scrollback)) =
         resolve_target_view(agent, matched, notification.session_id.0.as_ref())
     else {
         return false;
     };
-    apply_task_backgrounded(notification.update, replay, session, scrollback) && active
+    apply_task_backgrounded(notification.update, meta.is_replay, session, scrollback) && active
 }
 
 /// Project one background start through the same path for live and child replay.
@@ -264,6 +275,106 @@ pub(crate) fn apply_task_backgrounded(
         bg.scrollback_entry_id = Some(entry_id);
     }
 
+    true
+}
+
+/// Borrow only the `AgentSession` addressed by a session match, mirroring
+/// [`resolve_target_view`]'s routing. The state-only replay path has no
+/// transcript to touch, so the scrollback half of the view is not borrowed.
+fn resolve_target_session<'a>(
+    agent: &'a mut AgentView,
+    matched: SessionMatch,
+    child_sid: &str,
+) -> Option<&'a mut AgentSession> {
+    if matches!(matched, SessionMatch::Child(_)) {
+        Some(&mut agent.subagent_views.get_mut(child_sid)?.session)
+    } else {
+        Some(&mut agent.session)
+    }
+}
+
+/// Paged-load replay of `TaskBackgrounded` (`isReplay` + `grow/taskStateOnly`):
+/// restore the Tasks-center row from the task-start fact without touching the
+/// transcript.
+///
+/// The body pages that carried this task's presentation are not installed by
+/// this path, so there is no scrollback block, no tracker interaction and no
+/// cursor/native update — `bg_tasks` / `bg_tool_call_to_task` are the only
+/// consumers. Existing rows win: a duplicate (or out-of-order) start must not
+/// reset a terminal row to `Running` or drop live output / kill state, and an
+/// unsettled row stays `Running` so the ordinary stale-reconciliation
+/// completion after load can finalize it. `restored_from_replay` keeps the
+/// tasks pane from treating the row as new activity and auto-opening.
+pub(super) fn apply_task_backgrounded_state(
+    update: GrowSessionUpdate,
+    session: &mut AgentSession,
+) -> bool {
+    let (tool_call_id, task_id, command, cwd, output_file, monitor_description, description) =
+        match update {
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id,
+                task_id,
+                command,
+                cwd,
+                output_file,
+                monitor_description,
+                description,
+            } => (
+                tool_call_id,
+                task_id,
+                command,
+                cwd,
+                output_file,
+                monitor_description,
+                description,
+            ),
+            _ => return false,
+        };
+
+    if session.bg_tasks.contains_key(&task_id) {
+        // Keep the row the client already owns (terminal status, live stdout,
+        // kill bookkeeping). Only the stdout routing key is refreshed.
+        session.bg_tool_call_to_task.insert(tool_call_id, task_id);
+        return false;
+    }
+
+    // Same monitor detection and description fallbacks as the scrollback
+    // path, minus the tracker/Execute sources the state-only path must not
+    // touch.
+    let monitor_prefix = command.strip_prefix("[monitor] ").map(str::to_string);
+    let is_monitor = monitor_description.is_some() || monitor_prefix.is_some();
+    let non_blank = |d: Option<String>| d.filter(|s| !s.trim().is_empty());
+    let description = non_blank(monitor_description)
+        .or_else(|| non_blank(monitor_prefix))
+        .or_else(|| non_blank(description));
+
+    session.bg_tasks.insert(
+        task_id.clone(),
+        BgTaskState {
+            task_id: task_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            command,
+            description,
+            cwd,
+            output_file,
+            status: BgTaskStatus::Running,
+            // Provisional until the paired completion syncs the snapshot's
+            // real start (same contract as the scrollback replay path).
+            start_time: std::time::SystemTime::now(),
+            end_time: None,
+            exit_code: None,
+            signal: None,
+            stdout: String::new(),
+            stdout_line_count: 0,
+            truncated: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            is_monitor,
+            restored_from_replay: true,
+        },
+    );
+    session.bg_tool_call_to_task.insert(tool_call_id, task_id);
     true
 }
 
@@ -532,6 +643,16 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     {
         return active;
     }
+    // Paged-load task-state replay settles the Tasks-center row from the
+    // snapshot alone; see [`apply_task_completed_state`].
+    if meta.is_task_state_only_replay() {
+        let Some(session) =
+            resolve_target_session(agent, matched, notification.session_id.0.as_ref())
+        else {
+            return false;
+        };
+        return apply_task_completed_state(notification.update, session) && active;
+    }
     let Some((session, scrollback)) =
         resolve_target_view(agent, matched, notification.session_id.0.as_ref())
     else {
@@ -692,4 +813,108 @@ pub(crate) fn apply_task_completed(
     scrollback.push_block(block);
 
     true
+}
+
+/// Paged-load replay of `TaskCompleted` (`isReplay` + `grow/taskStateOnly`):
+/// sync the Tasks-center terminal state from the settled snapshot without
+/// touching the transcript.
+///
+/// A still-`Running` row settles with the snapshot's real start/end/exit
+/// facts and its final stdout / truncation flag when the row holds none; a
+/// row that already reached a terminal status is kept as-is, so duplicate
+/// (or out-of-order) completions are idempotent and never roll history back.
+/// The shell projects the complete visible lifecycle in physical order, so a
+/// settlement always follows its paired `TaskBackgrounded` start: a
+/// completion without a restored row has no established task/tool-call
+/// identity to adopt and is dropped instead of fabricating a placeholder.
+/// Kill bookkeeping is cleared only by the settle itself — a pending kill is
+/// a live fact that a replayed start must never roll back.
+pub(super) fn apply_task_completed_state(
+    update: GrowSessionUpdate,
+    session: &mut AgentSession,
+) -> bool {
+    let task_snapshot = match update {
+        GrowSessionUpdate::TaskCompleted { task_snapshot, .. } => task_snapshot,
+        _ => return false,
+    };
+
+    // Same success rule as the scrollback path: a signal-only exit is a
+    // failure.
+    let success = task_snapshot.exit_code == Some(0)
+        || (task_snapshot.exit_code.is_none() && task_snapshot.signal.is_none());
+
+    // Description fallback mirroring the live unknown-task path: model label
+    // first, then the isolation-unwrapped `display_command` (monitor prefix
+    // stripped, blank / command-equal values ignored). Fills only blank row
+    // descriptions; a row that already has a label keeps it.
+    let non_blank = |d: Option<String>| d.filter(|s| !s.trim().is_empty());
+    let snapshot_description = non_blank(task_snapshot.description.clone()).or_else(|| {
+        task_snapshot.display_command.clone().and_then(|d| {
+            let stripped = d
+                .strip_prefix("[monitor] ")
+                .map(str::to_string)
+                .unwrap_or(d);
+            let trimmed = stripped.trim();
+            if trimmed.is_empty() || trimmed == task_snapshot.command.trim() {
+                None
+            } else {
+                Some(stripped)
+            }
+        })
+    });
+
+    let task_id = task_snapshot.task_id.clone();
+    let Some(bg_task) = session.bg_tasks.get_mut(&task_id) else {
+        // No restored start row: there is no task/tool-call identity to
+        // adopt, and inventing a placeholder would fake a correlation the
+        // wire never established.
+        tracing::debug!(
+            task_id = %task_snapshot.task_id,
+            "state-only task completion has no restored start row; dropped"
+        );
+        return false;
+    };
+
+    if bg_task.status != BgTaskStatus::Running {
+        return false;
+    }
+    bg_task.status = if success {
+        BgTaskStatus::Done
+    } else {
+        BgTaskStatus::Failed
+    };
+    bg_task.exit_code = task_snapshot.exit_code;
+    bg_task.signal = task_snapshot.signal.clone();
+    bg_task.start_time = task_snapshot.start_time;
+    bg_task.end_time = Some(
+        task_snapshot
+            .end_time
+            .unwrap_or_else(std::time::SystemTime::now),
+    );
+    bg_task.pending_kill = false;
+    bg_task.kill_requested_at = None;
+    apply_snapshot_stdout(bg_task, &task_snapshot);
+    if bg_task
+        .description
+        .as_ref()
+        .is_none_or(|d| d.trim().is_empty())
+        && let Some(d) = snapshot_description
+    {
+        bg_task.description = Some(d);
+    }
+    true
+}
+
+/// Fill the row's stdout from the settlement snapshot only when the row holds
+/// none, through [`BgTaskState::set_stdout`] so the trim cap, line-count
+/// cache and `truncated` invariant stay in sync. Retained non-empty live
+/// output wins — a settled snapshot must not overwrite output this client
+/// already holds — and `truncated` only ever ORs in, never clears.
+fn apply_snapshot_stdout(bg_task: &mut BgTaskState, task_snapshot: &tools::types::TaskSnapshot) {
+    if bg_task.stdout.is_empty() && !task_snapshot.output.is_empty() {
+        bg_task.set_stdout(task_snapshot.output.clone());
+    }
+    if task_snapshot.truncated {
+        bg_task.truncated = true;
+    }
 }

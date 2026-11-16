@@ -4728,6 +4728,82 @@ fn projection_forwarding_preserves_raw_acp_metadata_and_completion_semantics() {
 }
 
 #[test]
+fn paged_history_replays_only_task_state_and_drains_every_ordered_send() {
+    run_local_for_bridge_test(|| async {
+        use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+        use crate::session::history::{HistoryContent, HistoryFact, HistorySnapshot, HistorySource};
+        use crate::session::storage::{ContainedDirectory, SessionUpdate};
+        let session = acp::SessionId::new("paged-task-state");
+        let root = tempfile::tempdir().unwrap();
+        let cwd = AbsPathBuf::new(root.path().to_path_buf()).unwrap();
+        let directory = ContainedDirectory::open(root.path(), std::path::Path::new(""), "fixture", false).unwrap();
+        let start = SessionUpdate::Grow(Box::new(SessionNotification {
+            session_id: session.clone(),
+            update: GrowUpdate::TaskBackgrounded {
+                task_id: "task".into(), tool_call_id: "call".into(), command: "sleep 120".into(),
+                cwd: cwd.as_str().into(), output_file: "task.log".into(),
+                description: Some("background fixture".into()), monitor_description: None,
+            },
+            meta: None,
+        }));
+        let completion = SessionUpdate::Grow(Box::new(SessionNotification {
+            session_id: session.clone(),
+            update: GrowUpdate::TaskCompleted { task_snapshot: tools::types::TaskSnapshot {
+                task_id: "task".into(), command: "sleep 120".into(), display_command: None,
+                cwd: cwd.as_str().into(), start_time: std::time::SystemTime::UNIX_EPOCH,
+                end_time: Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(70)),
+                output: String::new(), output_file: "task.log".into(), truncated: false,
+                exit_code: None, signal: Some("signal 9".into()), completed: true, kind: Default::default(),
+                block_waited: false, explicitly_killed: false, owner_session_id: Some(session.to_string()),
+                goal_id: None, goal_definition_revision: None, description: None, is_backgrounded: true,
+            } },
+            meta: None,
+        }));
+        let mut history = HistorySnapshot::default();
+        history.sources.push(HistorySource::Presentation { at_ms: 0, fact: Box::new(HistoryFact::from_update(&start).unwrap().unwrap()) });
+        for _ in 0..140 {
+            history.sources.push(HistorySource::Presentation { at_ms: 1, fact: Box::new(HistoryFact {
+                meta: None,
+                content: HistoryContent::Assistant(acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("transcript body")))),
+            }) });
+        }
+        history.sources.push(HistorySource::Presentation { at_ms: 70_000, fact: Box::new(HistoryFact::from_update(&completion).unwrap().unwrap()) });
+        let timeline = chat_state::Timeline::default();
+        let mut agent = build_minimal_agent_for_tests();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.gateway = GatewaySender::new(tx);
+        let persist = serde_json::json!({"routing":"persist"});
+        let client = serde_json::json!(42);
+        let mut replay = Box::pin(agent.replay_session_updates(&session, &cwd, &directory, &timeline, &history, true, Some(&persist), Some(&client), None, true));
+        assert!(futures::poll!(replay.as_mut()).is_pending());
+        let mut receipts = Vec::new();
+        let mut kinds = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            let acp_transport::AcpClientMessage::ExtNotification(args) = message else { panic!("task replay must not send transcript ACP updates") };
+            assert_eq!(args.request.method.as_ref(), "grow/session/update");
+            let value: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
+            assert_eq!(value["_meta"]["isReplay"], true);
+            assert_eq!(value["_meta"]["grow/taskStateOnly"], true);
+            assert_eq!(value["_meta"]["grow/persist"], persist);
+            assert_eq!(value["_meta"]["grow/leaderClientId"], client);
+            kinds.push(value["update"]["sessionUpdate"].as_str().unwrap().to_owned());
+            receipts.push(args.response_tx);
+        }
+        assert_eq!(kinds, ["task_backgrounded", "task_completed"]);
+        let last = receipts.pop().unwrap();
+        receipts.pop().unwrap().send(Ok(())).unwrap();
+        assert!(futures::poll!(replay.as_mut()).is_pending(), "all ordered sends must complete before session/load returns");
+        last.send(Ok(())).unwrap();
+        assert!(replay.await.unwrap().history_cut.is_some());
+        for source in &history.sources {
+            if let HistorySource::Presentation { fact, .. } = source {
+                assert!(fact.meta.as_ref().is_none_or(|meta| !meta.contains_key("grow/taskStateOnly") && !meta.contains_key("isReplay")));
+            }
+        }
+    });
+}
+
+#[test]
 fn fixed_timeline_snapshot_replays_complete_response_before_independent_history() {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         tokio::task::LocalSet::new().run_until(async {
@@ -4758,6 +4834,15 @@ fn fixed_timeline_snapshot_replays_complete_response_before_independent_history(
             agent.replay_session_updates(&sid, &cwd, opened.directory(), &snapshot.timeline, &snapshot.history, true, None, None, None, false).await.unwrap();
             let texts = seen.borrow().iter().filter_map(|notice| match &notice.update { acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content { acp::ContentBlock::Text(value) => Some(value.text.clone()), _ => None }, _ => None }).collect::<Vec<_>>();
             assert_eq!(texts, ["canonical", "independent"]);
+            let bodies_before = crate::session::history::HistorySnapshot::body_projection_count_for_test();
+            snapshot.history.prepare(&sid, &snapshot.timeline, None).unwrap();
+            let capture_bodies = crate::session::history::HistorySnapshot::body_projection_count_for_test() - bodies_before;
+            assert!(capture_bodies > 0, "fixture must exercise canonical response body projection");
+            let bodies_before = crate::session::history::HistorySnapshot::body_projection_count_for_test();
+            let paged = agent.replay_session_updates(&sid, &cwd, opened.directory(), &snapshot.timeline, &snapshot.history, true, None, None, None, true).await.unwrap();
+            assert!(paged.history_cut.is_some());
+            assert_eq!(crate::session::history::HistorySnapshot::body_projection_count_for_test() - bodies_before, capture_bodies,
+                "paged task restoration must not project response bodies beyond the one existing body cut capture");
             assert_eq!(std::fs::read(opened.directory().display_path().join("timeline.jsonl")).unwrap(), before);
             drain.abort();
         }).await;

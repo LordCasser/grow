@@ -70,7 +70,7 @@ impl IndexedUserEchoRow {
     }
 }
 
-const VERSION: u8 = 51;
+const VERSION: u8 = 52;
 const MANIFEST: &str = "working-history.json";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 #[cfg(unix)]
@@ -617,6 +617,36 @@ impl IndexedHistory {
         return self.manifest.tool_frontier.has_child_presentation;
         #[cfg(not(unix))]
         false
+    }
+
+    /// Original task presentations in this published cut, in physical journal order.
+    /// Unpublished tail records and command-settlement synthesis belong to the caller.
+    pub(crate) fn background_task_history(&self) -> io::Result<Vec<history::JournalRecord>> {
+        #[cfg(unix)]
+        {
+            let mut reader = self.page_reader()?;
+            let mut records = Vec::new();
+            for reference in self
+                .tools
+                .background_task_references_before(self.records())?
+            {
+                let record = reader.read_published_record(reference)?;
+                if classify(&record) != RecordClass::BackgroundTask {
+                    return Err(invalid(
+                        "background task reference names another record class",
+                    ));
+                }
+                if self
+                    .visible_range(reference.position)?
+                    .contains(&reference.position)
+                {
+                    records.push(record);
+                }
+            }
+            Ok(records)
+        }
+        #[cfg(not(unix))]
+        Err(invalid("indexed history is unsupported"))
     }
 
     pub(crate) fn subagent_lifecycle_events(&self) -> io::Result<Vec<chat_state::TimelineEvent>> {
@@ -3066,6 +3096,10 @@ mod tests {
     include!("working_snapshot/large_publication_test.rs");
     include!("working_snapshot/timeline_catalog_test.rs");
     include!("working_snapshot/timeline_suffix_test.rs");
+    mod background_tasks {
+        use super::*;
+        include!("working_snapshot/background_task_test.rs");
+    }
     mod branch_publication {
         use super::*;
         include!("working_snapshot/branch_publication_test.rs");

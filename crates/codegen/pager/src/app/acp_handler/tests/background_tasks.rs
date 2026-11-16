@@ -1,5 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
+    use crate::app::session::BG_TASK_MAX_STDOUT;
+    use std::time::Duration;
 
     /// Regression (resume sync): the on-disk replay stream re-emits persisted
     /// notifications through the generic `grow/session/update` envelope. A
@@ -633,5 +635,764 @@
             !agent.session.bg_tasks["task-l"].restored_from_replay,
             "live TaskBackgrounded must not mark restored_from_replay"
         );
+    }
+
+    /// Paged full-load state-only replay: the start fact restores the exact
+    /// task/tool-call identity into the Tasks center WITHOUT drawing any
+    /// scrollback — the transcript body belongs to HistoryRow pagination.
+    #[test]
+    fn state_only_start_restores_row_identity_without_scrollback() {
+        let mut app = make_app_with_agent("sess-1");
+
+        let notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-so-1".into(),
+                task_id: "task-so-1".into(),
+                command: "cargo build --release".into(),
+                cwd: "/work".into(),
+                output_file: "/work/build.log".into(),
+                monitor_description: None,
+                description: Some("compile in release mode".into()),
+            },
+        );
+        assert!(handle_task_backgrounded(&notif, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.scrollback.len(),
+            0,
+            "state-only start must not draw a scrollback block"
+        );
+        let task = agent.session.bg_tasks.get("task-so-1").expect("row restored");
+        assert_eq!(task.tool_call_id, "tc-so-1");
+        assert_eq!(task.command, "cargo build --release");
+        assert_eq!(task.cwd, "/work");
+        assert_eq!(task.output_file, "/work/build.log");
+        assert_eq!(task.description.as_deref(), Some("compile in release mode"));
+        assert_eq!(task.status, BgTaskStatus::Running);
+        assert!(task.restored_from_replay, "row is restored historical context");
+        assert_eq!(
+            agent.session.bg_tool_call_to_task.get("tc-so-1").map(String::as_str),
+            Some("task-so-1"),
+            "stdout routing must be established from the start fact"
+        );
+    }
+
+    /// Monitor detection mirrors the scrollback path so a restored monitor
+    /// renders with the Monitor tag, not bash highlighting.
+    #[test]
+    fn state_only_start_marks_monitor_rows() {
+        let mut app = make_app_with_agent("sess-1");
+        let notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-mon-so".into(),
+                task_id: "task-mon-so".into(),
+                command: "tail -f deploy.log".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/mon.log".into(),
+                monitor_description: Some("errors in deploy.log".into()),
+                description: None,
+            },
+        );
+        assert!(handle_task_backgrounded(&notif, &mut app));
+
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-mon-so"];
+        assert!(task.is_monitor, "monitor_description must mark is_monitor");
+        assert_eq!(task.description.as_deref(), Some("errors in deploy.log"));
+
+        // Reparented / older backends bake the "[monitor] " prefix into the
+        // command; the state-only path must still detect it.
+        let mut app = make_app_with_agent("sess-1");
+        let notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-mon-pfx".into(),
+                task_id: "task-mon-pfx".into(),
+                command: "[monitor] event counter".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/mon.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        assert!(handle_task_backgrounded(&notif, &mut app));
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-mon-pfx"];
+        assert!(task.is_monitor, "command prefix must mark is_monitor");
+        assert_eq!(task.description.as_deref(), Some("event counter"));
+    }
+
+    /// The paired completion settles the restored Running row with the
+    /// snapshot's real start/end/exit facts and final stdout — the full
+    /// recorded interval, not "elapsed since load".
+    #[test]
+    fn state_only_completion_settles_with_snapshot_facts() {
+        let mut app = make_app_with_agent("sess-1");
+        let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let end = start + Duration::from_secs(125);
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-settle".into(),
+                task_id: "task-settle".into(),
+                command: "long-build".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        assert!(handle_task_backgrounded(&start_notif, &mut app));
+
+        let snapshot = settled_task_snapshot(
+            "task-settle",
+            "long-build",
+            start,
+            end,
+            Some(0),
+            None,
+            "line one\nline two\nline three",
+            false,
+        );
+        let mut snapshot = snapshot;
+        snapshot.description = Some("the long build".into());
+        let completion = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        assert!(handle_task_completed(&completion, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.scrollback.len(),
+            0,
+            "state-only completion must not draw a completion block"
+        );
+        let task = agent.session.bg_tasks.get("task-settle").expect("row present");
+        assert_eq!(task.status, BgTaskStatus::Done);
+        assert_eq!(task.exit_code, Some(0));
+        assert_eq!(task.start_time, start, "real start must replace the provisional one");
+        assert_eq!(task.end_time, Some(end), "real end must be recorded");
+        assert_eq!(task.elapsed(), Duration::from_secs(125));
+        assert_eq!(task.stdout, "line one\nline two\nline three");
+        assert_eq!(task.stdout_line_count, 3);
+        assert!(!task.truncated);
+        assert_eq!(task.description.as_deref(), Some("the long build"));
+        assert!(!task.pending_kill);
+    }
+
+    /// A signal-only (or non-zero) exit settles as Failed and keeps the
+    /// recorded signal.
+    #[test]
+    fn state_only_completion_records_failure_and_signal() {
+        let mut app = make_app_with_agent("sess-1");
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-fail-so".into(),
+                task_id: "task-fail-so".into(),
+                command: "crashy".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+
+        let snapshot = settled_task_snapshot(
+            "task-fail-so",
+            "crashy",
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(7),
+            None,
+            Some("SIGTERM"),
+            "",
+            false,
+        );
+        let completion = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        assert!(handle_task_completed(&completion, &mut app));
+
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-fail-so"];
+        assert_eq!(task.status, BgTaskStatus::Failed);
+        assert_eq!(task.exit_code, None);
+        assert_eq!(task.signal.as_deref(), Some("SIGTERM"));
+    }
+
+    /// Duplicate (or repeated) state-only completions are idempotent: the
+    /// settled row is never recomputed from an older snapshot.
+    #[test]
+    fn state_only_completion_is_idempotent() {
+        let mut app = make_app_with_agent("sess-1");
+        let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        let end = start + Duration::from_secs(60);
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-idem".into(),
+                task_id: "task-idem".into(),
+                command: "repeat-me".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+        let completion = |app: &mut AppView| {
+            let snapshot = settled_task_snapshot(
+                "task-idem",
+                "repeat-me",
+                start,
+                end,
+                Some(0),
+                None,
+                "settled output",
+                false,
+            );
+            handle_task_completed(
+                &make_state_only_grow_task_notification(
+                    "sess-1",
+                    GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+                ),
+                app,
+            )
+        };
+        assert!(completion(&mut app), "first settle adopts the snapshot");
+
+        let settled = app.agents[&AgentId(0)].session.bg_tasks["task-idem"].clone();
+        assert!(
+            !completion(&mut app),
+            "a completion for an already-settled row must not re-apply"
+        );
+        let after = &app.agents[&AgentId(0)].session.bg_tasks["task-idem"];
+        assert_eq!(after.status, settled.status);
+        assert_eq!(after.start_time, settled.start_time);
+        assert_eq!(after.end_time, settled.end_time);
+        assert_eq!(after.stdout, settled.stdout);
+    }
+
+    /// A replayed start must never rewind a row that already reached its
+    /// terminal state (e.g. the completion fact arrived before the start is
+    /// re-delivered, or the burst repeats).
+    #[test]
+    fn state_only_start_keeps_terminal_row() {
+        let mut app = make_app_with_agent("sess-1");
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-term".into(),
+                task_id: "task-term".into(),
+                command: "done-cmd".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+        let end = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(9_000);
+        let snapshot =
+            settled_task_snapshot("task-term", "done-cmd", end - Duration::from_secs(9), end, Some(0), None, "", false);
+        let completion = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        handle_task_completed(&completion, &mut app);
+        let settled = app.agents[&AgentId(0)].session.bg_tasks["task-term"].clone();
+
+        let repeated_start = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-term".into(),
+                task_id: "task-term".into(),
+                command: "done-cmd".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        assert!(
+            !handle_task_backgrounded(&repeated_start, &mut app),
+            "duplicate start for an existing row must not report new activity"
+        );
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-term"];
+        assert_eq!(task.status, BgTaskStatus::Done, "start must not rewind a terminal row");
+        assert_eq!(task.start_time, settled.start_time);
+        assert_eq!(task.end_time, settled.end_time);
+        assert_eq!(
+            app.agents[&AgentId(0)]
+                .session
+                .bg_tool_call_to_task
+                .get("tc-term")
+                .map(String::as_str),
+            Some("task-term"),
+            "stdout routing stays refreshed"
+        );
+    }
+
+    /// A pending kill is a live fact of this client: a replayed start must
+    /// not roll the row back (kill state and live output survive untouched).
+    #[test]
+    fn state_only_start_keeps_live_kill_facts() {
+        let mut app = make_app_with_agent("sess-1");
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-kill".into(),
+                task_id: "task-kill".into(),
+                command: "sleep 999".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+        let (live_start, live_stdout_line_count) = {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let task = agent.session.bg_tasks.get_mut("task-kill").unwrap();
+            task.set_stdout("live output".into());
+            task.pending_kill = true;
+            task.kill_requested_at = Some(std::time::Instant::now());
+            (task.start_time, task.stdout_line_count)
+        };
+
+        let repeated_start = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-kill".into(),
+                task_id: "task-kill".into(),
+                command: "sleep 999".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        assert!(!handle_task_backgrounded(&repeated_start, &mut app));
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-kill"];
+        assert_eq!(task.status, BgTaskStatus::Running);
+        assert!(task.pending_kill, "kill request must survive the replayed start");
+        assert!(task.kill_requested_at.is_some());
+        assert_eq!(task.stdout, "live output", "live stdout must survive");
+        assert_eq!(task.stdout_line_count, live_stdout_line_count);
+        assert_eq!(task.start_time, live_start);
+    }
+
+    /// Retained non-empty live stdout wins: the settlement snapshot must not
+    /// overwrite output this client already holds. `truncated` only ORs in.
+    #[test]
+    fn state_only_completion_keeps_retained_stdout() {
+        let mut app = make_app_with_agent("sess-1");
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-retain".into(),
+                task_id: "task-retain".into(),
+                command: "streamer".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .bg_tasks
+            .get_mut("task-retain")
+            .unwrap()
+            .set_stdout("live streamed output".into());
+
+        let snapshot = settled_task_snapshot(
+            "task-retain",
+            "streamer",
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(3),
+            Some(0),
+            None,
+            "older snapshot output",
+            true,
+        );
+        let completion = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        assert!(handle_task_completed(&completion, &mut app));
+
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-retain"];
+        assert_eq!(
+            task.stdout, "live streamed output",
+            "retained non-empty stdout must win over the snapshot"
+        );
+        assert_eq!(task.stdout_line_count, 1);
+        assert!(task.truncated, "snapshot truncated must OR in");
+        assert_eq!(task.status, BgTaskStatus::Done, "the row still settles");
+    }
+
+    /// An empty live buffer is filled from the settlement snapshot (via
+    /// `set_stdout`, keeping cap/line-count invariants), and a live
+    /// truncated flag is never cleared by a non-truncated snapshot.
+    #[test]
+    fn state_only_completion_fills_empty_stdout_and_ors_truncation() {
+        let mut app = make_app_with_agent("sess-1");
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-fill".into(),
+                task_id: "task-fill".into(),
+                command: "printer".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .bg_tasks
+            .get_mut("task-fill")
+            .unwrap()
+            .truncated = true;
+
+        let snapshot = settled_task_snapshot(
+            "task-fill",
+            "printer",
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+            Some(0),
+            None,
+            "snapshot line A\nsnapshot line B",
+            false,
+        );
+        let completion = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        assert!(handle_task_completed(&completion, &mut app));
+
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-fill"];
+        assert_eq!(task.stdout, "snapshot line A\nsnapshot line B");
+        assert_eq!(task.stdout_line_count, 2);
+        assert!(
+            task.truncated,
+            "a live truncated flag must never be cleared by the snapshot"
+        );
+    }
+
+    /// An oversized snapshot output goes through `set_stdout`, so the row
+    /// keeps the `BG_TASK_MAX_STDOUT` cap and flips `truncated`.
+    #[test]
+    fn state_only_completion_caps_oversized_snapshot_stdout() {
+        let mut app = make_app_with_agent("sess-1");
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-cap".into(),
+                task_id: "task-cap".into(),
+                command: "spewer".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+
+        let oversized = "x".repeat(BG_TASK_MAX_STDOUT + 1);
+        let snapshot = settled_task_snapshot(
+            "task-cap",
+            "spewer",
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(4),
+            Some(0),
+            None,
+            &oversized,
+            false,
+        );
+        let completion = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        assert!(handle_task_completed(&completion, &mut app));
+
+        let task = &app.agents[&AgentId(0)].session.bg_tasks["task-cap"];
+        assert_eq!(task.stdout.len(), BG_TASK_MAX_STDOUT);
+        assert!(task.truncated);
+        assert_eq!(task.stdout_line_count, 1);
+    }
+
+    /// A completion without a restored start row has no task/tool-call
+    /// identity to adopt: the shell projects the complete visible lifecycle,
+    /// so the update is dropped instead of fabricating a placeholder row.
+    #[test]
+    fn state_only_completion_without_start_row_is_dropped() {
+        let mut app = make_app_with_agent("sess-1");
+        let snapshot = settled_task_snapshot(
+            "task-orphan",
+            "no-start",
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            Some(0),
+            None,
+            "output",
+            false,
+        );
+        let completion = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        assert!(!handle_task_completed(&completion, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.bg_tasks.is_empty(),
+            "no placeholder row may be created without a start identity"
+        );
+        assert!(agent.session.bg_tool_call_to_task.is_empty());
+        assert_eq!(agent.scrollback.len(), 0);
+    }
+
+    /// An unsettled restored start stays Running so the ordinary (non-replay)
+    /// stale reconciliation after load finds the row and finalizes it
+    /// quietly — no completion block is pushed for the pre-load death.
+    #[test]
+    fn unsettled_state_only_start_settles_via_stale_reconciliation() {
+        let mut app = make_app_with_agent("sess-1");
+        let start_notif = make_state_only_grow_task_notification(
+            "sess-1",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-stale".into(),
+                task_id: "task-stale".into(),
+                command: "died-with-session".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        handle_task_backgrounded(&start_notif, &mut app);
+        assert_eq!(
+            app.agents[&AgentId(0)].session.bg_tasks["task-stale"].status,
+            BgTaskStatus::Running,
+            "unsettled start must stay Running for reconciliation"
+        );
+
+        // Ordinary stale reconciliation (live envelope, no replay marks),
+        // exactly as the shell emits after a cold load.
+        let notif = make_task_completed_notif_with_signal(
+            "sess-1",
+            "task-stale",
+            "died-with-session",
+            None,
+            Some("session_restart"),
+        );
+        assert!(handle_task_completed(&notif, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let task = &agent.session.bg_tasks["task-stale"];
+        assert_eq!(task.status, BgTaskStatus::Failed);
+        assert_eq!(
+            agent.scrollback.len(),
+            0,
+            "stale reconciliation must not push a failure block for a row without scrollback"
+        );
+    }
+
+    /// State-only replay must not present its cursor as the first applied
+    /// history item (it carries no transcript body); an ordinary replayed
+    /// task update keeps recording it.
+    #[test]
+    fn state_only_task_replay_does_not_note_history_cursor() {
+        const CHILD: &str = "GROW_TASK_STATE_CURSOR_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::acp_handler::tests::background_tasks::state_only_task_replay_does_not_note_history_cursor",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env("GROW_INSTRUMENTATION", "log")
+                .env("GROW_HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        assert_ne!(
+            diagnostics::instrumentation::current_mode(),
+            diagnostics::instrumentation::InstrumentationMode::Disabled
+        );
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = true;
+
+        // State-only start with a cursor: applied, but the cursor must not
+        // become the first applied history item.
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-cursor".into(),
+                task_id: "task-cursor".into(),
+                command: "sleep 1".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+            meta: Some(serde_json::json!({
+                "isReplay": true,
+                "grow/taskStateOnly": true,
+                "grow/historyCursor": "state-only-cursor",
+            })),
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        let notif = acp::ExtNotification::new("grow/session/update", raw.into());
+        assert!(handle_ext_notification(&notif, &mut app));
+        assert!(
+            app.agents[&AgentId(0)]
+                .session
+                .replay_first_applied
+                .is_none(),
+            "state-only replay must not note_history_applied"
+        );
+
+        // Ordinary replayed task update (full replay projection): the cursor
+        // keeps being recorded.
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-cursor-2".into(),
+                task_id: "task-cursor-2".into(),
+                command: "sleep 2".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+            meta: Some(serde_json::json!({
+                "isReplay": true,
+                "grow/historyCursor": "ordinary-cursor",
+            })),
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        let notif = acp::ExtNotification::new("grow/session/update", raw.into());
+        assert!(handle_ext_notification(&notif, &mut app));
+        assert_eq!(
+            app.agents[&AgentId(0)].session.replay_first_applied.as_deref(),
+            Some("ordinary-cursor"),
+            "ordinary replay keeps recording the first applied cursor"
+        );
+    }
+
+    /// The state-only path requires BOTH marks. `isReplay` alone keeps the
+    /// full replay projection (scrollback block), and `grow/taskStateOnly`
+    /// alone is not a replay (live path).
+    #[test]
+    fn partial_marks_keep_original_paths() {
+        // isReplay only → existing full replay path draws the block.
+        let mut app = make_app_with_agent("sess-1");
+        let replayed = make_replayed_task_backgrounded_notif("sess-1", "tc-re", "task-re", "cmd");
+        assert!(handle_task_backgrounded(&replayed, &mut app));
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(agent.scrollback.len(), 1, "full replay still projects the block");
+            assert!(agent.session.bg_tasks["task-re"].restored_from_replay);
+        }
+
+        // taskStateOnly without isReplay → live path draws the block.
+        let mut app = make_app_with_agent("sess-1");
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-half".into(),
+                task_id: "task-half".into(),
+                command: "cmd".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+            meta: Some(serde_json::json!({
+                "grow/taskStateOnly": true,
+            })),
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        let notif = acp::ExtNotification::new("grow/session/update", raw.into());
+        assert!(handle_task_backgrounded(&notif, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.scrollback.len(), 1, "taskStateOnly alone is not a replay");
+        assert!(
+            !agent.session.bg_tasks["task-half"].restored_from_replay,
+            "without isReplay the row takes the live path"
+        );
+    }
+
+    /// State-only replay routes to the owning child session: the child's
+    /// Tasks center is restored and neither the parent state nor any
+    /// scrollback is touched.
+    #[test]
+    fn state_only_replay_routes_to_child_session() {
+        let mut app = make_app_with_parent_and_child("parent-sess", "child-sess");
+
+        let start_notif = make_state_only_grow_task_notification(
+            "child-sess",
+            GrowSessionUpdate::TaskBackgrounded {
+                tool_call_id: "tc-child-so".into(),
+                task_id: "task-child-so".into(),
+                command: "sleep 30".into(),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out.log".into(),
+                monitor_description: None,
+                description: None,
+            },
+        );
+        assert!(handle_task_backgrounded(&start_notif, &mut app));
+        let snapshot = settled_task_snapshot(
+            "task-child-so",
+            "sleep 30",
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+            Some(0),
+            None,
+            "",
+            false,
+        );
+        let completion = make_state_only_grow_task_notification(
+            "child-sess",
+            GrowSessionUpdate::TaskCompleted { task_snapshot: snapshot },
+        );
+        assert!(handle_task_completed(&completion, &mut app));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.bg_tasks.is_empty(),
+            "parent must not adopt the child's task"
+        );
+        assert_eq!(agent.scrollback.len(), 0, "parent scrollback untouched");
+        let child = agent.subagent_views.get("child-sess").unwrap();
+        assert_eq!(child.scrollback.len(), 0, "child scrollback untouched");
+        let task = child.session.bg_tasks.get("task-child-so").expect("child row restored");
+        assert_eq!(task.status, BgTaskStatus::Done);
+        assert_eq!(task.elapsed(), Duration::from_secs(30));
     }
 

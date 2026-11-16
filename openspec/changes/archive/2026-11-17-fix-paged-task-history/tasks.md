@@ -1,0 +1,5 @@
+- [x] 1.0 索引同一published cut的任务物理引用，验证固定截点和分支可见性。
+- [x] 1.1 Shell从同cut轻事实提供完整任务状态replay，不读取响应正文。
+- [x] 1.2 Pager接收state-only任务生命周期，恢复中心状态而不重放正文或推进cursor。
+- [x] 2.1 验收原失败PTY及正式Core相关选组、相关库与release-dist警告门禁。
+- [x] 2.2 同步开发者说明、严格校验并归档。

@@ -10,4 +10,6 @@
 
 原resize_clamps_subrow_within_rewrapping_anchor_line与follow_without_prompt_preserves_a_gap_row均通过；未删除或放宽正文锚点断言。单条entry总高度等于viewport时offset1不可达，夹具补tail，不改变bottom clamp。Minimal104项也通过。
 
+后续remove-unused-history-page-paths维护删除了无生产caller的旧prepend入口；当前gap前插回归仅走主历史窗口实际使用的replace_history_prefix，并保留所有该路径身份和行位置断言，固定1.93.1重跑通过。原双路径执行结果作为当时的历史验证保留。
+
 `cargo check --locked --workspace --all-targets`、固定1.93.1的`cargo fmt --all -- --check`、`git diff --check`均退出0。没有改历史cut、用量、native提交事实或公共/持久化schema。docs/development同步布局责任和主规范链接；本轮发现已闭合，可归档。

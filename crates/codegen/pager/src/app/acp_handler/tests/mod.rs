@@ -1407,6 +1407,58 @@ pub(super) fn make_replayed_task_backgrounded_notif(
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
     acp::ExtNotification::new("grow/session/update", std::sync::Arc::from(raw))
 }
+/// Settled `TaskSnapshot` for paged task-state replay tests. Fixed wall-clock
+/// bounds let assertions pin the restored row's real elapsed time.
+pub(super) fn settled_task_snapshot(
+    task_id: &str,
+    command: &str,
+    start_time: std::time::SystemTime,
+    end_time: std::time::SystemTime,
+    exit_code: Option<i32>,
+    signal: Option<&str>,
+    output: &str,
+    truncated: bool,
+) -> tools::types::TaskSnapshot {
+    tools::types::TaskSnapshot {
+        task_id: task_id.into(),
+        command: command.into(),
+        display_command: None,
+        cwd: "/tmp".into(),
+        start_time,
+        end_time: Some(end_time),
+        output: output.into(),
+        output_file: "/tmp/out.log".into(),
+        truncated,
+        exit_code,
+        signal: signal.map(str::to_string),
+        completed: true,
+        kind: Default::default(),
+        block_waited: false,
+        explicitly_killed: false,
+        owner_session_id: None,
+        goal_id: None,
+        goal_definition_revision: None,
+        description: None,
+        is_backgrounded: true,
+    }
+}
+/// Paged full-load task-state replay envelope: the `grow/session/update`
+/// replay method stamped with BOTH `isReplay` and `grow/taskStateOnly`.
+pub(super) fn make_state_only_grow_task_notification(
+    session_id: &str,
+    update: GrowSessionUpdate,
+) -> acp::ExtNotification {
+    let notif = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update,
+        meta: Some(serde_json::json!({
+            "isReplay": true,
+            "grow/taskStateOnly": true,
+        })),
+    };
+    let raw = serde_json::value::to_raw_value(&notif).unwrap();
+    acp::ExtNotification::new("grow/session/update", std::sync::Arc::from(raw))
+}
 /// Register a pending Execute tool call in the tracker and send an InProgress
 /// update to create the scrollback entry. Returns the agent for further use.
 pub(super) fn setup_pending_execute_tool(app: &mut AppView, tc_id: &str) {

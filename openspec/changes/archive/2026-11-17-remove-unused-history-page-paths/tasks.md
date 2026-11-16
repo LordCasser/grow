@@ -1,0 +1,3 @@
+- [x] 1.1 删除TranscriptProjection无caller的display-page finalizer。
+- [x] 1.2 删除Scrollback旧prepend入口，保留真实prefix gap前插回归。
+- [x] 1.3 验证真实projection/gap路径、fmt和正式release-dist deny-warnings检查，记录并归档。

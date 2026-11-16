@@ -79,6 +79,8 @@ child 的后台任务开始/完成事实也经过原 history stream 和共用展
 canonical 完成事实仍会将尚在 Running 的同一任务推进终态；已终态的状态和时间不回退。
 挂起期间的命令终态来自所选 Timeline 的各次 `CommandsSettled`。历史 projector 按 task ID 和 tool-call ID 匹配仍可见的后台任务，保留已记录的完成行，并用结算中的执行起止时间恢复缺失终态的完整耗时，旧结算缺字段时使用历史记录时间。见 [挂起任务恢复](../openspec/specs/client-surfaces/spec.md#requirement-resume-displays-and-restores-suspended-work)。
 
+分页恢复时，Tasks 中心状态从同一历史截点独立恢复，不依赖开始或完成记录是否出现在当前正文页。Shell 从派生索引点读任务生命周期和挂起结算，合并未发布尾部后，按原顺序发送带 `isReplay` 与 `grow/taskStateOnly` 的临时通知，并等待全部发送完成。Pager 只恢复任务身份、终态、实际起止时间和缺失输出，保留已有实时输出、终态与取消状态；这些通知不安装正文、不推进正文 cursor，也不启动命令。派生索引 schema 52 仅新增任务记录位置，旧索引按既有路径重建，canonical journal 保持原样。排查 Tasks 空白须同时核对轻状态通知和正文页，单独看到正文 Task 行不能证明中心状态已恢复。见 [分页 Tasks 契约](../openspec/specs/client-surfaces/spec.md#requirement-paged-history-restores-task-state-independently-of-transcript-pages)。
+
 MCP 工具调用的原始 deadline 与取消通知派发分别归属：drop guard只向原 service/request ID 尝试一次通知，后台 Grow 派发等待最多三秒，不延长工具返回期限。超时表示发送未确认；锁定 SDK 已入队的发送仍可能继续，不能据此声称 wire 撤回或远端副作用已取消。见 [取消派发所有权](../openspec/specs/extension-runtime/spec.md#requirement-mcp-cancellation-dispatch-has-a-bounded-grow-owner) 与 [真实受阻传输验证](../openspec/changes/archive/2026-11-06-bound-mcp-cancellation-dispatch/verification.md)。
 
 MCP 完整 `server__tool` 目录身份允许最多 256 个 ASCII 字符，原分段、字符集、app-only、禁用和权限门禁保持；`search_tool` 的 schema 和 `use_tool` 内部调用保留完整名字。公开 `Agent::tool_definitions` 只投影符合原 64 字符共同格式的直接 provider 声明，不截断或创建别名，完整 ToolBridge 目录不变。descriptor helper 保留普通 `<raw>.json` 路径；超出 255 字节组件的文件名改用 `tools/long-names/<完整 sanitized raw>/descriptor.json`。见 [目录身份契约](../openspec/specs/extension-runtime/spec.md#requirement-mcp-catalog-identities-have-their-own-length-bound) 与 [采样投影契约](../openspec/specs/model-sampling/spec.md#requirement-direct-agent-tool-definitions-preserve-provider-name-constraints)。
@@ -443,6 +445,8 @@ cargo build --locked -p cli --bin grow
 ```
 
 发布前分别执行默认 `cargo check --locked -p cli --bin grow` 和 `cargo check --locked --workspace --all-targets`，同时核对编译诊断与 build-script/linker stderr。库测试及 all-targets 会启用 dev-dependencies，不能替代默认生产构建；仅在测试图中可见的类型引用可能让测试通过而 CLI 无法编译。现有 core 门禁保留独立的默认 CLI build。
+
+分发候选还需检查实际 profile 和 feature：`RUSTFLAGS="-D warnings" cargo check --locked --profile release-dist --features release-dist -p cli --bin grow`。Windows 分发构建使用同一警告门禁；默认构建中只出现警告的无调用入口会在这里失败。此本地检查覆盖当前主机的编译路径，正式发布仍须通过同一 tag SHA 的十平台构建与原生门禁。
 
 PR 的 `core-regression` 在构建 `grow` 后串行运行工作流列出的 Pager PTY、挂起和计划恢复回归，包括 minimal、设置、滚动选择、队列取消、真实 `less` transcript 恢复和 leader 多客户端共享会话。它们仍以 `#[ignore]` 保持普通本地 Cargo 套件轻量；CI 显式提供 `PAGER_BINARY` 并仅选择已登记的场景。采样失败后继续的真实 ACP 回归另外使用同次构建的 `GROW_BINARY` 和精确测试 runner。完成历史 replay 的多客户端用例在附加 viewer 前等待第一轮 `turn_completed` 持久化记录；另一用例在首轮仍流式输出时附加 viewer，验证 resident reconnect 不会把运行中的 turn 当作冷恢复中断。单项可按工作流中的完整 target/name 运行：
 

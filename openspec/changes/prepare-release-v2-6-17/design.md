@@ -1,0 +1,11 @@
+## Decision
+
+沿用release.yml和build-one.yml的既有发布链，不新增发布入口，不修改平台选择或强制门禁。新的annotated v2.6.17必须解析为干净候选HEAD；所有build与reusable regression固定该SHA，十个archive和SHA256SUMS通过现有attestation校验后才公开。
+
+本地采用仓库固定Rust1.93.1。默认CLI、受影响库与真实PTY、release-dist feature/profile加-Dwarnings、workspace all-targets分别证明各自构建路径；本机检查不能代替Windows和其他目标的原生CI。版本递进只影响33个workspace继承包，按metadata和完整lock diff核对，不更新外部依赖。
+
+## Review Plan
+
+父architect亲核任务索引、同cut投影和Pager中心状态边界，按各独立交付验收。所有本轮场景与验证记录完成后归档功能change，再提交候选。正式运行失败按具体owner处理，不改已推送tag或放松oracle；后续源码修复须使用新候选身份。
+
+公开发行后核对release非draft/非prerelease、tag及remote commit一致、十平台资产加checksum恰好11项。下载macOS aarch64包和SHA256SUMS到临时目录，验证checksum、包内唯一grow、签名及version/help；workflow的attestation步骤须成功，并用现有signer workflow绑定下载资产。最终仅文档归档可在独立main提交完成，tag仍固定产品候选。

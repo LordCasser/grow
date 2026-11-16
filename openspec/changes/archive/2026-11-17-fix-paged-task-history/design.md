@@ -1,0 +1,19 @@
+## Evidence and Ownership
+
+history_window.project_history只安装TranscriptProjection.scrollback，不写AgentSession.bg_tasks。prepare_indexed会从updates剔除已发布task presentation，且indexed hydrate的sources只注入未结算start，并非全任务集合；不能把它们当完整任务集合。CommandsSettled合成器和rewind过滤已存在。只有正文页hydration会在start落旧页或Around替换时丢状态。
+
+索引所有者在既有redb派生索引增加BackgroundTask专用的物理引用表（只存position/RecordRef，不复制正文），发布时跟同一事务追加；VERSION递进按已有派生失效重建路径处理，不改journal。必要性：现OPEN_TASKS/TASK_CUT只保有未结束任务，TASK_FINISHES只存完成位置，无法点读完整的已完成生命周期；扫描DISPLAY或重新验证全部响应正文会破坏任务状态独立恢复的边界。内部接口`IndexedHistory::background_task_history() -> io::Result<Vec<history::JournalRecord>>`返回该manifest截点内经来源/类别/分支可见性验证的已发布任务presentation记录；不包含tail。调用方按record.seq与原sources去重，合并tail和保留的prompt/rewind/CommandsSettled轻边界。
+
+Shell历史projector负责从所选同cut的task轻事实、prompt/rewind边界和CommandsSettled投影ordered任务生命周期。已发布的CommandsSettled可只剩精确索引引用，须复用IndexedHistoryReader的task_terminals_after/read_task_terminal，不假设所有历史结算仍在内存Timeline；普通完成事实优先，撤销分支内的start不复活。MvpAgent在page_history返回前发送并drain completion，之后沿既有stale reconciliation处理未结算进程。不得调用完整prepare来decode全响应正文。正文HistoryPageCut和计数/范围不变。
+
+Pager的后台任务模块拥有bg_tasks及tool-call关联。只消费isReplay=true且grow/taskStateOnly=true的TaskBackgrounded/TaskCompleted，恢复中心行与时间/输出/monitor身份，保留已有live输出/终态/kill事实；不触碰tracker、scrollback、native commit、正文cursor或通知。中心行由有真实task/tool-call身份的start建立；未知task的单独完成不制造空tool-call占位行。已有task按当前replay不回退规则合并，重复接收幂等。接着到来的普通stale reconciliation应能把未结算历史start正确收为终态。
+
+## Wire Contract
+
+沿用Grow SessionNotification和原TaskBackgrounded/TaskCompleted payload及session_id。仅临时发送meta增加`isReplay: true`、`grow/taskStateOnly: true`，保留grow/persist与grow/leaderClientId路由。标记不入journal。Pager只在两个标记同时成立时采用state-only；两类Grow更新以外不引入新handler。Pager的background通知消费返回前，不为state-only调用note_history_applied，防止不含正文的cursor跳过正文历史。Shell只在paged full load发送；cursor-tail及noReplay保持现有语义。
+
+## Coder Tasks and Review Plan
+
+1. Shell模块：轻事实任务投影与paged load发送是一项单一承诺，写history projector、mvp replay及其直接测试。真实starts+普通completed、settlement跨多页、rewind隐藏、索引前缀和suffix都验证，正文解码计数必须不增加。
+2. Pager模块：state-only lifecycle reducer及现handler接入是一项功能，写acp_handler后台/通知及其直接测试。验证task/toolcall同身份、真实起止时间、保留stdout/截断/终态、无scrollback/cursor/native变化、重复不重复、普通live/child replay不变。
+3. 父集成：固定1.93.1重建CLI，先运行原失败PTY，再运行正式Core所选整组PTY与相关库；release-dist -Dwarnings、fmt与OpenSpec。不改失败oracle、不删失败场景。完整官方后继门禁通过前不宣称release完成。

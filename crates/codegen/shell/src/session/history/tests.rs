@@ -388,10 +388,26 @@ fn canonical_multimessage_response_cursor_requires_complete_matching_proof() {
         .collect::<Vec<_>>();
     let journal = crate::session::storage::JsonlStorageAdapter::decode_journal_lines(&lines)
         .expect("decode canonical response Timeline");
+    let bodies_before = HistorySnapshot::body_projection_count_for_test();
+    assert!(
+        journal
+            .history
+            .background_task_updates(&session_id, &timeline)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        HistorySnapshot::body_projection_count_for_test(),
+        bodies_before
+    );
     let prepared = journal
         .history
         .prepare(&session_id, &timeline, None)
         .expect("canonical response projects");
+    assert!(
+        HistorySnapshot::body_projection_count_for_test() > bodies_before,
+        "the body projection counter must detect the full response path"
+    );
     assert_eq!(prepared.updates.len(), 4);
     let projected_messages = prepared
         .updates
@@ -995,6 +1011,21 @@ fn history_restores_distinct_command_terminals_across_suspensions() {
 
     let prepared = history.prepare(&session, &timeline, None).unwrap();
     assert_eq!(prepared.updates.len(), 4);
+    assert_eq!(
+        history
+            .background_task_updates(&session, &timeline)
+            .unwrap()
+            .into_iter()
+            .map(notification_value)
+            .collect::<Vec<_>>(),
+        prepared
+            .updates
+            .iter()
+            .cloned()
+            .map(notification_value)
+            .collect::<Vec<_>>(),
+        "lightweight task projection preserves settlement identity, time and physical cursors"
+    );
     for (index, id) in ["first-task", "second-task"].into_iter().enumerate() {
         let SessionUpdate::Grow(completion) = &prepared.updates[index * 2 + 1] else {
             panic!("expected Grow completion");
@@ -1053,6 +1084,292 @@ fn history_restores_distinct_command_terminals_across_suspensions() {
         4,
         "existing completion must be emitted once"
     );
+    assert_eq!(
+        history
+            .background_task_updates(&session, &timeline)
+            .unwrap()
+            .into_iter()
+            .map(notification_value)
+            .collect::<Vec<_>>(),
+        prepared
+            .updates
+            .into_iter()
+            .map(notification_value)
+            .collect::<Vec<_>>()
+    );
+    // Sparse physical positions model a start preceding more than one page of
+    // response rows. Task projection must retain the complete lifecycle.
+    history.positions = (0..history.sources.len()).map(|n| n as u64 * 257).collect();
+    assert_eq!(
+        history
+            .background_task_updates(&session, &timeline)
+            .unwrap()
+            .len(),
+        4
+    );
+}
+
+mod background_task_projection_tests {
+    use super::*;
+    use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+    use crate::session::history::projector::command_settlement_update;
+    use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
+    use chat_state::session_runtime::{
+        CommandSettlementStatus, RuntimeCheckpoint, RuntimeCommandSettlement, SessionRuntimeEvent,
+    };
+    use std::time::{Duration, SystemTime};
+
+    fn start(session: &acp::SessionId, id: &str) -> SessionUpdate {
+        SessionUpdate::Grow(Box::new(SessionNotification {
+            session_id: session.clone(),
+            update: GrowUpdate::TaskBackgrounded {
+                task_id: id.into(),
+                tool_call_id: format!("call-{id}"),
+                command: "sleep 120".into(),
+                cwd: "/workspace".into(),
+                output_file: format!("{id}.log"),
+                description: Some(id.into()),
+                monitor_description: None,
+            },
+            meta: None,
+        }))
+    }
+
+    fn settlement(id: &str) -> RuntimeCommandSettlement {
+        RuntimeCommandSettlement {
+            command_id: id.into(),
+            call_id: format!("call-{id}"),
+            outcome: CommandSettlementStatus::Interrupted,
+            output_file: format!("{id}.log"),
+            exit_code: None,
+            signal: Some("signal 9".into()),
+            output: "private process output".into(),
+            is_backgrounded: true,
+            owner: chat_state::NotificationOwner::Session,
+            task_kind: chat_state::NotificationTaskKind::Task,
+            start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+            end_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(80)),
+        }
+    }
+
+    fn complete(session: &acp::SessionId, id: &str) -> SessionUpdate {
+        let SessionUpdate::Grow(start) = start(session, id) else {
+            unreachable!()
+        };
+        command_settlement_update(session, &start.update, 10_000, &settlement(id), 80_000)
+    }
+
+    fn push(history: &mut HistorySnapshot, update: &SessionUpdate) {
+        let next = history.record_count();
+        history.sources.push(HistorySource::Presentation {
+            at_ms: 80_000,
+            fact: Box::new(HistoryFact::from_update(update).unwrap().unwrap()),
+        });
+        history.positions.push(next);
+    }
+
+    #[tokio::test]
+    async fn lightweight_tasks_restore_published_settlement_ordinary_completion_and_tail() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = JsonlStorageAdapter::with_root(root.path().into());
+        let info = crate::session::info::Info {
+            id: acp::SessionId::new("task-projection-index"),
+            cwd: root.path().to_string_lossy().into_owned(),
+        };
+        storage
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
+        for id in ["ordinary", "settled", "tail"] {
+            storage
+                .append_update(&info, &start(&info.id, id))
+                .await
+                .unwrap();
+        }
+        storage
+            .append_update(&info, &complete(&info.id, "ordinary"))
+            .await
+            .unwrap();
+        for row in 0..140 {
+            let update = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                info.id.clone(),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new(format!("response-{row}"))),
+                )),
+            )));
+            storage.append_update(&info, &update).await.unwrap();
+        }
+        let mut timeline = chat_state::Timeline::default();
+        for event in [
+            SessionRuntimeEvent::SuspendRequested {
+                operation_id: "suspend".into(),
+                root_session_id: info.id.to_string(),
+            },
+            SessionRuntimeEvent::CommandsSettled {
+                operation_id: "suspend".into(),
+                commands: vec![settlement("settled")],
+            },
+            SessionRuntimeEvent::Checkpoint {
+                operation_id: "suspend".into(),
+                checkpoint: Box::new(RuntimeCheckpoint {
+                    frontier: chat_state::EventSeq::new(1),
+                    runtime_source_hash: "a".repeat(64),
+                    turn: None,
+                    step: None,
+                }),
+            },
+        ] {
+            let event = timeline
+                .record(chat_state::TimelineEventKind::Runtime(event))
+                .unwrap();
+            storage
+                .append_timeline_event_durable(&info, &event)
+                .await
+                .unwrap();
+        }
+        let publication = timeline
+            .record(chat_state::TimelineEventKind::Observation(
+                chat_state::ObservationEvent {
+                    scope: "shell".into(),
+                    name: "artifact".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(Value::String("x".repeat(2 * 1024 * 1024))),
+                },
+            ))
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &publication)
+            .await
+            .unwrap();
+        drop(storage);
+        let storage = JsonlStorageAdapter::with_root(root.path().into());
+        let mut loaded = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
+        assert!(
+            loaded.history.indexed.is_some(),
+            "exercise the actual published index"
+        );
+        assert!(!loaded.timeline.events().iter().any(|event| matches!(
+            &event.kind,
+            chat_state::TimelineEventKind::Runtime(SessionRuntimeEvent::CommandsSettled { .. })
+        )));
+        push(&mut loaded.history, &complete(&info.id, "tail"));
+        let bodies = HistorySnapshot::body_projection_count_for_test();
+        let updates = loaded
+            .history
+            .background_task_updates(&info.id, &loaded.timeline)
+            .unwrap();
+        assert_eq!(HistorySnapshot::body_projection_count_for_test(), bodies);
+        assert_eq!(
+            updates.len(),
+            6,
+            "prefix starts are deduplicated and tail completion retained"
+        );
+        let mut completed = Vec::new();
+        let mut positions = Vec::new();
+        for update in updates {
+            let SessionUpdate::Grow(notification) = update else {
+                panic!("only task updates")
+            };
+            let cursor: Value = serde_json::from_str(
+                notification.meta.as_ref().unwrap()[super::super::HISTORY_CURSOR_KEY]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            positions.push(cursor["record"].as_u64().unwrap());
+            assert_eq!(cursor["cut"], loaded.history.record_count());
+            if let GrowUpdate::TaskCompleted { task_snapshot } = notification.update {
+                assert_eq!(task_snapshot.duration_secs(), 70.0);
+                assert!(task_snapshot.output.is_empty());
+                completed.push(task_snapshot.task_id);
+            }
+        }
+        assert!(positions.is_sorted());
+        completed.sort();
+        assert_eq!(completed, ["ordinary", "settled", "tail"]);
+        // A later ordinary completion replaces the prefix settlement row.
+        push(&mut loaded.history, &complete(&info.id, "settled"));
+        assert_eq!(
+            loaded
+                .history
+                .background_task_updates(&info.id, &loaded.timeline)
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn lightweight_tasks_hide_rewound_starts_without_body_projection() {
+        let session = acp::SessionId::new("task-rewind");
+        let mut history = HistorySnapshot::default();
+        for prompt in 0..2 {
+            let chunk =
+                acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("prompt")))
+                    .meta(
+                        serde_json::json!({"promptIndex":prompt})
+                            .as_object()
+                            .cloned(),
+                    );
+            push(
+                &mut history,
+                &SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                    session.clone(),
+                    acp::SessionUpdate::UserMessageChunk(chunk),
+                ))),
+            );
+            push(
+                &mut history,
+                &start(&session, if prompt == 0 { "visible" } else { "hidden" }),
+            );
+        }
+        push(
+            &mut history,
+            &SessionUpdate::Grow(Box::new(SessionNotification {
+                session_id: session.clone(),
+                update: GrowUpdate::RewindMarker {
+                    target_prompt_index: 1,
+                    created_at: String::new(),
+                },
+                meta: None,
+            })),
+        );
+        let mut timeline = chat_state::Timeline::default();
+        for event in [
+            SessionRuntimeEvent::SuspendRequested {
+                operation_id: "rewound-task".into(),
+                root_session_id: session.to_string(),
+            },
+            SessionRuntimeEvent::CommandsSettled {
+                operation_id: "rewound-task".into(),
+                commands: vec![settlement("hidden")],
+            },
+        ] {
+            let event = timeline
+                .record(chat_state::TimelineEventKind::Runtime(event))
+                .unwrap();
+            let position = history.record_count();
+            history.sources.push(HistorySource::Domain {
+                event: event.seq.get(),
+                response_anchor: None,
+            });
+            history.positions.push(position);
+        }
+        let updates = history
+            .background_task_updates(&session, &timeline)
+            .unwrap();
+        assert_eq!(
+            updates.len(),
+            1,
+            "a settlement cannot resurrect the rewound start"
+        );
+        assert!(matches!(&updates[0], SessionUpdate::Grow(notification)
+            if matches!(&notification.update, GrowUpdate::TaskBackgrounded { task_id, .. } if task_id == "visible")));
+    }
 }
 
 fn cursor_for(record: u64, part: u64) -> serde_json::Value {

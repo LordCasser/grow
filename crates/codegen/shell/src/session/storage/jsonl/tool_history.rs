@@ -47,6 +47,7 @@ const CONTROL_RECEIPTS: TableDefinition<(&str, &str), &[u8]> =
     TableDefinition::new("control_receipts");
 const CONTROL_UI: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("control_ui");
 const CONTROL_UI_CUT: TableDefinition<u64, &[u8]> = TableDefinition::new("control_ui_at_frontier");
+const TASK_DISPLAY: TableDefinition<u64, &[u8]> = TableDefinition::new("background_task_display");
 const OPEN_TASKS: TableDefinition<&str, &[u8]> = TableDefinition::new("open_background_tasks");
 const TASK_CUT: TableDefinition<u64, &[u8]> = TableDefinition::new("background_tasks_at_frontier");
 const TASK_TERMINALS: TableDefinition<(u64, u64), &[u8]> =
@@ -374,6 +375,7 @@ impl Index {
                 .map_err(io::Error::other)?;
             let mut notice_ids = tx.open_table(DISPLAY_IDS).map_err(io::Error::other)?;
             let mut tool_display = tx.open_table(TOOL_DISPLAY).map_err(io::Error::other)?;
+            let mut task_display = tx.open_table(TASK_DISPLAY).map_err(io::Error::other)?;
             let mut background_tasks = tx.open_table(OPEN_TASKS).map_err(io::Error::other)?;
             let mut task_terminals = tx.open_table(TASK_TERMINALS).map_err(io::Error::other)?;
             let mut task_finishes = tx.open_table(TASK_FINISHES).map_err(io::Error::other)?;
@@ -533,6 +535,9 @@ impl Index {
                         if class == super::working_snapshot::RecordClass::BackgroundTask
                             && let HistoryContent::Grow(content) = &event.content
                         {
+                            task_display
+                                .insert(record.seq, encoded.as_slice())
+                                .map_err(io::Error::other)?;
                             match content.as_ref() {
                                 crate::session::history::GrowHistoryFact::TaskBackgrounded {
                                     task_id,
@@ -1307,6 +1312,27 @@ impl Index {
             .map(|entry| {
                 let (_, value) = entry.map_err(io::Error::other)?;
                 decode(value.value())
+            })
+            .collect()
+    }
+
+    pub(super) fn background_task_references_before(
+        &self,
+        before: u64,
+    ) -> io::Result<Vec<DisplayReference>> {
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        let rows = tx.open_table(TASK_DISPLAY).map_err(io::Error::other)?;
+        rows.range(..before)
+            .map_err(io::Error::other)?
+            .map(|entry| {
+                let (position, value) = entry.map_err(io::Error::other)?;
+                let reference: DisplayReference = decode(value.value())?;
+                if reference.position != position.value() {
+                    return Err(invalid(
+                        "background task reference differs from its position",
+                    ));
+                }
+                Ok(reference)
             })
             .collect()
     }

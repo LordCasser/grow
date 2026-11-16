@@ -1,0 +1,7 @@
+## Decision
+
+TranscriptProjection继续负责实际离线finish_snapshot，不保留无caller的finish_display_page。Scrollback继续通过replace_history_prefix安装连续历史、保留EntryId与native commit事实；删除无生产caller的prepend_entries_from，不能只把它标test后为它维持一条产品不使用的测试路径。
+
+## Handoff and Review
+
+两项独立所有者：projection coder只删finish_display_page；Scrollback coder只删prepend入口并把gap前插测试收窄到真实replace_history_prefix，保留所有该路径断言和同几何/换宽用例。父亲自核对全crate调用方、diff和实际窗口链，运行gap与projection已有回归、全仓fmt及RUSTFLAGS=-Dwarnings的release-dist check。新候选前等待当前官方其余门禁给出结果，防止逐个打tag发现同一候选中的独立问题。

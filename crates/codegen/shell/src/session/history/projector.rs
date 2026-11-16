@@ -18,6 +18,11 @@ pub(crate) use window::PreparedPages;
 
 pub(crate) const HISTORY_CURSOR_KEY: &str = "grow/historyCursor";
 
+#[cfg(test)]
+thread_local! {
+    static BODY_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Cursor {
@@ -624,6 +629,149 @@ fn time_from_ms(at_ms: i64) -> SystemTime {
 }
 
 impl HistorySnapshot {
+    #[cfg(test)]
+    pub(crate) fn body_projection_count_for_test() -> usize {
+        BODY_PROJECTIONS.get()
+    }
+
+    /// Restore the task surface from the selected cut without projecting response bodies.
+    pub(crate) fn background_task_updates(
+        &self,
+        session: &acp::SessionId,
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<Vec<SessionUpdate>> {
+        Self::validate_owner(timeline, session.0.as_ref())?;
+        let cut = self.record_count();
+        let mut facts = BTreeMap::new();
+        if let Some(index) = &self.indexed {
+            for record in index.background_task_history()? {
+                let JournalFact::Presentation { at_ms, event } = record.fact else {
+                    return Err(invalid("background task index names a domain fact"));
+                };
+                facts.insert(record.seq, (at_ms, event));
+            }
+        }
+        let mut settlements = Vec::new();
+        let mut pending_rewind = None;
+        let mut recovered_markers = Vec::new();
+        for (offset, source) in self.sources.iter().enumerate() {
+            let position = self.positions.get(offset).copied().unwrap_or(offset as u64);
+            match source {
+                HistorySource::Domain { event, .. } => {
+                    if let Some(target) =
+                        timeline.rewind_display_target(chat_state::EventSeq::new(*event))
+                    {
+                        recovered_markers.extend(pending_rewind.replace((position, target)));
+                    }
+                    let domain = timeline
+                        .event(chat_state::EventSeq::new(*event))
+                        .ok_or_else(|| invalid("task history domain source is absent"))?;
+                    if background_command_settlements(domain).next().is_some() {
+                        settlements.push((position, domain));
+                    }
+                }
+                HistorySource::Presentation { at_ms, fact } => {
+                    let retain = match &fact.content {
+                        HistoryContent::User(_) => true,
+                        HistoryContent::Grow(value) => match value.as_ref() {
+                            GrowHistoryFact::TaskBackgrounded { .. }
+                            | GrowHistoryFact::TaskCompleted { .. } => true,
+                            GrowHistoryFact::RewindMarker { .. } => {
+                                pending_rewind = None;
+                                true
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if retain {
+                        if let Some(index) = &self.indexed
+                            && position < index.records()
+                            && !index.visible_range(position)?.contains(&position)
+                        {
+                            continue;
+                        }
+                        facts
+                            .entry(position)
+                            .or_insert_with(|| (*at_ms, fact.as_ref().clone()));
+                    }
+                }
+            }
+        }
+        let mut updates = Vec::with_capacity(facts.len());
+        for (position, (at_ms, fact)) in facts {
+            if let Some(mut update) = fact.into_update(session)? {
+                self.stamp_cursor(session, cut, Some(at_ms), position, 0, true, &mut update)?;
+                updates.push(update);
+            }
+        }
+        recovered_markers.extend(pending_rewind);
+        for (position, target_prompt_index) in recovered_markers {
+            let mut marker = SessionUpdate::Grow(Box::new(GrowNotification {
+                session_id: session.clone(),
+                update: GrowUpdate::RewindMarker {
+                    target_prompt_index,
+                    created_at: String::new(),
+                },
+                meta: None,
+            }));
+            self.stamp_cursor(session, cut, None, position, 0, true, &mut marker)?;
+            updates.push(marker);
+        }
+        updates.sort_by_key(|update| {
+            let cursor = cursor_from_update(update).expect("stamped task history");
+            (cursor.record, cursor.part)
+        });
+        // Indexed hydration falls back to dense history for an unpublished
+        // domain rewind or presentation marker. Its prefix visibility is thus
+        // authoritative; dense history retains the prompt boundaries below.
+        let mut updates = crate::session::storage::filter_rewind_updates(updates);
+        if let Some(index) = &self.indexed {
+            let completed: HashSet<_> = updates
+                .iter()
+                .filter_map(|update| match update {
+                    SessionUpdate::Grow(notification) => match &notification.update {
+                        GrowUpdate::TaskCompleted { task_snapshot } => {
+                            Some(task_snapshot.task_id.clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            let mut reader = index.page_reader()?;
+            let mut before = (index.records(), 0);
+            loop {
+                let rows = reader.task_terminals_before(before, 256, cut)?;
+                if rows.is_empty() {
+                    break;
+                }
+                before = rows.last().expect("nonempty terminal batch").position();
+                for row in rows {
+                    if row.superseded()
+                        || completed.contains(row.task_id())
+                        || !index.visible_range(row.start())?.contains(&row.start())
+                        || !index
+                            .visible_range(row.position().0)?
+                            .contains(&row.position().0)
+                    {
+                        continue;
+                    }
+                    updates.push(reader.read_task_terminal(row, session, self)?);
+                }
+            }
+            updates.sort_by_key(|update| {
+                let cursor = cursor_from_update(update).expect("stamped task history");
+                (cursor.record, cursor.part)
+            });
+        }
+        settlements.sort_by_key(|(position, _)| *position);
+        let mut updates = self.project_command_terminals(session, cut, updates, settlements)?;
+        updates.retain(|update| matches!(update, SessionUpdate::Grow(notification)
+            if matches!(&notification.update, GrowUpdate::TaskBackgrounded { .. } | GrowUpdate::TaskCompleted { .. })));
+        Ok(updates)
+    }
+
     pub(crate) fn indexed_pages(
         &self,
         prepared: PreparedHistory,
@@ -944,6 +1092,8 @@ impl HistorySnapshot {
                 if response.quarantined_tool_exchanges != 0 {
                     continue;
                 }
+                #[cfg(test)]
+                BODY_PROJECTIONS.set(BODY_PROJECTIONS.get() + 1);
                 let texts = response
                     .items
                     .iter()
@@ -1122,6 +1272,8 @@ impl HistorySnapshot {
                     channel,
                     chunk_meta,
                 } => {
+                    #[cfg(test)]
+                    BODY_PROJECTIONS.set(BODY_PROJECTIONS.get() + 1);
                     let event = timeline
                         .exact_event(chat_state::EventSeq::new(*event))?
                         .ok_or_else(|| invalid("history message source is absent"))?;

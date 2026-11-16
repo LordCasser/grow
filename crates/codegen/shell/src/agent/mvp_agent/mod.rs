@@ -1214,8 +1214,27 @@ impl MvpAgent {
         if page_history {
             let captured = history_paging::HistoryPageCut::capture(session_id, history, timeline)
                 .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            let updates = history.background_task_updates(session_id, timeline)
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
             timer.with_field("history_cut", true);
-            timer.with_field("updates_count", 0);
+            timer.with_field("updates_count", updates.len());
+            let mut completions = Vec::with_capacity(updates.len());
+            for update in updates {
+                let crate::session::storage::SessionUpdate::Grow(mut notification) = update else {
+                    unreachable!("task state projection only emits Grow updates");
+                };
+                let meta = notification.meta.get_or_insert_with(|| serde_json::json!({})).as_object_mut().expect("validated history metadata");
+                meta.insert("isReplay".into(), true.into());
+                meta.insert("grow/taskStateOnly".into(), true.into());
+                if let Some(value) = persist_data { meta.insert("grow/persist".into(), value.clone()); }
+                if let Some(value) = target_client_id { meta.insert("grow/leaderClientId".into(), value.clone()); }
+                let raw = serde_json::value::to_raw_value(&notification).map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+                if completions.is_empty() {
+                    trace_first_history_send(&notification.session_id, notification.meta.as_ref().and_then(serde_json::Value::as_object));
+                }
+                completions.push(self.gateway.forward_with_completion(acp::ExtNotification::new("grow/session/update", std::sync::Arc::from(raw))));
+            }
+            for completion in completions { let _ = completion.await; }
             return Ok(SessionReplay {
                 coverage: captured.coverage,
                 history_cut: Some(captured.cut),

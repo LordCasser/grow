@@ -3416,31 +3416,25 @@ mod tests {
     #[test]
     fn gap_anchor_follows_entry_after_history_prepend() {
         let _theme = pin_theme();
-        for replace_prefix in [false, true] {
-            let mut state = ScrollbackState::new();
-            let entry_id = state.push_block(RenderBlock::tool_call("Tool", "done", true));
-            state.push_block(RenderBlock::agent_message("tail"));
-            state.prepare_layout(20, 2);
-            state.set_scroll_offset(1);
-            assert_eq!(state.scroll_offset(), 1);
-            let mut page = ScrollbackState::new();
-            page.next_id = state.next_id;
-            page.push_block(RenderBlock::agent_message("older history"));
+        let mut state = ScrollbackState::new();
+        let entry_id = state.push_block(RenderBlock::tool_call("Tool", "done", true));
+        state.push_block(RenderBlock::agent_message("tail"));
+        state.prepare_layout(20, 2);
+        state.set_scroll_offset(1);
+        assert_eq!(state.scroll_offset(), 1);
+        let mut page = ScrollbackState::new();
+        page.next_id = state.next_id;
+        page.push_block(RenderBlock::agent_message("older history"));
 
-            if replace_prefix {
-                // The continuous history window installs pages through this path.
-                state.replace_history_prefix(page, 0, true);
-            } else {
-                state.prepend_entries_from(page);
-            }
+        // The continuous history window installs pages through this path.
+        state.replace_history_prefix(page, 0, true);
 
-            let entry_idx = state.index_of_id(entry_id).unwrap();
-            let cache = state.layout_cache.as_ref().unwrap();
-            let expected = cache.virtual_y[entry_idx] + cache.entries[entry_idx].height as usize;
-            assert_eq!(state.scroll_offset(), expected);
-            assert_eq!(screen_row_of(&state, entry_idx + 1), 1);
-            assert_eq!(state.capture_scroll_anchor().unwrap().entry_id, entry_id);
-        }
+        let entry_idx = state.index_of_id(entry_id).unwrap();
+        let cache = state.layout_cache.as_ref().unwrap();
+        let expected = cache.virtual_y[entry_idx] + cache.entries[entry_idx].height as usize;
+        assert_eq!(state.scroll_offset(), expected);
+        assert_eq!(screen_row_of(&state, entry_idx + 1), 1);
+        assert_eq!(state.capture_scroll_anchor().unwrap().entry_id, entry_id);
     }
 
     #[test]

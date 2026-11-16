@@ -535,7 +535,23 @@ fn handle_session_notification_inner(
         _ => None,
     };
     if let Some(changed) = background_changed {
+        // A state-only task replay (paged full load) restores Tasks-center
+        // rows without transcript facts. Its cursor must not present itself
+        // as the first applied history item: the replay-first-frame
+        // diagnostics would then measure body restoration from an update
+        // that cannot move the body. Ordinary task updates keep recording.
+        let task_state_only = matches!(
+            &session_notif.update,
+            GrowSessionUpdate::TaskBackgrounded { .. } | GrowSessionUpdate::TaskCompleted { .. }
+        ) && NotificationMeta::from_json(
+            session_notif
+                .meta
+                .as_ref()
+                .and_then(serde_json::Value::as_object),
+        )
+        .is_task_state_only_replay();
         if changed
+            && !task_state_only
             && let Some(matched) = find_session_match(app, &session_notif.session_id)
             && let Some(agent) = app.agents.get_mut(&matched.agent_id())
         {

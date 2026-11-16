@@ -174,11 +174,6 @@ impl TranscriptProjection {
         self.settle_image_recovery_operations(None, "Image recovery incomplete at snapshot");
     }
 
-    pub(crate) fn finish_display_page(&mut self) {
-        self.tracker.finish_transcript_turn(&mut self.scrollback);
-        self.scrollback.finish_all_running();
-    }
-
     pub fn behavior_label(&self) -> Option<String> {
         self.behavior.as_ref().map(|(mode, phase)| {
             format!(

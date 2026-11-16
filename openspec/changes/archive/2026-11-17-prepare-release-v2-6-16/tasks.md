@@ -1,0 +1,5 @@
+- [x] 1.1 闭合仅Unix测试helper的cfg修复并同步2.6.16本地包版本、notes和旧候选状态。
+- [x] 1.2 完成相关本地检查，提交、annotated tag和validate-release.sh。
+- [x] 2.1 推送并执行官方全平台publish流程，记录源码门禁失败与macOS runner取消；发布未获准。
+- [x] 2.2 收齐全部平台结果，确认publish skipped且release接口404；没有公开资产可验收，不伪记checksum或原生下载验证。
+- [x] 3.1 更新失败候选文档并归档，保留已发布tag，将修复和最终发行转交下一可用patch。

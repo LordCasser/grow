@@ -61,6 +61,11 @@ pub struct NotificationMeta {
     pub prompt_id: Option<String>,
     /// Whether this notification is historical replay from `session/load`.
     pub is_replay: bool,
+    /// Paged-load task-state replay marker (`grow/taskStateOnly`): the
+    /// update carries only Tasks-center lifecycle facts (no transcript
+    /// content). Meaningful only together with `is_replay` — see
+    /// [`Self::is_task_state_only_replay`].
+    pub task_state_only: bool,
     /// Raw `eventId` string (`"{sessionId}-{counter}"`). Tracked per session
     /// as the reconnect cursor (`_meta.cursor` on `session/load`): the agent
     /// resolves it by exact string match against persisted lines, so the full
@@ -166,6 +171,10 @@ impl NotificationMeta {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             is_replay: m.get("isReplay").and_then(|v| v.as_bool()).unwrap_or(false),
+            task_state_only: m
+                .get("grow/taskStateOnly")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             replace_sampling_preview: m
                 .get("grow/replaceSamplingPreview")
                 .and_then(serde_json::Value::as_bool)
@@ -185,6 +194,15 @@ impl NotificationMeta {
                 .and_then(|v| v.as_u64())
                 .and_then(|v| u32::try_from(v).ok()),
         }
+    }
+
+    /// Task-state-only replay (paged full load): the shell re-emits the
+    /// session's task lifecycle (`TaskBackgrounded` / `TaskCompleted`) ahead
+    /// of the paged transcript so the Tasks center restores without body
+    /// pages. Both wire marks must hold — `isReplay` alone keeps the full
+    /// replay projection, `grow/taskStateOnly` alone is not a replay.
+    pub fn is_task_state_only_replay(&self) -> bool {
+        self.is_replay && self.task_state_only
     }
 }
 
@@ -286,6 +304,32 @@ mod tests {
         let meta = NotificationMeta::from_json(Some(map));
 
         assert!(meta.is_replay);
+    }
+
+    /// Paged full load re-emits task lifecycle ahead of the transcript with
+    /// BOTH `isReplay` and `grow/taskStateOnly`. Either mark alone must not
+    /// select the state-only path, and the field defaults to false for
+    /// older shells that never stamp it.
+    #[test]
+    fn parse_task_state_only_replay_marker() {
+        let parse = |meta_json: serde_json::Value| {
+            NotificationMeta::from_json(meta_json.as_object()).is_task_state_only_replay()
+        };
+
+        assert!(
+            parse(json!({ "isReplay": true, "grow/taskStateOnly": true })),
+            "both marks select the state-only task path"
+        );
+        assert!(
+            !parse(json!({ "isReplay": true })),
+            "isReplay alone must keep the full replay projection"
+        );
+        assert!(
+            !parse(json!({ "grow/taskStateOnly": true })),
+            "taskStateOnly alone is not a replay"
+        );
+        let meta = NotificationMeta::from_json(json!({}).as_object());
+        assert!(!meta.task_state_only, "absent marker defaults to false");
     }
 
     /// The build side ([`ReplayMetaStamp::replayed`]) and the parse side

@@ -601,34 +601,6 @@ impl ScrollbackState {
         self.bump_content_generation();
     }
 
-    /// Insert an observational page before the current fullscreen transcript.
-    /// Existing IDs stay in place so live trackers and the selection still
-    /// refer to the same entries.
-    pub(crate) fn prepend_entries_from(&mut self, mut page: ScrollbackState) {
-        if page.is_empty() {
-            return;
-        }
-        let anchor = if !self.follow_mode || self.follow_preserve_scroll {
-            self.capture_scroll_anchor()
-        } else {
-            None
-        };
-        if let Some(selected) = self.selected.as_mut() {
-            *selected += page.entries.len();
-        }
-        page.entries.extend(std::mem::take(&mut self.entries));
-        self.entries = page.entries;
-        self.next_id = page.next_id;
-        self.rebuild_immutable_event_index();
-        self.rebuild_turns();
-        self.invalidate_layout_cache();
-        if let Some(anchor) = anchor {
-            self.prepare_layout(self.last_width, self.viewport_height);
-            self.restore_scroll_anchor(anchor);
-        }
-        self.bump_content_generation();
-    }
-
     /// Replace the installed history prefix, leaving the live tail and its
     /// entry ids in place. History ids already present keep their fold state.
     /// Existing ids keep their native commit facts. New history rows stay
