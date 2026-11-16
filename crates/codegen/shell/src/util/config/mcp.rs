@@ -802,9 +802,8 @@ pub fn get_all_mcp_disabled_tools(
 
 /// Load the declared RWX ceiling for every `[mcp_servers.<name>]` entry.
 ///
-/// Single source of truth for the plan-mode read-only MCP classification:
-/// while a Plan is in a non-executing phase, tools from a listed server are
-/// allowed through the edit gate; every other MCP tool is rejected. MCP
+/// Ordinary tool authorization projects an MCP call to this config-owned
+/// ceiling. Plan phase does not add another MCP mask. MCP
 /// `annotations`/`readOnlyHint` are never consulted. The session caches the
 /// trust-filtered result in `McpState` at init instead of re-reading per tool
 /// call.

@@ -225,6 +225,13 @@ pub struct PendingCompaction {
     pub last_used: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedSamplingAttempt {
+    Previewing,
+    Accepted,
+    Discarded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SamplingAttemptKey {
     request_id: String,
@@ -543,6 +550,29 @@ impl AcpUpdateTracker {
 
     pub fn claim_hook_occurrence(&mut self, occurrence_id: &str) -> bool {
         self.seen_hook_occurrences.insert(occurrence_id.to_owned())
+    }
+
+    pub fn observed_sampling_attempt(
+        &self,
+        request_id: &str,
+        attempt: u32,
+    ) -> Option<ObservedSamplingAttempt> {
+        let key = SamplingAttemptKey {
+            request_id: request_id.to_owned(),
+            attempt,
+        };
+        if self.accepted_sampling_attempts.contains(&key) {
+            return Some(ObservedSamplingAttempt::Accepted);
+        }
+        if self.discarded_sampling_attempts.contains(&key) {
+            return Some(ObservedSamplingAttempt::Discarded);
+        }
+        if self.sampling_attempt.as_ref() == Some(&key)
+            || self.sampling_preview_entries.contains_key(&key)
+        {
+            return Some(ObservedSamplingAttempt::Previewing);
+        }
+        None
     }
 
     pub fn tool_entry_id(
@@ -3598,7 +3628,7 @@ fn meta_summary(meta: &NotificationMeta) -> String {
         "seq={} tokens={} prompt={} stream_start={}",
         meta.event_seq
             .map_or_else(|| "-".to_string(), |v| v.to_string()),
-        meta.total_tokens
+        meta.context_used_tokens
             .map_or_else(|| "-".to_string(), |v| v.to_string()),
         meta.prompt_id.as_deref().unwrap_or("-"),
         meta.stream_start_ms
@@ -7119,7 +7149,7 @@ mod tests {
         );
         let m = NotificationMeta {
             event_seq: Some(42),
-            total_tokens: Some(1234),
+            context_used_tokens: Some(1234),
             ..Default::default()
         };
         assert_eq!(

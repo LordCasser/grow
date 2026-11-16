@@ -28,6 +28,9 @@ use pager::theme::Theme;
 /// Called at the top of the minimal draw, before `commit_active`, so the card
 /// lands above the first conversation block in native scrollback.
 pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
+    if minimal_api::minimal_history_browsing(app) {
+        return;
+    }
     if !minimal_api::minimal_welcome_pending(app)
         || !minimal_api::minimal_welcome_session_ready(app)
     {

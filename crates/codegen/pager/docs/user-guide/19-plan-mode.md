@@ -13,7 +13,7 @@ When plan mode is active, the agent:
 3. May use `ask_user_question` to clarify specific questions
 4. Calls `plan_control(action="submit", plan=...)` to present the plan for your approval
 
-Plan is a human-approval protocol, not a permission preset. Before approval, workspace mutation is rejected in every permission mode, including shell and MCP execution paths that may mutate state. Read, search, web, and question tools still pass through their normal policy and permission checks. After approval, the frozen plan becomes the execution contract and normal mutation capabilities reopen.
+Plan is a human-approval protocol, not a permission preset. Tool calls use the same capability, permission, sandbox, and path checks as Normal. During Drafting, AwaitingApproval, and Amending, the agent may read, search, run terminal checks, and perform limited recoverable experiments, but only to form, verify, or revise the plan. Allowing a tool call does not approve the plan. The agent must not implement the planned product change, including through a script, file edit, MCP tool, subagent, another session, or Workflow. That instruction guides the agent; it is not a sandbox that blocks every command. After approval, Executing implements only the frozen scope under ordinary permissions. Work outside that scope needs an amendment and another approval.
 
 ---
 
@@ -74,7 +74,7 @@ See [completed Plan details](../../../../../openspec/specs/client-surfaces/spec.
 
 The complete plan is passed to `plan_control`. Before approval opens, Grow persists an immutable body at `artifacts/plan/<blake3-hash>.md` inside the session directory and commits its submission identity, revision, and hash. Approval binds that exact candidate; execution reminders use the approved snapshot as a contract. Later material changes require `action="amend"` and another approval.
 
-This artifact belongs to the session control plane. It is not exposed as a model-editable workspace target and does not grant the Agent arbitrary file-write access.
+This artifact belongs to the session control plane. The agent submits plan text through `plan_control`; the artifact is not a free-form edit target, and a recoverable experiment does not grant arbitrary file-write access.
 
 The plan file contains:
 
@@ -146,28 +146,23 @@ The user-facing Plan protocol has these phases:
 
 | Phase | Description |
 | --- | --- |
-| `Drafting` | Investigate and form a complete plan; workspace mutation is blocked. |
-| `AwaitingApproval` | The submitted candidate is frozen for user review; mutation remains blocked. |
-| `Executing` | The approved version is injected as the execution contract; mutation is allowed by normal policy. |
-| `Amending` | A material deviation has stopped execution and awaits approval of a complete replacement plan. |
+| `Drafting` | Investigate and form a complete plan. Tools follow normal permissions and serve planning only. |
+| `AwaitingApproval` | The submitted candidate is frozen. The agent must not execute, edit, or resubmit it. |
+| `Executing` | The approved version is the execution contract. Normal tool permissions apply inside that scope. |
+| `Amending` | A complete replacement is being revised, or is frozen for review. Unapproved scope is not implemented. |
 | `Completed/Cancelled` | The lifecycle is cleared and Behavior returns to Normal. |
 
 Transitions:
 
-`submit` moves Drafting to AwaitingApproval. Approval moves to Executing. `amend` moves Executing to Amending and approval returns to Executing with a new frozen version. `complete` and `cancel` return to Normal. Plan state and the outstanding approval survive process restarts. A retained candidate has its own review status; deferring it does not add a new execution phase or grant mutation permission. Copying plan history to another session does not copy approval: the target needs a new submission and review. State import rejects a source that still carries a reviewable or unresolved Plan execution relationship; closed history remains importable.
+`submit` moves Drafting to AwaitingApproval. Approval moves to Executing. `amend` moves Executing to Amending and approval returns to Executing with a new frozen version. `complete` and `cancel` return to Normal. Plan state and the outstanding approval survive process restarts. A retained candidate has its own review status; deferring it does not add a new execution phase or approve implementation. Copying plan history to another session does not copy approval: the target needs a new submission and review. State import rejects a source that still carries a reviewable or unresolved Plan execution relationship; closed history remains importable.
 
 ---
 
 ## Edits During Plan Mode
 
-During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Workflow is not advertised and stale Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
+Planning phases do not add a second mutation gate before permission evaluation. Reads, terminal checks, edits, MCP, and subagents are admitted or denied by the ordinary tool, Agent, sandbox, and permission policy. The agent must still keep that work recoverable and limited to forming, verifying, or revising the plan. It must not deliver the product change, discard your work, or commit or deploy it as investigation. Workflow remains unavailable as a way around plan approval.
 
-MCP servers declared with `[mcp_servers.<name>] max_access = "read_write"` are the one remote-query exception to the file-mutation gate: every tool of that trust domain may pass the gate, but still goes through normal permission policy. Broader or unclassified MCP domains remain rejected. The ceiling is server-wide—split servers that mix queries and mutations, or keep the conservative `all` default.
-
-This enforcement is independent of the permission mode:
-
-- **Always-approve stays armed as an independent permission policy**, but it cannot bypass a non-executing Plan phase's mutation gate.
-- Behavior belongs only to the primary Agent. Child Agents receive an explicit role, task, and capability boundary; they neither inherit Plan nor select another Behavior.
+During Executing, the same ordinary policy applies, limited to the approved scope. Always-approve and a one-time tool allow do not approve a plan or widen an approved scope. Behavior belongs only to the primary Agent. Child Agents receive an explicit role, task, and capability boundary; delegated planning research carries the same limit, and children neither inherit Plan nor select another Behavior.
 
 The prompt status line always shows Behavior between model and permission. Plan includes its current phase, and the permission indicator remains visible because the two dimensions are independent.
 

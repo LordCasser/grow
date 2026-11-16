@@ -1345,8 +1345,7 @@ impl WorkflowManager {
                     crate::session::persistence::PersistenceMsg::LoadWorkflowRunHistory {
                         respond_to,
                     } => {
-                        let _ = respond_to
-                            .send(Ok((Vec::new(), std::collections::HashMap::new())));
+                        let _ = respond_to.send(Ok((Vec::new(), std::collections::HashMap::new())));
                     }
                     _ => {}
                 }
@@ -1488,8 +1487,7 @@ impl WorkflowManager {
                     crate::session::persistence::PersistenceMsg::LoadWorkflowRunHistory {
                         respond_to,
                     } => {
-                        let _ = respond_to
-                            .send(Ok((Vec::new(), std::collections::HashMap::new())));
+                        let _ = respond_to.send(Ok((Vec::new(), std::collections::HashMap::new())));
                     }
                     _ => {}
                 }

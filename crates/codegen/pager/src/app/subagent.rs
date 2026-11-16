@@ -387,7 +387,11 @@ pub(crate) fn read_descendant_replay_batch(
             {
                 Ok(ownership) => ownership,
                 Err(error) => {
-                    tracing::debug!(session_id = root_session_id, ?error, "failed to read root ownership");
+                    tracing::debug!(
+                        session_id = root_session_id,
+                        ?error,
+                        "failed to read root ownership"
+                    );
                     None
                 }
             }
@@ -407,11 +411,7 @@ pub(crate) fn read_descendant_replay_batch(
         .collect::<std::collections::HashSet<_>>();
     let root_spawns = root_ownership
         .map(|ownership| {
-            replayed_direct_children.extend(
-                ownership
-                    .replayed_child_ids()
-                    .map(str::to_owned),
-            );
+            replayed_direct_children.extend(ownership.replayed_child_ids().map(str::to_owned));
             ownership.into_spawns()
         })
         .unwrap_or_default();
@@ -435,24 +435,23 @@ pub(crate) fn read_descendant_replay_batch(
         if !visited.insert(parent_session_id.clone()) {
             continue;
         }
-        let (ownership, lifecycle) =
-            match shell::session::storage::load_descendant_child_replay_at(
-                &parent_session_id,
-                &owner_session_id,
-                &owner_spawn,
-                grow_home,
-            ) {
-                Ok(Some(snapshot)) => snapshot,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::debug!(
-                        session_id = parent_session_id,
-                        ?error,
-                        "failed to replay descendant lifecycle"
-                    );
-                    continue;
-                }
-            };
+        let (ownership, lifecycle) = match shell::session::storage::load_descendant_child_replay_at(
+            &parent_session_id,
+            &owner_session_id,
+            &owner_spawn,
+            grow_home,
+        ) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::debug!(
+                    session_id = parent_session_id,
+                    ?error,
+                    "failed to replay descendant lifecycle"
+                );
+                continue;
+            }
+        };
         let durable_children = ownership.into_spawns();
         for notification in &lifecycle {
             if let SessionUpdate::SubagentSpawned {
@@ -750,10 +749,7 @@ fn apply_projected_root_spawn(
             permission_mode: event.permission_mode.clone(),
             effective_permission_mode: event.effective_permission_mode.clone(),
             model: Some(event.effective_model_id.clone()),
-            reasoning_effort: event
-                .reasoning_effort
-                .as_ref()
-                .map(ToString::to_string),
+            reasoning_effort: event.reasoning_effort.as_ref().map(ToString::to_string),
             model_state: None,
             workflow_agent_names: None,
             resumed_from: event.resumed_from.clone(),
@@ -812,9 +808,7 @@ fn should_apply_descendant_control(
     };
     match captured_generation {
         Some((binding_epoch, captured)) => {
-            child.session_binding_epoch == binding_epoch
-                && captured == 0
-                && generation == captured
+            child.session_binding_epoch == binding_epoch && captured == 0 && generation == captured
         }
         None => generation == 0,
     }
@@ -1698,6 +1692,7 @@ mod tests {
                     context_normalized: false,
                     resumed_from: None,
                     parent_prompt_id: None,
+                    parent_prompt_owner: None,
                     capability_mode: None,
                     birth_mcp_servers: Some(Default::default()),
                     permission_mode: None,

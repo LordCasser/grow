@@ -71,6 +71,10 @@ A confirmed exit or update restart preserves the original session and child iden
 
 When a paused Goal is ready to continue, use `/goal restart` after resume. Grow checks the restored Goal tool catalog before continuing.
 
+Resume restores the confirmed Behavior and Plan phase independently of the transcript. Opening an older history page does not change the current Behavior, restart a completed turn, or add token consumption. An unfinished logical turn keeps its recorded usage across suspension; its eventual result includes the usage recorded before and after resume.
+
+The main view first loads a recent history window. Scroll toward an unloaded edge to fetch the next segment in the same transcript. Enabling `/timeline` also loads a separate list of prompt positions; clicking a position outside the loaded window reads content around that target directly. A distant jump leaves a visible gap where intervening history has not been loaded. The [continuous history contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-main-transcript-scrolls-through-bounded-history-windows) records the window behavior; the [accounting contract](../../../../../openspec/specs/session-timeline/spec.md#requirement-suspended-logical-turns-restore-their-accounting-attribution) covers usage across resume.
+
 Open Tasks with `Ctrl+G`, then press `h` to see interrupted commands in completed history. The elapsed time includes the time a command ran in the foreground before `Ctrl+B`. Older records may display elapsed time based on the available history timestamps.
 
 New child Spawn facts record their birth MCP membership. A suspended child from

@@ -4,7 +4,8 @@ approved contract:
 ${{ plan_content }}
 
 Implement only work covered by this plan. You may decide ordinary implementation
-details inside its stated scope. Keep plan conformance, shared interfaces, and
+details inside its stated scope. Ordinary permission grants do not expand that
+scope. Keep plan conformance, shared interfaces, and
 integration primary-owned. Delegate only separable approved slices, and continue
 other approved analysis, implementation, or verification while they run whenever
 it is independent. If the goal, scope, architecture, major steps, risk profile,

@@ -198,6 +198,102 @@ fn live_tail_is_stamped_before_the_first_height_measurement() {
     );
 }
 
+#[test]
+fn history_browser_pauses_native_writes_and_returns_only_unprinted_live_ids() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use pager::app::root::ActiveView;
+    use pager::app::session::AgentId;
+    use pager::render::draw::{TermWriter, WriterSync};
+    use std::io::Write as _;
+
+    let mut app = minimal_api::test_minimal_app();
+    minimal_api::set_screen_mode_minimal_for_test(&mut app);
+    let mut root = minimal_api::test_agent_view(Some("history-native"), "/tmp/root".into());
+    let recent = root.scrollback.push(finalized("RECENT-LIVE"));
+    app.agents.insert(AgentId(0), root);
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let owner = minimal_api::minimal_visible_owner(&app).unwrap();
+    minimal_api::begin_minimal_visible_epoch(&mut app, Some(owner.clone()));
+
+    // Use the existing commit callback fixture to record emitted IDs. A fixed
+    // Crossterm terminal separately catches any submissions from commit_active
+    // while browsing; real native-screen restoration belongs to the PTY run.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let writer = TermWriter::new(tx, WriterSync::new()).unwrap();
+    let mut terminal = ratatui_inline::Terminal::with_options(
+        ratatui::backend::CrosstermBackend::new(writer),
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 40, 4)),
+        },
+    )
+    .unwrap();
+    let frame = pager::motion::FrameStamp::default();
+    let mut printed = Vec::new();
+    let mut commit_ids = |sb: &mut ScrollbackState| {
+        commit_leading_run(sb, false, |sb, index| {
+            printed.push(sb.get(index).unwrap().id);
+            true
+        })
+    };
+    assert_eq!(
+        commit_ids(&mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback),
+        1
+    );
+    assert!(minimal_api::is_committed(
+        &app.agents[&AgentId(0)].scrollback,
+        app.agents[&AgentId(0)]
+            .scrollback
+            .get_by_id(recent)
+            .unwrap(),
+    ));
+
+    app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    )));
+    assert!(minimal_api::minimal_history_browsing(&app));
+    let new_live = {
+        let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
+        minimal_api::prepend_committed_history_for_test(sb, "OLDER-PAGE");
+        sb.push(finalized("NEW-LIVE"))
+    };
+    assert!(!commit_active(&mut app, &mut terminal, frame));
+    terminal.backend_mut().flush().unwrap();
+    assert_eq!(
+        rx.try_iter().count(),
+        0,
+        "browsing must freeze native output"
+    );
+    assert_eq!(minimal_api::minimal_printed_owner(&app), Some(&owner));
+    let sb = &app.agents[&AgentId(0)].scrollback;
+    assert!(
+        sb.iter_entries()
+            .all(|(id, entry)| { minimal_api::is_committed(sb, entry) == (id != new_live) })
+    );
+
+    app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(!minimal_api::minimal_history_browsing(&app));
+    assert_eq!(
+        commit_ids(&mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback),
+        1
+    );
+    let sb = &app.agents[&AgentId(0)].scrollback;
+    assert!(
+        sb.iter_entries()
+            .all(|(_, entry)| minimal_api::is_committed(sb, entry))
+    );
+    assert_eq!(minimal_api::minimal_printed_owner(&app), Some(&owner));
+    assert_eq!(
+        commit_ids(&mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback),
+        0
+    );
+    assert_eq!(
+        printed,
+        vec![recent, new_live],
+        "old pages and recent IDs never replay"
+    );
+}
+
 /// Run a commit pass for a RUNNING turn, returning the emitted indices.
 fn commit_collect(state: &mut ScrollbackState) -> Vec<usize> {
     let mut seen = Vec::new();

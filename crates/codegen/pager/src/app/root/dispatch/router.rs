@@ -103,6 +103,7 @@ use super::turn::{
 use crate::app::actions::{Action, Effect};
 use crate::app::agent_view::ActivePane;
 use crate::app::root::{ActiveView, AppView};
+use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 /// Dispatch an action: mutate state, return effects to execute.
@@ -127,6 +128,30 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         effects.extend(refresh_pending_picker_after_owner_switch(app));
     }
     app.setting_persistence.finish_dispatch(effects)
+}
+
+/// Navigation over the main transcript: run the scroll mutation, then the
+/// unified history-interval boundary check in the navigation's direction so
+/// continued browsing requests the next page instead of clamping at an
+/// unloaded end. `forward` is `true` toward the newer end (down / next turn).
+/// `clear_selection` mirrors [`navigate_clearing_selection`]: navigation
+/// actions that scroll away from a highlighted region dismiss it.
+fn navigate_history(
+    app: &mut AppView,
+    forward: bool,
+    clear_selection: bool,
+    f: impl FnOnce(&mut ScrollbackState),
+) -> Vec<Effect> {
+    if clear_selection {
+        navigate_clearing_selection(app, f);
+    } else {
+        with_scrollback(app, f);
+    }
+    let mut effects = Vec::new();
+    with_active_agent(app, |agent| {
+        agent.request_history_at_viewport_boundary(forward, &mut effects);
+    });
+    effects
 }
 
 fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
@@ -433,70 +458,33 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             });
             effects
         }
-        Action::SelectNext => {
-            navigate_clearing_selection(app, |s| s.select_next());
-            vec![]
-        }
-        Action::SelectPrev => {
-            navigate_clearing_selection(app, |s| s.select_prev());
-            vec![]
-        }
-        Action::NextTurn => {
-            with_scrollback(app, |s| {
-                s.next_turn();
-            });
-            vec![]
-        }
-        Action::PrevTurn => {
-            with_scrollback(app, |s| {
-                s.prev_turn();
-            });
-            vec![]
-        }
-        Action::NextResponse => {
-            with_scrollback(app, |s| {
-                s.next_response();
-            });
-            vec![]
-        }
-        Action::PrevResponse => {
-            with_scrollback(app, |s| {
-                s.prev_response();
-            });
-            vec![]
-        }
-        Action::GotoTop => {
-            navigate_clearing_selection(app, |s| s.goto_top());
-            vec![]
-        }
+        Action::SelectNext => navigate_history(app, true, true, |s| s.select_next()),
+        Action::SelectPrev => navigate_history(app, false, true, |s| s.select_prev()),
+        Action::NextTurn => navigate_history(app, true, false, |s| {
+            s.next_turn();
+        }),
+        Action::PrevTurn => navigate_history(app, false, false, |s| {
+            s.prev_turn();
+        }),
+        Action::NextResponse => navigate_history(app, true, false, |s| {
+            s.next_response();
+        }),
+        Action::PrevResponse => navigate_history(app, false, false, |s| {
+            s.prev_response();
+        }),
+        Action::GotoTop => navigate_history(app, false, true, |s| s.goto_top()),
         Action::GotoBottom => {
-            navigate_clearing_selection(app, |s| s.goto_bottom());
-            vec![]
+            let mut effects = Vec::new();
+            with_active_agent(app, |agent| agent.suppress_timeline_jump(&mut effects));
+            effects.extend(navigate_history(app, true, true, |s| s.goto_bottom()));
+            effects
         }
-        Action::ScrollUp(n) => {
-            with_scrollback(app, |s| s.scroll_up(n));
-            vec![]
-        }
-        Action::ScrollDown(n) => {
-            with_scrollback(app, |s| s.scroll_down(n));
-            vec![]
-        }
-        Action::HalfPageUp => {
-            navigate_clearing_selection(app, |s| s.half_page_up());
-            vec![]
-        }
-        Action::HalfPageDown => {
-            navigate_clearing_selection(app, |s| s.half_page_down());
-            vec![]
-        }
-        Action::PageUp => {
-            navigate_clearing_selection(app, |s| s.page_up());
-            vec![]
-        }
-        Action::PageDown => {
-            navigate_clearing_selection(app, |s| s.page_down());
-            vec![]
-        }
+        Action::ScrollUp(n) => navigate_history(app, false, false, |s| s.scroll_up(n)),
+        Action::ScrollDown(n) => navigate_history(app, true, false, |s| s.scroll_down(n)),
+        Action::HalfPageUp => navigate_history(app, false, true, |s| s.half_page_up()),
+        Action::HalfPageDown => navigate_history(app, true, true, |s| s.half_page_down()),
+        Action::PageUp => navigate_history(app, false, true, |s| s.page_up()),
+        Action::PageDown => navigate_history(app, true, true, |s| s.page_down()),
         Action::Collapse => {
             with_scrollback(app, |s| {
                 let at_minimum = s

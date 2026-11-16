@@ -44,28 +44,7 @@ impl EventSeq {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TurnId(#[serde(with = "turn_id_serde")] pub u64);
-
-mod turn_id_serde {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&value.to_string())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(serde::de::Error::custom)
-    }
-}
+pub use tool_types::TurnId;
 
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -646,14 +625,21 @@ fn is_outgoing_inquiry(event: &TimelineEvent, id: &str) -> bool {
 }
 
 fn is_incoming_inquiry(event: &TimelineEvent, sender: &str, id: &str) -> bool {
-    let TimelineEventKind::Observation(observation) = &event.kind else { return false; };
+    let TimelineEventKind::Observation(observation) = &event.kind else {
+        return false;
+    };
     if observation.scope != "coordination" || observation.name != "inquiry" {
         return false;
     }
-    let Some(data) = observation.data.as_ref() else { return false; };
+    let Some(data) = observation.data.as_ref() else {
+        return false;
+    };
     data.get("kind").and_then(serde_json::Value::as_str) == Some("incoming")
         && data.get("inquiry_id").and_then(serde_json::Value::as_str) == Some(id)
-        && data.pointer("/audit/sourceSessionId").and_then(serde_json::Value::as_str) == Some(sender)
+        && data
+            .pointer("/audit/sourceSessionId")
+            .and_then(serde_json::Value::as_str)
+            == Some(sender)
 }
 
 /// A durable identity for one UI projection that must be present in the
@@ -793,6 +779,10 @@ pub struct SubagentSpawnEvent {
     pub resumed_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_prompt_id: Option<String>,
+    /// Stable owner captured when the delegation was admitted. `None` on this
+    /// durable fact means the bill cannot be attributed to a specific Turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_prompt_owner: Option<crate::UsagePromptOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_mode: Option<String>,
     /// Connected inherited server membership at birth. None means missing
@@ -1969,7 +1959,11 @@ pub trait ExecutionHistory: std::fmt::Debug + Send + Sync {
         seq: EventSeq,
     ) -> std::io::Result<Vec<TimelineEvent>>;
 
-    fn incoming_inquiry_events(&self, sender: &str, inquiry: &str) -> std::io::Result<Vec<TimelineEvent>>;
+    fn incoming_inquiry_events(
+        &self,
+        sender: &str,
+        inquiry: &str,
+    ) -> std::io::Result<Vec<TimelineEvent>>;
 
     fn agent_message_was_consumed(&self, message_id: &str, seq: EventSeq) -> std::io::Result<bool>;
 
@@ -2944,13 +2938,24 @@ pub enum TimelineError {
 }
 
 impl Timeline {
-    pub fn incoming_inquiry_events(&self, sender: &str, inquiry: &str) -> std::io::Result<Vec<TimelineEvent>> {
+    pub fn incoming_inquiry_events(
+        &self,
+        sender: &str,
+        inquiry: &str,
+    ) -> std::io::Result<Vec<TimelineEvent>> {
         let mut facts = match &self.lifecycle.history {
             Some(history) => history.incoming_inquiry_events(sender, inquiry)?,
             None => Vec::new(),
         };
-        let start = self.surface_checkpoint_cut.map_or(0, |cut| self.events.partition_point(|event| event.seq < cut));
-        facts.extend(self.events[start..].iter().filter(|event| is_incoming_inquiry(event, sender, inquiry)).cloned());
+        let start = self.surface_checkpoint_cut.map_or(0, |cut| {
+            self.events.partition_point(|event| event.seq < cut)
+        });
+        facts.extend(
+            self.events[start..]
+                .iter()
+                .filter(|event| is_incoming_inquiry(event, sender, inquiry))
+                .cloned(),
+        );
         Ok(facts)
     }
 
@@ -3408,11 +3413,14 @@ impl Timeline {
             .response_admission_before(identity, self.next_seq())
             .map_err(TimelineError::ResponseHistory)?;
         if let Some(event) = &event
-            && !history.response_selected(event.seq).map_err(TimelineError::ResponseHistory)?
+            && !history
+                .response_selected(event.seq)
+                .map_err(TimelineError::ResponseHistory)?
         {
             return Ok(None);
         }
-        Ok(event.filter(|event| {
+        Ok(event
+            .filter(|event| {
                 self.last_context_rebuild_seq
                     .is_none_or(|rebuild| event.seq > rebuild)
             })
@@ -4080,9 +4088,9 @@ impl Timeline {
     pub fn selected_prompt_coordinates(
         &self,
     ) -> impl Iterator<Item = (usize, Option<EventSeq>)> + '_ {
-        self.prompt_indices.iter().map(|index| {
-            (*index, self.user_prompt_positions.get(index).copied())
-        })
+        self.prompt_indices
+            .iter()
+            .map(|index| (*index, self.user_prompt_positions.get(index).copied()))
     }
 
     pub(crate) fn prompt_records_with_history(
@@ -4239,7 +4247,8 @@ impl Timeline {
                 self.user_prompt_positions.split_off(&next);
                 self.next_prompt_index = self.next_prompt_index.min(next);
                 self.archived_prompt_max = self.archived_prompt_max.filter(|index| *index < next);
-                self.rewind_display_targets.insert(event.seq, self.next_prompt_index);
+                self.rewind_display_targets
+                    .insert(event.seq, self.next_prompt_index);
             }
             _ => {}
         }
@@ -7129,50 +7138,57 @@ impl Timeline {
                 .collect();
         }
         let sources = self.branch_skill_sources();
-        self.surface.iter().enumerate().filter_map(|(index, item)| {
-            let id = self.surface_ids[index];
-            let origin = sources.origin(id).unwrap_or(id.event);
-            (matches!(item, ConversationItem::SkillLoad(_))
-                && sources.last_response.is_none_or(|response| response < origin))
+        self.surface
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let id = self.surface_ids[index];
+                let origin = sources.origin(id).unwrap_or(id.event);
+                (matches!(item, ConversationItem::SkillLoad(_))
+                    && sources
+                        .last_response
+                        .is_none_or(|response| response < origin))
                 .then_some(index)
-        }).collect()
+            })
+            .collect()
     }
 
     fn branch_skill_sources(&self) -> SurfaceSkillSources {
         let fold = fold_branch_provenance(self);
         let last_response = fold.admitted_response_events.iter().max().copied();
-        let origins = self.surface
+        let origins = self
+            .surface
             .iter()
             .enumerate()
             .filter_map(|(index, item)| {
                 let ConversationItem::SkillLoad(skill) = item else {
                     return None;
                 };
-                let origin = fold
-                    .surface
-                    .get(index)
-                    .and_then(|entry| {
-                        entry
-                            .leaves
-                            .iter()
-                            .filter_map(|leaf| match fold.leaf_values.get(leaf) {
-                                Some(ConversationItem::SkillLoad(original))
-                                    if original.call_id == skill.call_id
-                                        && conversation_items_match(
-                                            &ConversationItem::SkillLoad(original.clone()),
-                                            item,
-                                        ) =>
-                                {
-                                    Some(leaf.event)
-                                }
-                                _ => None,
-                            })
-                            .min()
-                    })?;
+                let origin = fold.surface.get(index).and_then(|entry| {
+                    entry
+                        .leaves
+                        .iter()
+                        .filter_map(|leaf| match fold.leaf_values.get(leaf) {
+                            Some(ConversationItem::SkillLoad(original))
+                                if original.call_id == skill.call_id
+                                    && conversation_items_match(
+                                        &ConversationItem::SkillLoad(original.clone()),
+                                        item,
+                                    ) =>
+                            {
+                                Some(leaf.event)
+                            }
+                            _ => None,
+                        })
+                        .min()
+                })?;
                 Some((self.surface_ids[index], origin))
             })
             .collect();
-        SurfaceSkillSources { origins, last_response }
+        SurfaceSkillSources {
+            origins,
+            last_response,
+        }
     }
 
     /// Project unconsumed skills for this selected branch and current Surface.
@@ -7371,18 +7387,24 @@ impl Timeline {
     }
 
     fn valid_rewind_replacement(&self, replacement: &[ConversationItem]) -> bool {
-        let Ok(canonical) = self.canonical_branch() else { return false };
+        let Ok(canonical) = self.canonical_branch() else {
+            return false;
+        };
         let branch = canonical.branch_transcript();
-        branch.iter().filter_map(|item| match item {
-            ConversationItem::User(user) => user.prompt_index,
-            _ => None,
-        }).any(|target| {
-            target < self.next_prompt_index()
-                && conversation_slices_match(
-                    &branch[..sampling_types::conversation_truncate_for_prompt(&branch, target)],
-                    replacement,
-                )
-        })
+        branch
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::User(user) => user.prompt_index,
+                _ => None,
+            })
+            .any(|target| {
+                target < self.next_prompt_index()
+                    && conversation_slices_match(
+                        &branch
+                            [..sampling_types::conversation_truncate_for_prompt(&branch, target)],
+                        replacement,
+                    )
+            })
     }
 
     fn validate_surface_range(&self, target: &SurfaceRange) -> Result<(), TimelineError> {
@@ -14584,7 +14606,9 @@ mod tests {
             }),
         };
 
-        timeline.restore_open_workflows(vec![(spawn, ended)]).unwrap();
+        timeline
+            .restore_open_workflows(vec![(spawn, ended)])
+            .unwrap();
         assert_eq!(
             timeline.execution_workflow_spawns(),
             vec![(EventSeq::new(1), "wf_suspended".into())]
@@ -17984,6 +18008,7 @@ mod tests {
             context_normalized: false,
             resumed_from: None,
             parent_prompt_id: None,
+            parent_prompt_owner: None,
             capability_mode: None,
             birth_mcp_servers: Some(Default::default()),
             permission_mode: None,

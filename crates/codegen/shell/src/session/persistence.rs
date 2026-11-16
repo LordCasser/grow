@@ -142,9 +142,12 @@ pub(crate) fn is_model_change(event: &chat_state::TimelineEvent) -> bool {
 pub(crate) fn current_model_selection(
     events: &[chat_state::TimelineEvent],
 ) -> io::Result<Option<PersistedModelSelection>> {
-    events.iter().rfind(|event| is_model_change(event)).map_or(Ok(None), |event| {
-        latest_model_selection(std::slice::from_ref(event))
-    })
+    events
+        .iter()
+        .rfind(|event| is_model_change(event))
+        .map_or(Ok(None), |event| {
+            latest_model_selection(std::slice::from_ref(event))
+        })
 }
 
 /// The checkpoint frontier binds the actual destination of the saved task;
@@ -486,10 +489,12 @@ pub enum PersistenceMsg {
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
     LoadWorkflowRunHistory {
-        respond_to: tokio::sync::oneshot::Sender<io::Result<(
-            Vec<crate::session::workflow::store::RestoredWorkflowRun>,
-            std::collections::HashMap<String, chat_state::WorkflowLifecycle>,
-        )>>,
+        respond_to: tokio::sync::oneshot::Sender<
+            io::Result<(
+                Vec<crate::session::workflow::store::RestoredWorkflowRun>,
+                std::collections::HashMap<String, chat_state::WorkflowLifecycle>,
+            )>,
+        >,
     },
     DeleteWorkflowRunState(String),
     /// Persist updated HEAD commit and branch to summary.

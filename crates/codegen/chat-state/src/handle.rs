@@ -94,15 +94,27 @@ impl ChatStateHandle {
             ChatStateCommand::GetOutgoingInquiry { inquiry_id, reply }
         })
         .await
-        .ok_or_else(|| std::io::Error::other("Timeline actor unavailable while admitting source inquiry"))?
+        .ok_or_else(|| {
+            std::io::Error::other("Timeline actor unavailable while admitting source inquiry")
+        })?
     }
 
     pub async fn incoming_inquiry_events(
-        &self, sender: String, inquiry_id: String,
+        &self,
+        sender: String,
+        inquiry_id: String,
     ) -> std::io::Result<Vec<crate::TimelineEvent>> {
-        self.query("GetIncomingInquiry", |reply| ChatStateCommand::GetIncomingInquiry {
-            sender, inquiry_id, reply,
-        }).await.ok_or_else(|| std::io::Error::other("Timeline actor unavailable while resolving incoming inquiry"))?
+        self.query("GetIncomingInquiry", |reply| {
+            ChatStateCommand::GetIncomingInquiry {
+                sender,
+                inquiry_id,
+                reply,
+            }
+        })
+        .await
+        .ok_or_else(|| {
+            std::io::Error::other("Timeline actor unavailable while resolving incoming inquiry")
+        })?
     }
 
     /// Capture runtime state and the resident Subagent Spawned/Ended/Seed events
@@ -666,6 +678,7 @@ impl ChatStateHandle {
         &self,
         attempt_key: String,
         captured_prompt_index: usize,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         model_id: String,
         usage: Option<TokenUsage>,
         cost_usd_ticks: Option<i64>,
@@ -676,6 +689,7 @@ impl ChatStateHandle {
                 attempt_key,
                 model_id,
                 captured_prompt_index,
+                prompt_owner,
                 usage,
                 cost_usd_ticks,
                 api_duration_ms,
@@ -692,6 +706,7 @@ impl ChatStateHandle {
         attempt_no: u32,
         model_id: String,
         captured_prompt_index: Option<usize>,
+        prompt_owner: Option<crate::UsagePromptOwner>,
     ) -> Result<bool, TimelineWriteError> {
         self.query("BeginAuxiliaryAttemptUsage", |reply| {
             ChatStateCommand::BeginAuxiliaryAttemptUsage {
@@ -699,6 +714,7 @@ impl ChatStateHandle {
                 attempt_no,
                 model_id,
                 captured_prompt_index,
+                prompt_owner,
                 reply,
             }
         })
@@ -733,13 +749,13 @@ impl ChatStateHandle {
         &self,
         subagent_id: String,
         by_model: Vec<(String, crate::usage::UsageTotals)>,
-        attribute_to_prompt: bool,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         incomplete: bool,
     ) -> Result<bool, TimelineWriteError> {
         self.record_subagent_usage_with_deadline(
             subagent_id,
             by_model,
-            attribute_to_prompt,
+            prompt_owner,
             incomplete,
             None,
         )
@@ -750,14 +766,14 @@ impl ChatStateHandle {
         &self,
         subagent_id: String,
         by_model: Vec<(String, crate::usage::UsageTotals)>,
-        attribute_to_prompt: bool,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         incomplete: bool,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, TimelineWriteError> {
         self.record_subagent_usage_with_deadline(
             subagent_id,
             by_model,
-            attribute_to_prompt,
+            prompt_owner,
             incomplete,
             deadline,
         )
@@ -768,7 +784,7 @@ impl ChatStateHandle {
         &self,
         subagent_id: String,
         by_model: Vec<(String, crate::usage::UsageTotals)>,
-        attribute_to_prompt: bool,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         incomplete: bool,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, TimelineWriteError> {
@@ -776,7 +792,7 @@ impl ChatStateHandle {
             ChatStateCommand::RecordSubagentUsage {
                 subagent_id,
                 by_model,
-                attribute_to_prompt,
+                prompt_owner,
                 incomplete,
                 deadline,
                 reply,
@@ -1143,7 +1159,11 @@ impl ChatStateHandle {
     /// Capture a canonical suffix without cloning the already-reconciled prefix.
     pub async fn timeline_events_from(&self, from_seq: u64) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetTimelineEvents", |reply| {
-            ChatStateCommand::GetTimelineEvents { from_seq, include_archived: true, reply }
+            ChatStateCommand::GetTimelineEvents {
+                from_seq,
+                include_archived: true,
+                reply,
+            }
         })
         .await
     }
@@ -1153,9 +1173,16 @@ impl ChatStateHandle {
         self.resident_timeline_events_from(0).await
     }
 
-    pub async fn resident_timeline_events_from(&self, from_seq: u64) -> Option<Vec<crate::TimelineEvent>> {
+    pub async fn resident_timeline_events_from(
+        &self,
+        from_seq: u64,
+    ) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetTimelineEvents", |reply| {
-            ChatStateCommand::GetTimelineEvents { from_seq, include_archived: false, reply }
+            ChatStateCommand::GetTimelineEvents {
+                from_seq,
+                include_archived: false,
+                reply,
+            }
         })
         .await
     }
@@ -1209,15 +1236,23 @@ impl ChatStateHandle {
         .await
     }
 
-    pub async fn agent_message_receipts(&self, sender: &str, operation: &str) -> Option<Vec<crate::TimelineEvent>> {
-        self.message_receipts(Some((sender.to_owned(), operation.to_owned()))).await
+    pub async fn agent_message_receipts(
+        &self,
+        sender: &str,
+        operation: &str,
+    ) -> Option<Vec<crate::TimelineEvent>> {
+        self.message_receipts(Some((sender.to_owned(), operation.to_owned())))
+            .await
     }
 
     pub async fn parent_message_receipts(&self) -> Option<Vec<crate::TimelineEvent>> {
         self.message_receipts(None).await
     }
 
-    async fn message_receipts(&self, identity: Option<(String, String)>) -> Option<Vec<crate::TimelineEvent>> {
+    async fn message_receipts(
+        &self,
+        identity: Option<(String, String)>,
+    ) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetParentMessageReceipts", |reply| {
             ChatStateCommand::GetParentMessageReceipts { identity, reply }
         })
@@ -1228,11 +1263,17 @@ impl ChatStateHandle {
         self.retained_notification_payloads(None).await
     }
 
-    pub async fn retained_notification_payload_candidates(&self, candidates: Vec<String>) -> Option<BTreeSet<String>> {
+    pub async fn retained_notification_payload_candidates(
+        &self,
+        candidates: Vec<String>,
+    ) -> Option<BTreeSet<String>> {
         self.retained_notification_payloads(Some(candidates)).await
     }
 
-    async fn retained_notification_payloads(&self, candidates: Option<Vec<String>>) -> Option<BTreeSet<String>> {
+    async fn retained_notification_payloads(
+        &self,
+        candidates: Option<Vec<String>>,
+    ) -> Option<BTreeSet<String>> {
         self.query("GetRetainedNotificationPayloadHashes", |reply| {
             ChatStateCommand::GetRetainedNotificationPayloadHashes { candidates, reply }
         })
@@ -1260,15 +1301,24 @@ impl ChatStateHandle {
 
     pub async fn submitted_input_payload_hashes(&self) -> Option<BTreeSet<String>> {
         self.query("GetSubmittedInputPayloadHashes", |reply| {
-            ChatStateCommand::GetSubmittedInputPayloadHashes { candidates: None, reply }
+            ChatStateCommand::GetSubmittedInputPayloadHashes {
+                candidates: None,
+                reply,
+            }
         })
         .await
     }
 
     /// Check only the candidate payload hashes in this reclamation batch.
-    pub async fn retained_input_payloads(&self, candidates: Vec<String>) -> Option<BTreeSet<String>> {
+    pub async fn retained_input_payloads(
+        &self,
+        candidates: Vec<String>,
+    ) -> Option<BTreeSet<String>> {
         self.query("GetSubmittedInputPayloadHashes", |reply| {
-            ChatStateCommand::GetSubmittedInputPayloadHashes { candidates: Some(candidates), reply }
+            ChatStateCommand::GetSubmittedInputPayloadHashes {
+                candidates: Some(candidates),
+                reply,
+            }
         })
         .await
     }
@@ -1310,7 +1360,11 @@ impl ChatStateHandle {
         include_tool_calls: bool,
     ) -> Option<(crate::TimelineRangeRef, Vec<ConversationItem>)> {
         self.query("MaterializePermissionContext", |reply| {
-            ChatStateCommand::MaterializePermissionContext { timeline_id, include_tool_calls, reply }
+            ChatStateCommand::MaterializePermissionContext {
+                timeline_id,
+                include_tool_calls,
+                reply,
+            }
         })
         .await
         .flatten()
@@ -1335,6 +1389,16 @@ impl ChatStateHandle {
     pub async fn current_prompt_index(&self) -> Option<usize> {
         self.query("CurrentPromptIndex", |reply| {
             ChatStateCommand::CurrentPromptIndex { reply }
+        })
+        .await
+        .flatten()
+    }
+
+    /// Capture the stable prompt owner together with its prompt index when
+    /// admitting work. Never reconstruct an owner at late settlement time.
+    pub async fn current_usage_prompt_owner(&self) -> Option<(usize, crate::UsagePromptOwner)> {
+        self.query("CurrentUsagePromptOwner", |reply| {
+            ChatStateCommand::CurrentUsagePromptOwner { reply }
         })
         .await
         .flatten()

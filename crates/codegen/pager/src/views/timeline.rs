@@ -29,13 +29,15 @@ pub const MIN_TURNS: usize = 2;
 pub struct TimelineRail {
     /// Full rail rect (hit target), spanning the scrollback rows.
     pub rect: Rect,
-    /// Turn indices currently shown as ticks (windowed around the active
-    /// turn when the conversation has more turns than rows).
-    pub window: Range<usize>,
+    /// Ordinals currently shown as ticks. Local rails use turn indexes;
+    /// a catalog rail uses global ordinals. The window is not the total.
+    pub window: Range<u64>,
+    /// Catalog or turn count the window is placed against.
+    pub total: u64,
     /// First tick row.
     pub ticks_y: u16,
-    /// Active turn (viewport top), if any.
-    pub active: Option<usize>,
+    /// Active ordinal (viewport top), if any.
+    pub active: Option<u64>,
     /// The ▲ target: nearest turn strictly above the viewport top
     /// ([`ScrollbackState::turn_above_viewport_top`]), NOT `active - 1` —
     /// stepping from `active` could target trailing turns that no scroll
@@ -43,7 +45,7 @@ pub struct TimelineRail {
     ///
     /// [`ScrollbackState::turn_above_viewport_top`]:
     /// crate::scrollback::ScrollbackState::turn_above_viewport_top
-    pub up_target: Option<usize>,
+    pub up_target: Option<u64>,
     /// The ▼ target: nearest turn below the viewport top
     /// ([`ScrollbackState::turn_below_viewport_top`]), so ▼ anchors it to the
     /// top exactly like clicking its tick (both go through `jump_to_turn`,
@@ -52,7 +54,9 @@ pub struct TimelineRail {
     ///
     /// [`ScrollbackState::turn_below_viewport_top`]:
     /// crate::scrollback::ScrollbackState::turn_below_viewport_top
-    pub down_target: Option<usize>,
+    pub down_target: Option<u64>,
+    /// ▼ follows the live tail instead of another ordinal.
+    pub down_returns_live: bool,
     /// Chevron rows.
     pub up_y: u16,
     pub down_y: u16,
@@ -61,8 +65,9 @@ pub struct TimelineRail {
 /// What part of the rail a screen position lands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineHit {
-    /// A turn tick (turn index).
-    Tick(usize),
+    /// A tick ordinal. Local rails store a turn index; catalog rails store
+    /// the global ordinal.
+    Tick(u64),
     /// The ▲ chevron (previous turn).
     Up,
     /// The ▼ chevron (next turn).
@@ -76,12 +81,12 @@ pub fn rail_width(
     show_timeline: bool,
     is_subagent_view: bool,
     area_width: u16,
-    turn_count: usize,
+    turn_count: u64,
 ) -> u16 {
     if show_timeline
         && !is_subagent_view
         && area_width >= MIN_TERMINAL_WIDTH
-        && turn_count >= MIN_TURNS
+        && turn_count >= MIN_TURNS as u64
     {
         RAIL_WIDTH
     } else {
@@ -94,14 +99,16 @@ pub fn rail_width(
 /// argument instead of four adjacent `Option<usize>` / `bool` positionals.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RailViewport {
-    /// Turn at the viewport top (the highlighted tick), if any.
-    pub active: Option<usize>,
-    /// ▲ target: nearest turn strictly above the viewport top.
-    pub up_target: Option<usize>,
-    /// ▼ target: nearest turn below the viewport top.
-    pub down_target: Option<usize>,
+    /// Ordinal at the viewport top (the highlighted tick), if any.
+    pub active: Option<u64>,
+    /// ▲ target: nearest ordinal strictly above the viewport top.
+    pub up_target: Option<u64>,
+    /// ▼ target: nearest ordinal below the viewport top.
+    pub down_target: Option<u64>,
     /// Viewport is scrolled to the bottom — pins the tick window to the tail.
     pub at_bottom: bool,
+    /// ▼ returns to the live tail instead of stepping an ordinal.
+    pub down_returns_live: bool,
 }
 
 /// Compute rail geometry for this frame, or `None` when the rail should
@@ -109,27 +116,27 @@ pub struct RailViewport {
 pub fn compute_rail(
     scrollback_area: Rect,
     rail_x: u16,
-    turn_count: usize,
+    total: u64,
     vp: RailViewport,
 ) -> Option<TimelineRail> {
-    if turn_count < MIN_TURNS {
+    if total < MIN_TURNS as u64 {
         return None;
     }
     let height = scrollback_area.height as usize;
     // Chevrons take 2 rows; require at least 1 tick row.
-    let max_ticks = height.checked_sub(2)?;
+    let max_ticks = height.checked_sub(2)? as u64;
     if max_ticks == 0 {
         return None;
     }
 
-    let window = if turn_count <= max_ticks {
-        0..turn_count
+    let window = if total <= max_ticks {
+        0..total
     } else {
-        // More turns than rows: slide a window that keeps the active tick
+        // More ordinals than rows: slide a window that keeps the active tick
         // visible. At the bottom, prefer the tail so the newest ticks stay
-        // on screen — but never exclude the viewport-top (active) turn,
+        // on screen — but never exclude the viewport-top (active) ordinal,
         // or no tick would highlight.
-        let tail_start = turn_count - max_ticks;
+        let tail_start = total - max_ticks;
         let start = if vp.at_bottom {
             match vp.active {
                 Some(a) => a.min(tail_start),
@@ -137,7 +144,7 @@ pub fn compute_rail(
             }
         } else {
             vp.active
-                .unwrap_or(turn_count - 1)
+                .unwrap_or(total - 1)
                 .saturating_sub(max_ticks / 2)
                 .min(tail_start)
         };
@@ -145,10 +152,12 @@ pub fn compute_rail(
     };
 
     // Center the chevron + tick stack vertically, like the web rail.
-    let total_rows = window.len() + 2;
+    let ordinal_count =
+        usize::try_from(window.end.saturating_sub(window.start)).unwrap_or(usize::MAX);
+    let total_rows = ordinal_count + 2;
     let top = scrollback_area.y + ((height - total_rows) / 2) as u16;
     let ticks_y = top + 1;
-    let down_y = ticks_y + window.len() as u16;
+    let down_y = ticks_y + ordinal_count as u16;
 
     Some(TimelineRail {
         rect: Rect {
@@ -159,9 +168,11 @@ pub fn compute_rail(
         },
         window,
         ticks_y,
+        total,
         active: vp.active,
         up_target: vp.up_target,
         down_target: vp.down_target,
+        down_returns_live: vp.down_returns_live,
         up_y: top,
         down_y,
     })
@@ -174,7 +185,7 @@ pub fn compute_rail(
 /// ▼ steps to `down_target` even at the bottom: `jump_to_turn` over-scrolls
 /// a trailing turn to the top (identical to clicking its tick), so the
 /// chevron matches the click instead of sitting dead.
-pub fn chevron_target(rail: &TimelineRail, hit: TimelineHit) -> Option<usize> {
+pub fn chevron_target(rail: &TimelineRail, hit: TimelineHit) -> Option<u64> {
     match hit {
         TimelineHit::Tick(turn_idx) => Some(turn_idx),
         TimelineHit::Up => rail.up_target,
@@ -195,8 +206,8 @@ impl TimelineRail {
             return Some(TimelineHit::Down);
         }
         if row >= self.ticks_y {
-            let rel = (row - self.ticks_y) as usize;
-            if rel < self.window.len() {
+            let rel = u64::from(row - self.ticks_y);
+            if rel < self.window.end.saturating_sub(self.window.start) {
                 return Some(TimelineHit::Tick(self.window.start + rel));
             }
         }
@@ -220,7 +231,7 @@ pub fn render_rail(
     // Chevron dim state derives from the same function the click handler
     // uses — a dim chevron is guaranteed to be a no-op.
     let up_enabled = chevron_target(rail, TimelineHit::Up).is_some();
-    let down_enabled = chevron_target(rail, TimelineHit::Down).is_some();
+    let down_enabled = chevron_target(rail, TimelineHit::Down).is_some() || rail.down_returns_live;
     let up_style = if hovered == Some(TimelineHit::Up) && up_enabled {
         bright
     } else if up_enabled {
@@ -276,7 +287,7 @@ pub fn render_tick_hover_popup(
     buf: &mut Buffer,
     rail: &TimelineRail,
     scrollback_area: Rect,
-    turn_idx: usize,
+    turn_idx: u64,
     preview: &str,
     theme: &Theme,
 ) {
@@ -371,12 +382,13 @@ mod tests {
     }
 
     /// `compute_rail` with adjacent targets for an off-bottom prompt row.
-    fn rail(turn_count: usize, active: Option<usize>) -> Option<TimelineRail> {
+    fn rail(turn_count: u64, active: Option<u64>) -> Option<TimelineRail> {
         let vp = RailViewport {
             active,
             up_target: active.and_then(|a| a.checked_sub(1)),
             down_target: active.and_then(|a| (a + 1 < turn_count).then_some(a + 1)),
             at_bottom: false,
+            down_returns_live: false,
         };
         compute_rail(area(), 76, turn_count, vp)
     }
@@ -391,6 +403,7 @@ mod tests {
         let vp = RailViewport {
             active: Some(0),
             down_target: Some(1),
+            down_returns_live: false,
             ..RailViewport::default()
         };
         assert!(compute_rail(tiny, 76, 5, vp).is_none());
@@ -410,7 +423,7 @@ mod tests {
     fn overflow_windows_around_active() {
         // 50 turns, 18 tick rows (20 - 2 chevrons).
         let rail = rail(50, Some(25)).unwrap();
-        assert_eq!(rail.window.len(), 18);
+        assert_eq!(rail.window.end - rail.window.start, 18);
         assert!(rail.window.contains(&25));
         // Window is roughly centered on the active turn, and tick rows map
         // to window-relative turn indices.
@@ -439,6 +452,7 @@ mod tests {
                 up_target: Some(24),
                 down_target: Some(26),
                 at_bottom: true,
+                down_returns_live: false,
             },
         )
         .unwrap();
@@ -455,6 +469,7 @@ mod tests {
                 up_target: Some(39),
                 down_target: Some(41),
                 at_bottom: true,
+                down_returns_live: false,
             },
         )
         .unwrap();
@@ -499,6 +514,7 @@ mod tests {
             RailViewport {
                 active: Some(0),
                 down_target: Some(0),
+                down_returns_live: false,
                 ..RailViewport::default()
             },
         )
@@ -516,6 +532,7 @@ mod tests {
                 up_target: Some(3),
                 down_target: Some(5),
                 at_bottom: true,
+                down_returns_live: false,
             },
         )
         .unwrap();
@@ -531,6 +548,7 @@ mod tests {
                 up_target: Some(8),
                 down_target: None,
                 at_bottom: true,
+                down_returns_live: false,
             },
         )
         .unwrap();

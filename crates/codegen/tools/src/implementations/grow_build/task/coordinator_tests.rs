@@ -1402,6 +1402,7 @@ fn request(id: &str, background: bool) -> SubagentRequest {
         parent_session_id: "parent".to_owned(),
         parent_step_id: None,
         parent_prompt_id: Some("prompt".to_owned()),
+        parent_prompt_owner: None,
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),

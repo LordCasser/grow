@@ -411,20 +411,19 @@ impl AgentView {
                 if self.hit_scrollbar.contains(mouse.column, mouse.row) {
                     self.set_active_pane(AgentPane::Scrollback, effects);
                     self.scrollbar_dragging = true;
-                    self.apply_scrollbar_click(mouse.row);
+                    self.scroll_from_scrollbar(mouse.row, effects);
                     return InputOutcome::Changed;
                 }
-                if let Some(rail) = self.timeline_rail.as_ref()
-                    && rail.rect.contains((mouse.column, mouse.row).into())
+                if let Some(hit) = self.timeline_rail_hit(mouse.column, mouse.row) {
+                    self.set_active_pane(AgentPane::Scrollback, effects);
+                    self.activate_timeline_rail_hit(hit, effects);
+                    return InputOutcome::Changed;
+                }
+                if self
+                    .timeline_rail
+                    .as_ref()
+                    .is_some_and(|rail| rail.rect.contains((mouse.column, mouse.row).into()))
                 {
-                    let target = rail
-                        .hit(mouse.column, mouse.row)
-                        .and_then(|hit| crate::views::timeline::chevron_target(rail, hit));
-                    if let Some(turn_idx) = target {
-                        self.set_active_pane(AgentPane::Scrollback, effects);
-                        self.scrollback.jump_to_turn(turn_idx);
-                        return InputOutcome::Changed;
-                    }
                     return InputOutcome::Unchanged;
                 }
                 if self.hit_sb_copy.contains(mouse.column, mouse.row) {
@@ -758,6 +757,10 @@ impl AgentView {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.pending_link_click = None;
+                if self.scrollbar_dragging {
+                    self.scroll_from_scrollbar(mouse.row, effects);
+                    return InputOutcome::Changed;
+                }
                 tracing::debug!(
                     event = "scrollback_mouse_drag",
                     col = mouse.column,
@@ -1079,6 +1082,7 @@ impl AgentView {
                 if new_timeline_hover != self.timeline_hover {
                     self.timeline_hover = new_timeline_hover;
                     self.sync_timeline_hover_preview();
+                    self.ensure_history_timeline(effects);
                     changed = true;
                 }
                 changed |= self
@@ -1246,6 +1250,52 @@ impl AgentView {
     /// Uses [`scrollbar_click_to_offset`] (same math as the thumb renderer)
     /// so the resulting scroll position is the exact inverse of where the
     /// thumb would be drawn for that offset.
+    fn timeline_rail_hit(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<crate::views::timeline::TimelineHit> {
+        let rail = self.timeline_rail.as_ref()?;
+        if !rail.rect.contains((column, row).into()) {
+            return None;
+        }
+        rail.hit(column, row)
+    }
+
+    fn activate_timeline_rail_hit(
+        &mut self,
+        hit: crate::views::timeline::TimelineHit,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
+        if self.global_timeline_total().is_some() {
+            self.activate_timeline_hit(hit, effects);
+            return;
+        }
+        if let Some(turn_idx) = self
+            .timeline_rail
+            .as_ref()
+            .and_then(|rail| crate::views::timeline::chevron_target(rail, hit))
+            .and_then(|ordinal| usize::try_from(ordinal).ok())
+        {
+            self.scrollback.jump_to_turn(turn_idx);
+        }
+    }
+
+    fn scroll_from_scrollbar(
+        &mut self,
+        screen_y: u16,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
+        let before = self.scrollback.scroll_offset();
+        if !self.apply_scrollbar_click(screen_y) {
+            return;
+        }
+        let after = self.scrollback.scroll_offset();
+        if after != before {
+            self.request_history_at_viewport_boundary(after > before, effects);
+        }
+    }
+
     pub(super) fn apply_scrollbar_click(&mut self, screen_y: u16) -> bool {
         use crate::render::scrollbar::{ScrollbarClickResult, scrollbar_click_to_offset};
         let Some(sb) = self.hit_scrollbar.rect else {

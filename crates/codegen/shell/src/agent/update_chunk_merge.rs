@@ -45,7 +45,7 @@ fn default_max_duration_ms() -> u64 {
 ///   "sessionId":"019e0000-0000-7000-8000-000000000001",
 ///   "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":".g"}},
 ///   "_meta":{
-///     "totalTokens":100,
+///     "contextUsedTokens":100,
 ///     "eventId":"019e0000-0000-7000-8000-000000000001-0001",
 ///     "agentTimestampMs":1700000000000,
 ///     "updateType":"AgentMessageChunk",
@@ -61,7 +61,7 @@ fn default_max_duration_ms() -> u64 {
 ///       "content":{"type":"text","text":".,"}
 ///   },
 ///   "_meta":{
-///       "totalTokens":100,
+///       "contextUsedTokens":100,
 ///       "eventId":"019e0000-0000-7000-8000-000000000001-0002",
 ///       "agentTimestampMs":1700000000000,
 ///       "updateType":"AgentMessageChunk",

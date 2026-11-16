@@ -610,6 +610,9 @@ pub fn commit_active(
     terminal: &mut PagerTerminal,
     frame: pager::motion::FrameStamp,
 ) -> bool {
+    if minimal_api::minimal_history_browsing(app) {
+        return false;
+    }
     let id = match minimal_api::app_active_view(app) {
         ActiveView::Agent(id) => *id,
         _ => return false, // welcome / dashboard: nothing to commit
@@ -718,7 +721,9 @@ pub fn expand_pending(
     terminal: &mut PagerTerminal,
     frame: pager::motion::FrameStamp,
 ) {
-    if minimal_api::minimal_pending_expand(app).is_empty() {
+    if minimal_api::minimal_history_browsing(app)
+        || minimal_api::minimal_pending_expand(app).is_empty()
+    {
         return;
     }
     let id = match minimal_api::app_active_view(app) {

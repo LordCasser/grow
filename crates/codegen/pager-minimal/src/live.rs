@@ -108,6 +108,11 @@ pub fn draw_live(
     } else {
         "/transcript"
     };
+    let transcript_hint = if minimal_api::minimal_history_pageup_hint(app) {
+        format!("{transcript_hint} · PgUp history")
+    } else {
+        transcript_hint.to_string()
+    };
     let transcript_progress = minimal_api::minimal_transcript_progress(app);
     let fps_overlay = minimal_api::minimal_fps_overlay(app);
     let exit_suspension = minimal_api::app_exit_suspension(app);
@@ -418,7 +423,7 @@ pub fn draw_live(
                         info_area,
                         agent,
                         queued,
-                        transcript_hint,
+                        &transcript_hint,
                         &theme,
                     );
                 }

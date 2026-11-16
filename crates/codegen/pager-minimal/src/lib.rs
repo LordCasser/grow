@@ -3,9 +3,9 @@
 //! In this mode finalized conversation blocks are printed once into the
 //! terminal's *native* scrollback (via `ratatui_inline::Terminal::insert_before_rows`,
 //! reusing `EntryRenderer`) while a small pinned live region holds the
-//! running-turn status, the prompt, and a minimal status line. The interactive
-//! `ScrollbackPane` (scroll, fold, selection, mouse) is not used; the terminal
-//! owns history.
+//! running-turn status, the prompt, and a minimal status line. PageUp temporarily
+//! opens the shared `ScrollbackPane` on an alternate screen for history browsing;
+//! native commit pauses until Esc restores the live viewport.
 //!
 //! - [`commit`] — committed-frontier logic, display policy, and the per-frame
 //!   commit-to-scrollback pass.
@@ -106,6 +106,29 @@ fn try_begin_visible_epoch(
 pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal, frame: pager::motion::FrameStamp) {
     let _ = terminal.backend_mut().queue(BeginSynchronizedUpdate);
     let _ = terminal.autoresize();
+    // History browsing paints the shared scrollback on a temporary alternate
+    // screen and must not reach welcome, plan, native commit, or expand.
+    // A failed switch leaves the browser retryable and closes this update.
+    match pager::minimal_api::present_minimal_history(app, terminal, frame) {
+        Ok(true) => {
+            // The history frame closes its own update on a successful paint.
+            // Queue the closer again so a no-op paint cannot leave the
+            // pre-switch synchronized update open.
+            let _ = terminal
+                .backend_mut()
+                .queue(EndSynchronizedUpdate)
+                .and_then(|backend| backend.flush());
+            return;
+        }
+        Err(_) => {
+            let _ = terminal
+                .backend_mut()
+                .queue(EndSynchronizedUpdate)
+                .and_then(|backend| backend.flush());
+            return;
+        }
+        Ok(false) => {}
+    }
     let owner = pager::minimal_api::minimal_visible_owner(app);
     if pager::minimal_api::minimal_printed_owner(app) != owner.as_ref() {
         // A native viewport cannot turn an earlier child epoch back into the

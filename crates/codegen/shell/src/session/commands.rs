@@ -421,6 +421,12 @@ pub enum SessionCommand {
     QueryForeground {
         respond_to: oneshot::Sender<Option<prompt_queue::ForegroundSnapshot>>,
     },
+    /// Read confirmed Behavior state after the current durable transition.
+    /// This observation never records history or settles a control intent.
+    QueryBehaviorSnapshot {
+        respond_to:
+            oneshot::Sender<Result<crate::extensions::notification::BehaviorProjection, String>>,
+    },
     /// Re-publish transient Shell-authoritative control projections after a
     /// client load or renderer restart. These snapshots never enter replay.
     PublishControlState {
@@ -644,6 +650,9 @@ pub enum SessionCommand {
     RecordSubagentUsage {
         subagent_id: String,
         by_model: Vec<(String, chat_state::UsageTotals)>,
+        /// Owner captured at delegation admission; `None` stays session-only.
+        prompt_owner: Option<chat_state::UsagePromptOwner>,
+        /// Kept for the coordinator's sticky pin reporting only.
         parent_prompt_id: Option<String>,
         /// Nested subagent bill may under-count.
         incomplete: bool,
@@ -652,6 +661,10 @@ pub enum SessionCommand {
     },
     /// Sticky incomplete for a parent prompt (or the live pin when `None`). Acks when marked.
     MarkSubagentUsageNotApplied {
+        /// Owner captured at delegation admission; decides which ledger may
+        /// be stained. A reused prompt id must not stain a different Turn.
+        prompt_owner: Option<chat_state::UsagePromptOwner>,
+        /// Report key for the coordinator's sticky flag only.
         parent_prompt_id: Option<String>,
         respond_to: oneshot::Sender<()>,
     },

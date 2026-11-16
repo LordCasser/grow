@@ -749,7 +749,7 @@
         let mut app = make_app_with_agent("placeholder");
         let agent_id = AgentId(0);
         app.agents.get_mut(&agent_id).unwrap().session.session_id = None;
-        let snapshot = GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+        let snapshot = ControlStateUpdate {
             epoch: "new-actor".into(),
             domain: ControlDomain::Agent,
             revision: 0,
@@ -762,16 +762,21 @@
             },
             desired: None,
             message: None,
-        });
+        };
         assert!(handle(
-            make_ext_session_notification("fresh-session", snapshot),
+            make_ext_session_notification(
+                "fresh-session",
+                GrowSessionUpdate::ControlStateUpdate(snapshot.clone()),
+            ),
             &mut app,
         ));
 
-        app.agents
-            .get_mut(&agent_id)
-            .unwrap()
-            .bind_session_id(acp::SessionId::new("fresh-session"));
+        let agent = app.agents.get_mut(&agent_id).unwrap();
+        agent.bind_session_id(acp::SessionId::new("fresh-session"));
+        assert!(
+            !agent.session.apply_shell_control_state(snapshot, false),
+            "first binding must preserve the snapshot epoch and projection"
+        );
         assert!(handle(
             make_ext_session_notification(
                 "fresh-session",
@@ -795,6 +800,59 @@
             &mut app,
         ));
         assert_eq!(app.agents[&agent_id].scrollback.len(), 1);
+    }
+
+    #[test]
+    fn unbind_clears_confirmed_behavior_before_binding_a_new_actor() {
+        use shell::extensions::notification::{
+            BehaviorProjection, ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = make_app_with_agent("old-session");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        crate::app::acp_handler::hydrate_behavior_projection(
+            agent,
+            BehaviorProjection {
+                control_epoch: "old-actor".into(),
+                control_revision: 2,
+                behavior_id: tools::types::BehaviorId::Plan,
+                plan_phase: Some("drafting".into()),
+                plan_completed: false,
+            },
+        );
+        assert!(agent.session.behavior_epoch_matches("old-actor"));
+
+        agent.unbind_session_id();
+        agent.bind_session_id(acp::SessionId::new("fresh-session"));
+        assert_eq!(
+            (
+                agent.session.behavior_snapshot_established(),
+                agent.session.behavior_mode,
+                agent.session.plan_phase.as_deref(),
+            ),
+            (false, tools::types::BehaviorId::Normal, None),
+            "a new binding after unbind must not inherit confirmed Behavior or phase"
+        );
+        assert!(handle(
+            make_ext_session_notification(
+                "fresh-session",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "new-actor".into(),
+                    domain: ControlDomain::Agent,
+                    revision: 0,
+                    intent: None,
+                    snapshot: true,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: ControlTarget::Agent {
+                        agent_name: "builder".into(),
+                    },
+                    desired: None,
+                    message: None,
+                }),
+            ),
+            &mut app,
+        ));
     }
 
     #[test]

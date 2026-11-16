@@ -218,8 +218,8 @@ fn fork_initiation_supersedes_open_reload_window() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );

@@ -47,8 +47,14 @@ pub(super) struct Row {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) enum TextOrigin {
-    Response { identity: ResponseAdmissionIdentity, reasoning: bool },
-    Inherited { reasoning: bool, chunk_meta: Option<acp::Meta> },
+    Response {
+        identity: ResponseAdmissionIdentity,
+        reasoning: bool,
+    },
+    Inherited {
+        reasoning: bool,
+        chunk_meta: Option<acp::Meta>,
+    },
 }
 
 pub(super) struct Writer<'tx> {
@@ -82,12 +88,17 @@ impl<'tx> Writer<'tx> {
         rewind: EventSeq,
         timeline: &chat_state::Timeline,
     ) -> io::Result<()> {
-        let survivors = timeline.admitted_response_views().into_iter()
-            .map(|view| view.event_seq).collect::<std::collections::BTreeSet<_>>();
+        let survivors = timeline
+            .admitted_response_views()
+            .into_iter()
+            .map(|view| view.event_seq)
+            .collect::<std::collections::BTreeSet<_>>();
         let previous = context_partition(previous_branch);
         let branch = context_partition(Some(rewind));
         let mut rows = Vec::new();
-        for result in self.rows.range((previous, 0, 0)..=(previous, u64::MAX, u64::MAX))
+        for result in self
+            .rows
+            .range((previous, 0, 0)..=(previous, u64::MAX, u64::MAX))
             .map_err(io::Error::other)?
         {
             let (key, value) = result.map_err(io::Error::other)?;
@@ -98,10 +109,14 @@ impl<'tx> Writer<'tx> {
             }
         }
         for (key, value) in rows {
-            self.rows.insert(key, value.as_slice()).map_err(io::Error::other)?;
+            self.rows
+                .insert(key, value.as_slice())
+                .map_err(io::Error::other)?;
         }
         for seq in survivors {
-            self.selected.insert((branch, seq.get()), ()).map_err(io::Error::other)?;
+            self.selected
+                .insert((branch, seq.get()), ())
+                .map_err(io::Error::other)?;
         }
         Ok(())
     }
@@ -249,7 +264,10 @@ impl<'tx> Writer<'tx> {
                         encoded_bytes,
                     };
                     self.rows
-                        .insert((context_partition(context_rebuild), position, part), serde_json::to_vec(&row)?.as_slice())
+                        .insert(
+                            (context_partition(context_rebuild), position, part),
+                            serde_json::to_vec(&row)?.as_slice(),
+                        )
                         .map_err(io::Error::other)?;
                 }
             }
@@ -266,12 +284,18 @@ impl<'tx> Writer<'tx> {
         journal: &mut File,
         read_reference: &impl Fn(EventSeq) -> io::Result<Option<RecordRef>>,
     ) -> io::Result<()> {
-        let HistoryContent::Message { event, item, channel, chunk_meta } = &fact.content else {
+        let HistoryContent::Message {
+            event,
+            item,
+            channel,
+            chunk_meta,
+        } = &fact.content
+        else {
             unreachable!("indexed inherited text must name its source");
         };
         let source = EventSeq::new(*event);
-        let reference = read_reference(source)?
-            .ok_or_else(|| invalid("missing inherited text source"))?;
+        let reference =
+            read_reference(source)?.ok_or_else(|| invalid("missing inherited text source"))?;
         let json = super::working_index::read_record_bytes(journal, reference)?;
         let record = decode_record(&json)?;
         let JournalFact::Domain { event, .. } = &record.fact else {
@@ -283,20 +307,32 @@ impl<'tx> Writer<'tx> {
         fact.inherited_item(event)?;
         let reasoning = *channel == TextChannel::Reasoning;
         let items = response_item_tokens(&json)?;
-        let token = text_token(items.get(*item).ok_or_else(|| invalid("inherited text token is absent"))?, reasoning)?;
+        let token = text_token(
+            items
+                .get(*item)
+                .ok_or_else(|| invalid("inherited text token is absent"))?,
+            reasoning,
+        )?;
         let encoded_bytes = self.index_fragments(position, 0, reference.offset, &json, token)?;
         let row = Row {
             position,
             part: 0,
             source,
-            origin: TextOrigin::Inherited { reasoning, chunk_meta: chunk_meta.clone() },
+            origin: TextOrigin::Inherited {
+                reasoning,
+                chunk_meta: chunk_meta.clone(),
+            },
             ordinal: *item,
             at_ms,
             meta: fact.meta.clone(),
             complete: true,
             encoded_bytes,
         };
-        self.rows.insert((INHERITED_ROWS, position, 0), serde_json::to_vec(&row)?.as_slice())
+        self.rows
+            .insert(
+                (INHERITED_ROWS, position, 0),
+                serde_json::to_vec(&row)?.as_slice(),
+            )
             .map_err(io::Error::other)?;
         Ok(())
     }
@@ -364,14 +400,23 @@ pub(super) fn admitted_calls_before(
     }
     let table = tx.open_table(ADMITTED_CALLS).map_err(io::Error::other)?;
     let mut calls = Vec::new();
-    for row in table.range((call_id, start, 0)..(call_id, end, 0)).map_err(io::Error::other)? {
-        if calls.len() == limit { break; }
+    for row in table
+        .range((call_id, start, 0)..(call_id, end, 0))
+        .map_err(io::Error::other)?
+    {
+        if calls.len() == limit {
+            break;
+        }
         let (key, value) = row.map_err(io::Error::other)?;
         let (_, seq, index) = key.value();
-        if !selected_at(tx, rewind, EventSeq::new(seq))? { continue; }
+        if !selected_at(tx, rewind, EventSeq::new(seq))? {
+            continue;
+        }
         let reference: DomainReference = serde_json::from_slice(value.value())?;
         if reference.seq.get() != seq {
-            return Err(invalid("admitted Tool call index differs from its response coordinate"));
+            return Err(invalid(
+                "admitted Tool call index differs from its response coordinate",
+            ));
         }
         let event = read_domain(journal, reference, bytes)?;
         let call = event
@@ -531,14 +576,65 @@ pub(super) fn rows_before(
     Ok(rows)
 }
 
+pub(super) fn rows_after(
+    tx: &ReadTransaction,
+    after: (u64, u64),
+    frontier: super::tool_history::Frontier,
+    records: u64,
+    limit: usize,
+) -> io::Result<Vec<Row>> {
+    use std::ops::Bound::Included;
+    if after >= (records, 0) {
+        return Ok(Vec::new());
+    }
+    let table = tx.open_table(ROWS).map_err(io::Error::other)?;
+    let mut rows = Vec::with_capacity(2 * limit);
+    for partition in [context_partition(frontier.history_branch()), INHERITED_ROWS] {
+        let mut visible = 0;
+        for entry in table
+            .range((
+                Included((partition, after.0, after.1)),
+                Included((partition, records, 0)),
+            ))
+            .map_err(io::Error::other)?
+        {
+            let (key, value) = entry.map_err(io::Error::other)?;
+            let (_, position, part) = key.value();
+            let row: Row = serde_json::from_slice(value.value())?;
+            if (row.position, row.part) != (position, part) {
+                return Err(invalid("response row differs from its physical key"));
+            }
+            if position < records && row.source.get() < frontier.domain {
+                rows.push(row);
+                visible += 1;
+                if visible == limit {
+                    break;
+                }
+            }
+        }
+    }
+    rows.sort_unstable_by_key(|row| (row.position, row.part));
+    rows.truncate(limit);
+    Ok(rows)
+}
+
 fn context_partition(rebuild: Option<EventSeq>) -> u64 {
     rebuild.map_or(0, |seq| seq.get() + 1)
 }
 
-pub(super) fn selected_at(tx: &ReadTransaction, rewind: Option<EventSeq>, source: EventSeq) -> io::Result<bool> {
-    let Some(rewind) = rewind.filter(|rewind| source < *rewind) else { return Ok(true); };
+pub(super) fn selected_at(
+    tx: &ReadTransaction,
+    rewind: Option<EventSeq>,
+    source: EventSeq,
+) -> io::Result<bool> {
+    let Some(rewind) = rewind.filter(|rewind| source < *rewind) else {
+        return Ok(true);
+    };
     let table = tx.open_table(SELECTED).map_err(io::Error::other)?;
-    Ok(table.get((context_partition(Some(rewind)), source.get())).map_err(io::Error::other)?.is_some())
+    Ok(table
+        .get((context_partition(Some(rewind)), source.get()))
+        .map_err(io::Error::other)?
+        .is_some())
 }
 
 pub(super) fn read_fragment(
@@ -596,4 +692,63 @@ pub(super) fn read_row(
     }
     parts.reverse();
     Ok((end, parts.concat()))
+}
+
+/// Seek by encoded byte end, which is also the next fragment's start.
+/// Only indexed fragments contributing to this bounded row are read.
+pub(super) fn read_row_after(
+    tx: &ReadTransaction,
+    journal: &mut File,
+    row: &Row,
+    start: u64,
+    bytes: u64,
+    limit: u64,
+) -> io::Result<(u64, String)> {
+    if start >= row.encoded_bytes {
+        return Err(invalid("response byte start is outside its indexed body"));
+    }
+    let ends = {
+        let table = tx.open_table(FRAGMENTS).map_err(io::Error::other)?;
+        let mut ends = Vec::new();
+        let mut cursor = start;
+        for entry in table
+            .range(
+                (row.position, row.part, start + 1)..=(row.position, row.part, row.encoded_bytes),
+            )
+            .map_err(io::Error::other)?
+        {
+            let (key, value) = entry.map_err(io::Error::other)?;
+            let next = key.value().2;
+            let reference: RecordRef = serde_json::from_slice(value.value())?;
+            if next.checked_sub(reference.len) != Some(cursor) {
+                return Err(invalid(
+                    "response byte start does not align with an indexed fragment",
+                ));
+            }
+            // The first indexed fragment is returned even when it exceeds the
+            // budget, matching the backward reader; later fragments must fit.
+            if !ends.is_empty() && next - start > limit {
+                break;
+            }
+            ends.push(next);
+            cursor = next;
+        }
+        ends
+    };
+    if ends.is_empty() {
+        return Err(invalid(
+            "response byte start does not align with an indexed fragment",
+        ));
+    }
+    let mut text = String::new();
+    let mut end = start;
+    for next in ends {
+        let (older, fragment) = read_fragment(tx, journal, row, next, bytes)?;
+        if older != end {
+            return Err(invalid("response byte fragments are not contiguous"));
+        }
+        text.push_str(&fragment);
+        end = next;
+    }
+    Ok((end, text))
 }

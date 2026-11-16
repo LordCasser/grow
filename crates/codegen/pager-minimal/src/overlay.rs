@@ -145,6 +145,9 @@ pub fn sync_viewport(
     terminal: &mut PagerTerminal,
     frame: pager::motion::FrameStamp,
 ) {
+    if minimal_api::minimal_history_browsing(app) {
+        return;
+    }
     let term_h = terminal.last_known_area().height;
     if term_h < 3 {
         return;

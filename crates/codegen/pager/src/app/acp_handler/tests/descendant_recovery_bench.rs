@@ -92,6 +92,7 @@ fn spawn_fact(
         context_normalized: false,
         resumed_from: None,
         parent_prompt_id: None,
+        parent_prompt_owner: None,
         capability_mode: Some("read-only".into()),
         birth_mcp_servers: Some(Default::default()),
         permission_mode: Some("auto".into()),

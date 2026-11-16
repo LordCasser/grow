@@ -8,9 +8,9 @@
 //! The receiver is owned by the shared single-writer coordinator actor; only
 //! the child runner plugged into that actor differs by host.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::future::Future;
 
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tool_types::planning::PlanningReadSnapshot;
@@ -253,7 +253,9 @@ type HistoryQuery = dyn Fn(
         Result<Option<SubagentInspection>, SubagentObservationError>,
     > + Send
     + Sync;
-type HistoryList = dyn Fn(SubagentListScope)
+type HistoryList = dyn Fn(
+        SubagentListScope,
+    )
         -> super::coordinator::SendBoxFuture<Result<Vec<SubagentSummary>, SubagentObservationError>>
     + Send
     + Sync;

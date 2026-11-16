@@ -87,6 +87,7 @@ async fn seed_spawn(actor: &SessionActor) {
                 context_normalized: false,
                 resumed_from: None,
                 parent_prompt_id: None,
+                parent_prompt_owner: None,
                 capability_mode: None,
                 birth_mcp_servers: Some(Default::default()),
                 permission_mode: None,

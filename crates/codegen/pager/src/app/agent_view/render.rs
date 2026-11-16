@@ -63,18 +63,17 @@ impl AgentView {
     /// stationary pointer) so render can borrow the cached text.
     pub(crate) fn sync_timeline_hover_preview(&mut self) {
         match self.timeline_hover {
-            Some(crate::views::timeline::TimelineHit::Tick(turn_idx)) => {
+            Some(crate::views::timeline::TimelineHit::Tick(ordinal)) => {
                 if self
                     .timeline_hover_preview
                     .as_ref()
-                    .is_some_and(|(idx, _)| *idx == turn_idx)
+                    .is_some_and(|(idx, _)| *idx == ordinal)
                 {
                     return;
                 }
                 self.timeline_hover_preview = self
-                    .scrollback
-                    .turn_preview(turn_idx)
-                    .map(|text| (turn_idx, text));
+                    .timeline_hover_text(ordinal)
+                    .map(|text| (ordinal, text));
             }
             _ => self.timeline_hover_preview = None,
         }
@@ -1185,11 +1184,20 @@ impl AgentView {
             _ => 1,
         };
         let follow_ups_height = u16::from(self.follow_ups.is_some());
+        let catalog_total = appearance
+            .show_timeline
+            .then(|| self.global_timeline_total())
+            .flatten();
+        let timeline_count = if catalog_total.is_some() {
+            self.timeline_rail_count(true)
+        } else {
+            self.scrollback.turn_count() as u64
+        };
         let timeline_width = crate::views::timeline::rail_width(
             appearance.show_timeline,
             self.is_subagent_view,
             area.width,
-            self.scrollback.turn_count(),
+            timeline_count,
         );
         let mut layout = AgentViewLayout::compute(
             area,
@@ -1237,16 +1245,30 @@ impl AgentView {
                 layout.scrollback_content.width,
                 layout.scrollback_content.height,
             );
-            let viewport = crate::views::timeline::RailViewport {
-                active: self.scrollback.active_turn_for_viewport(),
-                up_target: self.scrollback.turn_above_viewport_top(),
-                down_target: self.scrollback.turn_below_viewport_top(),
-                at_bottom: !self.scrollback.has_content_below(),
+            let viewport = if let Some(total) = catalog_total {
+                self.global_rail_viewport(total)
+            } else {
+                crate::views::timeline::RailViewport {
+                    active: self
+                        .scrollback
+                        .active_turn_for_viewport()
+                        .map(|turn| turn as u64),
+                    up_target: self
+                        .scrollback
+                        .turn_above_viewport_top()
+                        .map(|turn| turn as u64),
+                    down_target: self
+                        .scrollback
+                        .turn_below_viewport_top()
+                        .map(|turn| turn as u64),
+                    at_bottom: !self.scrollback.has_content_below(),
+                    down_returns_live: false,
+                }
             };
             match crate::views::timeline::compute_rail(
                 layout.scrollback,
                 layout.timeline_x,
-                self.scrollback.turn_count(),
+                timeline_count,
                 viewport,
             ) {
                 Some(rail) => {
@@ -1377,6 +1399,12 @@ impl AgentView {
                     self.session.session_usage.as_ref(),
                     &theme,
                     self.hit_usage_status.hovered,
+                    self.session.state.is_turn_running()
+                        || self
+                            .session
+                            .subagent_sessions
+                            .values()
+                            .any(|child| !child.finished),
                 ),
             );
         }
@@ -1807,20 +1835,20 @@ impl AgentView {
             }
             if let Some(ref rail) = self.timeline_rail {
                 crate::views::timeline::render_rail(buf, rail, self.timeline_hover, &theme);
-                if let Some(crate::views::timeline::TimelineHit::Tick(turn_idx)) =
+                if let Some(crate::views::timeline::TimelineHit::Tick(ordinal)) =
                     self.timeline_hover
                 {
                     let preview = self
                         .timeline_hover_preview
                         .as_ref()
-                        .filter(|(idx, _)| *idx == turn_idx)
+                        .filter(|(idx, _)| *idx == ordinal)
                         .map(|(_, text)| text.as_str());
                     if let Some(preview) = preview {
                         crate::views::timeline::render_tick_hover_popup(
                             buf,
                             rail,
                             layout.scrollback,
-                            turn_idx,
+                            ordinal,
                             preview,
                             &theme,
                         );

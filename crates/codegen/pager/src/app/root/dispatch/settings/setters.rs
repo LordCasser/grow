@@ -845,14 +845,27 @@ pub(in crate::app::root::dispatch) fn set_timeline(app: &mut AppView, new: bool)
         return vec![];
     }
     set_timeline_inner(app, new);
+    let mut effects = Vec::new();
+    if !new && let crate::app::root::ActiveView::Agent(id) = app.active_view {
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.suppress_timeline_jump(&mut effects);
+        }
+    }
+    if new {
+        // Re-enabling is an explicit user action: a catalog read that a
+        // failure blocked retries from here. Closing never re-requests
+        // toward an existing error.
+        crate::app::agent_view::resume_visible_history_timeline(app);
+    }
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "show_timeline", value = new, "setting changed");
     app.show_toast(&save_success_toast("Timeline sidebar", new));
-    vec![Effect::PersistSetting {
+    effects.push(Effect::PersistSetting {
         key: "show_timeline",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
+    });
+    effects
 }
 
 pub(super) fn set_page_flip_on_send_inner(app: &mut AppView, new: bool) {

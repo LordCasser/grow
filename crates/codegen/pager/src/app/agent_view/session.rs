@@ -109,14 +109,12 @@ impl AgentView {
         session_id: agent_client_protocol::schema::v1::SessionId,
     ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
-            self.history_page_cursor = None;
-            self.history_latest_pending = false;
-            self.history_is_partial = false;
-            self.history_page_request = None;
-            self.history_page_viewer = None;
+            self.retire_history_window();
             if self.session.plan_completed {
                 self.clear_completed_plan_details();
-                self.session.plan_completed = false;
+            }
+            if self.session.session_id.is_some() {
+                self.session.reset_behavior_binding();
             }
             self.close_rewind_for_binding_change();
             if let Some(effect) = self.release_server_queue_edit_on_close() {
@@ -147,11 +145,8 @@ impl AgentView {
         }
         self.clear_behavior_switch_confirmation();
         if self.session.session_id.take().is_some() {
-            self.history_page_cursor = None;
-            self.history_latest_pending = false;
-            self.history_is_partial = false;
-            self.history_page_request = None;
-            self.history_page_viewer = None;
+            self.session.reset_behavior_binding();
+            self.retire_history_window();
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.descendant_restore_generation = self.descendant_restore_generation.wrapping_add(1);
             self.descendant_restore_pending = false;
@@ -241,11 +236,15 @@ impl AgentView {
             descendant_model_control_generation: 0,
             descendant_agent_control_generation: 0,
             history_page_cursor: None,
+            history_cut: None,
+            history_generation: 0,
+            history_window: super::history_window::HistoryWindow::default(),
             history_latest_pending: false,
             history_is_partial: false,
             history_page_request: None,
             history_page_request_seq: 0,
             history_page_viewer: None,
+            history_timeline: super::history_timeline::HistoryTimeline::default(),
             switch_catalog_request: 0,
             scrollback,
             prompt,

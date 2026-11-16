@@ -2150,15 +2150,25 @@ impl SessionActor {
                 })
             })
         });
-        let captured_prompt_index = self
-            .chat_state_handle
-            .current_prompt_index()
-            .await
-            .ok_or_else(|| {
-                acp::Error::internal_error().data("sampling has no durable prompt owner")
-            })?;
-        let usage_sink =
-            self.sampling_usage_sink(self.current_catalog_model_id(), captured_prompt_index);
+        let (captured_prompt_index, prompt_owner) =
+            match self.chat_state_handle.current_usage_prompt_owner().await {
+                Some((index, owner)) => (index, Some(owner)),
+                None => (
+                    self.chat_state_handle
+                        .current_prompt_index()
+                        .await
+                        .ok_or_else(|| {
+                            acp::Error::internal_error()
+                                .data("sampling has no durable prompt owner")
+                        })?,
+                    None,
+                ),
+            };
+        let usage_sink = self.sampling_usage_sink(
+            self.current_catalog_model_id(),
+            captured_prompt_index,
+            prompt_owner,
+        );
         let evidence_owner = serde_json::json!({
             "request_id": request_id_str,
             "source_projection": request.source_projection,
@@ -2358,6 +2368,7 @@ impl SessionActor {
         &self,
         usage_model_id: String,
         captured_prompt_index: usize,
+        prompt_owner: Option<chat_state::UsagePromptOwner>,
     ) -> sampler::AttemptUsageSink {
         let goal_usage_window = self.goal_usage_window.clone();
         let usage_state = self.chat_state_handle.clone();
@@ -2367,6 +2378,7 @@ impl SessionActor {
             let window = goal_usage_window.clone();
             let state = usage_state.clone();
             let model = usage_model_id.clone();
+            let prompt_owner = prompt_owner.clone();
             let budget = output_budget.clone();
             let signals = signals.clone();
             Box::pin(async move {
@@ -2392,6 +2404,7 @@ impl SessionActor {
                     .settle_model_attempt_usage(
                         key,
                         captured_prompt_index,
+                        prompt_owner,
                         model,
                         usage.clone(),
                         cost,

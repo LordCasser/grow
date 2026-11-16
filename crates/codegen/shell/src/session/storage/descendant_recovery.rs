@@ -77,11 +77,14 @@ impl DescendantOwnership {
                 && spawn.child_session_id == *child
                 && spawn.security_parent_session_id == self.session_id
             {
-                self.spawns.insert(child.clone(), ChildReplaySpawn {
-                    spawn,
-                    parent_spawn_seq: seq.get(),
-                    terminal: terminal.filter(|terminal| terminal.result_ref.is_some()),
-                });
+                self.spawns.insert(
+                    child.clone(),
+                    ChildReplaySpawn {
+                        spawn,
+                        parent_spawn_seq: seq.get(),
+                        terminal: terminal.filter(|terminal| terminal.result_ref.is_some()),
+                    },
+                );
                 self.replayed_children.insert(child.clone());
             }
         }
@@ -93,7 +96,10 @@ impl DescendantOwnership {
         timeline: &chat_state::Timeline,
         history: &HistorySnapshot,
     ) -> io::Result<Self> {
-        let mut events = timeline.subagent_lifecycle_events().cloned().collect::<Vec<_>>();
+        let mut events = timeline
+            .subagent_lifecycle_events()
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some(indexed) = &history.indexed {
             events.extend(indexed.subagent_lifecycle_events()?);
         }
@@ -165,22 +171,26 @@ impl DescendantOwnership {
     /// Larger roots use the independently validated local fallback.
     pub(crate) fn into_load_meta(self) -> Option<serde_json::Value> {
         const MAX_META_BYTES: usize = 1024 * 1024;
-        let bound = self.spawns.iter().fold(
-            512usize.saturating_add(self.session_id.len().saturating_mul(6)),
-            |total, (child, spawn)| {
-                let spawn_len = serde_json::to_vec(spawn)
-                    .expect("validated ownership spawn serializes")
-                    .len();
+        let bound = self
+            .spawns
+            .iter()
+            .fold(
+                512usize.saturating_add(self.session_id.len().saturating_mul(6)),
+                |total, (child, spawn)| {
+                    let spawn_len = serde_json::to_vec(spawn)
+                        .expect("validated ownership spawn serializes")
+                        .len();
+                    total
+                        .saturating_add(64)
+                        .saturating_add(child.len().saturating_mul(6))
+                        .saturating_add(spawn_len)
+                },
+            )
+            .saturating_add(self.replayed_children.iter().fold(0usize, |total, child| {
                 total
-                    .saturating_add(64)
+                    .saturating_add(4)
                     .saturating_add(child.len().saturating_mul(6))
-                    .saturating_add(spawn_len)
-            },
-        )
-        .saturating_add(self.replayed_children.iter().fold(
-            0usize,
-            |total, child| total.saturating_add(4).saturating_add(child.len().saturating_mul(6)),
-        ));
+            }));
         (bound <= MAX_META_BYTES)
             .then(|| serde_json::to_value(self).expect("ownership snapshot serializes"))
     }
@@ -261,8 +271,8 @@ pub fn load_descendant_child_replay_at(
     grow_home: &Path,
 ) -> io::Result<Option<(DescendantOwnership, Vec<SessionNotification>)>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
-    let Some((child_summary, child_snapshot)) = storage
-        .validated_timeline_with_published_index_by_id(child_session_id)?
+    let Some((child_summary, child_snapshot)) =
+        storage.validated_timeline_with_published_index_by_id(child_session_id)?
     else {
         return Ok(None);
     };
@@ -314,21 +324,26 @@ fn project_descendant_replay(
         snapshot.history.clone()
     };
     let prepared = history.into_prepare(&session, &snapshot.timeline, None)?;
-    lifecycle.extend(prepared.updates.into_iter().filter_map(|update| match update {
-        SessionUpdate::Grow(notification)
-            if matches!(
-                &notification.update,
-                GrowUpdate::SubagentSpawned { .. }
-                    | GrowUpdate::SubagentProgress { .. }
-                    | GrowUpdate::SubagentFinished { .. }
-                    | GrowUpdate::ModelChanged { .. }
-                    | GrowUpdate::AgentChanged { .. }
-            ) =>
-        {
-            Some(*notification)
-        }
-        _ => None,
-    }));
+    lifecycle.extend(
+        prepared
+            .updates
+            .into_iter()
+            .filter_map(|update| match update {
+                SessionUpdate::Grow(notification)
+                    if matches!(
+                        &notification.update,
+                        GrowUpdate::SubagentSpawned { .. }
+                            | GrowUpdate::SubagentProgress { .. }
+                            | GrowUpdate::SubagentFinished { .. }
+                            | GrowUpdate::ModelChanged { .. }
+                            | GrowUpdate::AgentChanged { .. }
+                    ) =>
+                {
+                    Some(*notification)
+                }
+                _ => None,
+            }),
+    );
     Ok((ownership, lifecycle))
 }
 

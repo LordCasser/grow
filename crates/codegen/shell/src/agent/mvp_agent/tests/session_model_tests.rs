@@ -426,9 +426,10 @@ context_window = 128000
                         }
                         acp_transport::AcpClientMessage::ExtNotification(args) => {
                             if args.request.method.as_ref() == "grow/session_notification"
-                                && let Ok(notification) = serde_json::from_str::<
-                                    crate::extensions::notification::SessionNotification,
-                                >(args.request.params.get())
+                                && let Ok(notification) =
+                                    serde_json::from_str::<
+                                        crate::extensions::notification::SessionNotification,
+                                    >(args.request.params.get())
                             {
                                 match notification.update {
                                     crate::extensions::notification::SessionUpdate::SubagentSpawned { .. } => {
@@ -550,6 +551,7 @@ context_window = 128000
                     parent_session_id: session_id.0.to_string(),
                     parent_step_id: None,
                     parent_prompt_id: None,
+                    parent_prompt_owner: None,
                     resume_from: None,
                     cwd: None,
                     runtime_overrides: SubagentRuntimeOverrides {
@@ -801,15 +803,14 @@ context_window = 128000
                 delayed_control = Some(commands.recv().await.unwrap());
             }
             release.notify_one();
-            let usage = cold_recovery_stage("model-race.parent-usage-admitted", held_usage_rx.recv())
-                .await
-                .unwrap();
-            let completed_prompt = cold_recovery_stage(
-                "model-race.child-turn-completed",
-                child_turn_completed_rx,
-            )
-            .await
-            .unwrap();
+            let usage =
+                cold_recovery_stage("model-race.parent-usage-admitted", held_usage_rx.recv())
+                    .await
+                    .unwrap();
+            let completed_prompt =
+                cold_recovery_stage("model-race.child-turn-completed", child_turn_completed_rx)
+                    .await
+                    .unwrap();
             assert!(!completed_prompt.is_empty());
             assert!(
                 agent

@@ -264,6 +264,7 @@ complete(child.output);"#;
                             context_normalized: false,
                             resumed_from: child_request.resume_from.clone(),
                             parent_prompt_id: child_request.parent_prompt_id.clone(),
+                            parent_prompt_owner: None,
                             capability_mode: None,
                             birth_mcp_servers: Some(Default::default()),
                             permission_mode: None,

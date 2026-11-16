@@ -858,9 +858,23 @@ struct ShellControlState {
     sampling: Option<ShellControlSlot>,
     agent: Option<ShellControlSlot>,
     behavior: Option<ShellControlSlot>,
+    confirmed_behavior: Option<shell::extensions::notification::BehaviorProjection>,
 }
 
 impl ShellControlState {
+    fn establish_epoch(&mut self, epoch: &str) {
+        if self.active_epoch.as_deref() == Some(epoch) {
+            return;
+        }
+        if let Some(previous) = self.active_epoch.replace(epoch.to_owned()) {
+            self.retired_epochs.insert(previous);
+        }
+        self.sampling = None;
+        self.agent = None;
+        self.behavior = None;
+        self.confirmed_behavior = None;
+    }
+
     fn slot(
         &self,
         domain: shell::extensions::notification::ControlDomain,
@@ -980,10 +994,11 @@ pub struct AgentSession {
     /// Local request correlation only. The Shell owns desired state and
     /// publishes the presentation projection below.
     controls: SessionControlState,
-    /// Latest typed Shell-authoritative UI projection. It never enters prompt
-    /// construction and is cleared on reconnect until the Shell re-sends a
-    /// fresh snapshot.
+    /// Latest typed Shell-authoritative UI projection. Confirmed Behavior and
+    /// actor authority survive reconnect until the matching load replaces them.
     shell_controls: ShellControlState,
+    /// Live mode notifications that precede the load establishing their actor.
+    pub(crate) pending_mode_updates: Vec<acp::CurrentModeUpdate>,
     /// One keyed, replaceable progress fact for the live status row. It is
     /// presentation-only, never persisted, and never projected into model
     /// context. Clearing is key-checked so completion of an older operation
@@ -1330,6 +1345,7 @@ impl AgentSession {
             session_agent_name: None,
             controls: SessionControlState::default(),
             shell_controls: ShellControlState::default(),
+            pending_mode_updates: Vec::new(),
             live_feedback: None,
             pending_memory_browse: None,
             pending_authoritative_model_change: None,
@@ -1668,7 +1684,10 @@ impl AgentSession {
     /// the semantic user intent remains stable. Each domain keeps only its
     /// newest desired target and can reconnect independently.
     pub(crate) fn rearm_controls_for_reconnect(&mut self) {
-        self.shell_controls = ShellControlState::default();
+        self.shell_controls.sampling = None;
+        self.shell_controls.agent = None;
+        self.shell_controls.behavior = None;
+        self.pending_mode_updates.clear();
         self.controls.dispatch_generation = self.controls.dispatch_generation.saturating_add(1);
         let controls = [
             SessionControlDomain::Sampling,
@@ -1912,6 +1931,132 @@ impl AgentSession {
         matches && self.complete_control(token) == SessionControlCompletion::Drained
     }
 
+    pub(crate) fn behavior_projection_from_meta(
+        meta: Option<&acp::Meta>,
+    ) -> Option<shell::extensions::notification::BehaviorProjection> {
+        use shell::extensions::notification::BehaviorProjection;
+        let value = meta?.get(BehaviorProjection::META_KEY)?;
+        match serde_json::from_value(value.clone()) {
+            Ok(projection) => Some(projection),
+            Err(error) => {
+                tracing::warn!(%error, "invalid confirmed Behavior snapshot");
+                None
+            }
+        }
+    }
+
+    pub(crate) fn reset_behavior_binding(&mut self) {
+        self.shell_controls = ShellControlState::default();
+        self.pending_mode_updates.clear();
+        self.behavior_mode = tools::types::BehaviorId::Normal;
+        self.plan_mode_active = false;
+        self.plan_phase = None;
+        self.plan_completed = false;
+    }
+
+    pub(crate) fn behavior_epoch_matches(&self, epoch: &str) -> bool {
+        self.shell_controls.confirmed_behavior.is_some()
+            && self.shell_controls.active_epoch.as_deref() == Some(epoch)
+    }
+
+    pub(crate) fn behavior_snapshot_established(&self) -> bool {
+        self.shell_controls.confirmed_behavior.is_some()
+    }
+
+    pub(crate) fn confirmed_behavior_revision(&self) -> Option<u64> {
+        self.shell_controls
+            .confirmed_behavior
+            .as_ref()
+            .map(|projection| projection.control_revision)
+    }
+
+    /// Keep one newest live state candidate plus the exact receipts that must
+    /// still settle after the load. Historical updates never enter this queue.
+    pub(crate) fn stage_pending_live_mode(&mut self, update: acp::CurrentModeUpdate) {
+        let Some(revision) = Self::behavior_projection_from_meta(update.meta.as_ref())
+            .map(|projection| projection.control_revision)
+        else {
+            return;
+        };
+        let has_receipt = update
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.get("grow/planDecisionReceipt").is_some());
+        self.pending_mode_updates.retain(|existing| {
+            let Some(existing_revision) =
+                Self::behavior_projection_from_meta(existing.meta.as_ref())
+                    .map(|projection| projection.control_revision)
+            else {
+                return false;
+            };
+            if existing_revision == revision {
+                return false;
+            }
+            let existing_receipt = existing
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.get("grow/planDecisionReceipt").is_some());
+            existing_receipt || existing_revision > revision
+        });
+        let superseded = !has_receipt
+            && self.pending_mode_updates.iter().any(|existing| {
+                Self::behavior_projection_from_meta(existing.meta.as_ref())
+                    .is_some_and(|projection| projection.control_revision > revision)
+            });
+        if !superseded {
+            self.pending_mode_updates.push(update);
+        }
+        let mut retained_receipts = 0;
+        self.pending_mode_updates.retain(|existing| {
+            let receipt = existing
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.get("grow/planDecisionReceipt").is_some());
+            if !receipt {
+                return true;
+            }
+            retained_receipts += 1;
+            retained_receipts <= 8
+        });
+    }
+
+    /// State admission is independent of intent receipts. An older or identical
+    /// state may still carry an exact receipt, but cannot rewrite the projection.
+    pub(crate) fn apply_behavior_projection(
+        &mut self,
+        projection: shell::extensions::notification::BehaviorProjection,
+        establish_epoch: bool,
+    ) -> ShellControlApplyOutcome {
+        if establish_epoch {
+            self.shell_controls
+                .establish_epoch(&projection.control_epoch);
+        } else if !self.behavior_epoch_matches(&projection.control_epoch) {
+            return ShellControlApplyOutcome::Rejected;
+        }
+        if let Some(current) = &self.shell_controls.confirmed_behavior {
+            if current.control_revision > projection.control_revision {
+                return ShellControlApplyOutcome::Accepted { changed: false };
+            }
+            if current.control_revision == projection.control_revision {
+                return if current == &projection {
+                    ShellControlApplyOutcome::Accepted { changed: false }
+                } else {
+                    tracing::warn!(
+                        revision = projection.control_revision,
+                        "conflicting confirmed Behavior snapshot"
+                    );
+                    ShellControlApplyOutcome::Rejected
+                };
+            }
+        }
+        self.behavior_mode = projection.behavior_id;
+        self.plan_mode_active = projection.behavior_id.is_plan();
+        self.plan_phase = projection.plan_phase.clone();
+        self.plan_completed = projection.plan_completed;
+        self.shell_controls.confirmed_behavior = Some(projection);
+        ShellControlApplyOutcome::Accepted { changed: true }
+    }
+
     pub(crate) fn apply_shell_control_state_outcome(
         &mut self,
         update: shell::extensions::notification::ControlStateUpdate,
@@ -1936,6 +2081,11 @@ impl AgentSession {
             return ShellControlApplyOutcome::Rejected;
         }
         if self.shell_controls.active_epoch.as_deref() != Some(update.epoch.as_str()) {
+            // Once Behavior hydration establishes the live actor, only the
+            // next matching load may rotate its authority. History is passive.
+            if self.shell_controls.confirmed_behavior.is_some() {
+                return ShellControlApplyOutcome::Rejected;
+            }
             // Receipt-only projections are historical acknowledgements, not a
             // live state stream. They must never establish or rotate the
             // epoch (the ACP handler handles their immutable notice path).
@@ -1957,16 +2107,7 @@ impl AgentSession {
             if self.shell_controls.retired_epochs.contains(&update.epoch) {
                 return ShellControlApplyOutcome::Rejected;
             }
-            if let Some(previous) = self
-                .shell_controls
-                .active_epoch
-                .replace(update.epoch.clone())
-            {
-                self.shell_controls.retired_epochs.insert(previous);
-            }
-            self.shell_controls.sampling = None;
-            self.shell_controls.agent = None;
-            self.shell_controls.behavior = None;
+            self.shell_controls.establish_epoch(&update.epoch);
         }
         let slot = self.shell_controls.slot_mut(update.domain);
         if allow_snapshot_reset

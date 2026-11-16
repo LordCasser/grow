@@ -376,6 +376,7 @@ fn soak_request(id: String, background: bool) -> SubagentRequest {
         parent_session_id: PARENT_SESSION_ID.to_owned(),
         parent_step_id: None,
         parent_prompt_id: Some("soak-prompt".to_owned()),
+        parent_prompt_owner: None,
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),

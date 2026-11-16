@@ -176,7 +176,10 @@ pub enum ChatStateCommand {
     GetRuntimeTreeSnapshot {
         reply: oneshot::Sender<
             Result<
-                (crate::session_runtime::RuntimeLifecycle, Vec<crate::TimelineEvent>),
+                (
+                    crate::session_runtime::RuntimeLifecycle,
+                    Vec<crate::TimelineEvent>,
+                ),
                 crate::TimelineError,
             >,
         >,
@@ -204,11 +207,15 @@ pub enum ChatStateCommand {
     },
     // ═══ Mutations (fire-and-forget) ═══
     /// Push a user message into the conversation.
-    PushUserMessage { item: ConversationItem },
+    PushUserMessage {
+        item: ConversationItem,
+    },
 
     /// Append a non-message causal fact. Validation and ordering remain owned
     /// by the chat-state actor.
-    RecordTimelineEvent { kind: TimelineEventKind },
+    RecordTimelineEvent {
+        kind: TimelineEventKind,
+    },
 
     /// Prepare, durably commit, then accept a causal boundary. The actor does
     /// not process another command while awaiting this acknowledgement.
@@ -289,7 +296,9 @@ pub enum ChatStateCommand {
     },
 
     /// Record the assistant's response (text + tool calls).
-    PushAssistantResponse { item: ConversationItem },
+    PushAssistantResponse {
+        item: ConversationItem,
+    },
 
     /// Persist the complete provider response, then quarantine malformed tool
     /// exchanges before any reader or tool dispatcher can consume the Surface.
@@ -301,7 +310,9 @@ pub enum ChatStateCommand {
     },
 
     /// Record a tool result.
-    PushToolResult { item: ConversationItem },
+    PushToolResult {
+        item: ConversationItem,
+    },
 
     /// Commit a host control result before permitting its terminal decision.
     PushToolResultDurably {
@@ -340,11 +351,15 @@ pub enum ChatStateCommand {
 
     /// Replace projected context pressure with the provider's canonical
     /// total for the just-completed response.
-    RecordProviderContextAnchor { provider_total_tokens: u64 },
+    RecordProviderContextAnchor {
+        provider_total_tokens: u64,
+    },
 
     /// Stash the per-turn `TokenUsage` from the most recent model response.
     /// Overwrites any previously stashed value.
-    RecordLastTurnUsage { usage: TokenUsage },
+    RecordLastTurnUsage {
+        usage: TokenUsage,
+    },
 
     RecordModelCallUsage {
         model_id: Option<String>,
@@ -360,6 +375,7 @@ pub enum ChatStateCommand {
         attempt_key: String,
         model_id: String,
         captured_prompt_index: usize,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         usage: Option<TokenUsage>,
         cost_usd_ticks: Option<i64>,
         api_duration_ms: Option<u64>,
@@ -371,6 +387,7 @@ pub enum ChatStateCommand {
         attempt_no: u32,
         model_id: String,
         captured_prompt_index: Option<usize>,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
     },
     SettleAuxiliaryAttemptUsage {
@@ -386,7 +403,7 @@ pub enum ChatStateCommand {
     RecordSubagentUsage {
         subagent_id: String,
         by_model: Vec<(String, crate::usage::UsageTotals)>,
-        attribute_to_prompt: bool,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         /// Nested subagent bill may under-count.
         incomplete: bool,
         deadline: Option<tokio::time::Instant>,
@@ -412,14 +429,20 @@ pub enum ChatStateCommand {
     },
 
     /// Replace the active provider route and start a fresh continuation epoch.
-    ReplaceSamplingRoute { config: SamplingConfig },
+    ReplaceSamplingRoute {
+        config: SamplingConfig,
+    },
 
     /// Update sampling parameters without changing the provider route.
-    UpdateSamplingConfig { config: SamplingConfig },
+    UpdateSamplingConfig {
+        config: SamplingConfig,
+    },
 
     /// Drop provider-native continuation and acknowledge the new epoch before
     /// a portable fallback request is rebuilt.
-    ResetContinuation { reply: oneshot::Sender<()> },
+    ResetContinuation {
+        reply: oneshot::Sender<()>,
+    },
 
     /// Enable the current route's backend-specific portable reasoning replay
     /// after the provider explicitly requires it. Replies true only when the
@@ -430,13 +453,19 @@ pub enum ChatStateCommand {
     },
 
     /// Track that the agent edited a file path.
-    RecordAgentEditedPath { path: String },
+    RecordAgentEditedPath {
+        path: String,
+    },
 
     /// Record stream timing metadata.
-    RecordStreamStart { timestamp_ms: i64 },
+    RecordStreamStart {
+        timestamp_ms: i64,
+    },
 
     /// Record turn timing metadata.
-    RecordTurnStart { timestamp_ms: i64 },
+    RecordTurnStart {
+        timestamp_ms: i64,
+    },
 
     /// Commit a complete Surface transformation before publishing it to the
     /// actor projection.
@@ -506,13 +535,17 @@ pub enum ChatStateCommand {
     Flush,
 
     /// Update opaque credential secrets held by the actor.
-    UpdateCredentials { credentials: Credentials },
+    UpdateCredentials {
+        credentials: Credentials,
+    },
 
     /// Start capturing turn messages. Clears any previous buffer.
     BeginTurnCapture,
 
     /// Repair dangling tool calls after a harness-initiated halt.
-    RepairDanglingAfterHarnessHalt { class: &'static str },
+    RepairDanglingAfterHarnessHalt {
+        class: &'static str,
+    },
 
     // ═══ Queries (request/response via oneshot) ═══
     /// Build a ConversationRequest ready to send to the API.
@@ -650,14 +683,21 @@ pub enum ChatStateCommand {
     },
 
     /// Get current prompt index.
-    GetPromptIndex { reply: oneshot::Sender<usize> },
+    CurrentUsagePromptOwner {
+        reply: oneshot::Sender<Option<(usize, crate::UsagePromptOwner)>>,
+    },
+    GetPromptIndex {
+        reply: oneshot::Sender<usize>,
+    },
     /// Coordinate of the active/latest branch prompt, not the next free index.
     CurrentPromptIndex {
         reply: oneshot::Sender<Option<usize>>,
     },
 
     /// Get the current model-visible Surface revision without cloning it.
-    GetSurfaceRevision { reply: oneshot::Sender<u64> },
+    GetSurfaceRevision {
+        reply: oneshot::Sender<u64>,
+    },
 
     /// Get the prompt index at which the last compaction occurred.
     /// `Some` means the context currently holds a compaction summary.
@@ -666,7 +706,9 @@ pub enum ChatStateCommand {
     },
 
     /// Get provider-anchored projected context pressure.
-    GetProjectedTokens { reply: oneshot::Sender<u64> },
+    GetProjectedTokens {
+        reply: oneshot::Sender<u64>,
+    },
 
     /// Retrieve the most recent stashed per-turn `TokenUsage`. Returns
     /// `None` until at least one `RecordLastTurnUsage` has been processed.
@@ -687,7 +729,9 @@ pub enum ChatStateCommand {
     },
 
     /// Bytes/4 estimate of all non-system conversation items.
-    GetEstimatedMessagesTokens { reply: oneshot::Sender<u64> },
+    GetEstimatedMessagesTokens {
+        reply: oneshot::Sender<u64>,
+    },
 
     /// Get sampling config.
     GetSamplingConfig {
@@ -716,7 +760,9 @@ pub enum ChatStateCommand {
     },
 
     /// Get credential secrets.
-    GetCredentials { reply: oneshot::Sender<Credentials> },
+    GetCredentials {
+        reply: oneshot::Sender<Credentials>,
+    },
 
     GetLastModelMetadata {
         reply: oneshot::Sender<ModelMetadata>,
@@ -731,12 +777,16 @@ pub enum ChatStateCommand {
     // ═══ Narrow targeted queries (avoid full-conversation clone) ═══
     /// Get the number of items in the conversation.
     /// Cheaper than `GetConversation` when only the length is needed.
-    GetConversationLen { reply: oneshot::Sender<usize> },
+    GetConversationLen {
+        reply: oneshot::Sender<usize>,
+    },
 
     /// Whether any assistant tool call lacks a matching `ToolResult` (i.e. the
     /// dangling-tool-call repair would fire on the next request build).
     /// Cheaper than `GetConversation` when only this predicate is needed.
-    HasDanglingToolCalls { reply: oneshot::Sender<bool> },
+    HasDanglingToolCalls {
+        reply: oneshot::Sender<bool>,
+    },
 
     /// Get the text content of the last assistant message with non-empty text.
     /// Returns `None` if no such message exists.

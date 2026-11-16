@@ -501,7 +501,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             session_id,
             models: new_models,
-        } => handle_session_created(app, agent_id, session_id, new_models),
+            behavior,
+        } => handle_session_created(app, agent_id, session_id, new_models, behavior),
         TaskResult::SessionFailed { agent_id, error } => {
             handle_session_failed(app, agent_id, error)
         }
@@ -511,6 +512,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             models: new_models,
+            behavior,
         } => handle_worktree_session_created(
             app,
             agent_id,
@@ -518,6 +520,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             new_models,
+            behavior,
         ),
         TaskResult::WorktreeForked {
             agent_id,
@@ -554,20 +557,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             foreground,
             descendant_ownership,
-            older_history_cursor,
-            latest_history_cursor,
-        } => handle_session_loaded(
-            app,
-            agent_id,
-            session_id,
-            new_models,
-            code_restored,
-            restore_summary,
-            foreground,
-            descendant_ownership,
-            older_history_cursor,
-            latest_history_cursor,
-        ),
+            history_cut,
+            behavior,
+        } => {
+            let mut effects = handle_session_loaded(
+                app,
+                agent_id,
+                session_id,
+                new_models,
+                code_restored,
+                restore_summary,
+                foreground,
+                descendant_ownership,
+                history_cut,
+                behavior,
+            );
+            effects.extend(crate::app::agent_view::ensure_visible_history_timeline(app));
+            effects
+        }
         TaskResult::DescendantStateRestored {
             agent_id,
             session_id,
@@ -588,66 +595,113 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::HistoryPageLoaded {
-            agent_id,
+            agent_id: _,
             session_id,
             binding_epoch,
             request_id,
-            older_cursor,
+            generation,
+            query,
             result,
         } => {
-            let Some(agent) = app.agents.get_mut(&agent_id) else {
-                return vec![];
-            };
-            if agent.session.session_id.as_ref() != Some(&session_id)
-                || agent.session_binding_epoch != binding_epoch
-                || agent.history_page_request != Some(request_id)
+            let visible = crate::app::agent_view::visible_history_session(app);
+            let mut effects = Vec::new();
             {
-                return vec![];
-            }
-            agent.history_page_request = None;
-            let latest = agent.history_latest_pending;
-            if !latest && app.active_view != crate::app::root::ActiveView::Agent(agent_id) {
-                return vec![];
-            }
-            let mut timer = diagnostics::instrumentation::timer("pager.history_page.apply");
-            timer.with_field("latest", latest);
-            match result {
-                Ok(updates) => {
-                    timer.with_field("updates", updates.len());
-                    let mut projection =
-                        crate::transcript_projection::TranscriptProjection::default();
-                    if latest {
-                        projection.scrollback = agent.scrollback.fresh_continuation();
+                let Some(agent) = super::ctx::find_agent_view_by_session_id(
+                    &mut app.agents,
+                    session_id.0.as_ref(),
+                ) else {
+                    return vec![];
+                };
+                if agent.session.session_id.as_ref() != Some(&session_id)
+                    || agent.session_binding_epoch != binding_epoch
+                    || agent.history_page_request != Some(request_id)
+                    || agent.history_generation != generation
+                {
+                    return vec![];
+                }
+                agent.history_page_request = None;
+                let mut timer = diagnostics::instrumentation::timer("pager.history_page.apply");
+                timer.with_field(
+                    "rows",
+                    result.as_ref().map(|page| page.rows.len()).unwrap_or(0),
+                );
+                match result {
+                    Ok(response) => {
+                        if response.session_id != session_id {
+                            return vec![];
+                        }
+                        let target_source = response.target_source;
+                        let forward = matches!(
+                            query,
+                            shell::session::storage::HistoryPageQuery::After { .. }
+                        );
+                        let around = matches!(
+                            query,
+                            shell::session::storage::HistoryPageQuery::Around { .. }
+                        );
+                        match agent.apply_history_page(generation, &query, response) {
+                            crate::app::agent_view::HistoryPageOutcome::Rejected(reason) => {
+                                timer.with_field("rejected", reason);
+                                agent.show_toast(&format!("Could not load history: {reason}"));
+                            }
+                            crate::app::agent_view::HistoryPageOutcome::Adopted => {
+                                if around {
+                                    agent.reveal_adopted_timeline_target(target_source);
+                                } else if visible.as_ref() == Some(&session_id) {
+                                    agent.request_history_at_viewport_boundary(
+                                        forward,
+                                        &mut effects,
+                                    );
+                                }
+                            }
+                            crate::app::agent_view::HistoryPageOutcome::Discarded => {}
+                        }
                     }
-                    projection.scrollback.begin_batch();
-                    for update in updates {
-                        projection.apply(shell::session::storage::transcript::TranscriptEvent {
-                            update,
-                            timestamp_ms: None,
-                            simulated_source: false,
-                        });
-                    }
-                    projection.finish_snapshot();
-                    projection.scrollback.end_batch();
-                    agent.history_page_cursor = older_cursor;
-                    if latest {
-                        projection.finish_display_page();
-                        agent.scrollback.prepend_entries_from(projection.scrollback);
-                        agent.history_latest_pending = false;
-                        agent.history_is_partial = agent.history_page_cursor.is_some();
-                    } else {
-                        agent.history_page_viewer = Some(projection);
+                    Err(error) => {
+                        timer.with_field("error", error.as_str());
+                        agent.show_toast(&format!(
+                            "Could not load history: {}",
+                            crate::app::root::effects::sanitize_user_error(&error)
+                        ));
                     }
                 }
-                Err(error) => {
-                    timer.with_field("error", error.as_str());
-                    agent.show_toast(&format!(
-                        "Could not load history: {}",
-                        crate::app::root::effects::sanitize_user_error(&error)
-                    ));
-                }
             }
-            vec![]
+            effects.extend(crate::app::agent_view::ensure_visible_history_timeline(app));
+            effects
+        }
+        TaskResult::HistoryTimelineLoaded {
+            agent_id: _,
+            session_id,
+            binding_epoch,
+            request_id,
+            generation,
+            jump_ordinal,
+            jump_seq,
+            result,
+        } => {
+            let show_timeline = app.appearance.show_timeline;
+            let mut effects = Vec::new();
+            {
+                let Some(agent) = super::ctx::find_agent_view_by_session_id(
+                    &mut app.agents,
+                    session_id.0.as_ref(),
+                ) else {
+                    return vec![];
+                };
+                agent.admit_history_timeline(
+                    show_timeline,
+                    binding_epoch,
+                    request_id,
+                    generation,
+                    &session_id,
+                    jump_ordinal,
+                    jump_seq,
+                    result,
+                    &mut effects,
+                );
+            }
+            effects.extend(crate::app::agent_view::ensure_visible_history_timeline(app));
+            effects
         }
         TaskResult::CompleteTranscriptBuilt {
             agent_id,
@@ -689,6 +743,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             generation,
             result,
             descendant_ownership,
+            behavior,
         } => {
             let Some(agent) = app.agents.get_mut(&agent_id) else {
                 return vec![];
@@ -704,6 +759,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .map(|snapshot| snapshot.prompt_id.clone());
             if !agent.finalize_reload_and_maybe_adopt(generation, ok, foreground) {
                 return vec![];
+            }
+            if ok && let Some(behavior) = behavior {
+                crate::app::acp_handler::hydrate_behavior_projection(agent, behavior);
             }
             if let Err(error) = result {
                 agent.show_toast(&format!("Session resync failed: {error}. Reload to retry."));

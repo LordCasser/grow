@@ -609,7 +609,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         //
         // `total_tokens` is the live context length used to drive the
         // CLI `/context` bar, the auto-compact threshold, and
-        // `meta.totalTokens` on persisted sessions. The SSE decoder
+        // `meta.contextUsedTokens` on persisted sessions. The SSE decoder
         // (`deserialize_response_event`) has already rewritten
         // `u.total_tokens` to `context_details.input + output` when
         // the backend emits it; on older deployments the wire

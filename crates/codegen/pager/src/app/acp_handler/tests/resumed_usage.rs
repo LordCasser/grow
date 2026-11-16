@@ -89,6 +89,7 @@ async fn append_initial_usage_fixture(timeline_path: &std::path::Path) -> chat_s
         .settle_model_attempt_usage(
             "initial-known-attempt".into(),
             0,
+            None,
             "test/test-model".into(),
             Some(TokenUsage {
                 prompt_tokens: 1_000,
@@ -108,6 +109,7 @@ async fn append_initial_usage_fixture(timeline_path: &std::path::Path) -> chat_s
         .settle_model_attempt_usage(
             "initial-partial-cache-attempt".into(),
             0,
+            None,
             "test/test-model".into(),
             Some(TokenUsage {
                 prompt_tokens: 500,
@@ -125,6 +127,7 @@ async fn append_initial_usage_fixture(timeline_path: &std::path::Path) -> chat_s
         .settle_model_attempt_usage(
             "initial-unknown-attempt".into(),
             0,
+            None,
             "test/test-model".into(),
             None,
             None,
@@ -166,11 +169,208 @@ fn status_line_text(usage: &shell::extensions::notification::PromptUsage) -> Str
         Some(usage),
         &crate::theme::Theme::current(),
         false,
+        false,
     )
     .spans
     .iter()
     .map(|span| span.content.as_ref())
     .collect()
+}
+
+/// Feed a transient authoritative `grow/sessionUsage` snapshot through the
+/// real SessionNotification reducer path (not a string-mirrored state update).
+#[allow(clippy::too_many_arguments)]
+fn feed_session_usage(
+    app: &mut AppView,
+    session_id: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached: u64,
+    known_input: u64,
+    incomplete: bool,
+    replay: bool,
+) -> bool {
+    let usage = shell::extensions::notification::PromptUsage {
+        totals: shell::extensions::notification::PromptUsageModel {
+            input_tokens,
+            output_tokens,
+            cached_read_tokens: cached,
+            cache_read_known_input_tokens: known_input,
+            model_calls: 1,
+            ..Default::default()
+        },
+        usage_is_incomplete: incomplete,
+        ..Default::default()
+    };
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    let update = acp::SessionInfoUpdate::new().meta(
+        serde_json::json!({ "grow/sessionUsage": usage })
+            .as_object()
+            .cloned(),
+    );
+    let mut notification = acp::SessionNotification::new(
+        acp::SessionId::new(session_id),
+        acp::SessionUpdate::SessionInfoUpdate(update),
+    );
+    if replay {
+        notification = notification.meta(
+            serde_json::json!({ "transient": true, "isReplay": true })
+                .as_object()
+                .cloned(),
+        );
+    }
+    handle(
+        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request: notification,
+            response_tx,
+        }),
+        app,
+    )
+}
+
+fn subagent_finished(parent_sid: &str, child_sid: &str) -> AcpClientMessage {
+    make_ext_session_notification(
+        parent_sid,
+        GrowSessionUpdate::SubagentFinished {
+            subagent_id: child_sid.into(),
+            child_session_id: child_sid.into(),
+            status: "completed".into(),
+            error: None,
+            tool_calls: 2,
+            turns: 1,
+            duration_ms: 10,
+            tokens_used: 90,
+            output: None,
+        },
+    )
+}
+
+/// Same runtime predicate as the production status-bar caller in
+/// `agent_view::render` (turn activity or any live child).
+fn runtime_pending(app: &AppView, id: AgentId) -> bool {
+    let session = &app.agents[&id].session;
+    session.state.is_turn_running()
+        || session
+            .subagent_sessions
+            .values()
+            .any(|child| !child.finished)
+}
+
+/// Status line built from the agent's real reducer state, not hardcoded flags.
+fn status_line_with_runtime(app: &AppView, id: AgentId) -> String {
+    let session = &app.agents[&id].session;
+    crate::views::agent_status::session_usage_status_line(
+        session.session_usage.as_ref(),
+        &crate::theme::Theme::current(),
+        false,
+        runtime_pending(app, id),
+    )
+    .spans
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect()
+}
+
+#[test]
+fn pending_projection_follows_real_subagent_lifecycle_without_folding_live_tokens() {
+    let sid = "sess-usage-pending";
+    let mut app = make_app_with_agent(sid);
+    let id = AgentId(0);
+
+    // Authoritative 120 recorded, no running turn, no child: no pending hint.
+    assert!(feed_session_usage(
+        &mut app, sid, 100, 20, 90, 100, false, false
+    ));
+    assert!(
+        !app.agents[&id]
+            .session
+            .session_usage
+            .as_ref()
+            .unwrap()
+            .usage_is_incomplete
+    );
+    assert_eq!(
+        status_line_with_runtime(&app, id),
+        "120 recorded tokens · 90.00% cache"
+    );
+
+    // A live child flips pending without any lifetime change.
+    assert!(handle(
+        make_ext_session_notification(sid, test_subagent_spawned(sid, "child-pending")),
+        &mut app,
+    ));
+    assert_eq!(
+        status_line_with_runtime(&app, id),
+        "120 recorded tokens · pending · 90.00% cache"
+    );
+
+    // Interim child live tokens (progress) must not fold into the lifetime.
+    assert!(handle(
+        make_ext_session_notification(
+            sid,
+            GrowSessionUpdate::SubagentProgress {
+                subagent_id: "child-pending".into(),
+                parent_session_id: sid.into(),
+                child_session_id: "child-pending".into(),
+                duration_ms: 10,
+                turn_count: 1,
+                tool_call_count: 2,
+                tokens_used: 90,
+                context_window_tokens: 128_000,
+                context_usage_pct: 0,
+                tools_used: Vec::new(),
+                error_count: 0,
+            },
+        ),
+        &mut app,
+    ));
+    assert_eq!(
+        status_line_with_runtime(&app, id),
+        "120 recorded tokens · pending · 90.00% cache"
+    );
+
+    // Final authoritative bill folds in and the child finishes: pending clears.
+    assert!(feed_session_usage(
+        &mut app, sid, 190, 20, 171, 190, false, false
+    ));
+    assert!(handle(subagent_finished(sid, "child-pending"), &mut app));
+    assert_eq!(
+        status_line_with_runtime(&app, id),
+        "210 recorded tokens · 90.00% cache"
+    );
+
+    // Duplicate identical usage and Finished: totals hold, pending stays off.
+    feed_session_usage(&mut app, sid, 190, 20, 171, 190, false, false);
+    handle(subagent_finished(sid, "child-pending"), &mut app);
+    assert_eq!(
+        status_line_with_runtime(&app, id),
+        "210 recorded tokens · 90.00% cache"
+    );
+
+    // History replay of the same usage and spawn must not reopen pending,
+    // rewind totals, or resurrect a terminal child.
+    feed_session_usage(&mut app, sid, 190, 20, 171, 190, false, true);
+    handle(
+        make_replayed_ext_session_notification(
+            sid,
+            "child-pending-spawn-replay",
+            test_subagent_spawned(sid, "child-pending"),
+        ),
+        &mut app,
+    );
+    assert_eq!(
+        status_line_with_runtime(&app, id),
+        "210 recorded tokens · 90.00% cache"
+    );
+    assert!(!runtime_pending(&app, id));
+    assert!(
+        !app.agents[&id]
+            .session
+            .session_usage
+            .as_ref()
+            .unwrap()
+            .usage_is_incomplete
+    );
 }
 
 async fn wait_for_usage_snapshot(

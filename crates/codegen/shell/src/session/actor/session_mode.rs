@@ -998,6 +998,7 @@ impl SessionActor {
                 foreground_admission.terminal_preemption_pending = true;
             }
         }
+        self.enqueue_current_mode_update(session_mode_id.clone());
         drop(foreground_admission);
         drop(workflow_admission);
         drop(_goal_transaction);
@@ -1027,7 +1028,6 @@ impl SessionActor {
                 BehaviorEffect::Select(_) => {}
             }
         }
-        self.enqueue_current_mode_update(session_mode_id.clone());
         self.send_available_commands_update().await;
         BehaviorApplication {
             disposition: Ok(BehaviorChangeOutcome::Applied),
@@ -1074,8 +1074,9 @@ impl SessionActor {
         let (behavior, goal) = self.capture_control_authorities();
         let revision = self
             .control_revision
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            .saturating_add(1);
+            .load(std::sync::atomic::Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("Control revision exhausted"))?;
         let snapshot = crate::session::control::SessionControlSnapshot::new(
             revision,
             self.agent.borrow().definition().selector_identity(),
@@ -1086,41 +1087,471 @@ impl SessionActor {
         self.chat_state_handle
             .record_timeline_event_durably(kind)
             .await
-            .map(|_| ())
-            .map_err(std::io::Error::other)
+            .map_err(std::io::Error::other)?;
+        self.control_revision
+            .store(revision, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
-    /// Commit a Behavior transition through the same atomic control snapshot
-    /// used by Goal. A failed persistence barrier restores the in-memory
-    /// coordinator, so callers never publish a transition that cannot survive
-    /// reconnect.
-    pub(super) async fn commit_behavior_mutation_or_restore(
+    /// Build a candidate under the existing Control boundary and expose it
+    /// only after the durable ACK. Readers never observe a tentative phase.
+    pub(super) async fn commit_behavior_mutation<T>(
         &self,
-        previous: crate::session::behavior::BehaviorSnapshot,
-    ) -> Result<(), String> {
+        mutate: impl FnOnce(&mut crate::session::behavior::BehaviorCoordinator) -> Result<T, String>,
+    ) -> Result<T, String> {
         let _step_control = self.step_control_gate.lock().await;
+        let _transaction = self.goal_transaction_gate.lock().await;
         if !self.state.lock().await.execution_open() {
-            *self.behavior.lock() =
-                crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
             return Err("session is shutting down".into());
         }
-        let _transaction = self.goal_transaction_gate.lock().await;
-        let next = self.behavior.lock().snapshot();
-        let goal = self.goal_tracker.lock().snapshot().cloned();
-        let selection_changed = previous.behavior() != next.behavior();
-        let persisted = if selection_changed {
-            self.persist_behavior_transition_durably(next, goal).await
-        } else if next.behavior() == tool_types::BehaviorId::Plan && previous != next {
-            self.persist_plan_phase_transition_durably(next, goal).await
-        } else {
-            self.persist_control_snapshot_durably(next, goal).await
-        };
-        if let Err(error) = persisted {
-            *self.behavior.lock() =
-                crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
-            return Err(format!("Behavior control state was not persisted: {error}"));
+        let previous = self.behavior.lock().snapshot();
+        let mut candidate =
+            crate::session::behavior::BehaviorCoordinator::from_snapshot(previous.clone());
+        let result = mutate(&mut candidate)?;
+        let next = candidate.snapshot();
+        if previous == next {
+            return Ok(result);
         }
-        Ok(())
+        let goal = self.goal_tracker.lock().snapshot().cloned();
+        let persisted = if previous.behavior() != next.behavior() {
+            self.persist_behavior_transition_durably(next.clone(), goal)
+                .await
+        } else if next.behavior() == tool_types::BehaviorId::Plan {
+            self.persist_plan_phase_transition_durably(next.clone(), goal)
+                .await
+        } else {
+            self.persist_control_snapshot_durably(next.clone(), goal)
+                .await
+        };
+        persisted.map_err(|error| format!("Behavior control state was not persisted: {error}"))?;
+        *self.behavior.lock() = candidate;
+        let decision = next.retained_plan.as_ref().and_then(|candidate| {
+            candidate.decisions.last().filter(|receipt| {
+                !previous
+                    .retained_plan
+                    .as_ref()
+                    .is_some_and(|previous| previous.decisions.contains(receipt))
+            })
+        });
+        let mode = acp::SessionModeId::new(next.behavior().as_id());
+        if let Some(receipt) = decision {
+            self.enqueue_current_mode_update_with_plan_decision(mode, receipt);
+        } else {
+            self.enqueue_current_mode_update(mode);
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod confirmed_projection_tests {
+    use super::*;
+
+    struct ControlFaultPersistence {
+        events: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+        reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        hold_next: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        held: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>,
+        >,
+        attempts: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        revisions: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl chat_state::TimelinePersistence for ControlFaultPersistence {
+        fn persist_timeline_event_and_ack(
+            &mut self,
+            event: &chat_state::TimelineEvent,
+        ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                self.events.lock().expect("event log").push(event.clone());
+                let _ = tx.send(Ok(()));
+                return rx;
+            };
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.revisions
+                .lock()
+                .expect("revision log")
+                .push(control.revision);
+            if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = tx.send(Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "injected permanent Control failure",
+                )));
+                return rx;
+            }
+            self.events.lock().expect("event log").push(event.clone());
+            if self
+                .hold_next
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                *self.held.lock().expect("held ack") = Some(tx);
+            } else {
+                let _ = tx.send(Ok(()));
+            }
+            rx
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    fn confirmed_revision(actor: &SessionActor) -> u64 {
+        actor
+            .control_revision
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn durable_behavior(
+        events: &[chat_state::TimelineEvent],
+    ) -> crate::session::behavior::BehaviorSnapshot {
+        crate::session::control::SessionControlSnapshot::latest_from_timeline(events)
+            .expect("control timeline")
+            .expect("committed control")
+            .behavior
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn confirmed_projection_matches_durable_behavior_and_revision() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _rx) = super::super::tests::support::build_actor().await;
+                let before = actor.confirmed_behavior_projection().await.unwrap();
+                assert_eq!(before.behavior_id, tool_types::BehaviorId::Normal);
+                assert!(before.plan_phase.is_none());
+                assert!(!before.plan_completed);
+                assert_eq!(before.control_revision, confirmed_revision(&actor));
+
+                let cases = [
+                    (tool_types::BehaviorId::Clarify, None),
+                    (tool_types::BehaviorId::Workflow, None),
+                    (tool_types::BehaviorId::Goal, None),
+                    (tool_types::BehaviorId::Plan, Some("drafting")),
+                ];
+                for (behavior, phase) in cases {
+                    actor
+                        .commit_behavior_mutation(move |candidate| {
+                            candidate.select_behavior(behavior);
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                    let snapshot = actor.confirmed_behavior_projection().await.unwrap();
+                    assert_eq!(snapshot.behavior_id, behavior);
+                    assert_eq!(snapshot.plan_phase.as_deref(), phase);
+                    assert_eq!(snapshot.control_epoch, before.control_epoch);
+                    assert!(snapshot.control_revision > before.control_revision);
+                    let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                    let durable = durable_behavior(&events);
+                    assert_eq!(durable.behavior(), behavior);
+                    assert_eq!(
+                        crate::session::control::SessionControlSnapshot::latest_from_timeline(
+                            &events
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .control_revision,
+                        snapshot.control_revision
+                    );
+                }
+
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, "# Body")
+                    .unwrap();
+                actor
+                    .commit_behavior_mutation(|candidate| {
+                        candidate.record_plan_artifact("# Body");
+                        assert!(candidate.submit_initial_plan());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                let awaiting = actor.confirmed_behavior_projection().await.unwrap();
+                assert_eq!(awaiting.plan_phase.as_deref(), Some("awaiting_approval"));
+                let expected = actor.behavior.lock().snapshot();
+                actor
+                    .commit_behavior_mutation(|candidate| {
+                        assert!(candidate.approve_submitted_plan_if(&expected));
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    actor
+                        .confirmed_behavior_projection()
+                        .await
+                        .unwrap()
+                        .plan_phase
+                        .as_deref(),
+                    Some("executing")
+                );
+                crate::session::behavior::write_plan_artifact(
+                    &actor.session_directory,
+                    "# Amended",
+                )
+                .unwrap();
+                actor
+                    .commit_behavior_mutation(|candidate| {
+                        candidate.record_plan_artifact("# Amended");
+                        assert!(candidate.submit_plan_amendment());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                let amending = actor.confirmed_behavior_projection().await.unwrap();
+                assert_eq!(amending.plan_phase.as_deref(), Some("amending"));
+                assert!(!amending.plan_completed);
+                let amending_snapshot = actor.behavior.lock().snapshot();
+                actor
+                    .commit_behavior_mutation(|candidate| {
+                        assert!(candidate.approve_submitted_plan_if(&amending_snapshot));
+                        assert!(
+                            candidate.complete_plan(blake3::hash(b"report").to_hex().to_string())
+                        );
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                let completed = actor.confirmed_behavior_projection().await.unwrap();
+                assert_eq!(completed.behavior_id, tool_types::BehaviorId::Normal);
+                assert!(completed.plan_phase.is_none());
+                assert!(completed.plan_completed);
+                assert!(completed.control_revision > amending.control_revision);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_control_write_keeps_confirmed_revision_and_behavior() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut actor, _rx) = {
+                    let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (actor, _) = super::super::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                    (actor, gateway_rx)
+                };
+                let initial = actor.behavior.lock().snapshot();
+                actor
+                    .persist_control_snapshot_durably(initial.clone(), None)
+                    .await
+                    .unwrap();
+                let confirmed = actor.confirmed_behavior_projection().await.unwrap();
+                let events = std::sync::Arc::new(std::sync::Mutex::new(
+                    actor.chat_state_handle.timeline_events().await.unwrap(),
+                ));
+                let reject = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let sampling = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let retry_sampling = sampling.clone();
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    events.lock().unwrap().clone(),
+                    sampling,
+                    Box::new(ControlFaultPersistence {
+                        events: events.clone(),
+                        reject: reject.clone(),
+                        hold_next: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        held: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                        attempts: attempts.clone(),
+                        revisions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                    }),
+                    event_tx,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                actor.events =
+                    crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+                let failed = actor
+                    .commit_behavior_mutation(|candidate| {
+                        candidate.select_behavior(tool_types::BehaviorId::Clarify);
+                        Ok(())
+                    })
+                    .await;
+                assert!(failed.is_err(), "{failed:?}");
+                assert_eq!(actor.behavior.lock().snapshot(), initial);
+                assert_eq!(confirmed_revision(&actor), confirmed.control_revision);
+                let unavailable = actor.confirmed_behavior_projection().await;
+                assert!(
+                    unavailable.is_err(),
+                    "a retained pending Control commit must not publish a snapshot"
+                );
+                assert!(actor.chat_state_handle.pending_timeline_commit().is_some());
+                assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+                let durable = events.lock().unwrap().clone();
+                let durable_controls = durable
+                    .iter()
+                    .filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Control(_)))
+                    .count();
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                reject.store(false, std::sync::atomic::Ordering::SeqCst);
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    durable,
+                    retry_sampling,
+                    Box::new(ControlFaultPersistence {
+                        events: events.clone(),
+                        reject: reject.clone(),
+                        hold_next: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        held: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                        attempts: attempts.clone(),
+                        revisions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                    }),
+                    event_tx,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                actor.events =
+                    crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+                actor
+                    .commit_behavior_mutation(|candidate| {
+                        candidate.select_behavior(tool_types::BehaviorId::Clarify);
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                let retried = actor.confirmed_behavior_projection().await.unwrap();
+                assert_eq!(retried.behavior_id, tool_types::BehaviorId::Clarify);
+                assert_eq!(retried.control_revision, confirmed.control_revision + 1);
+                assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+                let durable = events.lock().unwrap().clone();
+                let controls = durable
+                    .iter()
+                    .filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Control(_)))
+                    .count();
+                assert_eq!(controls, durable_controls + 1);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_during_ack_and_concurrent_commits_keep_distinct_versions() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (mut actor, _) = super::super::tests::support::create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let initial = actor.behavior.lock().snapshot();
+                actor
+                    .persist_control_snapshot_durably(initial, None)
+                    .await
+                    .unwrap();
+                let before = actor.confirmed_behavior_projection().await.unwrap();
+                let events = std::sync::Arc::new(std::sync::Mutex::new(
+                    actor.chat_state_handle.timeline_events().await.unwrap(),
+                ));
+                let hold_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let revisions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let sampling = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    events.lock().unwrap().clone(),
+                    sampling,
+                    Box::new(ControlFaultPersistence {
+                        events: events.clone(),
+                        reject: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        hold_next: hold_next.clone(),
+                        held: held.clone(),
+                        attempts: attempts.clone(),
+                        revisions: revisions.clone(),
+                    }),
+                    event_tx,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                actor.events =
+                    crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+                let actor = std::sync::Arc::new(actor);
+                let writer = actor.clone();
+                let pending = tokio::task::spawn_local(async move {
+                    writer
+                        .commit_behavior_mutation(|candidate| {
+                            candidate.select_behavior(tool_types::BehaviorId::Clarify);
+                            Ok(())
+                        })
+                        .await
+                });
+                let reader = actor.clone();
+                let query = tokio::task::spawn_local(async move {
+                    reader.confirmed_behavior_projection().await
+                });
+                while held.lock().expect("held ack").is_none() {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    !query.is_finished(),
+                    "a snapshot waits for the durable commit and coordinator publication"
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Normal
+                );
+                assert_eq!(confirmed_revision(&actor), before.control_revision);
+                held.lock()
+                    .expect("held ack")
+                    .take()
+                    .unwrap()
+                    .send(Ok(()))
+                    .unwrap();
+                pending.await.unwrap().unwrap();
+                let observed = query.await.unwrap().unwrap();
+                assert_eq!(observed.behavior_id, tool_types::BehaviorId::Clarify);
+                assert_eq!(observed.control_revision, before.control_revision + 1);
+                let after = actor.confirmed_behavior_projection().await.unwrap();
+                assert_eq!(after.behavior_id, tool_types::BehaviorId::Clarify);
+                assert_eq!(after.control_revision, before.control_revision + 1);
+
+                let first = actor.clone();
+                let second = actor.clone();
+                let left = tokio::task::spawn_local(async move {
+                    first
+                        .commit_behavior_mutation(|candidate| {
+                            candidate.select_behavior(tool_types::BehaviorId::Workflow);
+                            Ok("workflow")
+                        })
+                        .await
+                });
+                let right = tokio::task::spawn_local(async move {
+                    second
+                        .commit_behavior_mutation(|candidate| {
+                            candidate.select_behavior(tool_types::BehaviorId::Goal);
+                            Ok("goal")
+                        })
+                        .await
+                });
+                let left = left.await.unwrap().unwrap();
+                let right = right.await.unwrap().unwrap();
+                assert_ne!(left, right);
+                let assigned = revisions.lock().expect("revision log").clone();
+                let unique = assigned.iter().collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(unique.len(), assigned.len());
+                let final_snapshot = actor.confirmed_behavior_projection().await.unwrap();
+                assert_eq!(final_snapshot.behavior_id, actor.behavior.lock().behavior());
+                assert_eq!(
+                    final_snapshot.control_revision,
+                    *assigned.last().expect("at least one revision")
+                );
+            })
+            .await;
     }
 }
 

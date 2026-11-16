@@ -259,6 +259,7 @@ fn opposite_parent_child_tools_use_real_authority_routes_and_independent_sideban
                     parent_session_id: "route-parent".into(),
                     parent_step_id: None,
                     parent_prompt_id: None,
+                    parent_prompt_owner: None,
                     resume_from: None,
                     cwd: None,
                     runtime_overrides: Default::default(),

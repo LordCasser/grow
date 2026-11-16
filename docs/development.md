@@ -795,7 +795,15 @@ Unix 下，新建会话与 fork 在发布会话目录前建立 Timeline 索引�
 
 Request 按原领域序号查询起点和终态，冷恢复保留未完成起点与最近请求时间。用量从同一发布截点的累计值及未结算辅助请求恢复，历史分段和子任务归因在查询时读取。已发布响应按物理 anchor 与 part 排序，从 Timeline 中按片段校验并读取正文，跨发布的候选 anchor 按 Request 与 attempt 点查。闭合 Turn 的完成通知由磁盘页按原位置读取。超大 Tool 展示使用带 call ID 和字节坐标的只读续页，索引页更新数组上限为 4 MiB。完整导出仍使用 canonical reader。见 [恢复契约](../openspec/specs/session-timeline/spec.md#requirement-executable-resume-hydrates-committed-working-state) 和 [分页契约](../openspec/specs/client-surfaces/spec.md#requirement-session-history-loads-from-the-newest-page-on-demand)。
 
-Fork 继承的回复和思考展示按子会话的原始 seed 消息引用分页。发布时验证来源并记录正文片段，保留会话内的消息身份，子会话不继承原 provider 的接纳身份。Pager 在后台读取子任务 lifecycle 的精确索引引用并验证父子 Seed/Result 链接。最近页仅含子任务终态时，Pager 根据该页的精确 spawn 归属建立子视图，保留原终态展示。旧页以只读历史查看器显示。
+Fork 继承的回复和思考展示按子会话的原始 seed 消息引用分页。发布时验证来源并记录正文片段，保留会话内的消息身份，子会话不继承原 provider 的接纳身份。Pager 在后台读取子任务 lifecycle 的精确索引引用并验证父子 Seed/Result 链接。最近页仅含子任务终态时，Pager 根据该页的精确 spawn 归属建立子视图，保留原终态展示。旧页按稳定 source/entity/fragment 合并到主 transcript 的连续历史窗口；远跳窗口与 live tail 之间保留未加载间隙。
+
+恢复调试应分别核对三条投影。当前 Behavior 来自 load 的 `grow/behaviorSnapshot`，使用 actor epoch 和已持久确认的 Control revision，不能从最近正文页推断。历史请求绑定固定 `grow/historyCut`；before、after、around 只更新展示窗口，不推进 live cursor，也不结算用量。右侧时间线启用后才读取同 cut 的轻目录，点击未缓存位置先取得该 ordinal 的签名 target，再直接读取邻近正文。契约见 [当前 Behavior](../openspec/specs/behavior-goal/spec.md#requirement-current-behavior-restores-independently-of-display-history)、[连续历史窗口](../openspec/specs/client-surfaces/spec.md#requirement-main-transcript-scrolls-through-bounded-history-windows) 与 [未加载目标定位](../openspec/specs/client-surfaces/spec.md#requirement-timeline-locates-unloaded-canonical-history)。
+
+Minimal 的 PageUp 通过同一 ScrollbackPane 打开临时历史屏，Esc 返回 native live。首次 Latest 页的 pending 实体正常提交一次；以后读页保持既有实体的 pending/committed 事实，只将新引入的旧历史标为已提交。浏览暂停 native commit，退出后的实时内容继续从原 frontier 提交。临时 alternate screen 的清理由现有 terminal teardown 负责，同批双 Ctrl+D 没有最后 draw 时也须归还终端。实现边界与最终验收见 [本次恢复修复](../openspec/changes/archive/2026-11-17-repair-session-resume-presentation/design.md) 和 [验证记录](../openspec/changes/archive/2026-11-17-repair-session-resume-presentation/verification.md)。
+
+Scrollback 的 viewport 锚点由布局 owner 持有。正文锚点保存逻辑行与 sub-row；entry 后的 gap 单独保存相对末尾的行偏移，前插和换宽后随原 EntryId 的新位置及高度恢复。估算布局转为精确测量时也保持 gap pin，正文仍按新逻辑行范围夹紧。见 [gap 锚点契约](../openspec/specs/client-surfaces/spec.md#requirement-scrollback-gap-anchors-follow-their-preceding-entry)。
+
+上下文 metadata 使用 `contextUsedTokens`，与 `PromptUsage.totals.totalTokens` 的消费含义分开。lifetime 和逻辑 Turn 的消费来自原结算账本；稳定 `TurnId/prompt_id` 决定结算归属，prompt index 只核对位置。活动 Turn 的账本复用既有 UsageCheckpoint 恢复，完成用量随原 TurnCompleted 展示事实冻结留存。查看历史不会重新累计，session-only 迟到账单也不会改写已冻结结果；未知费用和不完整标记必须保留。状态栏的 `recorded tokens` 表示已记录消费，`pending` 表示仍有活动工作可能追加结算，不能据此写入持久 incomplete。
 
 Rewind 和图片投影在发布时复用原分支校验，保存转换后的 Surface、原始 item ID 和修订号。Rewind 另外保存选中 prompt 与响应原始身份，以及展示排除区间。历史页按原位置跳过已撤销区间，图片历史继续按既有展示规则读取。进程在转换提交、快照发布之间退出时，当前 writer 可以用原日志验证并修补该截点。更早版本写入的会话通过既有迁移流程建立新版索引。见 [转换后恢复契约](../openspec/specs/session-timeline/spec.md#requirement-working-publications-cover-rewind-and-image-projection)。
 

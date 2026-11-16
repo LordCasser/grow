@@ -29,7 +29,7 @@ fn includes_baseline_keys_without_usage() {
     assert_eq!(meta["sessionId"], "sess-1");
     assert_eq!(meta["requestId"], "prompt-1");
     assert_eq!(meta["promptId"], "prompt-1");
-    assert_eq!(meta["totalTokens"], 42_000);
+    assert_eq!(meta["contextUsedTokens"], 42_000);
     assert_eq!(meta["modelId"], "grow-4.5");
     // No per-turn keys when usage is absent.
     assert!(meta.get("inputTokens").is_none());

@@ -235,7 +235,10 @@ impl SessionActor {
         let Some(retained_hashes) = self
             .chat_state_handle
             .retained_notification_payload_candidates(
-                candidates.iter().map(|payload| payload.blake3.clone()).collect(),
+                candidates
+                    .iter()
+                    .map(|payload| payload.blake3.clone())
+                    .collect(),
             )
             .await
         else {
@@ -282,12 +285,16 @@ impl SessionActor {
             .await
             .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?
             .into_iter()
-            .filter(|receipt| matches!(&receipt.source,
+            .filter(|receipt| {
+                matches!(&receipt.source,
                 chat_state::NotificationSource::SubagentCompleted { subagent_id: subject, .. }
-                if subject == subagent_id))
+                if subject == subagent_id)
+            })
             .map(|receipt| receipt.payload_ref)
             .collect();
-        self.chat_state_handle.push_tool_result_durably(item).await?;
+        self.chat_state_handle
+            .push_tool_result_durably(item)
+            .await?;
         self.cleanup_notification_payloads_under_gate(&artifact_guard, payloads)
             .await;
         Ok(())
@@ -1216,7 +1223,10 @@ impl SessionActor {
         // Resume checkpoints are context for the next real turn, not a reason
         // to spend a model turn. If a terminal receipt is also present, fold
         // the checkpoint context into that already-necessary turn.
-        if !notifications.iter().any(|receipt| self.notification_autostarts(receipt)) {
+        if !notifications
+            .iter()
+            .any(|receipt| self.notification_autostarts(receipt))
+        {
             return;
         }
 
@@ -1433,9 +1443,9 @@ impl SessionActor {
     fn notification_autostarts(&self, notification: &chat_state::PendingNotification) -> bool {
         match notification.source {
             chat_state::NotificationSource::TaskStillRunning { .. } => false,
-            chat_state::NotificationSource::InquiryAnswered { continue_if_idle, .. } => {
-                continue_if_idle && self.consultation_autostart_allowed()
-            }
+            chat_state::NotificationSource::InquiryAnswered {
+                continue_if_idle, ..
+            } => continue_if_idle && self.consultation_autostart_allowed(),
             _ => true,
         }
     }

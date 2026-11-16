@@ -514,17 +514,22 @@ impl TimelineBootstrap {
 #[cfg(test)]
 mod restored_recap_coverage_tests {
     use super::TimelineBootstrap;
-    use crate::session::history::{GrowHistoryFact, HistoryContent, HistoryFact, HistorySnapshot, HistorySource};
     use crate::session::helpers::session_recap::{main_turn_count, recap_gate};
+    use crate::session::history::{
+        GrowHistoryFact, HistoryContent, HistoryFact, HistorySnapshot, HistorySource,
+    };
     use sampling_types::ConversationItem;
 
     fn recap(coverage: Option<usize>, auto: bool) -> HistorySource {
         HistorySource::Presentation {
             at_ms: 1,
             fact: Box::new(HistoryFact {
-                meta: coverage.map(|count| serde_json::Map::from_iter([(
-                    "recapCoveredMainTurns".into(), serde_json::json!(count),
-                )])),
+                meta: coverage.map(|count| {
+                    serde_json::Map::from_iter([(
+                        "recapCoveredMainTurns".into(),
+                        serde_json::json!(count),
+                    )])
+                }),
                 content: HistoryContent::Grow(Box::new(GrowHistoryFact::SessionRecap {
                     summary: "Completed work".into(),
                     auto,
@@ -536,10 +541,18 @@ mod restored_recap_coverage_tests {
 
     fn existing(turns: usize, sources: Vec<HistorySource>) -> TimelineBootstrap {
         TimelineBootstrap::Existing {
-            timeline: Box::new(chat_state::Timeline::from_seed(
-                (0..turns).map(|_| ConversationItem::user("real prompt")).collect(),
-            ).unwrap()),
-            history: HistorySnapshot { sources, ..Default::default() },
+            timeline: Box::new(
+                chat_state::Timeline::from_seed(
+                    (0..turns)
+                        .map(|_| ConversationItem::user("real prompt"))
+                        .collect(),
+                )
+                .unwrap(),
+            ),
+            history: HistorySnapshot {
+                sources,
+                ..Default::default()
+            },
         }
     }
 
@@ -553,27 +566,49 @@ mod restored_recap_coverage_tests {
             assert!(recap_gate(3, coverage, true, true).is_err());
             assert!(recap_gate(4, coverage, true, true).is_ok());
             assert!(recap_gate(3, coverage, false, true).is_ok());
-            let TimelineBootstrap::Existing { timeline, .. } = bootstrap else { unreachable!() };
+            let TimelineBootstrap::Existing { timeline, .. } = bootstrap else {
+                unreachable!()
+            };
             assert_eq!(main_turn_count(timeline.surface()), 4);
         }
     }
 
     #[test]
     fn fresh_seeded_and_legacy_recaps_do_not_invent_coverage() {
-        assert_eq!(existing(3, vec![recap(None, true)]).last_recap_main_turn(), 0);
+        assert_eq!(
+            existing(3, vec![recap(None, true)]).last_recap_main_turn(),
+            0
+        );
         assert_eq!(existing(3, vec![]).last_recap_main_turn(), 0);
-        assert_eq!(TimelineBootstrap::Fresh { session_rules: None }.last_recap_main_turn(), 0);
+        assert_eq!(
+            TimelineBootstrap::Fresh {
+                session_rules: None
+            }
+            .last_recap_main_turn(),
+            0
+        );
         let TimelineBootstrap::Existing { timeline, history } =
-            existing(3, vec![recap(Some(3), true)]) else { unreachable!() };
-        assert_eq!(TimelineBootstrap::Seeded { timeline, history }.last_recap_main_turn(), 0);
+            existing(3, vec![recap(Some(3), true)])
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            TimelineBootstrap::Seeded { timeline, history }.last_recap_main_turn(),
+            0
+        );
     }
 
     #[test]
     fn coverage_round_trips_through_existing_history_metadata() {
-        let HistorySource::Presentation { fact, .. } = recap(Some(3), true) else { unreachable!() };
+        let HistorySource::Presentation { fact, .. } = recap(Some(3), true) else {
+            unreachable!()
+        };
         let encoded = serde_json::to_vec(&fact).unwrap();
         let restored: HistoryFact = serde_json::from_slice(&encoded).unwrap();
-        let update = restored.into_update(&acp_transport::protocol::SessionId::new("test")).unwrap().unwrap();
+        let update = restored
+            .into_update(&acp_transport::protocol::SessionId::new("test"))
+            .unwrap()
+            .unwrap();
         let restored = HistoryFact::from_update(&update).unwrap().unwrap();
         assert_eq!(restored.meta.unwrap()["recapCoveredMainTurns"], 3);
     }
@@ -587,8 +622,14 @@ mod restored_recap_coverage_tests {
                 content: HistoryContent::Grow(Box::new(GrowHistoryFact::SessionRecapUnavailable)),
             }),
         };
-        assert_eq!(existing(4, vec![recap(Some(3), true), recap(Some(4), false), unavailable])
-            .last_recap_main_turn(), 4);
+        assert_eq!(
+            existing(
+                4,
+                vec![recap(Some(3), true), recap(Some(4), false), unavailable]
+            )
+            .last_recap_main_turn(),
+            4
+        );
     }
 }
 
@@ -609,26 +650,28 @@ fn restored_control_presentations(
 ) -> std::io::Result<Vec<crate::session::storage::SessionUpdate>> {
     use crate::session::history::{GrowHistoryFact, HistoryContent, HistorySource};
 
-    let mut prefix = history.indexed.as_ref().map(|index| index.control_presentations())
-        .transpose()?.unwrap_or_default();
-    prefix.extend(history
-        .sources
-        .iter()
-        .filter_map(|source| {
-            let HistorySource::Presentation { fact, .. } = source else {
-                return None;
-            };
-            let retain = match &fact.content {
-                HistoryContent::User(_) => true,
-                HistoryContent::Grow(value) => matches!(
-                    value.as_ref(),
-                    GrowHistoryFact::RewindMarker { .. } | GrowHistoryFact::ControlStateUpdate(_)
-                ),
-                _ => false,
-            };
-            retain.then(|| fact.as_ref().clone())
-        }));
-    let updates = prefix.into_iter()
+    let mut prefix = history
+        .indexed
+        .as_ref()
+        .map(|index| index.control_presentations())
+        .transpose()?
+        .unwrap_or_default();
+    prefix.extend(history.sources.iter().filter_map(|source| {
+        let HistorySource::Presentation { fact, .. } = source else {
+            return None;
+        };
+        let retain = match &fact.content {
+            HistoryContent::User(_) => true,
+            HistoryContent::Grow(value) => matches!(
+                value.as_ref(),
+                GrowHistoryFact::RewindMarker { .. } | GrowHistoryFact::ControlStateUpdate(_)
+            ),
+            _ => false,
+        };
+        retain.then(|| fact.as_ref().clone())
+    }));
+    let updates = prefix
+        .into_iter()
         .map(|fact| fact.into_update(session_id))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()

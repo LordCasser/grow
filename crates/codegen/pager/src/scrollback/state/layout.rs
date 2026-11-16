@@ -6,7 +6,8 @@ use super::*;
 /// A content anchor for the viewport top, captured before layout coordinates
 /// change so the same content can be re-pinned afterward.
 ///
-/// Entry-top pins store only the stable entry identity. Other positions use
+/// Entry-top pins store only the stable entry identity. Gap pins store their
+/// row offset after the entry's layout height. Content positions use
 /// `(logical_line, sub_rows)` rather than an absolute wrapped-row count: a row
 /// count is meaningless after re-wrapping (the whole transcript can be one giant
 /// entry), but the logical (newline-delimited) line it sits on is width-independent.
@@ -22,6 +23,9 @@ pub(crate) struct ScrollAnchor {
     /// Entry-top pins resolve directly from virtual_y without rendering or
     /// collecting logical-line rows on every follow pass.
     line: Option<(usize, i64)>,
+    /// Zero-based row within the layout gap after the entry, separate from a
+    /// logical line's sub-row so resizing cannot clamp it into content.
+    gap_rows: Option<u16>,
 }
 
 /// Cached layout data for efficient navigation and rendering.
@@ -500,10 +504,20 @@ impl ScrollbackState {
         let entry_y = *cache.virtual_y.get(entry_idx)?;
         let rows_into_entry = top_content_y.saturating_sub(entry_y);
         let (entry_id, entry) = self.entries.get_index(entry_idx)?;
+        let layout = cache.entries.get(entry_idx)?;
+        let gap_rows = rows_into_entry.saturating_sub(layout.height as usize);
+        if rows_into_entry >= layout.height as usize && gap_rows < layout.gap_after as usize {
+            return Some(ScrollAnchor {
+                entry_id: *entry_id,
+                line: None,
+                gap_rows: Some(gap_rows as u16),
+            });
+        }
         if rows_into_entry == 0 {
             return Some(ScrollAnchor {
                 entry_id: *entry_id,
                 line: None,
+                gap_rows: None,
             });
         }
 
@@ -521,6 +535,7 @@ impl ScrollbackState {
         Some(ScrollAnchor {
             entry_id: *entry_id,
             line: Some((logical_line, sub_rows)),
+            gap_rows: None,
         })
     }
 
@@ -537,7 +552,11 @@ impl ScrollbackState {
     /// Resolve an anchor in the current geometry without the manual-scroll
     /// bottom clamp: a follow-preserve pin may legitimately be above max_offset.
     pub(super) fn scroll_anchor_offset(&self, anchor: ScrollAnchor) -> Option<usize> {
-        let ScrollAnchor { entry_id, line } = anchor;
+        let ScrollAnchor {
+            entry_id,
+            line,
+            gap_rows,
+        } = anchor;
         let entry_idx = self.index_of_id(entry_id)?;
         let range = self.visible_entry_range();
         if !range.contains(&entry_idx) {
@@ -546,6 +565,13 @@ impl ScrollbackState {
         let cache = self.layout_cache.as_ref()?;
         let base_y = *cache.virtual_y.get(range.start)?;
         let entry_y = *cache.virtual_y.get(entry_idx)?;
+        if let Some(gap_rows) = gap_rows {
+            let layout = cache.entries.get(entry_idx)?;
+            let gap_rows = gap_rows.min(layout.gap_after.saturating_sub(1));
+            return Some(
+                (entry_y + layout.height as usize + gap_rows as usize).saturating_sub(base_y),
+            );
+        }
         let Some((logical_line, sub_rows)) = line else {
             return Some(entry_y.saturating_sub(base_y));
         };
@@ -806,6 +832,20 @@ impl ScrollbackState {
             let Some((start, end)) = self.measurement_window() else {
                 return;
             };
+            // A resize restores against estimated heights first. If the top is
+            // in a gap, exact measurement of its preceding entry must move the
+            // gap pin with that entry's end; content pins keep their row policy.
+            let gap_anchor = if !self.follow_mode
+                && self.viewport_virtual_bounds().is_some_and(|(top, _)| {
+                    self.layout_cache.as_ref().is_some_and(|cache| {
+                        top >= cache.virtual_y[start] + cache.entries[start].height as usize
+                    })
+                }) {
+                self.capture_scroll_anchor()
+                    .filter(|anchor| anchor.gap_rows.is_some())
+            } else {
+                None
+            };
             let (measured_any, changes) = self.measure_window_exact(width, start, end);
             if !measured_any {
                 // Everything visible is exact: render will match the layout.
@@ -818,9 +858,12 @@ impl ScrollbackState {
                 // Bottom-anchored: re-pin to the (now exact) bottom.
                 self.follow_scroll_to_bottom();
             } else {
-                // Top-anchored: the first visible entry's offset is unchanged
-                // (nothing above it was measured), so scroll stays put. Only
-                // clamp if the content shrank past the end.
+                if let Some(anchor) = gap_anchor {
+                    self.restore_scroll_anchor(anchor);
+                }
+                // Top-anchored: content offsets stay unchanged (nothing above
+                // the first visible entry was measured). Only clamp if the
+                // content shrank past the end.
                 let max_offset = self
                     .total_height
                     .saturating_sub(self.viewport_height as usize);
@@ -3349,6 +3392,83 @@ mod tests {
             before,
             screen_row_of(&state, anchor)
         );
+    }
+
+    #[test]
+    fn gap_anchor_roundtrips_in_same_geometry() {
+        let _theme = pin_theme();
+        let mut state = ScrollbackState::new();
+        let entry_id = state.push_block(RenderBlock::tool_call("Tool", "done", true));
+        state.push_block(RenderBlock::agent_message("tail"));
+        state.prepare_layout(20, 2);
+        assert_eq!(state.get_cached_entry_height(0), Some(1));
+        state.set_scroll_offset(1);
+        assert_eq!(state.scroll_offset(), 1);
+
+        let anchor = state.capture_scroll_anchor().unwrap();
+        assert_eq!(anchor.entry_id, entry_id);
+        state.restore_scroll_anchor(anchor);
+
+        assert_eq!(state.scroll_offset(), 1, "the gap must not become content");
+        assert_eq!(screen_row_of(&state, 1), 1);
+    }
+
+    #[test]
+    fn gap_anchor_follows_entry_after_history_prepend() {
+        let _theme = pin_theme();
+        for replace_prefix in [false, true] {
+            let mut state = ScrollbackState::new();
+            let entry_id = state.push_block(RenderBlock::tool_call("Tool", "done", true));
+            state.push_block(RenderBlock::agent_message("tail"));
+            state.prepare_layout(20, 2);
+            state.set_scroll_offset(1);
+            assert_eq!(state.scroll_offset(), 1);
+            let mut page = ScrollbackState::new();
+            page.next_id = state.next_id;
+            page.push_block(RenderBlock::agent_message("older history"));
+
+            if replace_prefix {
+                // The continuous history window installs pages through this path.
+                state.replace_history_prefix(page, 0, true);
+            } else {
+                state.prepend_entries_from(page);
+            }
+
+            let entry_idx = state.index_of_id(entry_id).unwrap();
+            let cache = state.layout_cache.as_ref().unwrap();
+            let expected = cache.virtual_y[entry_idx] + cache.entries[entry_idx].height as usize;
+            assert_eq!(state.scroll_offset(), expected);
+            assert_eq!(screen_row_of(&state, entry_idx + 1), 1);
+            assert_eq!(state.capture_scroll_anchor().unwrap().entry_id, entry_id);
+        }
+    }
+
+    #[test]
+    fn gap_anchor_follows_rewrapping_entry_end() {
+        let _theme = pin_theme();
+        for (from_width, to_width) in [(80, 30), (30, 120)] {
+            let mut state = resize_anchor_state();
+            let entry_id = *state.entries.get_index(0).unwrap().0;
+            state.prepare_layout(from_width, 12);
+            state.set_scroll_offset(0);
+            state.prepare_layout(from_width, 12);
+            let old_height = state.get_cached_entry_height(0).unwrap() as usize;
+            state.set_scroll_offset(old_height);
+            state.prepare_layout(from_width, 12);
+            assert_eq!(state.scroll_offset(), old_height);
+
+            state.prepare_layout(to_width, 12);
+
+            let new_height = state.get_cached_entry_height(0).unwrap() as usize;
+            assert_ne!(new_height, old_height);
+            assert_eq!(
+                state.scroll_offset(),
+                new_height,
+                "gap follows the entry end"
+            );
+            assert_eq!(screen_row_of(&state, 1), 1);
+            assert_eq!(state.capture_scroll_anchor().unwrap().entry_id, entry_id);
+        }
     }
 
     #[test]

@@ -283,7 +283,7 @@ pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
     view.apply_context_used(used, total);
 }
 /// Refresh the bar and record `used` as the confirmed count for a pending
-/// compaction message; call only from the `meta.totalTokens` path.
+/// compaction message; call only from the `meta.contextUsedTokens` path.
 pub(super) fn confirm_context_used(view: &mut AgentView, used: u64) {
     refresh_context_used(view, used);
     view.session.note_context_used(used);
@@ -657,14 +657,12 @@ fn handle_session_notification_inner(
         if !meta.is_replay {
             match &session_notif.update {
                 GrowSessionUpdate::ModelChanged { .. } => {
-                    child.descendant_model_control_generation = child
-                        .descendant_model_control_generation
-                        .wrapping_add(1);
+                    child.descendant_model_control_generation =
+                        child.descendant_model_control_generation.wrapping_add(1);
                 }
                 GrowSessionUpdate::AgentChanged { .. } => {
-                    child.descendant_agent_control_generation = child
-                        .descendant_agent_control_generation
-                        .wrapping_add(1);
+                    child.descendant_agent_control_generation =
+                        child.descendant_agent_control_generation.wrapping_add(1);
                 }
                 _ => {}
             }
@@ -2481,30 +2479,144 @@ pub(super) fn apply_retry_state(
     }
     session.in_flight_prompt = None;
 }
-/// Single source of truth for Behavior state on the pager side.
-///
-/// The shell emits `CurrentModeUpdate` for every Behavior transition. Tools
-/// never form a second Behavior state-transition channel.
-///
-/// Do not be tempted to infer mode from tool-call titles: titles incorporate
-/// raw model/user input (Grep pattern, Bash command, search query, ...), so
-/// a substring match silently bricks sessions whenever any tool happens to
-/// mention a Behavior control tool.
-///
-/// Returns `true` when a `CurrentModeUpdate` was processed so the
-/// caller can refresh open settings modals after the per-agent borrow
-/// releases.
-pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut AgentView) -> bool {
+fn apply_confirmed_behavior(
+    agent: &mut AgentView,
+    projection: shell::extensions::notification::BehaviorProjection,
+    establish_epoch: bool,
+) -> crate::app::session::ShellControlApplyOutcome {
+    let previous = agent.session.behavior_mode;
+    let was_completed = agent.session.plan_completed;
+    let outcome = agent
+        .session
+        .apply_behavior_projection(projection, establish_epoch);
+    if !outcome.changed() {
+        return outcome;
+    }
+    let mode = agent.session.behavior_mode;
+    if mode != tools::types::BehaviorId::Workflow {
+        agent.show_workflows = false;
+    }
+    if was_completed && !agent.session.plan_completed {
+        agent.clear_completed_plan_details();
+    } else if !was_completed && agent.session.plan_completed {
+        agent.activate_completed_plan_details();
+    }
+    if !was_completed && !agent.session.plan_completed && previous != mode && mode.is_plan() {
+        agent.plan_preview_request_id = agent.plan_preview_request_id.wrapping_add(1);
+    }
+    outcome
+}
+
+/// Only a current new/load response establishes actor authority. Hydration
+/// observes that snapshot and reapplies live updates staged before the epoch
+/// was known. Historical replay never enters the queue, and this pass does
+/// not settle a local Behavior intent.
+pub(crate) fn hydrate_behavior_projection(
+    agent: &mut AgentView,
+    projection: shell::extensions::notification::BehaviorProjection,
+) {
+    let epoch = projection.control_epoch.clone();
+    apply_confirmed_behavior(agent, projection, true);
+    for update in std::mem::take(&mut agent.session.pending_mode_updates) {
+        if crate::app::session::AgentSession::behavior_projection_from_meta(update.meta.as_ref())
+            .is_some_and(|projection| projection.control_epoch == epoch)
+        {
+            // State and an exact plan receipt may confirm. The returned
+            // control is intentionally discarded: hydration is not a live
+            // settlement of the local intent or admission latch.
+            let _ =
+                observe_mode_update(&acp::SessionUpdate::CurrentModeUpdate(update), agent, true);
+        }
+    }
+}
+
+/// Current-actor mode confirmation. `mode` is the mode named by this update,
+/// not whatever confirmed state happened to already be installed.
+#[derive(Clone, Copy)]
+pub(super) struct AdmittedBehaviorControl {
+    mode: tools::types::BehaviorId,
+    resolution: crate::app::session::BehaviorControlResolution,
+    outcome_target: Option<tools::types::BehaviorId>,
+}
+
+pub(super) struct ModeUpdateObservation {
+    pub(super) refresh: bool,
+    pub(super) control: Option<AdmittedBehaviorControl>,
+}
+
+pub(super) struct AdmittedBehaviorDrain {
+    pub(super) effects: Vec<Effect>,
+    pub(super) page_flip_entry: Option<crate::scrollback::entry::EntryId>,
+}
+
+impl ModeUpdateObservation {
+    const fn ignored() -> Self {
+        Self {
+            refresh: false,
+            control: None,
+        }
+    }
+}
+
+/// Settle a local Behavior intent only from a mode update this actor admitted.
+/// Rejected, replayed, wrong-epoch, and conflicting notifications carry no
+/// control here, so they cannot drain the intent or the admission latch.
+/// Exact intent identity stays on `ControlStateUpdate`.
+pub(super) fn take_admitted_behavior_drain(
+    agent: &mut AgentView,
+    session_id: &str,
+    control: Option<AdmittedBehaviorControl>,
+) -> Option<AdmittedBehaviorDrain> {
+    let Some(control) = control else {
+        return None;
+    };
+    if agent
+        .session
+        .resolve_in_flight_behavior(control.mode, control.resolution, control.outcome_target)
+        .is_some()
+    {
+        apply_deferred_authoritative_controls(agent, session_id);
+    }
+    if control.resolution == crate::app::session::BehaviorControlResolution::Applied
+        && agent.session.deferred_session_mode == Some(control.mode)
+    {
+        agent.session.deferred_session_mode = None;
+        let drain = crate::app::root::dispatch::maybe_drain_queue(agent);
+        return Some(AdmittedBehaviorDrain {
+            effects: drain.effects,
+            page_flip_entry: drain.page_flip_entry,
+        });
+    }
+    None
+}
+
+/// Live state and intent receipts share an entry point but have independent
+/// admission. `live` comes from the notification envelope, not from mode
+/// metadata: replay is display-only and cannot settle a local intent or receipt.
+#[cfg(test)]
+pub(super) fn detect_plan_mode_change(
+    update: &acp::SessionUpdate,
+    agent: &mut AgentView,
+    live: bool,
+) -> bool {
+    observe_mode_update(update, agent, live).refresh
+}
+
+pub(super) fn observe_mode_update(
+    update: &acp::SessionUpdate,
+    agent: &mut AgentView,
+    live: bool,
+) -> ModeUpdateObservation {
     use tools::types::BehaviorId;
     let acp::SessionUpdate::CurrentModeUpdate(cmu) = update else {
-        return false;
+        return ModeUpdateObservation::ignored();
     };
     let Some(mode) = BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref()) else {
         tracing::warn!(
             mode_id = %cmu.current_mode_id.0,
             "ignoring CurrentModeUpdate with unknown Behavior id"
         );
-        return false;
+        return ModeUpdateObservation::ignored();
     };
     if !matches!(
         mode,
@@ -2518,48 +2630,84 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             mode_id = %cmu.current_mode_id.0,
             "ignoring CurrentModeUpdate for an unsupported pager Behavior"
         );
-        return false;
+        return ModeUpdateObservation::ignored();
+    }
+    if !live {
+        return ModeUpdateObservation::ignored();
     }
     let previous = agent.session.behavior_mode;
-    if previous != mode {
+    // True only when this update itself is a current-or-same revision of the
+    // established actor. A rejected snapshot, an older revision, or a wrong
+    // epoch leaves it false so the confirmed mode cannot stand in for them.
+    let admits_current;
+    let project_behavior_change;
+    match crate::app::session::AgentSession::behavior_projection_from_meta(cmu.meta.as_ref()) {
+        Some(projection) => {
+            if projection.behavior_id != mode {
+                tracing::warn!("CurrentModeUpdate conflicts with its confirmed Behavior snapshot");
+                return ModeUpdateObservation::ignored();
+            }
+            if !agent
+                .session
+                .behavior_epoch_matches(&projection.control_epoch)
+            {
+                if agent.session.loading_replay || !agent.session.behavior_snapshot_established() {
+                    agent.session.stage_pending_live_mode(cmu.clone());
+                }
+                return ModeUpdateObservation::ignored();
+            }
+            let revision = projection.control_revision;
+            let current_revision = agent.session.confirmed_behavior_revision();
+            let outcome = apply_confirmed_behavior(agent, projection, false);
+            admits_current =
+                outcome.accepted() && current_revision.is_none_or(|current| revision >= current);
+            project_behavior_change = admits_current;
+        }
+        None if agent.session.behavior_snapshot_established() => {
+            return ModeUpdateObservation::ignored();
+        }
+        None => {
+            agent.session.behavior_mode = mode;
+            agent.session.plan_mode_active = mode.is_plan();
+            if mode != BehaviorId::Workflow {
+                agent.show_workflows = false;
+            }
+            agent.session.plan_phase = cmu
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/planPhase"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if let Some(completed) = cmu
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/planCompleted"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                let was_completed = agent.session.plan_completed;
+                if was_completed && !completed {
+                    agent.clear_completed_plan_details();
+                }
+                agent.session.plan_completed = completed;
+                if !was_completed && completed {
+                    agent.activate_completed_plan_details();
+                }
+                if !completed && !was_completed && previous != mode && mode.is_plan() {
+                    agent.plan_preview_request_id = agent.plan_preview_request_id.wrapping_add(1);
+                }
+            }
+            admits_current = true;
+            project_behavior_change = true;
+        }
+    }
+    if previous != agent.session.behavior_mode {
         agent.clear_behavior_switch_confirmation();
     }
-    agent.session.behavior_mode = mode;
-    if mode != BehaviorId::Workflow {
-        agent.show_workflows = false;
-    }
-    agent.session.plan_phase = cmu
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("grow/planPhase"))
-        .and_then(|phase| phase.as_str())
-        .map(str::to_owned);
-    if let Some(completed) = cmu
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("grow/planCompleted"))
-        .and_then(serde_json::Value::as_bool)
-    {
-        let was_completed = agent.session.plan_completed;
-        if was_completed && !completed {
-            agent.clear_completed_plan_details();
-        }
-        agent.session.plan_completed = completed;
-        if !was_completed && completed {
-            agent.activate_completed_plan_details();
-        }
-        // A newly selected Plan can supersede a canonical artifact read that
-        // was started while the previous behavior was active. Retire only the
-        // pending read identity; an already cached active-Plan preview remains
-        // useful until the new artifact is resolved.
-        if !completed && !was_completed && previous != mode && mode.is_plan() {
-            agent.plan_preview_request_id = agent.plan_preview_request_id.wrapping_add(1);
-        }
-    }
-    if let Some(change) = cmu
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("grow/behaviorChange"))
+    if project_behavior_change
+        && let Some(change) = cmu
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("grow/behaviorChange"))
     {
         let status = change.get("status").and_then(serde_json::Value::as_str);
         if status == Some("confirmation_required") {
@@ -2578,32 +2726,41 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             agent.clear_behavior_switch_confirmation();
         }
     }
-    let was_active = agent.session.plan_mode_active;
-    let now_active = mode.is_plan();
-    agent.session.plan_mode_active = now_active;
-    if previous != mode || was_active != now_active {
-        tracing::info!(
-            mode_id = %cmu.current_mode_id.0,
-            plan_active = now_active,
-            behavior = mode.as_id(),
-            "Behavior state updated (from CurrentModeUpdate)"
-        );
+    let control = admits_current
+        .then(|| behavior_mode_update_resolution(update))
+        .flatten()
+        .map(|resolution| AdmittedBehaviorControl {
+            mode,
+            resolution,
+            outcome_target: behavior_mode_update_target(update),
+        });
+    // An unchanged same-revision snapshot still carries its exact receipt.
+    // An older revision, a conflicting snapshot, rejection, and confirmation
+    // do not. `detect` stays false unless this actor admitted the update, so
+    // a rewound projection cannot look like a live mode change.
+    if !admits_current {
+        return ModeUpdateObservation::ignored();
     }
-    if let Some(receipt) = cmu
+    if control.as_ref().is_some_and(|control| {
+        control.resolution == crate::app::session::BehaviorControlResolution::Applied
+    }) && let Some(receipt) = cmu
         .meta
         .as_ref()
         .and_then(|meta| meta.get("grow/planDecisionReceipt"))
     {
         agent.confirm_plan_decision_receipt(receipt);
     }
-    true
+    ModeUpdateObservation {
+        refresh: true,
+        control,
+    }
 }
 
 /// Whether this authoritative mode update completed a Behavior selection.
 /// Confirmation and rejection responses keep the Shell's selection unchanged
 /// and must not release locally-held prompts. Plain updates and explicit
 /// `applied` responses may release the prompt queue after the new identity is
-/// installed by [`detect_plan_mode_change`].
+/// installed by [`observe_mode_update`].
 pub(crate) fn behavior_mode_update_resolution(
     update: &acp::SessionUpdate,
 ) -> Option<crate::app::session::BehaviorControlResolution> {

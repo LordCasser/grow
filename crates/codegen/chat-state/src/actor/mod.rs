@@ -13,6 +13,9 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod usage_restore_tests;
+
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -77,10 +80,11 @@ impl ChatStateActor {
             self.persistence_poisoned = true;
             return Err(crate::commands::TimelineWriteError::CommittedProjectionInvalid(error));
         }
-        if self.state.timeline.has_archived_events() && !self.persistence.retains_complete_history() {
+        if self.state.timeline.has_archived_events() && !self.persistence.retains_complete_history()
+        {
             self.state.timeline.archive_latest_diagnostic();
         }
-        self.refresh_prompt_projection(previous_prompt_index);
+        self.refresh_prompt_projection(previous_prompt_index, &committed.kind);
         if self.state.timeline.surface_revision() != previous_surface_revision {
             self.state.refresh_context_pressure();
         }
@@ -223,6 +227,7 @@ impl ChatStateActor {
         }
         let previous_surface_revision = self.state.timeline.surface_revision();
         let previous_prompt_index = self.state.timeline.next_prompt_index();
+        let committed_kind = event.kind.clone();
         self.state.timeline.accept(event).unwrap_or_else(|error| {
             self.persistence_poisoned = true;
             tracing::error!(%error, "persisted Timeline event could not be accepted");
@@ -230,22 +235,36 @@ impl ChatStateActor {
         if self.persistence_poisoned {
             return false;
         }
-        if self.state.timeline.has_archived_events() && !self.persistence.retains_complete_history() {
+        if self.state.timeline.has_archived_events() && !self.persistence.retains_complete_history()
+        {
             self.state.timeline.archive_latest_diagnostic();
         }
-        self.refresh_prompt_projection(previous_prompt_index);
+        self.refresh_prompt_projection(previous_prompt_index, &committed_kind);
         if self.state.timeline.surface_revision() != previous_surface_revision {
             self.state.refresh_context_pressure();
         }
         true
     }
 
-    fn refresh_prompt_projection(&mut self, previous_prompt_index: usize) {
+    fn refresh_prompt_projection(
+        &mut self,
+        previous_prompt_index: usize,
+        kind: &TimelineEventKind,
+    ) {
         let next_prompt_index = self.state.timeline.next_prompt_index();
         if next_prompt_index != previous_prompt_index {
             self.state.prompt_usage = None;
+            self.state.prompt_usage_owner = None;
             self.send_event(ChatStateEvent::PromptIndexChanged {
                 new_index: next_prompt_index,
+            });
+        }
+        // The live ledger owner follows the last admitted TurnStarted, even when
+        // rewind reused its prompt position for a different logical Turn.
+        if let TimelineEventKind::Turn(crate::TurnEvent::Started { id, prompt_id, .. }) = kind {
+            self.state.prompt_usage_owner = Some(crate::UsagePromptOwner {
+                turn_id: *id,
+                prompt_id: prompt_id.clone(),
             });
         }
     }
@@ -527,26 +546,30 @@ impl ChatStateActor {
                     .state
                     .timeline
                     .exact_notification(&source, &source_version)
-                    .map(|existing| existing.and_then(|event| match &event.kind {
-                        TimelineEventKind::Notification(crate::NotificationEvent::Received {
-                            owner_session_id: existing_owner,
-                            source: existing_source,
-                            source_version: existing_version,
-                            payload_ref: existing_payload,
-                            ..
-                        }) if existing_version == &source_version => Some((
-                            event.as_ref().clone(),
-                            existing_owner == &owner_session_id
-                                && existing_payload == &payload_ref
-                                && (!matches!(
-                                    source,
-                                    crate::NotificationSource::ParentMessage { .. }
-                                        | crate::NotificationSource::PlanGuidance { .. }
-                                        | crate::NotificationSource::AgentReply { .. }
-                                ) || existing_source == &source),
-                        )),
-                        _ => None,
-                    }));
+                    .map(|existing| {
+                        existing.and_then(|event| match &event.kind {
+                            TimelineEventKind::Notification(
+                                crate::NotificationEvent::Received {
+                                    owner_session_id: existing_owner,
+                                    source: existing_source,
+                                    source_version: existing_version,
+                                    payload_ref: existing_payload,
+                                    ..
+                                },
+                            ) if existing_version == &source_version => Some((
+                                event.as_ref().clone(),
+                                existing_owner == &owner_session_id
+                                    && existing_payload == &payload_ref
+                                    && (!matches!(
+                                        source,
+                                        crate::NotificationSource::ParentMessage { .. }
+                                            | crate::NotificationSource::PlanGuidance { .. }
+                                            | crate::NotificationSource::AgentReply { .. }
+                                    ) || existing_source == &source),
+                            )),
+                            _ => None,
+                        })
+                    });
                 let result = match existing {
                     Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
                     Ok(Some((event, true))) => Ok(event),
@@ -589,19 +612,21 @@ impl ChatStateActor {
                     .state
                     .timeline
                     .submitted_input_event(&input_id)
-                    .map(|event| event.and_then(|event| match &event.kind {
-                        TimelineEventKind::Input(crate::InputEvent::Submitted {
-                            input_id: existing_id,
-                            intent: existing_intent,
-                            payload_ref: existing_payload,
-                        }) => Some((
-                            event.clone(),
-                            existing_id == &input_id
-                                && existing_intent == &intent
-                                && existing_payload == &payload_ref,
-                        )),
-                        _ => None,
-                    }));
+                    .map(|event| {
+                        event.and_then(|event| match &event.kind {
+                            TimelineEventKind::Input(crate::InputEvent::Submitted {
+                                input_id: existing_id,
+                                intent: existing_intent,
+                                payload_ref: existing_payload,
+                            }) => Some((
+                                event.clone(),
+                                existing_id == &input_id
+                                    && existing_intent == &intent
+                                    && existing_payload == &payload_ref,
+                            )),
+                            _ => None,
+                        })
+                    });
                 let result = match existing {
                     Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
                     Ok(Some((event, true))) => Ok(crate::commands::SubmitInputResult {
@@ -797,6 +822,7 @@ impl ChatStateActor {
             ChatStateCommand::SettleModelAttemptUsage {
                 attempt_key,
                 captured_prompt_index,
+                prompt_owner,
                 model_id,
                 usage,
                 cost_usd_ticks,
@@ -807,6 +833,7 @@ impl ChatStateActor {
                     .settle_model_attempt_usage(
                         attempt_key,
                         captured_prompt_index,
+                        prompt_owner,
                         model_id,
                         usage,
                         cost_usd_ticks,
@@ -820,6 +847,7 @@ impl ChatStateActor {
                 attempt_no,
                 model_id,
                 captured_prompt_index,
+                prompt_owner,
                 reply,
             } => {
                 let result = self
@@ -828,6 +856,7 @@ impl ChatStateActor {
                         attempt_no,
                         model_id,
                         captured_prompt_index,
+                        prompt_owner,
                     )
                     .await;
                 let _ = reply.send(result);
@@ -854,7 +883,7 @@ impl ChatStateActor {
             ChatStateCommand::RecordSubagentUsage {
                 subagent_id,
                 by_model,
-                attribute_to_prompt,
+                prompt_owner,
                 incomplete,
                 deadline,
                 reply,
@@ -863,7 +892,7 @@ impl ChatStateActor {
                     .record_subagent_usage_before(
                         &subagent_id,
                         &by_model,
-                        attribute_to_prompt,
+                        prompt_owner,
                         incomplete,
                         deadline,
                     )
@@ -1111,21 +1140,27 @@ impl ChatStateActor {
             ChatStateCommand::GetHookProjection {
                 occurrence_id,
                 reply,
-            } => {
-                match self.state.timeline.exact_hook_projection(&occurrence_id) {
-                    Ok(projection) => { let _ = reply.send(projection); }
-                    Err(error) => tracing::warn!(%error, %occurrence_id, "Hook history lookup failed"),
+            } => match self.state.timeline.exact_hook_projection(&occurrence_id) {
+                Ok(projection) => {
+                    let _ = reply.send(projection);
                 }
-            }
+                Err(error) => tracing::warn!(%error, %occurrence_id, "Hook history lookup failed"),
+            },
             ChatStateCommand::GetCompletedHookProjections { reply } => {
                 let _ = reply.send(self.state.timeline.completed_hook_projections());
             }
-            ChatStateCommand::GetTimelineEvents { from_seq, include_archived, reply } => {
+            ChatStateCommand::GetTimelineEvents {
+                from_seq,
+                include_archived,
+                reply,
+            } => {
                 let timeline = &self.state.timeline;
                 let events = timeline.events();
                 let start = events.partition_point(|event| event.seq.get() < from_seq);
                 let end_seq = timeline.next_seq().get();
-                if include_archived && events[start..].len() as u64 != end_seq.saturating_sub(from_seq) {
+                if include_archived
+                    && events[start..].len() as u64 != end_seq.saturating_sub(from_seq)
+                {
                     if let Some(read) = self.persistence.read_events(from_seq, end_seq) {
                         tokio::spawn(async move {
                             if let Ok(Ok(events)) = read.await {
@@ -1162,8 +1197,16 @@ impl ChatStateActor {
             ChatStateCommand::GetOutgoingInquiry { inquiry_id, reply } => {
                 let _ = reply.send(self.state.timeline.outgoing_inquiry_events(&inquiry_id));
             }
-            ChatStateCommand::GetIncomingInquiry { sender, inquiry_id, reply } => {
-                let _ = reply.send(self.state.timeline.incoming_inquiry_events(&sender, &inquiry_id));
+            ChatStateCommand::GetIncomingInquiry {
+                sender,
+                inquiry_id,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.state
+                        .timeline
+                        .incoming_inquiry_events(&sender, &inquiry_id),
+                );
             }
             ChatStateCommand::GetSuspensionEvidence {
                 operation_id,
@@ -1232,9 +1275,9 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetRuntimeTreeSnapshot { reply } => {
                 let timeline = &self.state.timeline;
-                let snapshot = timeline.runtime_subagent_events().map(|events| {
-                    (timeline.runtime_lifecycle().clone(), events)
-                });
+                let snapshot = timeline
+                    .runtime_subagent_events()
+                    .map(|events| (timeline.runtime_lifecycle().clone(), events));
                 let _ = reply.send(snapshot);
             }
             ChatStateCommand::GetSubagentOperation { subagent_id, reply } => {
@@ -1245,7 +1288,11 @@ impl ChatStateActor {
                 tokio::task::spawn_blocking(move || {
                     let result = (|| {
                         if let Some(history) = history {
-                            events.extend(history.subagent_events().map_err(crate::TimelineError::SubagentHistory)?);
+                            events.extend(
+                                history
+                                    .subagent_events()
+                                    .map_err(crate::TimelineError::SubagentHistory)?,
+                            );
                             events.sort_unstable_by_key(|event| event.seq);
                             events.dedup_by_key(|event| event.seq);
                         }
@@ -1264,7 +1311,11 @@ impl ChatStateActor {
                 source_version,
                 reply,
             } => {
-                if let Ok(turn) = self.state.timeline.exact_notification_consumer(&source, &source_version) {
+                if let Ok(turn) = self
+                    .state
+                    .timeline
+                    .exact_notification_consumer(&source, &source_version)
+                {
                     let _ = reply.send(turn);
                 }
             }
@@ -1272,16 +1323,25 @@ impl ChatStateActor {
                 let _ = reply.send(self.state.timeline.pending_notifications());
             }
             ChatStateCommand::GetParentMessageReceipts { identity, reply } => {
-                let identity = identity.as_ref().map(|(sender, operation)| (sender.as_str(), operation.as_str()));
+                let identity = identity
+                    .as_ref()
+                    .map(|(sender, operation)| (sender.as_str(), operation.as_str()));
                 if let Ok(receipts) = self.state.timeline.exact_agent_message_receipts(identity) {
                     let _ = reply.send(receipts);
                 }
             }
             ChatStateCommand::GetRetainedNotificationPayloadHashes { candidates, reply } => {
-                let (mut hashes, history) = self.state.timeline.notification_payload_hash_sources(candidates.as_deref());
+                let (mut hashes, history) = self
+                    .state
+                    .timeline
+                    .notification_payload_hash_sources(candidates.as_deref());
                 if let Some(history) = history {
                     tokio::task::spawn_blocking(move || {
-                        if let Ok(archived) = history.notification_payload_hashes(candidates.as_deref(), &|| reply.is_closed()) {
+                        if let Ok(archived) = history
+                            .notification_payload_hashes(candidates.as_deref(), &|| {
+                                reply.is_closed()
+                            })
+                        {
                             hashes.extend(archived);
                             let _ = reply.send(hashes);
                         }
@@ -1304,16 +1364,26 @@ impl ChatStateActor {
                 }
             }
             ChatStateCommand::GetInputState { input_id, reply } => {
-                let _ = reply.send(self.state.timeline.exact_input_state(&input_id).map_err(|error| error.to_string()));
+                let _ = reply.send(
+                    self.state
+                        .timeline
+                        .exact_input_state(&input_id)
+                        .map_err(|error| error.to_string()),
+                );
             }
             ChatStateCommand::GetPendingAllowedInputs { reply } => {
                 let _ = reply.send(self.state.timeline.pending_allowed_inputs());
             }
             ChatStateCommand::GetSubmittedInputPayloadHashes { candidates, reply } => {
-                let (mut hashes, history) = self.state.timeline.input_payload_hash_sources(candidates.as_deref());
+                let (mut hashes, history) = self
+                    .state
+                    .timeline
+                    .input_payload_hash_sources(candidates.as_deref());
                 tokio::task::spawn_blocking(move || {
                     if let Some(history) = history {
-                        match history.input_payload_hashes(candidates.as_deref(), &|| reply.is_closed()) {
+                        match history
+                            .input_payload_hashes(candidates.as_deref(), &|| reply.is_closed())
+                        {
                             Ok(archived) => hashes.extend(archived),
                             Err(error) => {
                                 if !reply.is_closed() {
@@ -1331,32 +1401,48 @@ impl ChatStateActor {
                 source_version,
                 reply,
             } => {
-                if let Ok(event) = self.state.timeline.exact_notification(&source, &source_version) {
+                if let Ok(event) = self
+                    .state
+                    .timeline
+                    .exact_notification(&source, &source_version)
+                {
                     let id = event.and_then(|event| match &event.kind {
-                        TimelineEventKind::Notification(crate::NotificationEvent::Received { id, .. }) => Some(id.clone()),
+                        TimelineEventKind::Notification(crate::NotificationEvent::Received {
+                            id,
+                            ..
+                        }) => Some(id.clone()),
                         _ => None,
                     });
                     let _ = reply.send(id);
                 }
             }
             ChatStateCommand::MaterializeTimeline { timeline_id, reply } => {
-                let materialized = self.state.timeline.last_seq().map(|seq| {
-                    crate::TimelineMaterialization {
-                        input_ref: crate::TimelineRangeRef {
-                            timeline_id,
-                            first_seq: 0,
-                            last_seq: seq.get(),
-                        },
-                        surface_revision: self.state.timeline.surface_revision(),
-                        surface: self.state.timeline.surface().to_vec(),
-                        surface_ids: self.state.timeline.surface_ids().to_vec(),
-                        unconsumed_skill_load_ids: self.state.timeline.unconsumed_skill_load_ids(),
-                        active_control_contexts: self.state.timeline.active_control_contexts(),
-                    }
-                });
+                let materialized =
+                    self.state
+                        .timeline
+                        .last_seq()
+                        .map(|seq| crate::TimelineMaterialization {
+                            input_ref: crate::TimelineRangeRef {
+                                timeline_id,
+                                first_seq: 0,
+                                last_seq: seq.get(),
+                            },
+                            surface_revision: self.state.timeline.surface_revision(),
+                            surface: self.state.timeline.surface().to_vec(),
+                            surface_ids: self.state.timeline.surface_ids().to_vec(),
+                            unconsumed_skill_load_ids: self
+                                .state
+                                .timeline
+                                .unconsumed_skill_load_ids(),
+                            active_control_contexts: self.state.timeline.active_control_contexts(),
+                        });
                 let _ = reply.send(materialized);
             }
-            ChatStateCommand::MaterializePermissionContext { timeline_id, include_tool_calls, reply } => {
+            ChatStateCommand::MaterializePermissionContext {
+                timeline_id,
+                include_tool_calls,
+                reply,
+            } => {
                 let timeline = &self.state.timeline;
                 let materialized = timeline.last_seq().and_then(|seq| {
                     let provenance = timeline.canonical_branch().ok()?;
@@ -1365,11 +1451,14 @@ impl ChatStateActor {
                     } else {
                         provenance.direct_user_permission_evidence()
                     };
-                    Some((crate::TimelineRangeRef {
-                        timeline_id,
-                        first_seq: 0,
-                        last_seq: seq.get(),
-                    }, evidence))
+                    Some((
+                        crate::TimelineRangeRef {
+                            timeline_id,
+                            first_seq: 0,
+                            last_seq: seq.get(),
+                        },
+                        evidence,
+                    ))
                 });
                 let _ = reply.send(materialized);
             }
@@ -1379,8 +1468,7 @@ impl ChatStateActor {
                     return;
                 };
                 let materialized = self.state.timeline.last_seq().map(|seq| {
-                    let (transcript_ids, transcript) =
-                        provenance.branch_transcript_with_ids();
+                    let (transcript_ids, transcript) = provenance.branch_transcript_with_ids();
                     crate::RecallMaterialization {
                         source_ref: crate::TimelineRangeRef {
                             timeline_id,
@@ -1399,6 +1487,15 @@ impl ChatStateActor {
             }
             ChatStateCommand::CurrentPromptIndex { reply } => {
                 let _ = reply.send(self.state.timeline.current_prompt_index());
+            }
+            ChatStateCommand::CurrentUsagePromptOwner { reply } => {
+                let owner = self.state.timeline.current_prompt_index().zip(
+                    self.state
+                        .prompt_usage_owner
+                        .clone()
+                        .filter(|owner| self.state.timeline.active_turn() == Some(owner.turn_id)),
+                );
+                let _ = reply.send(owner);
             }
             ChatStateCommand::GetPromptIndex { reply } => {
                 let _ = reply.send(self.state.timeline.next_prompt_index());

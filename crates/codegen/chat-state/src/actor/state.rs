@@ -313,6 +313,8 @@ pub(crate) struct ChatState {
     pub last_turn_usage: Option<TokenUsage>,
     /// Usage for the open prompt (cleared on next prompt; not persisted).
     pub prompt_usage: Option<UsageLedger>,
+    /// Stable owner of the live prompt ledger, captured from committed TurnStarted.
+    pub(crate) prompt_usage_owner: Option<crate::UsagePromptOwner>,
     /// Lifetime session usage rebuilt from durable Timeline settlement facts.
     pub session_usage: UsageLedger,
     /// Historical rows changed by replay beyond the pinned history cut.
@@ -354,6 +356,8 @@ pub(crate) struct AttemptUsageSettlement {
     pub(crate) attempt_key: String,
     pub(crate) model_id: String,
     pub(crate) captured_prompt_index: usize,
+    #[serde(default)]
+    pub(crate) prompt_owner: Option<crate::UsagePromptOwner>,
     pub(crate) usage: Option<TokenUsage>,
     pub(crate) cost_usd_ticks: Option<i64>,
     pub(crate) api_duration_ms: Option<u64>,
@@ -382,6 +386,8 @@ pub(crate) struct AuxiliaryAttemptStart {
     pub(crate) key: AuxiliaryAttemptKey,
     pub(crate) model_id: String,
     pub(crate) captured_prompt_index: Option<usize>,
+    #[serde(default)]
+    pub(crate) prompt_owner: Option<crate::UsagePromptOwner>,
 }
 
 impl AuxiliaryAttemptStart {
@@ -425,8 +431,23 @@ impl AuxiliaryAttemptSettlement {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubagentUsageSettlement {
     pub(crate) subagent_id: String,
+    #[serde(default)]
+    pub(crate) prompt_owner: Option<crate::UsagePromptOwner>,
     pub(crate) by_model: Vec<(String, crate::usage::UsageTotals)>,
     pub(crate) incomplete: bool,
+}
+
+/// Explicit payload of a `session_usage/incomplete` marker. `session` says
+/// whether this marker establishes the lifetime lower bound; `prompt_owner`
+/// names the one prompt ledger it stains. `None` is an explicit session-only
+/// marker and never attributes to whatever prompt happens to be open at
+/// replay time. Markers without any payload predate this type: they carry the
+/// legacy lifetime-only semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UsageIncompleteMarker {
+    pub(super) session: bool,
+    pub(super) prompt_owner: Option<crate::UsagePromptOwner>,
 }
 
 impl AttemptUsageSettlement {
@@ -440,6 +461,7 @@ impl AttemptUsageSettlement {
         if existing.matches(
             &self.model_id,
             self.captured_prompt_index,
+            self.prompt_owner.as_ref(),
             self.usage.as_ref(),
             self.cost_usd_ticks,
             self.api_duration_ms,
@@ -454,12 +476,14 @@ impl AttemptUsageSettlement {
         &self,
         model_id: &str,
         captured_prompt_index: usize,
+        prompt_owner: Option<&crate::UsagePromptOwner>,
         usage: Option<&TokenUsage>,
         cost_usd_ticks: Option<i64>,
         api_duration_ms: Option<u64>,
     ) -> bool {
         self.model_id == model_id
             && self.captured_prompt_index == captured_prompt_index
+            && self.prompt_owner.as_ref() == prompt_owner
             && token_usage_matches(self.usage.as_ref(), usage)
             && self.cost_usd_ticks == cost_usd_ticks
             && self.api_duration_ms == api_duration_ms
@@ -503,7 +527,18 @@ type TimelineUsageProjection = (
     BTreeMap<String, SubagentUsageSettlement>,
     UsageLedger,
     BTreeMap<UsageSegmentId, UsageSegment>,
+    Option<ActivePromptUsage>,
 );
+
+/// The open logical Turn's prompt ledger carried inside a usage checkpoint.
+/// Attribution binds to the stable owner captured at TurnStarted; the prompt
+/// index is only a rewind-reusable position check, never the identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ActivePromptUsage {
+    pub(crate) owner: crate::UsagePromptOwner,
+    pub(crate) prompt_index: usize,
+    pub(crate) ledger: UsageLedger,
+}
 
 /// Published accounting state. Exact settlement identities stay in the
 /// journal index; only auxiliary attempts that can still settle are resident.
@@ -514,6 +549,11 @@ pub struct UsageCheckpoint {
     #[serde(with = "indexmap::map::serde_seq")]
     pending: indexmap::IndexMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, UsageSegmentId)>,
     current_segment: Option<UsageSegmentId>,
+    /// Prompt-scoped ledger of the Turn that was open at `frontier`. Absent
+    /// on cuts written before this projection existed; absence proves nothing
+    /// about attribution and must not be read as an exact zero.
+    #[serde(default)]
+    active_prompt: Option<ActivePromptUsage>,
     #[serde(skip)]
     changed_segments: Vec<(UsageSegmentId, UsageSegment)>,
 }
@@ -630,6 +670,7 @@ fn usage_from_timeline(
         local.subagents,
         checkpoint.ledger,
         segment_overrides,
+        checkpoint.active_prompt,
     ))
 }
 
@@ -639,6 +680,10 @@ struct UsageFacts {
     auxiliary_starts: BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, UsageSegmentId)>,
     auxiliary_settlements: BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
     subagents: BTreeMap<String, SubagentUsageSettlement>,
+    /// Auxiliary starts whose raw payload predates the `prompt_owner` field.
+    /// Their attribution is unknown, which is distinct from an explicit
+    /// session-only `null` and can only lower-bound a restored prompt ledger.
+    unproven_aux_owners: BTreeSet<AuxiliaryAttemptKey>,
 }
 
 fn archived<T: serde::de::DeserializeOwned>(
@@ -731,6 +776,12 @@ impl UsageCheckpoint {
     pub fn set_frontier(&mut self, frontier: EventSeq) {
         self.frontier = Some(frontier);
         self.ledger.compact_checkpoint();
+        // Keep the carried prompt ledger bounded the same way: aggregates,
+        // per-model rows and the owning agent survive; per-child agent detail
+        // stays derivable from the settlement facts.
+        if let Some(active) = &mut self.active_prompt {
+            active.ledger.compact_checkpoint();
+        }
     }
 
     pub fn take_changed_segments(&mut self) -> Vec<(UsageSegmentId, UsageSegment)> {
@@ -739,6 +790,87 @@ impl UsageCheckpoint {
 
     pub fn frontier(&self) -> Option<EventSeq> {
         self.frontier
+    }
+
+    /// Fold one newly applied main-attempt settlement into the open prompt
+    /// ledger. `owner_reported` distinguishes legacy payloads that predate the
+    /// `prompt_owner` field (unknown attribution → lower bound) from an
+    /// explicit session-only `null`, which never enters the prompt ledger.
+    fn fold_main_attempt_prompt(&mut self, payload: &AttemptUsageSettlement, owner_reported: bool) {
+        let Some(active) = self.active_prompt.as_mut() else {
+            return;
+        };
+        let attributed = payload.prompt_owner.as_ref().is_some_and(|owner| {
+            *owner == active.owner && payload.captured_prompt_index == active.prompt_index
+        });
+        if attributed {
+            if let Some(usage) = payload.usage.as_ref() {
+                active.ledger.record_main_loop_call(
+                    &payload.model_id,
+                    usage,
+                    payload.api_duration_ms,
+                    payload.cost_usd_ticks,
+                );
+            } else {
+                active.ledger.mark_incomplete();
+            }
+        } else if !owner_reported {
+            active.ledger.mark_incomplete();
+        }
+    }
+
+    /// Fold one auxiliary settlement into the open prompt ledger. Attribution
+    /// comes from the attempt's start, mirroring the live mutation path.
+    fn fold_auxiliary_prompt(
+        &mut self,
+        start: &AuxiliaryAttemptStart,
+        owner_reported: bool,
+        settlement: &AuxiliaryAttemptSettlement,
+    ) {
+        let Some(active) = self.active_prompt.as_mut() else {
+            return;
+        };
+        let attributed = start.prompt_owner.as_ref().is_some_and(|owner| {
+            *owner == active.owner
+                && start
+                    .captured_prompt_index
+                    .is_none_or(|index| index == active.prompt_index)
+        });
+        if attributed {
+            if let Some(usage) = settlement.usage.as_ref() {
+                active.ledger.record_auxiliary_call(
+                    &start.model_id,
+                    usage,
+                    settlement.api_duration_ms,
+                    settlement.cost_usd_ticks,
+                );
+            } else {
+                active.ledger.mark_incomplete();
+            }
+        } else if !owner_reported {
+            active.ledger.mark_incomplete();
+        }
+    }
+
+    /// Fold one child bill into the open prompt ledger. The payload carries
+    /// the admission-time owner; late bills of other Turns stay session-only.
+    fn fold_subagent_prompt(&mut self, payload: &SubagentUsageSettlement, owner_reported: bool) {
+        let Some(active) = self.active_prompt.as_mut() else {
+            return;
+        };
+        if payload
+            .prompt_owner
+            .as_ref()
+            .is_some_and(|owner| *owner == active.owner)
+        {
+            active.ledger.record_subagent(
+                &payload.subagent_id,
+                &payload.by_model,
+                payload.incomplete,
+            );
+        } else if !owner_reported {
+            active.ledger.mark_incomplete();
+        }
     }
 
     fn contains(&self, seq: EventSeq) -> bool {
@@ -781,6 +913,45 @@ impl UsageCheckpoint {
         mut segment_lookup: impl FnMut(UsageSegmentId) -> std::io::Result<Option<UsageSegment>>,
         sideband_exists: impl Fn(&str) -> std::io::Result<bool>,
     ) -> Result<(), crate::TimelineWriteError> {
+        // The active prompt projection follows Turn lifecycle facts, not just
+        // usage observations: TurnStarted establishes the owner-scoped ledger,
+        // TurnEnded retires it, and a rewind branch selection revokes it. The
+        // rewind can reuse the position for a different logical Turn, so only
+        // an owner change — never the index alone — starts a fresh ledger.
+        match &event.kind {
+            crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+                id,
+                prompt_id,
+                prompt_index,
+                ..
+            }) => {
+                let owner = crate::UsagePromptOwner {
+                    turn_id: *id,
+                    prompt_id: prompt_id.clone(),
+                };
+                if self
+                    .active_prompt
+                    .as_ref()
+                    .is_none_or(|active| active.owner != owner)
+                {
+                    self.active_prompt = Some(ActivePromptUsage {
+                        owner,
+                        prompt_index: *prompt_index,
+                        ledger: UsageLedger::default(),
+                    });
+                }
+                return Ok(());
+            }
+            crate::TimelineEventKind::Turn(crate::TurnEvent::Ended { .. })
+            | crate::TimelineEventKind::Messages(crate::MessageEvent {
+                cause: crate::MessageCause::Rewind,
+                ..
+            }) => {
+                self.active_prompt = None;
+                return Ok(());
+            }
+            _ => {}
+        }
         let crate::TimelineEventKind::Observation(observation) = &event.kind else {
             return Ok(());
         };
@@ -792,41 +963,59 @@ impl UsageCheckpoint {
             reason,
         };
         match (observation.scope.as_str(), observation.name.as_str()) {
-            ("session_usage", "resume_started" | "incomplete") => {
+            ("session_usage", "resume_started") => {
                 if observation.data.is_some() {
                     return Err(invalid("marker must not contain data".into()));
                 }
-                if observation.name == "resume_started" {
-                    let mut current_segment_changed = false;
-                    for (_, segment_id) in self.pending.values() {
-                        ledger.incomplete = true;
-                        if Some(*segment_id) == self.current_segment {
-                            ledger.mark_segment_incomplete(ledger.segments.len() - 1);
-                            current_segment_changed = true;
-                        } else {
-                            let mut segment = archived_segment(&mut segment_lookup, *segment_id)?
-                                .ok_or_else(|| {
-                                invalid("pending usage segment is missing".into())
-                            })?;
-                            segment.mark_incomplete();
-                            self.changed_segments.push((*segment_id, segment));
-                        }
+                let mut current_segment_changed = false;
+                for (_, segment_id) in self.pending.values() {
+                    ledger.incomplete = true;
+                    if Some(*segment_id) == self.current_segment {
+                        ledger.mark_segment_incomplete(ledger.segments.len() - 1);
+                        current_segment_changed = true;
+                    } else {
+                        let mut segment = archived_segment(&mut segment_lookup, *segment_id)?
+                            .ok_or_else(|| invalid("pending usage segment is missing".into()))?;
+                        segment.mark_incomplete();
+                        self.changed_segments.push((*segment_id, segment));
                     }
-                    if current_segment_changed
-                        && let (Some(id), Some(segment)) =
-                            (self.current_segment, ledger.segments.last())
-                    {
-                        self.changed_segments.push((id, segment.clone()));
+                }
+                if current_segment_changed
+                    && let (Some(id), Some(segment)) =
+                        (self.current_segment, ledger.segments.last())
+                {
+                    self.changed_segments.push((id, segment.clone()));
+                }
+                ledger.begin_resume_segment(event.seq, event.at_ms);
+                self.current_segment = Some(UsageSegmentId::Resume(event.seq));
+            }
+            ("session_usage", "incomplete") => {
+                let (mark_session, marker_owner) = match observation.data.as_ref() {
+                    // A payload-less marker predates the explicit attribution
+                    // field: it only ever established the lifetime lower bound
+                    // and must not stain whatever prompt is open at replay.
+                    None => (true, None),
+                    Some(data) => {
+                        let marker = UsageIncompleteMarker::deserialize(data)
+                            .map_err(|error| invalid(error.to_string()))?;
+                        (marker.session, marker.prompt_owner)
                     }
-                    ledger.begin_resume_segment(event.seq, event.at_ms);
-                    self.current_segment = Some(UsageSegmentId::Resume(event.seq));
-                } else {
+                };
+                if mark_session {
                     ledger.mark_incomplete();
                     if let (Some(id), Some(segment)) =
                         (self.current_segment, ledger.segments.last())
                     {
                         self.changed_segments.push((id, segment.clone()));
                     }
+                }
+                // Owner identity alone decides attribution; the position is
+                // rewind-reusable and never part of the marker's meaning.
+                if let Some(owner) = marker_owner.as_ref()
+                    && let Some(active) = self.active_prompt.as_mut()
+                    && active.owner == *owner
+                {
+                    active.ledger.mark_incomplete();
                 }
             }
             ("sampling_usage", "aux_attempt_started") => {
@@ -864,6 +1053,12 @@ impl UsageCheckpoint {
                     };
                 }
                 let segment_id = self.current_segment.unwrap_or(UsageSegmentId::Initial);
+                if !data
+                    .as_object()
+                    .is_some_and(|fields| fields.contains_key("prompt_owner"))
+                {
+                    local.unproven_aux_owners.insert(start.key.clone());
+                }
                 local
                     .auxiliary_starts
                     .insert(start.key.clone(), (start.clone(), segment_id));
@@ -936,7 +1131,9 @@ impl UsageCheckpoint {
                 }
                 local
                     .auxiliary_settlements
-                    .insert(settlement.key.clone(), settlement);
+                    .insert(settlement.key.clone(), settlement.clone());
+                let owner_reported = !local.unproven_aux_owners.contains(&settlement.key);
+                self.fold_auxiliary_prompt(&start, owner_reported, &settlement);
             }
             ("sampling_usage", "attempt_settled") => {
                 let data = observation
@@ -974,6 +1171,10 @@ impl UsageCheckpoint {
                 if let (Some(id), Some(segment)) = (self.current_segment, ledger.segments.last()) {
                     self.changed_segments.push((id, segment.clone()));
                 }
+                let owner_reported = data
+                    .as_object()
+                    .is_some_and(|fields| fields.contains_key("prompt_owner"));
+                self.fold_main_attempt_prompt(&payload, owner_reported);
                 local.attempts.insert(payload.attempt_key.clone(), payload);
             }
             ("session_usage", "subagent_settled") => {
@@ -1003,6 +1204,10 @@ impl UsageCheckpoint {
                 if let (Some(id), Some(segment)) = (self.current_segment, ledger.segments.last()) {
                     self.changed_segments.push((id, segment.clone()));
                 }
+                let owner_reported = data
+                    .as_object()
+                    .is_some_and(|fields| fields.contains_key("prompt_owner"));
+                self.fold_subagent_prompt(&payload, owner_reported);
                 local.subagents.insert(payload.subagent_id.clone(), payload);
             }
             _ => {}
@@ -1079,6 +1284,7 @@ mod usage_checkpoint_tests {
             key: key.clone(),
             model_id: "model-a".into(),
             captured_prompt_index: None,
+            prompt_owner: None,
         };
         let mut checkpoint = UsageCheckpoint::default();
         let mut rows = BTreeMap::new();
@@ -1171,6 +1377,7 @@ mod usage_checkpoint_tests {
             let child = format!("child-{index}");
             let settlement = SubagentUsageSettlement {
                 subagent_id: child.clone(),
+                prompt_owner: None,
                 by_model: vec![(
                     "model".into(),
                     crate::usage::UsageTotals {
@@ -1460,7 +1667,30 @@ impl ChatState {
             settled_subagent_usage,
             session_usage,
             usage_segment_overrides,
+            active_prompt,
         ) = usage_from_timeline(&timeline)?;
+
+        // Install the open prompt's ledger only for a runtime continuation of
+        // the same logical Turn (stable owner plus the rewind-reusable index
+        // as a position check). Without that proof nothing is inherited: an
+        // ordinary new Turn starts a fresh ledger and a checkpoint cut that
+        // predates the active-prompt projection cannot prove attribution, so
+        // it stays `None` (unknown) instead of an exact zero.
+        let runtime = timeline.runtime_lifecycle();
+        let restored_prompt = active_prompt.filter(|active| {
+            runtime.preserves_open_turn()
+                && runtime
+                    .checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.turn.as_ref())
+                    .is_some_and(|continuation| {
+                        continuation.turn_id == active.owner.turn_id
+                            && continuation.prompt_id == active.owner.prompt_id
+                            && continuation.prompt_index == active.prompt_index
+                    })
+        });
+        let prompt_usage_owner = restored_prompt.as_ref().map(|active| active.owner.clone());
+        let prompt_usage = restored_prompt.map(|active| active.ledger);
 
         let mut state = Self {
             continuation: ContinuationLane::new(
@@ -1469,6 +1699,7 @@ impl ChatState {
             ),
             image_budget: None,
             request_active_goal: active_goal,
+            prompt_usage_owner,
             timeline,
             sampling_config,
             projected_tokens: 0,
@@ -1479,8 +1710,10 @@ impl ChatState {
             turn_start_ms: None,
             agent_edited_paths: BTreeSet::new(),
             credentials: Credentials::default(),
+            // The most recent single model call is a live calibration input;
+            // it is never reconstructed from ledger totals across a restore.
             last_turn_usage: None,
-            prompt_usage: None,
+            prompt_usage,
             session_usage,
             usage_segment_overrides,
             settled_model_attempts,

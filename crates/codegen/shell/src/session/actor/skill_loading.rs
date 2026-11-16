@@ -202,9 +202,11 @@ impl SessionActor {
                 .ok_or_else(|| {
                     acp::Error::internal_error().data("Skill input has no immutable payload")
                 })?;
-            let payload =
-                crate::session::input_inbox::read_payload(&self.session_directory, &input.payload_ref)
-                    .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+            let payload = crate::session::input_inbox::read_payload(
+                &self.session_directory,
+                &input.payload_ref,
+            )
+            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
             let crate::session::input_inbox::InputPayload::Prompt {
                 skill_invocations, ..
             } = payload;

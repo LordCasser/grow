@@ -240,7 +240,8 @@ pub(crate) struct PromptResponseMeta {
     pub session_id: String,
     pub request_id: String,
     pub prompt_id: String,
-    pub total_tokens: u64,
+    /// Current context occupancy projection, not a lifetime bill.
+    pub context_used_tokens: u64,
     pub model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u32>,
@@ -276,6 +277,8 @@ pub(crate) struct PromptResponseMeta {
 pub(crate) struct PromptResponseMetaArgs<'a> {
     pub session_id: &'a str,
     pub prompt_id: &'a str,
+    /// Context occupancy projection (`get_projected_tokens`); serialized as
+    /// `contextUsedTokens`.
     pub total_tokens: u64,
     pub model_id: &'a str,
     pub last_turn_usage: Option<&'a sampling_types::TokenUsage>,
@@ -310,7 +313,7 @@ pub(crate) fn build_prompt_response_meta(
         session_id: session_id.to_string(),
         request_id: prompt_id.to_string(),
         prompt_id: prompt_id.to_string(),
-        total_tokens,
+        context_used_tokens: total_tokens,
         model_id: model_id.to_string(),
         input_tokens: last_turn_usage.map(|u| u.prompt_tokens),
         output_tokens: last_turn_usage.map(|u| u.completion_tokens),
@@ -919,6 +922,12 @@ mod session_model;
 mod session_lifecycle;
 mod runtime_handoff;
 mod history_paging;
+/// Cursor-tail and full replay still push live updates. Paging loads only
+/// capture a fixed cut; the client reads `HistoryRow` pages afterwards.
+pub(super) struct SessionReplay {
+    coverage: crate::session::storage::SubagentProjectionState,
+    history_cut: Option<history_paging::HistoryPageCut>,
+}
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
@@ -1198,15 +1207,23 @@ impl MvpAgent {
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
         page_history: bool,
-    ) -> Result<(crate::session::storage::SubagentProjectionState, (usize, Option<usize>), Option<Arc<crate::session::history::IndexedPages>>, Option<crate::session::history::PagePosition>), acp::Error> {
+    ) -> Result<SessionReplay, acp::Error> {
         let mut timer = crate::instrumentation_timer!("session.load_session_replay");
         timer.with_field("session_id", session_id.0.as_ref());
         timer.with_field("cwd", cwd.as_str());
-        let mut prepared = if page_history && history.indexed.is_some() {
-            history.prepare_indexed(session_id, timeline)
-        } else {
-            history.prepare(session_id, timeline, cursor)
-        }.map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+        if page_history {
+            let captured = history_paging::HistoryPageCut::capture(session_id, history, timeline)
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            timer.with_field("history_cut", true);
+            timer.with_field("updates_count", 0);
+            return Ok(SessionReplay {
+                coverage: captured.coverage,
+                history_cut: Some(captured.cut),
+            });
+        }
+        let mut prepared = history
+            .prepare(session_id, timeline, cursor)
+            .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
         let mut coverage = crate::session::storage::SubagentProjectionState::default();
         for update in &prepared.updates {
             if let crate::session::storage::SessionUpdate::Grow(notification) = update {
@@ -1218,28 +1235,7 @@ impl MvpAgent {
                 }
             }
         }
-        let mark_replay = prepared.mark_replay;
-        let pages = if page_history && history.indexed.is_some() {
-            history.indexed_pages(crate::session::history::PreparedHistory {
-                updates: std::mem::take(&mut prepared.updates),
-                mark_replay,
-            }).map_err(|error| crate::session::persistence::io_error_to_acp(&error))?.map(Arc::new)
-        } else {
-            None
-        };
-        let (older_rows, older_position, updates) = if let Some(pages) = &pages {
-            let pages = pages.clone();
-            let id = session_id.clone();
-            let (position, updates) = tokio::task::spawn_blocking(move || pages.page_before(&id, crate::session::history::PagePosition::newest())).await
-                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
-                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-            ((0, None), position, updates)
-        } else if page_history {
-            let (start, updates) = prepared.take_page(prepared.updates.len()).map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-            ((start, None), None, updates)
-        } else {
-            ((0, None), None, prepared.updates)
-        };
+        let updates = std::mem::take(&mut prepared.updates);
         let mut pending_tools = std::collections::HashMap::new();
         let mut completions = Vec::with_capacity(updates.len());
         timer.with_field("updates_count", updates.len());
@@ -1247,32 +1243,6 @@ impl MvpAgent {
             match update {
                 crate::session::storage::SessionUpdate::Acp(notification) => self.forward_replay_notification(*notification, persist_data, target_client_id, &mut completions, prepared.mark_replay, &mut pending_tools),
                 crate::session::storage::SessionUpdate::Grow(mut notification) => {
-                    if page_history
-                        && let crate::extensions::notification::SessionUpdate::SubagentSpawned {
-                            subagent_id, child_session_id, parent_session_id, ..
-                        } = &notification.update
-                        && parent_session_id == session_id.0.as_ref()
-                    {
-                        coverage.replayed_children.insert(child_session_id.clone(), subagent_id.clone());
-                    }
-                    if page_history
-                        && let crate::extensions::notification::SessionUpdate::SubagentProgress {
-                            subagent_id,
-                            child_session_id,
-                            parent_session_id,
-                            ..
-                        } = &notification.update
-                        && parent_session_id == session_id.0.as_ref()
-                    {
-                        coverage.replayed_children.insert(child_session_id.clone(), subagent_id.clone());
-                    }
-                    if page_history
-                        && let crate::extensions::notification::SessionUpdate::SubagentFinished {
-                            subagent_id, child_session_id, ..
-                        } = &notification.update
-                    {
-                        coverage.replayed_children.insert(child_session_id.clone(), subagent_id.clone());
-                    }
                     let meta = notification.meta.get_or_insert_with(|| serde_json::json!({})).as_object_mut().expect("validated history metadata");
                     if prepared.mark_replay { meta.insert("isReplay".into(), true.into()); }
                     if let Some(value) = persist_data { meta.insert("grow/persist".into(), value.clone()); }
@@ -1288,8 +1258,7 @@ impl MvpAgent {
             }
         }
         for completion in completions { let _ = completion.await; }
-        let pages = pages.filter(|_| older_position.is_some());
-        Ok((coverage, older_rows, pages, older_position))
+        Ok(SessionReplay { coverage, history_cut: None })
     }
     /// Find replay rows that would leave a cold client's background-task UI in
     /// a false "Running" state. This projection never restores task runtime

@@ -2040,6 +2040,21 @@ pub(super) async fn run_session(
                     SessionCommand::RebuildAgentForDefinition { definition, intent, responds_to } => {
                         session.admit_agent_selection(definition, intent, responds_to).await;
                     }
+                    SessionCommand::QueryBehaviorSnapshot { mut respond_to } => {
+                        // Waiting for a durable transition must leave the mailbox
+                        // available for shutdown and provider accounting.
+                        let session = session.clone();
+                        tokio::task::spawn_local(async move {
+                            tokio::select! {
+                                biased;
+                                _ = respond_to.closed() => {}
+                                _ = session.background_service_shutdown.cancelled() => {}
+                                result = session.confirmed_behavior_projection() => {
+                                    let _ = respond_to.send(result);
+                                }
+                            }
+                        });
+                    }
                     SessionCommand::PublishControlState { replay_hooks, respond_to } => {
                         session.publish_control_state_snapshot().await;
                         if replay_hooks {
@@ -2447,6 +2462,7 @@ pub(super) async fn run_session(
                     SessionCommand::RecordSubagentUsage {
                         subagent_id,
                         by_model,
+                        prompt_owner,
                         parent_prompt_id,
                         incomplete,
                         deadline,
@@ -2457,7 +2473,7 @@ pub(super) async fn run_session(
                             .record_subagent_usage_before(
                                 &subagent_id,
                                 &by_model,
-                                parent_prompt_id.as_deref(),
+                                prompt_owner,
                                 incomplete,
                                 deadline,
                             )
@@ -2477,18 +2493,18 @@ pub(super) async fn run_session(
                                     )
                                     .await;
                                 let _ = respond_to.send(());
-                            }
-                            // Drop oneshot → fold_acked=false on child; true-miss path runs.
+                            }                            // Drop oneshot → fold_acked=false on child; true-miss path runs.
                             Err(()) => {}
                         }
                     }
                     SessionCommand::MarkSubagentUsageNotApplied {
+                        prompt_owner,
                         parent_prompt_id,
                         respond_to,
                     } => {
-                        // True apply-miss: sticky + pin-aware ledger fail-closed.
+                        // True apply-miss: sticky + owner-aware ledger fail-closed.
                         if session
-                            .mark_apply_miss_incomplete(parent_prompt_id.as_deref())
+                            .mark_apply_miss_incomplete(prompt_owner.as_ref(), parent_prompt_id.as_deref())
                             .await
                         {
                             let _ = respond_to.send(());

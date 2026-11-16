@@ -58,7 +58,7 @@ fn tool_call(id: &str) -> acp::SessionUpdate {
 }
 
 #[test]
-fn passive_tool_output_fragment_projects_with_tool_metadata() {
+fn passive_tool_output_fragment_is_not_a_display_row() {
     let mut projection = TranscriptProjection::default();
     projection.apply(grow_event(GrowUpdate::ToolOutputFragment(
         shell::extensions::notification::ToolOutputFragment {
@@ -74,16 +74,7 @@ fn passive_tool_output_fragment_projects_with_tool_metadata() {
         },
     )));
 
-    let entry = projection.scrollback.entry(0).unwrap();
-    let crate::scrollback::block::RenderBlock::ToolCall(ToolCallBlock::Other(block)) = &entry.block
-    else {
-        panic!("expected a passive Tool output card");
-    };
-    assert!(block.summary.contains("Run migration"));
-    assert!(block.summary.contains("Execute"));
-    assert!(block.summary.contains("Completed"));
-    assert!(block.summary.contains("128–153/256"));
-    assert!(block.output.as_deref().unwrap().contains("continued"));
+    assert_eq!(projection.scrollback.len(), 0);
 }
 
 fn tool_terminal(id: &str, status: acp::ToolCallStatus) -> acp::SessionUpdate {

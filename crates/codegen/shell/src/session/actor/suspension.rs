@@ -22,7 +22,10 @@ impl SessionActor {
         task_id: &str,
     ) -> Result<Option<chat_state::timeline::SubagentOperation>, String> {
         if root_id == self.session_id_string() {
-            return self.chat_state_handle.subagent_operation(task_id.to_owned()).await;
+            return self
+                .chat_state_handle
+                .subagent_operation(task_id.to_owned())
+                .await;
         }
         if let Some((owner, handle)) = &self.tool_context.subagent_lifecycle_root
             && owner == root_id
@@ -34,10 +37,12 @@ impl SessionActor {
         let task_id = task_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
-            let opened = storage.open_session_by_id(&root_id)
+            let opened = storage
+                .open_session_by_id(&root_id)
                 .map_err(|error| error.to_string())?
                 .ok_or("original lifecycle root is missing")?;
-            opened.validated_timeline(&root_id)
+            opened
+                .validated_timeline(&root_id)
                 .map_err(|error| error.to_string())?
                 .timeline
                 .subagent_operation(&task_id)
@@ -53,17 +58,32 @@ impl SessionActor {
         spawn_seq: chat_state::EventSeq,
         spawn: &chat_state::SubagentSpawnEvent,
     ) -> Result<Option<tool_types::planning::SubagentPlanningSummary>, acp::Error> {
-        use crate::agent::subagent::{DurableChildOperation, durable_child_operation_from_validated_facts};
-        let (_, _, terminal) = self.runtime_delegation_operation(root_id, &spawn.subagent_id)
+        use crate::agent::subagent::{
+            DurableChildOperation, durable_child_operation_from_validated_facts,
+        };
+        let (_, _, terminal) = self
+            .runtime_delegation_operation(root_id, &spawn.subagent_id)
             .await
             .map_err(|error| acp::Error::internal_error().data(error))?
             .filter(|(seq, current, _)| *seq == spawn_seq && current == spawn)
-            .ok_or_else(|| acp::Error::internal_error().data("original child spawn is unavailable"))?;
-        let terminal = terminal.filter(|terminal| terminal.result_ref.is_some())
-            .ok_or_else(|| acp::Error::internal_error().data("original child has no canonical terminal result"))?;
-        let DurableChildOperation::Completed(result) = durable_child_operation_from_validated_facts(
-            root_id, &spawn.subagent_id, spawn_seq, spawn, Some(&terminal),
-        ).map_err(|error| acp::Error::internal_error().data(error))? else {
+            .ok_or_else(|| {
+                acp::Error::internal_error().data("original child spawn is unavailable")
+            })?;
+        let terminal = terminal
+            .filter(|terminal| terminal.result_ref.is_some())
+            .ok_or_else(|| {
+                acp::Error::internal_error().data("original child has no canonical terminal result")
+            })?;
+        let DurableChildOperation::Completed(result) =
+            durable_child_operation_from_validated_facts(
+                root_id,
+                &spawn.subagent_id,
+                spawn_seq,
+                spawn,
+                Some(&terminal),
+            )
+            .map_err(|error| acp::Error::internal_error().data(error))?
+        else {
             unreachable!("a verified terminal has a durable result")
         };
         Ok(result.planning_summary)
@@ -155,7 +175,10 @@ impl SessionActor {
             let result_already_present = surface.iter().any(|item| {
                 matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == operation.call_id)
             });
-            let root_id = self.chat_state_handle.runtime_state().await
+            let root_id = self
+                .chat_state_handle
+                .runtime_state()
+                .await
                 .map_err(|error| acp::Error::internal_error().data(error))?
                 .root_session_id
                 .unwrap_or_else(|| self.session_id_string());
@@ -167,8 +190,10 @@ impl SessionActor {
                     spawn.origin_tool_call_id.as_deref() == Some(operation.call_id.as_str())
                         && spawn.security_parent_session_id == self.session_id_string()
                 })
-                .ok_or_else(|| acp::Error::internal_error()
-                    .data("original child spawn identity is unavailable"))?;
+                .ok_or_else(|| {
+                    acp::Error::internal_error()
+                        .data("original child spawn identity is unavailable")
+                })?;
             let recipe = tools::implementations::grow_build::task::types::SubagentExecutionRecipe::from_value(&spawn.execution_recipe)
                 .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
             if result_already_present && recipe.run_in_background {
@@ -204,8 +229,13 @@ impl SessionActor {
                 if result_already_present {
                     if let Some(terminal) = &initial_terminal {
                         crate::agent::subagent::durable_child_operation_from_validated_facts(
-                            &root_id, &task_id, spawn_seq, &spawn, Some(terminal),
-                        ).map_err(|error| acp::Error::internal_error().data(error))?;
+                            &root_id,
+                            &task_id,
+                            spawn_seq,
+                            &spawn,
+                            Some(terminal),
+                        )
+                        .map_err(|error| acp::Error::internal_error().data(error))?;
                         self.settle_restored_child_completion_receipt(
                             &root_id, spawn_seq, &spawn, terminal,
                         )
@@ -995,7 +1025,9 @@ impl SessionActor {
             .suspension_evidence(
                 operation_id.clone(),
                 cursor.as_ref().map(|turn| turn.turn_id),
-                cursor.as_ref().and_then(|turn| turn.accepted_response.as_ref())
+                cursor
+                    .as_ref()
+                    .and_then(|turn| turn.accepted_response.as_ref())
                     .map(|response| response.identity.clone()),
             )
             .await
@@ -1167,11 +1199,19 @@ impl SessionActor {
             }
         }
         // All Goal state survives. Only its execution-time clock is frozen.
-        self.goal_tracker.lock().freeze_runtime_clock();
-        let (behavior, goal) = self.capture_control_authorities();
-        self.persist_control_snapshot_durably(behavior, goal)
-            .await
-            .map_err(|error| error.to_string())?;
+        // Auxiliary Goal usage may still settle until the later
+        // session_activities drain, so the frozen-clock snapshot shares the
+        // transaction gate: the Control revision is allocated only inside it,
+        // and a stale snapshot cannot overwrite a concurrent settlement. The
+        // gate is released before the stop/drain joins below.
+        {
+            let _goal_transaction = self.goal_transaction_gate.lock().await;
+            self.goal_tracker.lock().freeze_runtime_clock();
+            let (behavior, goal) = self.capture_control_authorities();
+            self.persist_control_snapshot_durably(behavior, goal)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         // Background storage workers must relinquish their exact ownership;
         // stopping the caller's timeout cannot detach them behind this frontier.
         self.background_service_shutdown.cancel();
@@ -1503,7 +1543,6 @@ mod suspension_tests {
             kind,
         }
     }
-
 }
 
 /// Physical wait owners disappear during drain. Their Timeline attempts remain

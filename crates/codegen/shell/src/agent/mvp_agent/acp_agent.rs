@@ -27,6 +27,34 @@ impl Drop for ReconnectGatewayMute {
         self.restore();
     }
 }
+impl MvpAgent {
+    async fn behavior_snapshot_from_actor(
+        &self,
+        session_id: &acp::SessionId,
+        command_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+    ) -> Result<crate::extensions::notification::BehaviorProjection, acp::Error> {
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        command_tx.send(SessionCommand::QueryBehaviorSnapshot { respond_to })
+            .map_err(|_| acp::Error::internal_error().data("Session ended before Behavior snapshot"))?;
+        let snapshot = response.await
+            .map_err(|_| acp::Error::internal_error().data("Behavior snapshot acknowledgement was lost"))?
+            .map_err(|error| acp::Error::internal_error().data(error))?;
+        let is_current = self.sessions.borrow().get(session_id).is_some_and(|handle| {
+            handle.cmd_tx.same_channel(command_tx)
+                && !handle.cmd_tx.is_closed()
+                && !handle.chat_state_handle.is_closed()
+                && handle.chat_state_handle.pending_timeline_commit().is_none()
+                && handle.runtime_observation.read().control_epoch == snapshot.control_epoch
+        });
+        if !is_current {
+            return Err(acp::Error::internal_error().data(
+                "Session actor changed or ended while loading; retry the session load.",
+            ));
+        }
+        Ok(snapshot)
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl acp_transport::AcpAgentHandler for MvpAgent {
     /// In the meta, we provide
@@ -643,6 +671,10 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         if let Some(handle) = self.sessions.borrow().get(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
         }
+        let behavior_snapshot = self.behavior_snapshot_from_actor(&session_id, &control_tx).await?;
+        if let Some(meta) = meta.as_object_mut() {
+            behavior_snapshot.insert_meta(meta);
+        }
         Ok(acp::NewSessionResponse::new(session_id)
             .config_options(config_options)
             .meta(meta.as_object().cloned()))
@@ -1184,27 +1216,16 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             && timeline.subagent_lifecycle_events().next().is_none()
             && !history.indexed.as_ref().is_some_and(|index| index.has_child_presentation())
             && Self::find_stale_background_task_projections(&session_id, &history, timeline.events()).is_empty();
-        let (subagent_projections, page_end, indexed_pages, older_position) = if no_replay {
+        let replay = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
                 "Skipping session replay (noReplay requested by client)"
             );
-            (Default::default(), (0, None), None, None)
-        } else if deferred_history {
-            let prepared = history.prepare_indexed(&session_id, &timeline)
-                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-            let mut pages = history.indexed_pages(prepared)
-                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
-                .map(Arc::new);
-            if let Some(current) = &pages
-                && current.is_empty().map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
-            {
-                pages = None;
-            }
-            (Default::default(), (0, None), pages, None)
+            super::SessionReplay { coverage: Default::default(), history_cut: None }
         } else {
             self
                 // Replay must use the already validated/pinned Timeline snapshot.
+                // Paging captures one fixed cut and does not push bare updates.
                 .replay_session_updates(
                     &session_id,
                     &cwd,
@@ -1219,13 +1240,14 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 )
                 .await?
         };
+        let subagent_projections = replay.coverage;
         if let Err(error) = descendant_ownership.include_replayed_children(
             &timeline,
             &subagent_projections.replayed_children,
         ) {
             tracing::warn!(%session_id, %error, "Unable to resolve an archived child in the replayed page");
         }
-        let history_page_cut = super::history_paging::HistoryPageCut::new(&history, &timeline, page_end, indexed_pages);
+        let history_page_cut = replay.history_cut;
         let replay_hooks = history.indexed.is_none();
         if let Some(mute) = reconnect_gateway_mute.as_mut() {
             mute.restore();
@@ -1453,9 +1475,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         // retain their live selection; reconnect is not a model-control request.
         let mut response_meta_map = serde_json::Map::new();
         if let Some(cut) = &history_page_cut {
-            let key = if deferred_history { "grow/latestHistoryCursor" } else { "grow/olderHistoryCursor" };
-            let cursor = older_position.map_or_else(|| cut.first_cursor(), |position| cut.indexed_cursor(position));
-            response_meta_map.insert(key.into(), cursor.into());
+            response_meta_map.insert("grow/historyCut".into(), cut.token().into());
         }
         if let Some(ownership_meta) = descendant_ownership.into_load_meta() {
             response_meta_map.insert(
@@ -1572,11 +1592,6 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     .data("Session ended while loading; retry the session load."));
             }
         }
-        let response_meta = serde_json::Value::Object(response_meta_map);
-        let config_options = self.session_config_options(Some(&session_id), &model_state);
-        let response = acp::LoadSessionResponse::new()
-            .config_options(config_options)
-            .meta(response_meta.as_object().cloned());
         // Reconciliation can take much longer than replay. Release only after
         // all load-owned work is done, including the durable usage boundary.
         if let Some(restore) = prepared_restore {
@@ -1586,12 +1601,21 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     "Suspended tree restoration is blocked: {error}"
                 )))?;
         }
+        // Observe the same actor that published Control state, after every
+        // recovery gate and load-owned await. History pages are not inputs.
+        let behavior_snapshot = self.behavior_snapshot_from_actor(&session_id, &control_tx).await?;
+        behavior_snapshot.insert_meta(&mut response_meta_map);
+        let config_options = self.session_config_options(Some(&session_id), &model_state);
+        let response = acp::LoadSessionResponse::new()
+            .config_options(config_options)
+            .meta(Some(response_meta_map));
         if !no_replay {
-            self.resident_resources
-                .borrow_mut()
-                .entry(session_id.clone())
-                .or_default()
-                .history_page_cut = history_page_cut;
+            // Cursor-tail replay has no new cut. Keep the installed token while
+            // this actor and branch still match so the partial window stays readable.
+            // Do not attach grow/historyCut here; that field means a new full page cut.
+            let cursor_tail = cursor.is_some() && !spawn_new_actor;
+            self.apply_loaded_history_cut(&session_id, history_page_cut, cursor_tail)
+                .await;
         }
         drop(catalog_transaction);
         if let Some(token) = recovery_token.take() {
@@ -2252,6 +2276,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 crate::extensions::session_updates::handle(&args, &self.gateway).await
             }
             "grow/read_history_page" => self.read_history_page(&args).await,
+            "grow/read_history_timeline" => self.read_history_timeline(&args).await,
             "grow/session/state" => {
                 crate::extensions::session_state::handle_state(&args).await
             }

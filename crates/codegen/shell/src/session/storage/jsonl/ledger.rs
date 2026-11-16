@@ -474,7 +474,9 @@ impl JsonlStorageAdapter {
             let prefix = cached.as_mut().expect("validated Timeline prefix");
             prefix.stamp = stamp;
             if let AppendFact::Presentation(event) = &mut fact {
-                prefix.state.bind_indexed_presentation(event, prefix.indexed.as_ref())?;
+                prefix
+                    .state
+                    .bind_indexed_presentation(event, prefix.indexed.as_ref())?;
             }
             // Preserve the exact original source identity on an ambiguous ACK.
             // Presentation timestamps are write metadata, not a second payload.
@@ -574,8 +576,12 @@ impl JsonlStorageAdapter {
             });
             #[cfg(unix)]
             let branch_changed = domain.is_some_and(|event| {
-                matches!(event.kind, chat_state::TimelineEventKind::ImageProjection(_))
-                    || event.messages().is_some_and(|message| message.cause == chat_state::MessageCause::Rewind)
+                matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::ImageProjection(_)
+                ) || event
+                    .messages()
+                    .is_some_and(|message| message.cause == chat_state::MessageCause::Rewind)
             }) || matches!(&fact, AppendFact::Presentation(event)
                 if matches!(&event.content, HistoryContent::Grow(value)
                     if matches!(value.as_ref(), history::GrowHistoryFact::RewindMarker { .. })));
@@ -680,11 +686,11 @@ impl JsonlStorageAdapter {
                 }
             }
             #[cfg(unix)]
-            if repeated && complete_len != prior_stamp.len
+            if repeated
+                && complete_len != prior_stamp.len
                 && let Some(indexed) = &prefix.indexed
-                && let Some(repaired) = indexed.acknowledge_torn_tail_removal(
-                    &file, complete_len, &prefix.stamp,
-                )?
+                && let Some(repaired) =
+                    indexed.acknowledge_torn_tail_removal(&file, complete_len, &prefix.stamp)?
             {
                 prefix.indexed = Some(repaired);
             }

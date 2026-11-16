@@ -179,14 +179,23 @@ impl<'a> Writer<'a> {
         self.cut.max_prompt = None;
         for (index, user) in timeline.selected_prompt_coordinates() {
             self.cut.max_prompt = Some(index);
-            self.coordinates.insert((branch, index as u64), source.get()).map_err(io::Error::other)?;
+            self.coordinates
+                .insert((branch, index as u64), source.get())
+                .map_err(io::Error::other)?;
             let Some(seq) = user else { continue };
             let Some(TimelineEventKind::Turn(TurnEvent::Started { id, .. })) =
                 timeline.event(seq).map(|event| &event.kind)
-            else { return Err(invalid("selected prompt has no Turn start")) };
-            let reference = self.turns.get(id.0).map_err(io::Error::other)?
+            else {
+                return Err(invalid("selected prompt has no Turn start"));
+            };
+            let reference = self
+                .turns
+                .get(id.0)
+                .map_err(io::Error::other)?
                 .ok_or_else(|| invalid("selected prompt has no indexed Turn"))?;
-            self.prompts.insert((branch, index as u64, seq.get()), reference.value()).map_err(io::Error::other)?;
+            self.prompts
+                .insert((branch, index as u64, seq.get()), reference.value())
+                .map_err(io::Error::other)?;
         }
         Ok(())
     }
@@ -338,8 +347,10 @@ pub(super) fn prompts_before(
                 .range((branch, 0, 0)..(branch, prompt, 0))
                 .map_err(io::Error::other)?
                 .next_back(),
-            None => table.range((branch, 0, 0)..=(branch, u64::MAX, u64::MAX))
-                .map_err(io::Error::other)?.next_back(),
+            None => table
+                .range((branch, 0, 0)..=(branch, u64::MAX, u64::MAX))
+                .map_err(io::Error::other)?
+                .next_back(),
         };
         let Some(row) = row else { break };
         let (key, value) = row.map_err(io::Error::other)?;

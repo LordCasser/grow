@@ -8,7 +8,7 @@ use super::ChatStateActor;
 use crate::MessageCause;
 use crate::actor::state::{
     AttemptUsageSettlement, AuxiliaryAttemptKey, AuxiliaryAttemptSettlement, AuxiliaryAttemptStart,
-    SubagentUsageSettlement,
+    SubagentUsageSettlement, UsageIncompleteMarker,
 };
 use crate::events::ChatStateEvent;
 
@@ -214,7 +214,10 @@ impl ChatStateActor {
         }
 
         if let Some(response_admission) = response_admission.as_ref()
-            && let Some(existing) = self.state.timeline.exact_response_admission(response_admission)?
+            && let Some(existing) = self
+                .state
+                .timeline
+                .exact_response_admission(response_admission)?
         {
             let same_items = serde_json::to_value(&existing.items)
                 .expect("response items must serialize")
@@ -663,6 +666,7 @@ impl ChatStateActor {
         &mut self,
         attempt_key: String,
         captured_prompt_index: usize,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         model_id: String,
         usage: Option<TokenUsage>,
         cost_usd_ticks: Option<i64>,
@@ -672,6 +676,7 @@ impl ChatStateActor {
             attempt_key,
             model_id,
             captured_prompt_index,
+            prompt_owner,
             usage,
             cost_usd_ticks,
             api_duration_ms,
@@ -707,8 +712,9 @@ impl ChatStateActor {
             ))?;
         self.commit_timeline_event(event).await?;
 
-        let current_prompt =
-            self.state.timeline.current_prompt_index() == Some(settlement.captured_prompt_index);
+        let current_prompt = settlement.prompt_owner.is_some()
+            && settlement.prompt_owner == self.state.prompt_usage_owner
+            && self.state.timeline.current_prompt_index() == Some(settlement.captured_prompt_index);
         if let Some(usage) = settlement.usage.as_ref() {
             let model_key = if settlement.model_id.is_empty() {
                 self.state.sampling_config.model.clone()
@@ -755,6 +761,7 @@ impl ChatStateActor {
         attempt_no: u32,
         model_id: String,
         captured_prompt_index: Option<usize>,
+        prompt_owner: Option<crate::UsagePromptOwner>,
     ) -> Result<bool, crate::commands::TimelineWriteError> {
         let start = AuxiliaryAttemptStart {
             key: AuxiliaryAttemptKey {
@@ -763,6 +770,7 @@ impl ChatStateActor {
             },
             model_id,
             captured_prompt_index,
+            prompt_owner,
         };
         start
             .validate()
@@ -895,8 +903,11 @@ impl ChatStateActor {
                 },
             ))?;
         self.commit_timeline_event(event).await?;
-        let current_prompt = start.captured_prompt_index.is_some()
-            && self.state.timeline.current_prompt_index() == start.captured_prompt_index;
+        let current_prompt = start.prompt_owner.is_some()
+            && start.prompt_owner == self.state.prompt_usage_owner
+            && start
+                .captured_prompt_index
+                .is_none_or(|index| self.state.timeline.current_prompt_index() == Some(index));
         if let Some(usage) = settlement.usage.as_ref() {
             if let Some(segment_index) = live_segment_index {
                 self.state.session_usage.record_auxiliary_call_at(
@@ -962,7 +973,7 @@ impl ChatStateActor {
         &mut self,
         subagent_id: &str,
         by_model: &[(String, crate::usage::UsageTotals)],
-        attribute_to_prompt: bool,
+        prompt_owner: Option<crate::UsagePromptOwner>,
         incomplete: bool,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, crate::commands::TimelineWriteError> {
@@ -971,6 +982,7 @@ impl ChatStateActor {
         }
         let settlement = SubagentUsageSettlement {
             subagent_id: subagent_id.to_owned(),
+            prompt_owner: prompt_owner.clone(),
             by_model: by_model.to_vec(),
             incomplete,
         };
@@ -999,7 +1011,7 @@ impl ChatStateActor {
             ))?;
         self.commit_timeline_event_before(event, deadline).await?;
 
-        if attribute_to_prompt {
+        if prompt_owner.is_some() && prompt_owner == self.state.prompt_usage_owner {
             self.state
                 .prompt_usage
                 .get_or_insert_default()
@@ -1024,28 +1036,54 @@ impl ChatStateActor {
         prompt: bool,
         session: bool,
     ) -> Result<(), crate::commands::TimelineWriteError> {
-        if session && !self.state.session_usage.incomplete {
-            let event = self
+        // The marker binds to the prompt owner captured inside this actor
+        // turn, not to a coordinator's possibly stale view of the open
+        // prompt. Without an open owner there is no prompt ledger to
+        // lower-bound; report-level incompleteness still flows to callers.
+        let owner = if prompt {
+            self.state.prompt_usage_owner.clone()
+        } else {
+            None
+        };
+        let session_new = session && !self.state.session_usage.incomplete;
+        let prompt_new = owner.is_some()
+            && self
                 .state
-                .timeline
-                .prepare(crate::TimelineEventKind::Observation(
-                    crate::ObservationEvent {
-                        scope: "session_usage".into(),
-                        name: "incomplete".into(),
-                        turn: None,
-                        step: None,
-                        data: None,
-                    },
-                ))?;
-            self.commit_timeline_event(event).await?;
+                .prompt_usage
+                .as_ref()
+                .is_none_or(|ledger| !ledger.incomplete);
+        // A durable append is justified only by a new lower bound: the
+        // session ledger not yet marked, or this owner's prompt ledger not
+        // yet marked. An already incomplete session still commits when the
+        // prompt mark itself is new.
+        if !session_new && !prompt_new {
+            return Ok(());
         }
-        if prompt {
+        let marker = UsageIncompleteMarker {
+            session: session_new,
+            prompt_owner: owner,
+        };
+        let data = serde_json::to_value(&marker).expect("usage marker is serializable");
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "session_usage".into(),
+                    name: "incomplete".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(data),
+                },
+            ))?;
+        self.commit_timeline_event(event).await?;
+        if prompt_new {
             self.state
                 .prompt_usage
                 .get_or_insert_default()
                 .mark_incomplete();
         }
-        if session && !self.state.session_usage.incomplete {
+        if session_new {
             self.state.session_usage.mark_incomplete();
             self.publish_session_usage();
         }
@@ -1112,6 +1150,7 @@ impl ChatStateActor {
         self.commit_timeline_event(event).await?;
         self.state.turn_capture = None;
         self.state.prompt_usage = None;
+        self.state.prompt_usage_owner = None;
         self.state.continuation.reset(
             self.state.sampling_config.api_backend.clone(),
             self.state.timeline.surface_len(),

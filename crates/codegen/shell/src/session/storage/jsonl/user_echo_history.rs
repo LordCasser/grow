@@ -52,7 +52,7 @@ impl<'a> Writer<'a> {
         echo: &UserDisplayEcho,
         source: DomainReference,
         bytes: u64,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<u64>> {
         let mut blocks = Vec::new();
         let mut provisional = Vec::new();
         for reference in references(&self.blocks, &echo.message_id, u64::MAX)? {
@@ -84,7 +84,9 @@ impl<'a> Writer<'a> {
         {
             return Err(invalid("duplicate consumed user echo"));
         }
+        let mut revealed = Vec::with_capacity(provisional.len());
         for presentation in provisional {
+            revealed.push(presentation.position);
             let row = Row {
                 presentation,
                 consume_seq: source.seq,
@@ -94,7 +96,7 @@ impl<'a> Writer<'a> {
                 .insert(presentation.position, serde_json::to_vec(&row)?.as_slice())
                 .map_err(io::Error::other)?;
         }
-        Ok(())
+        Ok(revealed)
     }
 }
 
@@ -168,6 +170,32 @@ pub(super) fn rows_before(
     let mut selected = Vec::new();
     for row in rows.range(..before).map_err(io::Error::other)?.rev() {
         let (key, value) = row.map_err(io::Error::other)?;
+        let row: Row = serde_json::from_slice(value.value())?;
+        if row.presentation.position != key.value() {
+            return Err(invalid("indexed user echo differs from its physical key"));
+        }
+        if row.consume_seq.get() < frontier.domain
+            && row.presentation.record.offset < frontier.bytes
+        {
+            selected.push(row);
+            if selected.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(selected)
+}
+
+pub(super) fn rows_after(
+    tx: &ReadTransaction,
+    after: u64,
+    frontier: Frontier,
+    limit: usize,
+) -> io::Result<Vec<Row>> {
+    let rows = tx.open_table(ROWS).map_err(io::Error::other)?;
+    let mut selected = Vec::new();
+    for entry in rows.range(after..).map_err(io::Error::other)? {
+        let (key, value) = entry.map_err(io::Error::other)?;
         let row: Row = serde_json::from_slice(value.value())?;
         if row.presentation.position != key.value() {
             return Err(invalid("indexed user echo differs from its physical key"));

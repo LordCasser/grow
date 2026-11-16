@@ -630,8 +630,12 @@ fn valid_hash(hash: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(crate) fn input_image_directory_exists(session: &crate::session::storage::ContainedDirectory) -> bool {
-    session.open_relative(Path::new(IMAGE_DIRECTORY), "input image directory", false).is_ok()
+pub(crate) fn input_image_directory_exists(
+    session: &crate::session::storage::ContainedDirectory,
+) -> bool {
+    session
+        .open_relative(Path::new(IMAGE_DIRECTORY), "input image directory", false)
+        .is_ok()
 }
 
 /// Called under input_artifact_gate after obtaining ALL Submitted hashes.

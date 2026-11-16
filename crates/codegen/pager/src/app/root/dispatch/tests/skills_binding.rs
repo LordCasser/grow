@@ -215,6 +215,7 @@ fn skills_binding_no_session_modal_creates_before_fetching() {
             agent_id: AgentId(0),
             session_id: acp::SessionId::new("created-owner"),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -275,14 +276,15 @@ fn skills_binding_open_reload_toggle_and_session_ready_producers_capture_epoch()
                 restore_summary: None,
                 foreground: None,
                 descendant_ownership: None,
-                older_history_cursor: None,
-                latest_history_cursor: None,
+                history_cut: None,
+                behavior: None,
             }
         } else {
             TaskResult::SessionCreated {
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new("ready"),
                 models: None,
+                behavior: None,
             }
         };
         let effects = dispatch(Action::TaskComplete(result), &mut app);

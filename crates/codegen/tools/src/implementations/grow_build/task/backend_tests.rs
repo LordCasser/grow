@@ -242,6 +242,7 @@ async fn channel_backend_spawn_success() {
         parent_session_id: "parent".to_string(),
         parent_step_id: None,
         parent_prompt_id: None,
+        parent_prompt_owner: None,
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),
@@ -279,6 +280,7 @@ async fn channel_backend_spawn_closed_channel() {
         parent_session_id: "parent".to_string(),
         parent_step_id: None,
         parent_prompt_id: None,
+        parent_prompt_owner: None,
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),
@@ -391,10 +393,11 @@ async fn channel_backend_inspect_returns_history_terminal_before_runtime_wait_en
 async fn channel_backend_query_and_inspect_race_silent_runtime_with_durable_terminal() {
     for inspect in [false, true] {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let backend = ChannelBackend::for_session(tx, "parent").with_history_query(|id| async move {
-            tokio::task::yield_now().await;
-            Ok(Some(durable_inspection(id)))
-        });
+        let backend =
+            ChannelBackend::for_session(tx, "parent").with_history_query(|id| async move {
+                tokio::task::yield_now().await;
+                Ok(Some(durable_inspection(id)))
+            });
         let runtime = tokio::spawn(async move {
             let event = rx.recv().await.unwrap();
             match event {
@@ -666,6 +669,7 @@ async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
             parent_session_id: "parent".to_string(),
             parent_step_id: None,
             parent_prompt_id: None,
+            parent_prompt_owner: None,
             resume_from: None,
             cwd: None,
             runtime_overrides: Default::default(),
@@ -723,6 +727,7 @@ async fn channel_backend_spawn_result_dropped() {
         parent_session_id: "parent".to_string(),
         parent_step_id: None,
         parent_prompt_id: None,
+        parent_prompt_owner: None,
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),

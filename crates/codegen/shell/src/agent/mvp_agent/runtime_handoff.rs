@@ -34,7 +34,9 @@ impl CanonicalChildFacts {
     }
 
     fn from_validated_timeline(timeline: &chat_state::Timeline) -> Result<Self, String> {
-        let events = timeline.runtime_subagent_events().map_err(|error| error.to_string())?;
+        let events = timeline
+            .runtime_subagent_events()
+            .map_err(|error| error.to_string())?;
         Self::scan(&events)
     }
 
@@ -356,7 +358,9 @@ impl MvpAgent {
     ) -> Result<bool, String> {
         let facts = wait_before(
             deadline,
-            root_handle.chat_state_handle.subagent_operation(task_id.to_owned()),
+            root_handle
+                .chat_state_handle
+                .subagent_operation(task_id.to_owned()),
         )
         .await
         .map_err(|_| "root Timeline query exceeded suspension deadline")?
@@ -365,16 +369,27 @@ impl MvpAgent {
             return Ok(false);
         };
         if terminal.result_ref.is_none() {
-            return Err(format!("ended child {task_id:?} has no canonical result reference"));
+            return Err(format!(
+                "ended child {task_id:?} has no canonical result reference"
+            ));
         }
         let operation = wait_before(deadline, async {
             crate::agent::subagent::durable_child_operation_from_validated_facts(
-                root_session_id, task_id, seq, &spawn, Some(&terminal),
+                root_session_id,
+                task_id,
+                seq,
+                &spawn,
+                Some(&terminal),
             )
-        }).await.map_err(|_| "child terminal verification exceeded suspension deadline")??;
+        })
+        .await
+        .map_err(|_| "child terminal verification exceeded suspension deadline")??;
         match operation {
             crate::agent::subagent::DurableChildOperation::Completed(result)
-                if result.child_session_id == spawn.child_session_id => Ok(true),
+                if result.child_session_id == spawn.child_session_id =>
+            {
+                Ok(true)
+            }
             _ => Err(format!("child {task_id:?} terminal could not be verified")),
         }
     }
@@ -446,9 +461,9 @@ impl MvpAgent {
             acp::Error::internal_error().data("suspended child's original root is missing")
         })?;
         let root = crate::session::storage::jsonl::JsonlStorageAdapter::new()
-                .observe_execution_timeline(&root_summary.info)
-                .await
-                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            .observe_execution_timeline(&root_summary.info)
+            .await
+            .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
         let root_runtime = root.runtime_lifecycle();
         let root_identity_matches = root_runtime.root_session_id.as_deref() == Some(&root_id)
             && root_runtime.operation_id == runtime.operation_id;
@@ -500,7 +515,10 @@ impl MvpAgent {
             .observe_execution_timeline(&handle.info)
             .await
             .map_err(|error| error.to_string())?;
-        Ok((timeline.runtime_lifecycle().clone(), CanonicalChildFacts::from_validated_timeline(&timeline)?))
+        Ok((
+            timeline.runtime_lifecycle().clone(),
+            CanonicalChildFacts::from_validated_timeline(&timeline)?,
+        ))
     }
 
     pub(super) async fn runtime_state_before(
@@ -674,12 +692,7 @@ impl MvpAgent {
             .map(|(task_id, _)| task_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
         let verified_terminal_task_ids = self
-            .verify_ended_children(
-                root.0.as_ref(),
-                &facts,
-                &terminal_task_ids,
-                None,
-            )
+            .verify_ended_children(root.0.as_ref(), &facts, &terminal_task_ids, None)
             .await?;
         let open = facts
             .open()
@@ -733,12 +746,15 @@ impl MvpAgent {
                 cwd: spawn.child_cwd.clone(),
             };
             let child_runtime = match self.control_session_handle(&info.id) {
-                Some(handle) if !handle.cmd_tx.is_closed() => handle.chat_state_handle.runtime_state().await?,
+                Some(handle) if !handle.cmd_tx.is_closed() => {
+                    handle.chat_state_handle.runtime_state().await?
+                }
                 _ => crate::session::storage::jsonl::JsonlStorageAdapter::new()
                     .observe_execution_timeline(&info)
                     .await
                     .map_err(|error| error.to_string())?
-                    .runtime_lifecycle().clone(),
+                    .runtime_lifecycle()
+                    .clone(),
             };
             let already_released = child_runtime.phase == RuntimePhase::Running
                 && child_runtime.resume_committed
@@ -777,6 +793,7 @@ impl MvpAgent {
                 parent_session_id: root.0.to_string(),
                 parent_step_id: spawn.parent_step_id.clone(),
                 parent_prompt_id: spawn.parent_prompt_id.clone(),
+                parent_prompt_owner: spawn.parent_prompt_owner.clone(),
                 resume_from: spawn.resumed_from.clone(),
                 cwd: Some(spawn.child_cwd.clone()),
                 runtime_overrides: recipe.runtime_overrides,
@@ -988,7 +1005,8 @@ impl MvpAgent {
                 ));
             }
             let info = claim_partial_child_writer(&storage, spawn)?;
-            let loaded = storage.observe_execution_timeline(&info)
+            let loaded = storage
+                .observe_execution_timeline(&info)
                 .await
                 .map_err(|error| {
                     format!(
@@ -1176,12 +1194,7 @@ impl MvpAgent {
         terminal_candidates.extend(frozen_ids.iter().cloned());
         terminal_candidates.extend(canonical.open().map(|(task_id, _)| task_id.clone()));
         let verified_terminal_ids = self
-            .verify_ended_children(
-                root.0.as_ref(),
-                &canonical,
-                &terminal_candidates,
-                deadline,
-            )
+            .verify_ended_children(root.0.as_ref(), &canonical, &terminal_candidates, deadline)
             .await?;
         let open = canonical
             .open()
@@ -1510,6 +1523,7 @@ mod tests {
             context_normalized: false,
             resumed_from: None,
             parent_prompt_id: None,
+            parent_prompt_owner: None,
             capability_mode: None,
             birth_mcp_servers: Some(Default::default()),
             permission_mode: None,

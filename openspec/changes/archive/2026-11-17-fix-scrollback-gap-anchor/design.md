@@ -1,0 +1,7 @@
+## Decision
+
+ScrollbackState继续独占布局与viewport锚点。capture/restore必须区分正文逻辑行内的sub-row与entry之后的gap偏移；前者在换宽后按该逻辑行extent夹紧，后者相对新entry末尾恢复，不能夹到正文。只处理现有布局定义的gap，不为任意无效offset或缺失entry新增旁路。表示可在原私有ScrollAnchor中补最小必要信息，不改变公共API/持久化schema。
+
+## Invariants and Review
+
+一行工具结果后追加不同组的真实tail，再prepare_layout(20,2)、scroll_offset=1，使gap在现有bottom clamp内可达；同几何capture/restore须保持1。单条目总高度等于viewport时不能滚达1，不为夹具修改该边界。补旧页仍锚到同EntryId之后的gap，换宽后gap随前一entry高度变化。正文中间行、折叠/选择和bottom clamp保持原语义。验收真实布局和历史前插路径，保留原多行内容锚点用例；不修改用量、历史cut或native提交事实。

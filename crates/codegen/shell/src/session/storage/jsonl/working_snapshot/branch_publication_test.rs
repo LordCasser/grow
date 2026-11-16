@@ -350,6 +350,22 @@ async fn rewound_prompt_reuse_preserves_the_discarded_identity_and_pages_the_new
     let shown = serde_json::to_string(&old).unwrap();
     assert!(shown.contains("selected user prompt"));
     assert!(!shown.contains("discarded user prompt"));
+    let mut after = history::PagePosition::oldest();
+    let mut forward = String::new();
+    loop {
+        let window = pages.read_after(&info.id, after).unwrap();
+        if window.rows.is_empty() {
+            break;
+        }
+        forward.push_str(&serde_json::to_string(&window.rows).unwrap());
+        match window.newer_position {
+            Some(next) => after = next,
+            None => break,
+        }
+    }
+    assert!(forward.contains("replacement user prompt"));
+    assert!(forward.contains("selected user prompt"));
+    assert!(!forward.contains("discarded user prompt"));
     assert!(
         recovered
             .timeline

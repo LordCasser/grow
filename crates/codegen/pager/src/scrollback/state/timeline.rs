@@ -235,18 +235,20 @@ mod tests {
         state.prepare_layout(80, viewport_height);
         let area = ratatui::layout::Rect::new(0, 0, 80, viewport_height);
         let vp = RailViewport {
-            active: state.active_turn_for_viewport(),
-            up_target: state.turn_above_viewport_top(),
-            down_target: state.turn_below_viewport_top(),
+            active: state.active_turn_for_viewport().map(|turn| turn as u64),
+            up_target: state.turn_above_viewport_top().map(|turn| turn as u64),
+            down_target: state.turn_below_viewport_top().map(|turn| turn as u64),
             at_bottom: !state.has_content_below(),
+            down_returns_live: false,
         };
-        let rail = compute_rail(area, 78, state.turn_count(), vp).expect("rail eligible");
+        let rail = compute_rail(area, 78, state.turn_count() as u64, vp).expect("rail eligible");
         let hit = if up {
             TimelineHit::Up
         } else {
             TimelineHit::Down
         };
         let target = chevron_target(&rail, hit)?;
+        let target = usize::try_from(target).expect("turn ordinal fits");
         state.jump_to_turn(target);
         Some(target)
     }

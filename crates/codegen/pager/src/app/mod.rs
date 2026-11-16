@@ -1420,6 +1420,13 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
             let _ = execute!(stderr, cursor::Show, LeaveAlternateScreen);
         });
     } else {
+        // Minimal history can owe a Leave even when quit skips the final draw.
+        // Flush it before restoring the native viewport's cursor.
+        if mode.is_minimal() {
+            shell::util::with_locked_stderr(|stderr| {
+                let _ = crate::minimal_history::leave_history_alt_screen_for_teardown(stderr);
+            });
+        }
         let rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24);
         let last = rows.saturating_sub(1);
         let target = inline_cursor_row.unwrap_or(last).min(last);

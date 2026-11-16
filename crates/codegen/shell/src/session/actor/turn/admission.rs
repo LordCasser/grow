@@ -501,36 +501,62 @@ impl SessionActor {
                     sampling_deadline_ms: None,
                     operations: Vec::new(),
                 });
-            if origin.is_synthetic() && !matches!(origin, super::super::PromptOrigin::HostCommand) {
-                let Some(turn) = self.events.current_turn() else {
-                    return Err(crate::session::commands::fatal_turn_boundary_error(
-                        "start",
-                        "synthetic prompt hook has no durable Turn cause",
-                    ));
-                };
-                let cause = if let [notification_id] = notification_ids.as_slice() {
-                    chat_state::HookCause::Notification {
-                        notification_id: notification_id.clone(),
-                    }
-                } else {
-                    chat_state::HookCause::Turn { turn }
-                };
-                let envelope = self.make_hook_envelope(
-                    ::hooks::event::HookEventName::UserPromptSubmit,
-                    Some(prompt_id.to_string()),
-                    ::hooks::event::HookPayload::UserPromptSubmit {
-                        prompt: Some(original_prompt_text.clone()),
-                    },
-                );
-                if let Err(error) = self
-                    .dispatch_prompt_hook(cause, envelope, ::hooks::event::GateKind::Observe)
-                    .await
-                {
-                    return Err(crate::session::commands::fatal_turn_boundary_error(
-                        "start",
-                        format!("synthetic prompt hook lifecycle was not durable: {error}"),
-                    ));
+        }
+        // The stable usage owner becomes available only once the durable turn
+        // identity is established: after the TurnStarted ACK for a new turn, or
+        // on the already-validated restored cursor and ledger for a resume.
+        // Refresh the TaskTool capture before any hook, model or tool can
+        // sample so children admitted by this turn carry its real owner. A
+        // restored turn keeps its original TurnId; when the restored ledger
+        // cannot prove an owner yet this stays `None` instead of guessing.
+        {
+            let bridge = self.agent.borrow().tool_bridge().clone();
+            let prompt_owner = self
+                .chat_state_handle
+                .current_usage_prompt_owner()
+                .await
+                .filter(|(_, owner)| owner.prompt_id == prompt_id)
+                .map(|(_, owner)| owner);
+            bridge
+                .update_resource(
+                    tools::implementations::grow_build::task::types::CurrentUsagePromptOwnerResource(
+                        prompt_owner,
+                    ),
+                )
+                .await;
+        }
+        if restored_turn.is_none()
+            && origin.is_synthetic()
+            && !matches!(origin, super::super::PromptOrigin::HostCommand)
+        {
+            let Some(turn) = self.events.current_turn() else {
+                return Err(crate::session::commands::fatal_turn_boundary_error(
+                    "start",
+                    "synthetic prompt hook has no durable Turn cause",
+                ));
+            };
+            let cause = if let [notification_id] = notification_ids.as_slice() {
+                chat_state::HookCause::Notification {
+                    notification_id: notification_id.clone(),
                 }
+            } else {
+                chat_state::HookCause::Turn { turn }
+            };
+            let envelope = self.make_hook_envelope(
+                ::hooks::event::HookEventName::UserPromptSubmit,
+                Some(prompt_id.to_string()),
+                ::hooks::event::HookPayload::UserPromptSubmit {
+                    prompt: Some(original_prompt_text.clone()),
+                },
+            );
+            if let Err(error) = self
+                .dispatch_prompt_hook(cause, envelope, ::hooks::event::GateKind::Observe)
+                .await
+            {
+                return Err(crate::session::commands::fatal_turn_boundary_error(
+                    "start",
+                    format!("synthetic prompt hook lifecycle was not durable: {error}"),
+                ));
             }
         }
         self.current_turn_number.set(turn_number);

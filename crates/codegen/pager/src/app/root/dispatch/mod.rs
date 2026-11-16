@@ -41,7 +41,14 @@ pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
 pub(crate) use queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip};
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
-pub(crate) use router::dispatch;
+pub(crate) fn dispatch(
+    action: crate::app::actions::Action,
+    app: &mut crate::app::root::AppView,
+) -> Vec<crate::app::actions::Effect> {
+    let mut effects = router::dispatch(action, app);
+    effects.extend(crate::app::agent_view::ensure_visible_history_timeline(app));
+    effects
+}
 pub(crate) use session::load::reconcile_controls_after_reconnect;
 pub(crate) use settings::ui::refresh_open_settings_modals;
 pub(crate) use status::commit_minimal_update_notice;

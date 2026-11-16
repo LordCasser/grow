@@ -17,9 +17,10 @@ then `P` opens the Permission picker.
 
 ## Plan mode
 
-For bigger or more ambiguous tasks, use **plan mode**: Grow explores the
-codebase read-only, designs an approach, and presents a plan you approve
-*before* any code is written.
+For bigger or more ambiguous tasks, use **plan mode**: Grow investigates with
+the same tool permissions as other work, designs an approach, and presents a
+plan you approve *before* the product change is implemented. Allowing a
+command is not the same as approving the plan.
 
 - **`Ctrl+X`, then `B`** opens the Behavior picker; select **Plan**.
 - **`Ctrl+X`, then `P`** opens the independent Permission picker.

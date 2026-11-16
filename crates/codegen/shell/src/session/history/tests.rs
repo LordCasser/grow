@@ -1054,3 +1054,212 @@ fn history_restores_distinct_command_terminals_across_suspensions() {
         "existing completion must be emitted once"
     );
 }
+
+fn cursor_for(record: u64, part: u64) -> serde_json::Value {
+    serde_json::json!({
+        "version": super::PROJECTOR_VERSION,
+        "session": "window",
+        "cut": 9,
+        "hash": "cut",
+        "record": record,
+        "part": part,
+        "complete": true,
+    })
+    .to_string()
+    .into()
+}
+
+fn text_row(record: u64, event: u64, item: u64, text: &str) -> SessionUpdate {
+    let mut update = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+        acp::SessionId::new("window"),
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new(text),
+        ))),
+    )));
+    let SessionUpdate::Acp(notification) = &mut update else {
+        unreachable!()
+    };
+    let meta = notification.meta.get_or_insert_with(acp::Meta::new);
+    meta.insert("grow/historyMessageEvent".into(), event.into());
+    meta.insert("grow/historyMessageItem".into(), item.into());
+    meta.insert(super::HISTORY_CURSOR_KEY.into(), cursor_for(record, 0));
+    update
+}
+
+fn row_text(row: &super::HistoryRow) -> String {
+    let SessionUpdate::Acp(notification) = &row.update else {
+        panic!("expected text row")
+    };
+    let acp::SessionUpdate::AgentMessageChunk(chunk) = &notification.update else {
+        panic!("expected assistant text")
+    };
+    let acp::ContentBlock::Text(text) = &chunk.content else {
+        panic!("expected text")
+    };
+    text.text.clone()
+}
+
+#[test]
+fn prepared_windows_page_by_source_and_round_trip_without_rereading() {
+    use super::{HistoryEntity, PagePosition, PreparedHistory};
+
+    let updates = (0..300)
+        .map(|index| text_row(index, 10, index, &format!("row-{index}")))
+        .collect::<Vec<_>>();
+    let pages = PreparedHistory {
+        updates,
+        mark_replay: false,
+    }
+    .into_pages()
+    .unwrap();
+    let mut after = PagePosition::oldest();
+    let mut forward = Vec::new();
+    let mut page_count = 0;
+    loop {
+        let window = pages.read_after(after).unwrap();
+        assert!(window.rows.len() <= super::HISTORY_PAGE_ROWS);
+        assert!(serde_json::to_vec(&window.rows).unwrap().len() <= super::HISTORY_PAGE_BYTES);
+        if window.rows.is_empty() {
+            assert!(window.range.is_none());
+            assert!(window.newer_position.is_none());
+            break;
+        }
+        let range = window.range.unwrap();
+        assert_eq!(range.start, window.rows.first().unwrap().source);
+        assert_eq!(range.end, window.rows.last().unwrap().source);
+        page_count += 1;
+        forward.extend(window.rows);
+        match window.newer_position {
+            Some(next) => after = next,
+            None => break,
+        }
+    }
+    assert!(page_count > 1);
+    assert_eq!(forward.len(), 300);
+    let tail = pages.read_before(PagePosition::newest()).unwrap();
+    let older = tail.older_position.expect("older rows exist");
+    let previous = pages.read_before(older).unwrap();
+    let revisited = pages.read_after(previous.newer_position.unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&revisited.rows).unwrap(),
+        serde_json::to_value(&tail.rows).unwrap()
+    );
+    assert!(
+        pages
+            .read_before(PagePosition::oldest())
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(
+        pages
+            .read_after(PagePosition::newest())
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(forward.iter().all(|row| matches!(
+        &row.entity,
+        Some(HistoryEntity::Message { event_seq: 10, .. })
+    )));
+    assert!(forward.iter().all(|row| row.fragment.is_none()));
+}
+
+#[test]
+fn prepared_utf8_windows_split_inherited_text_without_request_id() {
+    use super::{HistoryEntity, HistoryFragmentCoordinate, PagePosition, PreparedHistory};
+
+    let original = "好\u{0001}\"".repeat(1_500_000);
+    let mut user = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+        acp::SessionId::new("window"),
+        acp::SessionUpdate::UserMessageChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("prompt"))).meta(
+                Some(
+                    serde_json::json!({"messageId": "user-1"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            ),
+        ),
+    )));
+    let SessionUpdate::Acp(notification) = &mut user else {
+        unreachable!()
+    };
+    notification
+        .meta
+        .get_or_insert_with(acp::Meta::new)
+        .insert(super::HISTORY_CURSOR_KEY.into(), cursor_for(0, 0));
+    let mut tool = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+        acp::SessionId::new("window"),
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new("tool-1", "Read").status(acp::ToolCallStatus::Completed),
+        ),
+    )));
+    let SessionUpdate::Acp(notification) = &mut tool else {
+        unreachable!()
+    };
+    notification
+        .meta
+        .get_or_insert_with(acp::Meta::new)
+        .insert(super::HISTORY_CURSOR_KEY.into(), cursor_for(2, 0));
+    let pages = PreparedHistory {
+        updates: vec![user, text_row(1, 4, 2, &original), tool],
+        mark_replay: false,
+    }
+    .into_pages()
+    .unwrap();
+    let mut after = PagePosition::oldest();
+    let mut parts = Vec::new();
+    let mut saw_user = false;
+    let mut saw_tool = false;
+    loop {
+        let position = after;
+        let window = pages.read_after(position).unwrap();
+        if window.rows.is_empty() {
+            break;
+        }
+        for row in &window.rows {
+            let serialized = serde_json::to_string(row).unwrap();
+            assert!(!serialized.contains("samplingRequestId"));
+            match &row.entity {
+                Some(HistoryEntity::UserMessage { message_id }) => {
+                    assert_eq!(message_id, "user-1");
+                    saw_user = true;
+                }
+                Some(HistoryEntity::Message {
+                    event_seq: 4,
+                    item_ordinal: 2,
+                }) => {
+                    let fragment = row.fragment.expect("split inherited text");
+                    assert_eq!(fragment.coordinate, HistoryFragmentCoordinate::Utf8Bytes);
+                    parts.push((fragment.start, fragment.end_exclusive, row_text(row)));
+                }
+                Some(HistoryEntity::Tool { tool_call_id }) => {
+                    assert_eq!(tool_call_id, "tool-1");
+                    saw_tool = true;
+                }
+                other => panic!("unexpected entity {other:?}"),
+            }
+        }
+        assert!(serde_json::to_vec(&window.rows).unwrap().len() <= super::HISTORY_PAGE_BYTES);
+        match window.newer_position {
+            Some(next) => {
+                assert_ne!(next, position);
+                after = next;
+            }
+            None => break,
+        }
+    }
+    assert!(saw_user && saw_tool);
+    assert!(parts.len() > 1);
+    let mut end = 0;
+    let mut text = String::new();
+    for (start, next, body) in parts {
+        assert_eq!(start, end);
+        assert_eq!(next, start + body.len() as u64);
+        text.push_str(&body);
+        end = next;
+    }
+    assert_eq!(text, original);
+}

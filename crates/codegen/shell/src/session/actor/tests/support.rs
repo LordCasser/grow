@@ -223,6 +223,64 @@ pub(crate) async fn seed_test_timeline(
 }
 
 #[cfg(test)]
+pub(crate) async fn start_test_turn(
+    actor: &SessionActor,
+    prompt_text: &str,
+) -> chat_state::UsagePromptOwner {
+    static NEXT_ACTIVE_TURN: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(20_000);
+    let prompt_index = actor.chat_state_handle.get_prompt_index().await;
+    let id =
+        chat_state::TurnId(NEXT_ACTIVE_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let owner = chat_state::UsagePromptOwner {
+        turn_id: id,
+        prompt_id: format!("test-prompt-{}", id.0),
+    };
+    actor
+        .chat_state_handle
+        .record_timeline_event(chat_state::TimelineEventKind::Turn(
+            chat_state::TurnEvent::Started {
+                id,
+                prompt_id: owner.prompt_id.clone(),
+                input_ids: Vec::new(),
+                identity: chat_state::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "test".into(),
+                input_message_count: 0,
+                prompt_index,
+                prompt_text: prompt_text.into(),
+                input_kind: chat_state::TurnInputKind::Prompt,
+                redirect_kind: None,
+            },
+        ));
+    owner
+}
+
+pub(crate) async fn end_test_turn(actor: &SessionActor, owner: &chat_state::UsagePromptOwner) {
+    actor
+        .chat_state_handle
+        .record_timeline_event(chat_state::TimelineEventKind::Turn(
+            chat_state::TurnEvent::Ended {
+                id: owner.turn_id,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: chat_state::TurnTerminal {
+                    source: chat_state::TurnTerminalSource::Host,
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            },
+        ));
+}
+
 pub(crate) async fn record_test_prompt(actor: &SessionActor, prompt_text: &str) {
     static NEXT_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10_000);
     let prompt_index = actor.chat_state_handle.get_prompt_index().await;

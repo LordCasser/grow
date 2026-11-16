@@ -442,7 +442,8 @@ impl CoordinationHandle {
             cancellation,
             admission,
             None,
-        ).await
+        )
+        .await
     }
 
     pub(crate) async fn ask_session_with_source(
@@ -492,7 +493,10 @@ impl CoordinationHandle {
             Arc::clone(record)
         } else {
             let mut may_have_dispatched = false;
-            if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id, source_timeline).await? {
+            if let Some(fact) = self
+                .durable_inquiry(inquiry_id, source_session_id, source_timeline)
+                .await?
+            {
                 let (target, original_question, outcome) = match fact {
                     super::InquiryEvent::OutgoingStarted {
                         target_session_id,
@@ -699,7 +703,8 @@ impl CoordinationHandle {
         inquiry_id: &str,
         source_session_id: &str,
     ) -> Result<InquiryState, CoordinationError> {
-        self.get_inquiry_with_source(inquiry_id, source_session_id, None).await
+        self.get_inquiry_with_source(inquiry_id, source_session_id, None)
+            .await
     }
 
     pub(crate) async fn get_inquiry_with_source(
@@ -772,9 +777,12 @@ impl CoordinationHandle {
         source_timeline: Option<&chat_state::ChatStateHandle>,
     ) -> Result<Option<super::InquiryEvent>, CoordinationError> {
         if let Some(timeline) = source_timeline {
-            let events = timeline.outgoing_inquiry_events(id.to_owned()).await.map_err(|error| {
-                CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
-            })?;
+            let events = timeline
+                .outgoing_inquiry_events(id.to_owned())
+                .await
+                .map_err(|error| {
+                    CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
+                })?;
             return Self::resolve_durable_inquiry(id, &events);
         }
         let id = id.to_owned();
@@ -805,10 +813,9 @@ impl CoordinationHandle {
     ) -> Result<Option<super::InquiryEvent>, CoordinationError> {
         let mut found = None;
         for event in events {
-            let fact =
-                super::inquiry::InquiryEvent::from_timeline(event).map_err(|error| {
-                    CoordinationError::new(CoordinationErrorCode::AuditFailure, error)
-                })?;
+            let fact = super::inquiry::InquiryEvent::from_timeline(event).map_err(|error| {
+                CoordinationError::new(CoordinationErrorCode::AuditFailure, error)
+            })?;
             match fact {
                 Some(super::InquiryEvent::OutgoingStarted {
                     inquiry_id,
@@ -837,8 +844,7 @@ impl CoordinationHandle {
                             "inquiry completion conflicts with its first durable request",
                         ));
                     }
-                    if !matches!(found, Some(super::InquiryEvent::OutgoingCompleted { .. }))
-                    {
+                    if !matches!(found, Some(super::InquiryEvent::OutgoingCompleted { .. })) {
                         found = Some(super::InquiryEvent::OutgoingCompleted { audit });
                     }
                 }
@@ -854,7 +860,8 @@ impl CoordinationHandle {
         source_session_id: &str,
         target_session_id: &str,
     ) -> Result<bool, CoordinationError> {
-        self.cancel_session_with_source(inquiry_id, source_session_id, target_session_id, None).await
+        self.cancel_session_with_source(inquiry_id, source_session_id, target_session_id, None)
+            .await
     }
 
     pub(crate) async fn cancel_session_with_source(
@@ -887,7 +894,10 @@ impl CoordinationHandle {
                 return Ok(true);
             }
         }
-        if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id, source_timeline).await? {
+        if let Some(fact) = self
+            .durable_inquiry(inquiry_id, source_session_id, source_timeline)
+            .await?
+        {
             let target = match &fact {
                 super::InquiryEvent::OutgoingStarted {
                     target_session_id, ..

@@ -23,7 +23,9 @@ pub use coordinator_state::{cap_completion_output, completion_summary};
 pub mod types;
 
 use self::backend::SubagentBackendResource;
-use self::types::{CurrentPromptIdResource, CurrentSubagentOwnerResource};
+use self::types::{
+    CurrentPromptIdResource, CurrentSubagentOwnerResource, CurrentUsagePromptOwnerResource,
+};
 
 use self::types::*;
 use crate::types::output::ToolOutput;
@@ -165,6 +167,7 @@ impl tool_runtime::Tool for TaskTool {
             model_validator,
             parent_session_id,
             parent_prompt_id,
+            parent_prompt_owner,
             owner,
             inherited_goal_context,
             goal_turn_snapshot,
@@ -197,6 +200,18 @@ impl tool_runtime::Tool for TaskTool {
                 .get::<CurrentPromptIdResource>()
                 .map(|p| p.0.clone())
                 .filter(|prompt_id| !prompt_id.is_empty());
+            let parent_prompt_owner = match res.get::<CurrentUsagePromptOwnerResource>() {
+                Some(resource) => resource.0.clone(),
+                None => {
+                    if parent_prompt_id.is_some() {
+                        tracing::warn!(
+                            "TaskTool prompt scoping has no captured usage prompt owner; \
+                             child usage will stay session-only"
+                        );
+                    }
+                    None
+                }
+            };
             let owner = res
                 .get::<CurrentSubagentOwnerResource>()
                 .map(|owner| owner.0.clone())
@@ -219,6 +234,7 @@ impl tool_runtime::Tool for TaskTool {
                 model_validator,
                 parent_session_id,
                 parent_prompt_id,
+                parent_prompt_owner,
                 owner,
                 inherited_goal_context,
                 goal_turn_snapshot,
@@ -469,6 +485,7 @@ impl tool_runtime::Tool for TaskTool {
             parent_session_id,
             parent_step_id: Some(input.parent_step_id.clone()),
             parent_prompt_id,
+            parent_prompt_owner,
             resume_from,
             cwd,
             runtime_overrides: SubagentRuntimeOverrides {

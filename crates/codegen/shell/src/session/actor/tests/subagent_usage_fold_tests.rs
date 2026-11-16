@@ -21,6 +21,15 @@ fn usage_rows() -> Vec<(String, chat_state::UsageTotals)> {
     )]
 }
 
+/// A settlement stamp that never matches the live prompt owner: proves
+/// attribution is bound to the captured Turn, not to a reused prompt id.
+fn next_owner_stale(_live: &chat_state::UsagePromptOwner) -> chat_state::UsagePromptOwner {
+    chat_state::UsagePromptOwner {
+        turn_id: chat_state::TurnId(424_242),
+        prompt_id: "stale-prompt-id".into(),
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn subagent_usage_fold_attribution_gate() {
     tokio::task::LocalSet::new()
@@ -28,10 +37,11 @@ async fn subagent_usage_fold_attribution_gate() {
             let actor = make_actor().await;
             let usage = usage_rows();
 
-            *actor.current_prompt_id.lock().unwrap() = Some("p-1".into());
+            let owner = start_test_turn(&actor, "first prompt").await;
+            *actor.current_prompt_id.lock().unwrap() = Some(owner.prompt_id.clone());
             assert_eq!(
                 actor
-                    .record_subagent_usage("sub-1", &usage, Some("p-1"), false)
+                    .record_subagent_usage("sub-1", &usage, Some(owner.clone()), false)
                     .await,
                 Ok(super::updates::SubagentUsageApply::AttributedToPrompt)
             );
@@ -47,13 +57,10 @@ async fn subagent_usage_fold_attribution_gate() {
                 40
             );
 
-            super::support::record_test_prompt(&actor, "next prompt").await;
-            for (child, live, stamped) in [
-                ("sub-2", Some("p-2"), Some("p-1")),
-                ("sub-3", Some("p-1"), None),
-                ("sub-4", None, Some("p-1")),
-            ] {
-                *actor.current_prompt_id.lock().unwrap() = live.map(str::to_string);
+            end_test_turn(&actor, &owner).await;
+            let next_owner = start_test_turn(&actor, "next prompt").await;
+            for (child, stamped) in [("sub-2", Some(next_owner_stale(&owner))), ("sub-3", None)] {
+                *actor.current_prompt_id.lock().unwrap() = Some(next_owner.prompt_id.clone());
                 // Session-only: ledger apply ok, not attributed to live prompt.
                 assert_eq!(
                     actor
@@ -71,11 +78,21 @@ async fn subagent_usage_fold_attribution_gate() {
                         .is_none()
                 );
             }
+            // Live owner becomes unavailable once the turn ends; an old stamp
+            // must stay session-only instead of binding the ended turn.
+            end_test_turn(&actor, &next_owner).await;
+            *actor.current_prompt_id.lock().unwrap() = None;
+            assert_eq!(
+                actor
+                    .record_subagent_usage("sub-4", &usage, Some(next_owner_stale(&owner)), false)
+                    .await,
+                Ok(super::updates::SubagentUsageApply::SessionOnly)
+            );
             // A repeated terminal receipt is idempotent even after the live
             // prompt changes; it must not add another child's worth of usage.
             assert_eq!(
                 actor
-                    .record_subagent_usage("sub-1", &usage, Some("p-1"), false)
+                    .record_subagent_usage("sub-1", &usage, Some(owner), false)
                     .await,
                 Ok(super::updates::SubagentUsageApply::SessionOnly)
             );
@@ -208,11 +225,12 @@ async fn nested_incomplete_fold_marks_parent_ledger() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let actor = make_actor().await;
-            *actor.current_prompt_id.lock().unwrap() = Some("p-1".into());
+            let owner = start_test_turn(&actor, "live incomplete").await;
+            *actor.current_prompt_id.lock().unwrap() = Some(owner.prompt_id.clone());
             let usage = usage_rows();
             assert_eq!(
                 actor
-                    .record_subagent_usage("sub-1", &usage, Some("p-1"), true)
+                    .record_subagent_usage("sub-1", &usage, Some(owner), true)
                     .await,
                 Ok(super::updates::SubagentUsageApply::AttributedToPrompt)
             );
@@ -310,7 +328,8 @@ async fn session_only_incomplete_does_not_stain_live_open_prompt() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let actor = make_actor().await;
-            *actor.current_prompt_id.lock().unwrap() = Some("p-live".into());
+            let owner = start_test_turn(&actor, "live open prompt").await;
+            *actor.current_prompt_id.lock().unwrap() = Some(owner.prompt_id.clone());
             // Open a live prompt ledger via a main-loop call.
             actor.chat_state_handle.record_model_call_usage(
                 Some("m".into()),
@@ -328,10 +347,10 @@ async fn session_only_incomplete_does_not_stain_live_open_prompt() {
                 None,
             );
             let usage = usage_rows();
-            // Stamped pin ≠ live pin → session-only.
+            // Stamped owner ≠ live owner → session-only.
             assert_eq!(
                 actor
-                    .record_subagent_usage("sub-1", &usage, Some("p-stamped"), true)
+                    .record_subagent_usage("sub-1", &usage, Some(next_owner_stale(&owner)), true)
                     .await,
                 Ok(super::updates::SubagentUsageApply::SessionOnly)
             );
@@ -363,11 +382,12 @@ async fn snapshot_ors_ledger_incomplete_even_when_reply_complete() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let actor = make_actor().await;
-            *actor.current_prompt_id.lock().unwrap() = Some("p-1".into());
+            let owner = start_test_turn(&actor, "live incomplete").await;
+            *actor.current_prompt_id.lock().unwrap() = Some(owner.prompt_id.clone());
             let usage = usage_rows();
             assert_eq!(
                 actor
-                    .record_subagent_usage("sub-1", &usage, Some("p-1"), true)
+                    .record_subagent_usage("sub-1", &usage, Some(owner), true)
                     .await,
                 Ok(super::updates::SubagentUsageApply::AttributedToPrompt)
             );
@@ -375,6 +395,277 @@ async fn snapshot_ors_ledger_incomplete_even_when_reply_complete() {
             let snap = actor.snapshot_prompt_usage_marked(false).await.unwrap();
             assert!(snap.usage_is_incomplete);
             assert_eq!(snap.totals.input_tokens, 40);
+        })
+        .await;
+}
+
+/// Restoring an already-billed suspended Turn must not need another sampling
+/// request before Shell can freeze its complete result usage.
+#[tokio::test(flavor = "current_thread")]
+async fn restored_turn_freezes_main_aux_and_child_without_new_sampling() {
+    use crate::extensions::notification::SessionUpdate;
+    use chat_state::session_runtime::{SessionRuntimeEvent, TurnContinuation, TurnResumePoint};
+    use chat_state::{TimelineEventKind, UsageAgent};
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut actor = make_actor().await;
+            let prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            let owner = start_test_turn(&actor, "suspend after all bills settled").await;
+            let token_usage = |input, output| sampling_types::TokenUsage {
+                prompt_tokens: input,
+                completion_tokens: output,
+                total_tokens: input + output,
+                ..Default::default()
+            };
+            // Only the first bill belongs to this Turn. Explicit session-only
+            // and stale-owner bills must survive in lifetime, outside its result.
+            for (attempt, bill_owner, input, output) in [
+                ("main-current", Some(owner.clone()), 50, 5),
+                ("main-session-only", None, 500, 50),
+            ] {
+                actor
+                    .chat_state_handle
+                    .settle_model_attempt_usage(
+                        attempt.into(),
+                        prompt_index,
+                        bill_owner,
+                        "main-model".into(),
+                        Some(token_usage(input, output)),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            for (bill_owner, input, output) in [(Some(owner.clone()), 20, 2), (None, 70, 7)] {
+                let sideband_id = uuid::Uuid::now_v7().to_string();
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(TimelineEventKind::Sideband(
+                        chat_state::SidebandSpawnEvent {
+                            sideband_id: sideband_id.clone(),
+                            purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                            source_refs: Vec::new(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .begin_auxiliary_attempt_usage(
+                        sideband_id.clone(),
+                        1,
+                        "aux-model".into(),
+                        bill_owner.as_ref().map(|_| prompt_index),
+                        bill_owner,
+                    )
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .settle_auxiliary_attempt_usage(
+                        sideband_id,
+                        1,
+                        Some(token_usage(input, output)),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            for (child, bill_owner, input) in [
+                ("child-current", owner.clone(), 30),
+                ("child-stale", next_owner_stale(&owner), 400),
+            ] {
+                actor
+                    .chat_state_handle
+                    .record_subagent_usage(
+                        child.into(),
+                        vec![(
+                            "child-model".into(),
+                            chat_state::UsageTotals {
+                                input_tokens: input,
+                                output_tokens: 3,
+                                model_calls: 1,
+                                cost_missing_calls: 1,
+                                ..Default::default()
+                            },
+                        )],
+                        Some(bill_owner),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let operation_id = "suspend-before-shell-freeze".to_string();
+            for runtime_event in [
+                SessionRuntimeEvent::SuspendRequested {
+                    operation_id: operation_id.clone(),
+                    root_session_id: actor.session_id_string(),
+                },
+                SessionRuntimeEvent::CommandsSettled {
+                    operation_id: operation_id.clone(),
+                    commands: Vec::new(),
+                },
+            ] {
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(TimelineEventKind::Runtime(runtime_event))
+                    .await
+                    .unwrap();
+            }
+            actor
+                .chat_state_handle
+                .checkpoint_runtime(
+                    operation_id,
+                    "b".repeat(64),
+                    Some(TurnContinuation {
+                        turn_id: owner.turn_id,
+                        prompt_id: owner.prompt_id.clone(),
+                        prompt_index,
+                        origin: "user".into(),
+                        next_step_index: 0,
+                        tool_turns_used: 0,
+                        tool_calls_used: 0,
+                        stop_continuations_used: 0,
+                        output_schema: None,
+                        resume_point: TurnResumePoint::Model,
+                        task_output_usage: None,
+                        accepted_response: None,
+                        structured_output_retries: 0,
+                        sampling_attempts_used: 0,
+                        sampling_max_attempts: Some(3),
+                        sampling_replay_safe: true,
+                        sampling_deadline_ms: None,
+                        operations: Vec::new(),
+                    }),
+                    None,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                )
+                .await
+                .unwrap();
+            let lifetime = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .unwrap();
+            assert_eq!(
+                lifetime.totals.total_tokens(),
+                55 + 550 + 22 + 77 + 33 + 403
+            );
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let suspended_facts = serde_json::to_value(&events).unwrap();
+            let config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let (persistence, _persistence_rx) =
+                chat_state::persistence::MockTimelinePersistence::new();
+            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let cancellation_token = tokio_util::sync::CancellationToken::new();
+            let restored = chat_state::ChatStateActor::spawn_from_validated_timeline(
+                chat_state::Timeline::from_events(events).unwrap(),
+                config,
+                None,
+                Box::new(persistence),
+                event_tx,
+                cancellation_token.clone(),
+            )
+            .await
+            .unwrap();
+            actor.chat_state_handle = restored;
+            *actor.current_prompt_id.lock().unwrap() = Some(owner.prompt_id.clone());
+            actor.tool_context.subagent_event_tx =
+                Some(scripted_outstanding_responder(vec![Default::default()]));
+
+            assert!(
+                actor
+                    .chat_state_handle
+                    .get_last_turn_usage()
+                    .await
+                    .is_none()
+            );
+            let prompt = actor
+                .chat_state_handle
+                .try_get_prompt_usage()
+                .await
+                .unwrap()
+                .expect("the original suspended Turn retains its ledger");
+            assert_eq!(prompt.totals.total_tokens(), 110);
+            assert_eq!(prompt.by_agent[&UsageAgent::Owner].total_tokens(), 77);
+            assert_eq!(
+                prompt.by_agent[&UsageAgent::Subagent("child-current".into())].total_tokens(),
+                33
+            );
+            assert_eq!(prompt.by_agent.len(), 2, "stale child stays session-only");
+            assert_eq!(
+                prompt.main_loop_model_calls, 1,
+                "aux and child are not main rounds"
+            );
+            assert!(!prompt.incomplete);
+
+            // Exercise the real Shell drain -> finalize -> prompt-ledger
+            // projection, without recording any post-restore sampling or bill.
+            let usage = actor
+                .freeze_prompt_usage_bounded(
+                    &owner.prompt_id,
+                    std::time::Duration::from_millis(120),
+                )
+                .await
+                .expect("restored consumption attaches without a new model response");
+            assert_eq!(usage.totals.input_tokens, 100);
+            assert_eq!(usage.totals.output_tokens, 10);
+            assert_eq!(usage.totals.total_tokens, 110);
+            assert_eq!(usage.totals.model_calls, 3);
+            assert_eq!(usage.num_turns, 1);
+            assert!(!usage.usage_is_incomplete);
+            assert_eq!(usage.model_usage.len(), 3);
+            for (model, total) in [("main-model", 55), ("aux-model", 22), ("child-model", 33)] {
+                assert_eq!(usage.model_usage[model].total_tokens, total);
+                assert!(usage.model_usage[model].cost_usd_ticks.is_none());
+                assert!(!usage.model_usage[model].cost_is_partial);
+            }
+            assert!(
+                usage.totals.cost_usd_ticks.is_none(),
+                "unknown cost stays unknown"
+            );
+            assert!(!usage.totals.cost_is_partial);
+            assert!(
+                actor
+                    .chat_state_handle
+                    .get_last_turn_usage()
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .try_get_session_usage()
+                    .await
+                    .unwrap(),
+                lifetime,
+                "restoration and result freeze must not charge lifetime again"
+            );
+            assert_eq!(
+                serde_json::to_value(actor.chat_state_handle.timeline_events().await.unwrap())
+                    .unwrap(),
+                suspended_facts,
+                "no new Request, settlement, or other Timeline fact is needed for freeze"
+            );
+
+            let completed = SessionUpdate::TurnCompleted {
+                prompt_id: owner.prompt_id.clone(),
+                identity: None,
+                stop_reason: "cancelled".into(),
+                agent_result: None,
+                usage: Some(usage.clone()),
+            };
+            let wire = serde_json::to_value(&completed).unwrap();
+            assert_eq!(wire["sessionUpdate"], "turn_completed");
+            assert_eq!(wire["prompt_id"], owner.prompt_id);
+            assert_eq!(wire["usage"], serde_json::to_value(&usage).unwrap());
+            assert_eq!(wire["usage"]["totalTokens"], 110);
+            assert!(wire["usage"].get("costUsdTicks").is_none());
+            let roundtrip: SessionUpdate = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(roundtrip).unwrap(), wire);
         })
         .await;
 }
@@ -417,8 +708,14 @@ async fn freeze_timeout_marks_report_and_both_ledgers() {
                     subagent_usage_not_applied: false,
                 },
             ]));
+            // Production freezes run for an already-admitted Turn; the
+            // fail-closed prompt mark binds to that Turn's owner.
+            let owner = start_test_turn(&actor, "frozen prompt").await;
             let usage = actor
-                .freeze_prompt_usage_bounded("p-1", std::time::Duration::from_millis(120))
+                .freeze_prompt_usage_bounded(
+                    &owner.prompt_id,
+                    std::time::Duration::from_millis(120),
+                )
                 .await
                 .expect("incomplete usage always attaches");
             assert!(usage.usage_is_incomplete);
@@ -464,10 +761,16 @@ async fn freeze_held_outstanding_ack_fails_closed_at_deadline() {
                 }
             });
             actor.tool_context.subagent_event_tx = Some(tx);
+            // Production freezes run for an already-admitted Turn; the
+            // fail-closed prompt mark binds to that Turn's owner.
+            let owner = start_test_turn(&actor, "frozen prompt").await;
 
             let usage = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                actor.freeze_prompt_usage_bounded("p-1", std::time::Duration::from_millis(120)),
+                actor.freeze_prompt_usage_bounded(
+                    &owner.prompt_id,
+                    std::time::Duration::from_millis(120),
+                ),
             )
             .await
             .expect("held ACK must end at the freeze deadline")
@@ -517,10 +820,16 @@ async fn freeze_late_reply_fails_closed_at_deadline() {
                 }
             });
             actor.tool_context.subagent_event_tx = Some(tx);
+            // Production freezes run for an already-admitted Turn; the
+            // fail-closed prompt mark binds to that Turn's owner.
+            let owner = start_test_turn(&actor, "frozen prompt").await;
 
             let usage = tokio::time::timeout(
                 std::time::Duration::from_millis(300),
-                actor.freeze_prompt_usage_bounded("p-1", std::time::Duration::from_millis(120)),
+                actor.freeze_prompt_usage_bounded(
+                    &owner.prompt_id,
+                    std::time::Duration::from_millis(120),
+                ),
             )
             .await
             .expect("late reply must not hold the freeze past its deadline")
@@ -644,13 +953,57 @@ async fn finalize_background_only_flags_report_not_ledgers() {
         .await;
 }
 
-/// Pin-aware apply-miss: stamped pin ≠ live open prompt stains session only.
+/// Report-channel stub: acks `MarkUsageNotApplied` and echoes that sticky on
+/// the next `Outstanding` query, so freeze reads the same channel the
+/// coordinator would.
+fn capturing_usage_report() -> (
+    tokio::sync::mpsc::UnboundedSender<
+        tools::implementations::grow_build::task::types::SubagentEvent,
+    >,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use tools::implementations::grow_build::task::types::{
+        SubagentEvent, SubagentOutstandingReply,
+    };
+    let marks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = std::sync::Arc::clone(&marks);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_local(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                SubagentEvent::MarkUsageNotApplied(req) => {
+                    recorded.lock().unwrap().push(req.prompt_id);
+                    let _ = req.respond_to.send(());
+                }
+                SubagentEvent::Outstanding(req) => {
+                    let marked = recorded
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|id| id == &req.prompt_id);
+                    let _ = req.respond_to.send(SubagentOutstandingReply {
+                        live_ids: vec![],
+                        background_live: false,
+                        subagent_usage_not_applied: marked,
+                    });
+                }
+                _ => {}
+            }
+        }
+    });
+    (tx, marks)
+}
+
+/// Owner-aware apply-miss: stamped owner ≠ live owner stains session only.
 #[tokio::test(flavor = "current_thread")]
 async fn apply_miss_mismatched_pin_does_not_stain_live_prompt() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let actor = make_actor().await;
-            *actor.current_prompt_id.lock().unwrap() = Some("p-live".into());
+            let mut actor = make_actor().await;
+            let (tx, marks) = capturing_usage_report();
+            actor.tool_context.subagent_event_tx = Some(tx);
+            let owner = start_test_turn(&actor, "live open prompt").await;
+            *actor.current_prompt_id.lock().unwrap() = Some(owner.prompt_id.clone());
             actor.chat_state_handle.record_model_call_usage(
                 Some("m".into()),
                 sampling_types::TokenUsage {
@@ -666,7 +1019,34 @@ async fn apply_miss_mismatched_pin_does_not_stain_live_prompt() {
                 None,
                 None,
             );
-            assert!(actor.mark_apply_miss_incomplete(Some("p-stamped")).await);
+            let stale = next_owner_stale(&owner);
+            assert!(
+                actor
+                    .mark_apply_miss_incomplete(Some(&stale), Some("p-stamped"))
+                    .await
+            );
+            assert!(
+                actor.mark_apply_miss_incomplete(None, None).await,
+                "absent owner still lower-bounds the session lifetime"
+            );
+            assert!(
+                actor
+                    .mark_apply_miss_incomplete(None, Some(&owner.prompt_id))
+                    .await
+            );
+            assert!(
+                marks.lock().unwrap().is_empty(),
+                "stale and absent owners must not mark the live report pin"
+            );
+            let usage = actor
+                .freeze_prompt_usage_bounded(
+                    &owner.prompt_id,
+                    std::time::Duration::from_millis(120),
+                )
+                .await
+                .expect("billed prompt attaches");
+            assert!(!usage.usage_is_incomplete);
+            assert_eq!(usage.totals.input_tokens, 11);
             let live = actor
                 .chat_state_handle
                 .try_get_prompt_usage()
@@ -690,13 +1070,16 @@ async fn apply_miss_mismatched_pin_does_not_stain_live_prompt() {
         .await;
 }
 
-/// Pin-aware apply-miss: matching pin stains both ledgers.
+/// Owner-aware apply-miss: matching owner stains both ledgers and the report.
 #[tokio::test(flavor = "current_thread")]
 async fn apply_miss_matching_pin_stains_prompt_and_session() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let actor = make_actor().await;
-            *actor.current_prompt_id.lock().unwrap() = Some("p-1".into());
+            let mut actor = make_actor().await;
+            let (tx, marks) = capturing_usage_report();
+            actor.tool_context.subagent_event_tx = Some(tx);
+            let owner = start_test_turn(&actor, "live matched prompt").await;
+            *actor.current_prompt_id.lock().unwrap() = Some(owner.prompt_id.clone());
             actor.chat_state_handle.record_model_call_usage(
                 Some("m".into()),
                 sampling_types::TokenUsage {
@@ -712,7 +1095,31 @@ async fn apply_miss_matching_pin_stains_prompt_and_session() {
                 None,
                 None,
             );
-            assert!(actor.mark_apply_miss_incomplete(Some("p-1")).await);
+            assert!(
+                actor
+                    .mark_apply_miss_incomplete(Some(&owner), Some(&owner.prompt_id))
+                    .await
+            );
+            assert!(
+                actor
+                    .mark_apply_miss_incomplete(Some(&owner), Some("other-pin"))
+                    .await,
+                "ledger still lower-bounds when the report pin is refused"
+            );
+            assert_eq!(
+                marks.lock().unwrap().as_slice(),
+                [owner.prompt_id.as_str()],
+                "one sticky mark, and not the divergent pin"
+            );
+            let usage = actor
+                .freeze_prompt_usage_bounded(
+                    &owner.prompt_id,
+                    std::time::Duration::from_millis(120),
+                )
+                .await
+                .expect("billed prompt attaches");
+            assert!(usage.usage_is_incomplete);
+            assert_eq!(usage.totals.input_tokens, 3);
             assert!(
                 actor
                     .chat_state_handle
@@ -722,6 +1129,84 @@ async fn apply_miss_matching_pin_stains_prompt_and_session() {
                     .expect("prompt")
                     .incomplete
             );
+            assert!(
+                actor
+                    .chat_state_handle
+                    .try_get_session_usage()
+                    .await
+                    .unwrap()
+                    .incomplete
+            );
+        })
+        .await;
+}
+
+/// A reused client prompt id under a new Turn must not let the old Turn's
+/// failed fold stain the new live prompt ledger or its report sticky.
+#[tokio::test(flavor = "current_thread")]
+async fn apply_miss_with_reused_prompt_id_does_not_stain_new_turn() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut actor = make_actor().await;
+            let (tx, marks) = capturing_usage_report();
+            actor.tool_context.subagent_event_tx = Some(tx);
+            let first = start_test_turn(&actor, "first logical turn").await;
+            end_test_turn(&actor, &first).await;
+            let second = start_test_turn(&actor, "second logical turn").await;
+            *actor.current_prompt_id.lock().unwrap() = Some(second.prompt_id.clone());
+            actor.chat_state_handle.record_model_call_usage(
+                Some("m".into()),
+                sampling_types::TokenUsage {
+                    prompt_tokens: 5,
+                    completion_tokens: 1,
+                    total_tokens: 6,
+                    reasoning_tokens: 0,
+                    cached_prompt_tokens: 0,
+                    cache_read_known: true,
+                    cache_creation_prompt_tokens: 0,
+                    cache_write_known: true,
+                },
+                None,
+                None,
+            );
+            // Same prompt id text, different logical Turn: the stale stamp
+            // carries the first Turn's identity with the second's prompt id.
+            let stale = chat_state::UsagePromptOwner {
+                turn_id: first.turn_id,
+                prompt_id: second.prompt_id.clone(),
+            };
+            assert!(
+                actor
+                    .mark_apply_miss_incomplete(Some(&stale), Some(&stale.prompt_id))
+                    .await
+            );
+            assert!(
+                marks.lock().unwrap().is_empty(),
+                "old Turn must not mark the reused prompt id"
+            );
+            let usage = actor
+                .freeze_prompt_usage_bounded(
+                    &second.prompt_id,
+                    std::time::Duration::from_millis(120),
+                )
+                .await
+                .expect("billed prompt attaches");
+            assert!(
+                !usage.usage_is_incomplete,
+                "reused prompt id must stay a complete report"
+            );
+            assert_eq!(usage.totals.input_tokens, 5);
+            let live = actor
+                .chat_state_handle
+                .try_get_prompt_usage()
+                .await
+                .unwrap()
+                .expect("live prompt ledger");
+            assert!(
+                !live.incomplete,
+                "a reused prompt id must not stain the new Turn's ledger"
+            );
+            assert_eq!(live.totals.input_tokens, 5);
             assert!(
                 actor
                     .chat_state_handle

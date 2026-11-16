@@ -1,4 +1,6 @@
 //! Canonical, extensible tool types.
+mod usage;
+pub use usage::{TurnId, UsagePromptOwner};
 mod behavior;
 mod definition;
 mod ext;

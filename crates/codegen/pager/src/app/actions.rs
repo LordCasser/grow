@@ -1335,7 +1335,23 @@ pub enum Effect {
         session_id: acp::SessionId,
         binding_epoch: u32,
         request_id: u64,
-        cursor: String,
+        generation: u64,
+        cut: String,
+        query: shell::session::storage::HistoryPageQuery,
+    },
+    /// Read one page of the fixed-cut prompt catalog. Metadata only.
+    ReadHistoryTimeline {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        generation: u64,
+        cut: String,
+        limit: usize,
+        query: shell::session::storage::HistoryTimelineQuery,
+        /// Ordinal this response may jump to, if it is still the latest click.
+        jump_ordinal: Option<u64>,
+        jump_seq: u64,
     },
     /// Read and project the complete validated transcript for an export or
     /// external pager request when the resident scrollback is a page window.
@@ -2238,6 +2254,7 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         models: Option<shell::agent::models::SessionModelState>,
+        behavior: Option<shell::extensions::notification::BehaviorProjection>,
     },
     /// Session creation failed.
     SessionFailed {
@@ -2292,6 +2309,7 @@ pub enum TaskResult {
         /// Effective cwd inside the worktree (preserves subdirectory offset).
         session_cwd: std::path::PathBuf,
         models: Option<shell::agent::models::SessionModelState>,
+        behavior: Option<shell::extensions::notification::BehaviorProjection>,
     },
     /// Worktree created and session forked, but not yet loaded.
     /// The dispatch handler sets session_id eagerly, then emits LoadSession.
@@ -2320,9 +2338,9 @@ pub enum TaskResult {
         /// semantics from the id spelling.
         foreground: Option<prompt_queue::ForegroundSnapshot>,
         descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
-        /// Opaque branch/cut-bound continuation for the older display page.
-        older_history_cursor: Option<String>,
-        latest_history_cursor: Option<String>,
+        /// Opaque `grow/historyCut` token. It is not a paging cursor.
+        history_cut: Option<String>,
+        behavior: Option<shell::extensions::notification::BehaviorProjection>,
     },
     DescendantStateRestored {
         agent_id: AgentId,
@@ -2338,8 +2356,20 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         binding_epoch: u32,
         request_id: u64,
-        older_cursor: Option<String>,
-        result: Result<Vec<shell::session::storage::SessionUpdate>, String>,
+        generation: u64,
+        query: shell::session::storage::HistoryPageQuery,
+        result: Result<shell::session::storage::HistoryPageResponse, String>,
+    },
+    /// A fixed-cut catalog page. Caching is independent from a history jump.
+    HistoryTimelineLoaded {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        generation: u64,
+        jump_ordinal: Option<u64>,
+        jump_seq: u64,
+        result: Result<shell::session::storage::HistoryTimelineResponse, String>,
     },
     CompleteTranscriptBuilt {
         agent_id: AgentId,
@@ -2362,6 +2392,7 @@ pub enum TaskResult {
         generation: u64,
         result: Result<Option<crate::app::prompt_queue::ForegroundSnapshot>, String>,
         descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+        behavior: Option<shell::extensions::notification::BehaviorProjection>,
     },
     /// Local `summary.json` title read for [`Effect::HydrateSessionTitleFromDisk`].
     SessionTitleFromDisk {

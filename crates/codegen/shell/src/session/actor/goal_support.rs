@@ -891,9 +891,19 @@ impl SessionActor {
             .current_prompt_id
             .lock()
             .expect("current_prompt_id mutex poisoned") = Some(prompt_id.clone());
+        // A new turn's owner is not durable yet; clear the stale one so no
+        // child admission can capture the previous turn. The durable install
+        // happens after TurnStarted ACK in turn admission.
         bridge
             .update_resource(
                 tools::implementations::grow_build::task::types::CurrentPromptIdResource(prompt_id),
+            )
+            .await;
+        bridge
+            .update_resource(
+                tools::implementations::grow_build::task::types::CurrentUsagePromptOwnerResource(
+                    None,
+                ),
             )
             .await;
         bridge
@@ -1425,8 +1435,9 @@ impl SessionActor {
         }
         let revision = self
             .control_revision
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            .saturating_add(1);
+            .load(std::sync::atomic::Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("Control revision exhausted"))?;
         let agent_name = agent_name
             .map(str::to_owned)
             .unwrap_or_else(|| self.agent.borrow().definition().selector_identity());
@@ -1451,8 +1462,12 @@ impl SessionActor {
         self.chat_state_handle
             .record_control_event_durably(control, scope)
             .await
-            .map(|_| ())
-            .map_err(std::io::Error::other)
+            .map_err(std::io::Error::other)?;
+        // Runtime callers hold goal_transaction_gate; startup is serial before
+        // the actor is published. Readers must never see a reserved revision.
+        self.control_revision
+            .store(revision, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     pub(super) async fn commit_goal_mutation_or_restore(

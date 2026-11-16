@@ -91,6 +91,7 @@ pub(super) async fn record_subagent_usage(
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     subagent_id: String,
     by_model: Option<Vec<(String, chat_state::UsageTotals)>>,
+    prompt_owner: Option<chat_state::UsagePromptOwner>,
     parent_prompt_id: Option<String>,
     incomplete: bool,
 ) -> bool {
@@ -98,6 +99,7 @@ pub(super) async fn record_subagent_usage(
         parent_cmd_tx,
         subagent_id,
         by_model,
+        prompt_owner,
         parent_prompt_id,
         incomplete,
         None,
@@ -109,6 +111,7 @@ pub(super) async fn record_subagent_usage_before(
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     subagent_id: String,
     by_model: Option<Vec<(String, chat_state::UsageTotals)>>,
+    prompt_owner: Option<chat_state::UsagePromptOwner>,
     parent_prompt_id: Option<String>,
     incomplete: bool,
     deadline: Option<tokio::time::Instant>,
@@ -125,6 +128,7 @@ pub(super) async fn record_subagent_usage_before(
                 .send(SessionCommand::RecordSubagentUsage {
                     subagent_id,
                     by_model,
+                    prompt_owner,
                     parent_prompt_id,
                     incomplete,
                     deadline,
@@ -421,12 +425,19 @@ async fn run_shell_child_inner(
                 completion_data,
             );
         }
-        match session::persistence::load_light_for_replay(&info, Some(gateway.clone()), true, true).await {
+        match session::persistence::load_light_for_replay(&info, Some(gateway.clone()), true, true)
+            .await
+        {
             Ok((loaded, persistence)) => {
                 if let Err(error) = loaded.timeline.validate_subagent_seed_link(
-                    &ctx.parent_session_id, spawn_seq, &spawn,
+                    &ctx.parent_session_id,
+                    spawn_seq,
+                    &spawn,
                 ) {
-                    return child_run_output(failure_result(&request, &error.to_string()), completion_data);
+                    return child_run_output(
+                        failure_result(&request, &error.to_string()),
+                        completion_data,
+                    );
                 }
                 let runtime = loaded.timeline.runtime_lifecycle();
                 if !matches!(
@@ -674,7 +685,9 @@ async fn run_shell_child_inner(
     {
         return child_run_output(failure_result(&request, &error), completion_data);
     }
-    let (worktree_path, worktree_materialization) = if let Some((_, spawn)) = restored_spawn.as_ref() {
+    let (worktree_path, worktree_materialization) = if let Some((_, spawn)) =
+        restored_spawn.as_ref()
+    {
         (spawn.worktree_path.as_ref().map(PathBuf::from), None)
     } else if let Some(ref source) = resume_source {
         if effective_runtime.isolation != tool_types::SubagentIsolationMode::None
@@ -1053,22 +1066,22 @@ async fn run_shell_child_inner(
         return child_run_output(failure_result(&request, &message), completion_data);
     }
     if let Some((loaded, persistence)) = restored_persistence.as_mut() {
-        let selection = match session::persistence::current_model_selection(loaded.timeline.events())
-        {
-            Ok(Some(selection)) => selection,
-            Ok(None) => {
-                return child_run_output(
-                    failure_result(&request, "original child model route baseline is missing"),
-                    completion_data,
-                );
-            }
-            Err(error) => {
-                return child_run_output(
-                    failure_result(&request, &error.to_string()),
-                    completion_data,
-                );
-            }
-        };
+        let selection =
+            match session::persistence::current_model_selection(loaded.timeline.events()) {
+                Ok(Some(selection)) => selection,
+                Ok(None) => {
+                    return child_run_output(
+                        failure_result(&request, "original child model route baseline is missing"),
+                        completion_data,
+                    );
+                }
+                Err(error) => {
+                    return child_run_output(
+                        failure_result(&request, &error.to_string()),
+                        completion_data,
+                    );
+                }
+            };
         if selection.0 != effective_model_id {
             let event = match loaded
                 .timeline
@@ -1214,6 +1227,7 @@ async fn run_shell_child_inner(
                     context_normalized,
                     resumed_from: request.resume_from.clone(),
                     parent_prompt_id: request.parent_prompt_id.clone(),
+                    parent_prompt_owner: request.parent_prompt_owner.clone(),
                     capability_mode: capability_mode.clone(),
                     birth_mcp_servers: Some(birth_mcp_servers),
                     permission_mode: permission_mode.clone(),
@@ -1234,7 +1248,9 @@ async fn run_shell_child_inner(
             .await
         {
             Ok(event) => match event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) => (event.seq, *spawn),
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => (event.seq, *spawn),
                 _ => unreachable!("recorded a Subagent Spawn"),
             },
             Err(error) => {
@@ -1448,7 +1464,8 @@ async fn run_shell_child_inner(
     )
     .with_hunk_tracking_enabled(ctx.hunk_tracking_enabled);
     tool_ctx.subagent_event_tx = Some(ctx.subagent_event_tx.clone());
-    tool_ctx.subagent_lifecycle_root = Some((ctx.parent_session_id.clone(), parent_chat_state.clone()));
+    tool_ctx.subagent_lifecycle_root =
+        Some((ctx.parent_session_id.clone(), parent_chat_state.clone()));
     let task_output_budget = request
         .runtime_overrides
         .output_token_budget
@@ -2564,6 +2581,7 @@ async fn run_shell_child_inner(
             ctx.parent_cmd_tx.as_ref(),
             request.id.clone(),
             subagent_usage_by_model,
+            request.parent_prompt_owner.clone(),
             request.parent_prompt_id.clone(),
             subagent_usage_incomplete,
             Some(finalization_deadline),
@@ -2591,6 +2609,7 @@ async fn run_shell_child_inner(
                 if cmd_tx
                     .send(
                         crate::session::commands::SessionCommand::MarkSubagentUsageNotApplied {
+                            prompt_owner: request.parent_prompt_owner.clone(),
                             parent_prompt_id: sticky_prompt.clone(),
                             respond_to,
                         },

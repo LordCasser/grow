@@ -209,6 +209,7 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
             context_normalized: false,
             resumed_from: Some("source-child".into()),
             parent_prompt_id: Some("prompt-1".into()),
+            parent_prompt_owner: None,
             goal_definition_revision: None,
             capability_mode: None,
             birth_mcp_servers: Some(Default::default()),
@@ -350,20 +351,31 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
     drop(agent.subagent_event_rx.borrow_mut().take());
 
     let mut resources = tools::types::resources::Resources::new();
-    resources.insert(tools::implementations::grow_build::task::backend::SubagentBackendResource(
-        Arc::new(crate::agent::subagent::observation::backend(
-            agent.subagent_event_tx.clone(), root_id.to_owned(), None,
+    resources.insert(
+        tools::implementations::grow_build::task::backend::SubagentBackendResource(Arc::new(
+            crate::agent::subagent::observation::backend(
+                agent.subagent_event_tx.clone(),
+                root_id.to_owned(),
+                None,
+            ),
         )),
-    ));
+    );
     let resources = resources.into_shared();
     let listed = tool_runtime::Tool::run(
         &tools::implementations::grow_build::ListSubagentTool,
         tools::types::tool_metadata::test_ctx(resources.clone()),
-        tool_types::ListSubagentInput { scope: tool_types::SubagentListScope::All },
-    ).await.unwrap();
+        tool_types::ListSubagentInput {
+            scope: tool_types::SubagentListScope::All,
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(listed.subagents.len(), 1);
     assert_eq!(listed.subagents[0].subagent_id, "cold-child");
-    assert_eq!(listed.subagents[0].status, tool_types::SubagentStatus::Cancelled);
+    assert_eq!(
+        listed.subagents[0].status,
+        tool_types::SubagentStatus::Cancelled
+    );
     assert_eq!(listed.subagents[0].direct_parent_session_id, root_id);
     let model_output = tools::types::output::ToolOutput::SubagentList(listed).to_prompt_format();
     let structured: serde_json::Value = serde_json::from_str(&model_output).unwrap();
@@ -373,12 +385,22 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
     let details = tool_runtime::Tool::run(
         &tools::implementations::grow_build::GetSubagentStatusTool,
         tools::types::tool_metadata::test_ctx(resources.clone()),
-        tool_types::GetSubagentStatusInput { subagent_ids: vec!["cold-child".into(), "unknown".into()] },
-    ).await.unwrap();
-    assert_eq!(details.subagents[0].status, tool_types::SubagentStatus::Cancelled);
+        tool_types::GetSubagentStatusInput {
+            subagent_ids: vec!["cold-child".into(), "unknown".into()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        details.subagents[0].status,
+        tool_types::SubagentStatus::Cancelled
+    );
     assert_eq!(details.subagents[0].statistics.tool_call_count, Some(2));
     assert_eq!(details.subagents[0].statistics.turn_count, Some(1));
-    assert_eq!(details.subagents[1].status, tool_types::SubagentStatus::Unauthorized);
+    assert_eq!(
+        details.subagents[1].status,
+        tool_types::SubagentStatus::Unauthorized
+    );
     assert!(details.subagents[1].description.is_none());
     let output = tools::types::output::ToolOutput::SubagentStatus(details);
     assert!(tools::reminders::task_completion::consumed_completion_ids(&output).is_empty());
@@ -386,11 +408,24 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
     let waited = tool_runtime::Tool::run(
         &tools::implementations::grow_build::WaitSubagentTool,
         tools::types::tool_metadata::test_ctx(resources),
-        tool_types::WaitSubagentInput { subagent_ids: vec!["cold-child".into()], timeout_ms: Some(1000) },
-    ).await.unwrap();
+        tool_types::WaitSubagentInput {
+            subagent_ids: vec!["cold-child".into()],
+            timeout_ms: Some(1000),
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(waited.reason, tool_types::SubagentWaitReason::AnyFinished);
-    assert_eq!(waited.subagents[0].status, tool_types::SubagentStatus::Cancelled);
-    assert_eq!(tools::reminders::task_completion::consumed_completion_ids(&tools::types::output::ToolOutput::SubagentWait(waited)), ["cold-child"]);
+    assert_eq!(
+        waited.subagents[0].status,
+        tool_types::SubagentStatus::Cancelled
+    );
+    assert_eq!(
+        tools::reminders::task_completion::consumed_completion_ids(
+            &tools::types::output::ToolOutput::SubagentWait(waited)
+        ),
+        ["cold-child"]
+    );
 
     let response = get_subagent(&agent, root_id, "cold-child").await.unwrap();
     let body: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();

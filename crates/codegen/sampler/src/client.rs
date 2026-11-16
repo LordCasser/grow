@@ -537,7 +537,7 @@ fn decode_chat_chunk(data: &str) -> Result<Option<ChatCompletionChunk>> {
 /// `response.usage.context_details.{input_tokens, output_tokens}`.
 ///
 /// `total_tokens` drives the CLI's `/context` bar, the auto-compact
-/// threshold, and `meta.totalTokens` on persisted sessions. Under
+/// threshold, and `meta.contextUsedTokens` on persisted sessions. Under
 /// server-side multi-turn loops the
 /// wire's cumulative total inflates as the loop runs; `context_details`
 /// reports the final turn's prompt + output tokens — the real live

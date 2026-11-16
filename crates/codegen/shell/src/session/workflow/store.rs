@@ -155,9 +155,7 @@ impl WorkflowRunStore {
         (store, states, corrupt_sidecar_repairs)
     }
 
-    pub(crate) async fn restore_historical_runs(
-        &self,
-    ) -> io::Result<Vec<WorkflowRunState>> {
+    pub(crate) async fn restore_historical_runs(&self) -> io::Result<Vec<WorkflowRunState>> {
         let (respond_to, response) = oneshot::channel();
         self.persistence_tx
             .send(PersistenceMsg::LoadWorkflowRunHistory { respond_to })

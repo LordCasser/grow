@@ -17,8 +17,80 @@ pub(crate) fn indexes_background_task(event: &HistoryFact) -> bool {
 }
 mod projector;
 pub(crate) use projector::{
-    HISTORY_CURSOR_KEY, IndexedPages, PagePosition, PreparedHistory, background_command_settlements,
+    HISTORY_CURSOR_KEY, IndexedPages, PagePosition, PreparedHistory, PreparedPages,
+    background_command_settlements,
 };
+mod timeline;
+pub use timeline::HistoryTimelineEntry;
+pub(crate) use timeline::{
+    HistoryTimelinePage, PromptPiece, TimelineQuery, catalog_from_pieces, expand_piece,
+    page_bounds, page_from, page_from_bounds, prompt_piece, prompt_piece_from_text,
+};
+
+/// Canonical physical display source, stable within a fixed history cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HistorySourceKey {
+    pub record: u64,
+    pub part: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum HistoryEntity {
+    Message { event_seq: u64, item_ordinal: u64 },
+    Tool { tool_call_id: String },
+    UserMessage { message_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryFragmentCoordinate {
+    Utf8Bytes,
+    EncodedResponseBytes,
+    ToolPayloadJsonBytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFragment {
+    pub coordinate: HistoryFragmentCoordinate,
+    pub start: u64,
+    pub end_exclusive: u64,
+    /// True only when this row contains the entire source body.
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryRow {
+    pub source: HistorySourceKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<HistoryEntity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<HistoryFragment>,
+    pub update: crate::session::storage::SessionUpdate,
+}
+
+/// Actual first and last returned source keys, both inclusive. Fragment
+/// intervals, rather than this range alone, determine overlap/adjacency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryRange {
+    pub start: HistorySourceKey,
+    pub end: HistorySourceKey,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PageWindow {
+    pub rows: Vec<HistoryRow>,
+    pub range: Option<HistoryRange>,
+    pub older_position: Option<PagePosition>,
+    pub newer_position: Option<PagePosition>,
+    pub target_source: Option<HistorySourceKey>,
+}
 #[cfg(unix)]
 pub(crate) use projector::command_settlement_update;
 #[cfg(test)]
@@ -114,25 +186,31 @@ pub(crate) fn user_echo_identity(chunk: &acp::ContentChunk) -> Option<(&str, usi
 }
 
 pub(crate) fn provisional_user_echo(chunk: &acp::ContentChunk) -> bool {
-    chunk.meta.as_ref()
+    chunk
+        .meta
+        .as_ref()
         .and_then(|meta| meta.get("grow/consumedInputEcho"))
-        .and_then(serde_json::Value::as_bool) == Some(true)
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 pub(crate) fn verify_user_echo(
     expected: &chat_state::UserDisplayEcho,
     blocks: &[(usize, serde_json::Value)],
 ) -> io::Result<()> {
-    let mut value = serde_json::Value::Array(
-        blocks.iter().map(|(_, content)| content.clone()).collect(),
-    );
+    let mut value =
+        serde_json::Value::Array(blocks.iter().map(|(_, content)| content.clone()).collect());
     value.sort_all_objects();
     let bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
     if blocks.len() != expected.block_count
-        || blocks.iter().any(|(prompt, _)| *prompt != expected.prompt_index)
+        || blocks
+            .iter()
+            .any(|(prompt, _)| *prompt != expected.prompt_index)
         || blake3::hash(&bytes).to_hex().as_str() != expected.blake3
     {
-        return Err(invalid("committed user echo differs from its source fingerprint"));
+        return Err(invalid(
+            "committed user echo differs from its source fingerprint",
+        ));
     }
     Ok(())
 }
@@ -143,10 +221,17 @@ impl HistoryFact {
         source: &'a chat_state::TimelineEvent,
     ) -> io::Result<&'a sampling_types::ConversationItem> {
         use sampling_types::ConversationItem;
-        let HistoryContent::Message { event, item, channel, .. } = &self.content else {
+        let HistoryContent::Message {
+            event,
+            item,
+            channel,
+            ..
+        } = &self.content
+        else {
             unreachable!("only inherited history refers to another message");
         };
-        let item = source.messages()
+        let item = source
+            .messages()
             .filter(|message| source.seq.get() == *event && message.response_admission.is_none())
             .and_then(|message| message.items.get(*item))
             .ok_or_else(|| invalid("invalid inherited history source or item"))?;
@@ -154,7 +239,9 @@ impl HistoryFact {
             (TextChannel::User, ConversationItem::User(_))
             | (TextChannel::Assistant, ConversationItem::Assistant(_))
             | (TextChannel::Reasoning, ConversationItem::Reasoning(_)) => Ok(item),
-            _ => Err(invalid("inherited history channel differs from canonical item")),
+            _ => Err(invalid(
+                "inherited history channel differs from canonical item",
+            )),
         }
     }
 
@@ -511,7 +598,9 @@ impl AppendState {
             crate::session::storage::communication_history::receipt_identity(event)?
             && let std::collections::btree_map::Entry::Vacant(entry) = self.receipts.entry(identity)
         {
-            entry.insert(crate::session::storage::communication_history::ReceiptSource::from_event(event)?);
+            entry.insert(
+                crate::session::storage::communication_history::ReceiptSource::from_event(event)?,
+            );
         }
         Ok(())
     }
@@ -543,7 +632,8 @@ impl AppendState {
     }
 
     pub(crate) fn bind_indexed_presentation(
-        &self, fact: &mut HistoryFact,
+        &self,
+        fact: &mut HistoryFact,
         index: Option<&crate::session::storage::jsonl::IndexedHistory>,
     ) -> io::Result<()> {
         if let HistoryContent::Grow(value) = &fact.content
@@ -559,7 +649,8 @@ impl AppendState {
     }
 
     fn find_notice_source(
-        &self, notice: &crate::extensions::notification::UiNotice,
+        &self,
+        notice: &crate::extensions::notification::UiNotice,
         index: Option<&crate::session::storage::jsonl::IndexedHistory>,
     ) -> io::Result<Option<crate::session::storage::communication_history::ReceiptSource>> {
         if let Some(index) = index {
@@ -573,20 +664,25 @@ impl AppendState {
         }
         match index {
             Some(index) => index.notice_source(
-                &crate::session::storage::communication_history::notice_identity(notice), true,
+                &crate::session::storage::communication_history::notice_identity(notice),
+                true,
             ),
             None => Ok(None),
         }
     }
 
     pub(crate) fn validate_indexed_presentation(
-        &self, fact: &HistoryFact, index: &crate::session::storage::jsonl::IndexedHistory,
+        &self,
+        fact: &HistoryFact,
+        index: &crate::session::storage::jsonl::IndexedHistory,
     ) -> io::Result<()> {
         if let HistoryContent::Grow(value) = &fact.content
             && let GrowHistoryFact::UiNotice(notice) = value.as_ref()
             && self.find_notice_source(notice, Some(index))?.is_some()
         {
-            return Err(invalid("canonical receipt must use its validated history reference"));
+            return Err(invalid(
+                "canonical receipt must use its validated history reference",
+            ));
         }
         Ok(())
     }
@@ -754,15 +850,24 @@ impl HistorySnapshot {
         }
         if let Some(index) = &self.indexed {
             for source in &self.sources {
-                let HistorySource::Presentation { fact, .. } = source else { continue };
-                let HistoryContent::Notice { event } = fact.content else { continue };
+                let HistorySource::Presentation { fact, .. } = source else {
+                    continue;
+                };
+                let HistoryContent::Notice { event } = fact.content else {
+                    continue;
+                };
                 if event < index.published_domain() {
                     self.notice_anchors_in_tail.insert(event);
-                    if let std::collections::btree_map::Entry::Vacant(entry) = self.notices.entry(event) {
-                        let source = timeline.exact_event(chat_state::EventSeq::new(event))?
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        self.notices.entry(event)
+                    {
+                        let source = timeline
+                            .exact_event(chat_state::EventSeq::new(event))?
                             .ok_or_else(|| invalid("notice source is missing"))?;
-                        let notice = crate::session::storage::communication_history::read_notice(directory, &source)?
-                            .ok_or_else(|| invalid("notice source is not a communication receipt"))?;
+                        let notice = crate::session::storage::communication_history::read_notice(
+                            directory, &source,
+                        )?
+                        .ok_or_else(|| invalid("notice source is not a communication receipt"))?;
                         entry.insert(notice);
                     }
                 }
@@ -808,9 +913,12 @@ impl HistorySnapshot {
                     crate::session::storage::communication_history::receipt_identity(&event)?
                         .ok_or_else(|| invalid("notice source is not a communication receipt"))?;
                 let canonical = match &self.indexed {
-                    Some(index) => index.notice_source(&identity, false)?.map(|source| source.event),
+                    Some(index) => index
+                        .notice_source(&identity, false)?
+                        .map(|source| source.event),
                     None => None,
-                }.or_else(|| receipt_sources.get(&identity).copied());
+                }
+                .or_else(|| receipt_sources.get(&identity).copied());
                 if canonical != Some(event.seq.get()) {
                     return Err(invalid(
                         "notice reference does not select its original receipt",
@@ -818,7 +926,8 @@ impl HistorySnapshot {
                 }
             }
             if let HistoryContent::Message { event, .. } = &fact.content {
-                let source = timeline.exact_event(chat_state::EventSeq::new(*event))?
+                let source = timeline
+                    .exact_event(chat_state::EventSeq::new(*event))?
                     .ok_or_else(|| invalid("inherited history source is absent"))?;
                 fact.inherited_item(&source)?;
             }
@@ -829,10 +938,18 @@ impl HistorySnapshot {
                 continue;
             };
             let blocks = echoes.entry(message.to_owned()).or_default();
-            if blocks.first().is_some_and(|(old_prompt, _)| *old_prompt != prompt) {
-                return Err(invalid("user echo identity carries multiple prompt indices"));
+            if blocks
+                .first()
+                .is_some_and(|(old_prompt, _)| *old_prompt != prompt)
+            {
+                return Err(invalid(
+                    "user echo identity carries multiple prompt indices",
+                ));
             }
-            blocks.push((prompt, serde_json::to_value(&chunk.content).map_err(io::Error::other)?));
+            blocks.push((
+                prompt,
+                serde_json::to_value(&chunk.content).map_err(io::Error::other)?,
+            ));
         }
         let has_committed_echoes = timeline.events().iter().any(|event| {
             matches!(
@@ -867,7 +984,9 @@ impl HistorySnapshot {
             else {
                 continue;
             };
-            if !timeline.has_surface_checkpoint() && !selected_echo_events.contains(&event.seq.get()) {
+            if !timeline.has_surface_checkpoint()
+                && !selected_echo_events.contains(&event.seq.get())
+            {
                 continue;
             }
             let blocks = echoes
@@ -919,7 +1038,9 @@ impl HistorySnapshot {
         // physical position even when no presentation row exists (noReplay or
         // a hidden branch must not let later live events fall below that UI highwater).
         max.unwrap_or(0).max(self.record_count()).max(
-            self.indexed.as_ref().map_or(0, |index| index.event_counter_floor()),
+            self.indexed
+                .as_ref()
+                .map_or(0, |index| index.event_counter_floor()),
         )
     }
 

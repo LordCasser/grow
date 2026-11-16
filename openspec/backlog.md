@@ -2,6 +2,11 @@
 
 这里只保留已有明确暂缓决定或启动门槛的事项。2026-11-06用户重新授权“完成修复和处理，处理backlog的非延期项目”；本轮按[实施范围与验收](changes/archive/2026-11-07-complete-nondeferred-backlog/proposal.md)推进，下文2026-11-05停止点仅作历史。刚分析的child收尾及SessionEnd顺序在本轮范围，其他明确暂缓事项继续保留。八项非延期验证债务已完成修复、验证并随 [v2.6.0](https://github.com/LordCasser/grow/releases/tag/v2.6.0) 发布；逐项 owner、证据和剩余边界见[发布阻塞闭合矩阵](changes/archive/2026-11-04-close-v2-6-0-release-blockers/verification.md#八项闭合矩阵)，原始八项快照见[backlog-before.md](changes/archive/2026-11-04-close-v2-6-0-release-blockers/backlog-before.md)。既有历史整理记录见[本轮闭合记录](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/algorithm-inventory.md)及其[清理前快照](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/backlog-before.md)。
 
+## 2026-11-17 恢复修复收尾（已关闭）
+
+- **全仓 Rustfmt 基线**：固定Rustfmt1.93.1的全仓检查已通过，此前28个路径的格式差异已收敛，机械整理保持非格式token数量。见[发布验证](changes/prepare-release-v2-6-15/verification.md)。
+- **条目后 gap 的滚动锚点往返**：由Scrollback布局owner单独修复；gap偏移随原entry末尾保位，正文逻辑行仍夹紧。三个新增回归覆盖同几何、实际历史前缀安装和双向换宽，连同原正文及follow保护通过固定1.93.1的Pager7719项全库。见[gap验收](changes/archive/2026-11-17-fix-scrollback-gap-anchor/verification.md)。
+
 ## 2026-11-07 发布前范围收拢
 
 用户最新要求只完成 P0、必要或已经进行的修复，然后准备 2.6.2。当前实施范围以[收拢记录](changes/archive/2026-11-07-complete-nondeferred-backlog/proposal.md#2026-11-07-范围收拢)为准；长历史双 Ctrl+D 五秒退出超时为发布主线。表中尚未启动的卸载/普通更新保存错误、Markdown 性能、Workflow 测试和 Agent 公共实体整理继续保留，不在本轮追加实施。ACP 容量实验尚未写源码，已停在[准备材料](changes/measure-acp-gateway-backlog/design.md)，没有运行结果，也没有容量政策改动。

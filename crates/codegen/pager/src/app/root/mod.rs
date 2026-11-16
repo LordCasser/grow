@@ -1819,15 +1819,33 @@ impl AppView {
     fn dispatch_scroll(&mut self, lines: i32, column: u16, row: u16) {
         match self.active_view {
             ActiveView::Agent(id) => {
+                // Single funnel for wheel scrolling (immediate flush and the
+                // scroll-clock stream flush): scroll the visible main view —
+                // the fullscreen child when one is open — then run the
+                // unified history boundary check in the wheel's direction.
+                let mut history_effects = Vec::new();
                 if let Some(agent) = self.agents.get_mut(&id) {
-                    if let Some(child_sid) = agent.active_subagent.clone()
-                        && let Some(child) = agent.subagent_views.get_mut(&child_sid)
-                    {
-                        child.handle_scroll(lines, column, row);
-                        return;
+                    let forward = lines > 0;
+                    match agent.active_subagent.clone() {
+                        Some(child_sid) if agent.subagent_views.contains_key(&child_sid) => {
+                            if let Some(child) = agent.subagent_views.get_mut(&child_sid) {
+                                child.handle_scroll(lines, column, row);
+                                child.request_history_at_viewport_boundary(
+                                    forward,
+                                    &mut history_effects,
+                                );
+                            }
+                        }
+                        _ => {
+                            agent.handle_scroll(lines, column, row);
+                            agent.request_history_at_viewport_boundary(
+                                forward,
+                                &mut history_effects,
+                            );
+                        }
                     }
-                    agent.handle_scroll(lines, column, row);
                 }
+                self.pending_effects.extend(history_effects);
             }
             ActiveView::Welcome => {}
             ActiveView::AgentDashboard => {
@@ -1904,6 +1922,9 @@ impl AppView {
         if let Some(key) = key_event
             && self.registry.lookup(key, When::Always) == Some(ActionId::Quit)
         {
+            // Leave the history alternate screen before the shared confirm
+            // prompt, so Ctrl-D / Ctrl-Q cannot paint over it or strand the tty.
+            crate::minimal_history::yield_history_browser(self);
             if let ActiveView::Agent(id) = self.active_view
                 && let Some(agent) = self.agents.get_mut(&id)
             {
@@ -2254,6 +2275,11 @@ impl AppView {
                             _ => {}
                         }
                     }
+                }
+                if self.screen_mode.is_minimal()
+                    && let Some(outcome) = crate::minimal_history::handle_history_key(self, ev)
+                {
+                    return outcome;
                 }
                 if self.screen_mode.is_minimal()
                     && let Event::Key(key) = ev

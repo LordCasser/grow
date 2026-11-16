@@ -3651,6 +3651,7 @@ mod tests {
                     agent_id,
                     session_id: session_id.clone(),
                     models: None,
+                    behavior: None,
                 },
             ),
             &mut app,

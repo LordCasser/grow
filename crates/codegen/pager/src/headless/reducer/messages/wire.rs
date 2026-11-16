@@ -11,13 +11,17 @@ pub(super) fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Serialize an `f64` cost, substituting `0.0` for a non-finite value that would
-/// otherwise make `serde_json` error and degrade the whole line to the `error` fallback.
-pub(super) fn serialize_finite_cost<S: serde::Serializer>(
-    value: &f64,
+/// Serialize a USD cost. A finite value, including a known zero, is emitted as a
+/// number. `None` and non-finite values become JSON null: unknown cost must not
+/// look like an exact zero, and a non-finite value must not fail the whole line.
+pub(super) fn serialize_optional_cost<S: serde::Serializer>(
+    value: &Option<f64>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.serialize_f64(if value.is_finite() { *value } else { 0.0 })
+    match value {
+        Some(cost) if cost.is_finite() => serializer.serialize_f64(*cost),
+        _ => serializer.serialize_none(),
+    }
 }
 
 /// Map a Grow permission mode to the Messages `permissionMode` enum, clamping Grow-only values to `default`.
@@ -214,8 +218,10 @@ pub(super) struct ModelUsage {
     pub(super) cache_read_unknown_calls: u64,
     #[serde(rename = "cacheWriteUnknownCalls")]
     pub(super) cache_write_unknown_calls: u64,
-    #[serde(rename = "costUSD", serialize_with = "serialize_finite_cost")]
-    pub(super) cost_usd: f64,
+    /// `None` serializes as null. Same meaning as a missing `costUSD` on the
+    /// ordinary headless result: the fee is unknown, not free.
+    #[serde(rename = "costUSD", serialize_with = "serialize_optional_cost")]
+    pub(super) cost_usd: Option<f64>,
     #[serde(rename = "contextWindow", skip_serializing_if = "Option::is_none")]
     pub(super) context_window: Option<u64>,
 }
@@ -231,8 +237,13 @@ pub(super) struct ResultLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) result: Option<String>,
     pub(super) stop_reason: Option<String>,
-    #[serde(serialize_with = "serialize_finite_cost")]
-    pub(super) total_cost_usd: f64,
+    /// `None` serializes as null. Same meaning as a missing `total_cost_usd` on
+    /// the ordinary headless result: the fee is unknown, not free.
+    #[serde(serialize_with = "serialize_optional_cost")]
+    pub(super) total_cost_usd: Option<f64>,
+    /// Copied from the projected PromptUsage. True when the turn bill may
+    /// under-count, or when no ledger was available to prove completeness.
+    pub(super) usage_is_incomplete: bool,
     pub(super) usage: MessageUsage,
     /// Per-model usage keyed by model id; `{}` when there is no per-model breakdown.
     #[serde(rename = "modelUsage")]

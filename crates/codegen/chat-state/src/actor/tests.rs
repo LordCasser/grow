@@ -170,13 +170,23 @@ async fn seed_completed_request(h: &mut TestHarness, id: &str) {
         .unwrap();
 }
 
-async fn record_prompt(handle: &crate::handle::ChatStateHandle, text: impl Into<String>) {
+/// Record a full user Turn and return the stable usage owner it created. The
+/// owner is built from the same TurnStarted fact the actor projects, so
+/// fixtures attribute settlements to the prompt they were captured under.
+async fn record_prompt(
+    handle: &crate::handle::ChatStateHandle,
+    text: impl Into<String>,
+) -> crate::UsagePromptOwner {
     static NEXT_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = crate::TurnId(NEXT_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let prompt_index = handle.get_prompt_index().await;
+    let owner = crate::UsagePromptOwner {
+        turn_id: id,
+        prompt_id: format!("test-prompt-{}", id.0),
+    };
     handle.record_timeline_event(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
         id,
-        prompt_id: format!("test-prompt-{}", id.0),
+        prompt_id: owner.prompt_id.clone(),
         input_ids: Vec::new(),
         identity: crate::TurnIdentity {
             origin: "user".into(),
@@ -206,6 +216,7 @@ async fn record_prompt(handle: &crate::handle::ChatStateHandle, text: impl Into<
         details: None,
     }));
     let _ = handle.get_prompt_index().await;
+    owner
 }
 
 /// Test harness that spawns an actor and keeps the event + persistence channels.
@@ -1603,7 +1614,7 @@ async fn session_usage_events_replace_totals_and_include_late_children() {
                         ..Default::default()
                     }
                 )],
-                false,
+                None,
                 false
             )
             .await,
@@ -1736,7 +1747,7 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
 #[tokio::test]
 async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds() {
     let h = TestHarness::new();
-    record_prompt(&h.handle, "auxiliary").await;
+    let owner = record_prompt(&h.handle, "auxiliary").await;
     let sideband_id = uuid::Uuid::now_v7().to_string();
     h.handle
         .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
@@ -1759,19 +1770,53 @@ async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds(
     };
     assert!(
         h.handle
-            .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
+            .begin_auxiliary_attempt_usage(
+                sideband_id.clone(),
+                1,
+                "aux-model".into(),
+                Some(0),
+                Some(owner.clone())
+            )
             .await
             .unwrap()
     );
     assert!(
         !h.handle
-            .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
+            .begin_auxiliary_attempt_usage(
+                sideband_id.clone(),
+                1,
+                "aux-model".into(),
+                Some(0),
+                Some(owner.clone())
+            )
             .await
             .unwrap()
     );
     assert!(matches!(
         h.handle
-            .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "other".into(), Some(0))
+            .begin_auxiliary_attempt_usage(
+                sideband_id.clone(),
+                1,
+                "other".into(),
+                Some(0),
+                Some(owner.clone())
+            )
+            .await,
+        Err(crate::TimelineWriteError::AttemptUsageConflict)
+    ));
+    let reassigned_owner = crate::UsagePromptOwner {
+        turn_id: crate::TurnId(9999),
+        prompt_id: "phantom".into(),
+    };
+    assert!(matches!(
+        h.handle
+            .begin_auxiliary_attempt_usage(
+                sideband_id.clone(),
+                1,
+                "aux-model".into(),
+                Some(0),
+                Some(reassigned_owner)
+            )
             .await,
         Err(crate::TimelineWriteError::AttemptUsageConflict)
     ));
@@ -1872,7 +1917,7 @@ async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds(
 #[tokio::test]
 async fn auxiliary_retries_bill_once_each_without_reassigning_a_late_prompt() {
     let h = TestHarness::new();
-    record_prompt(&h.handle, "origin").await;
+    let owner_origin = record_prompt(&h.handle, "origin").await;
     let sideband_id = uuid::Uuid::now_v7().to_string();
     h.handle
         .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
@@ -1885,10 +1930,16 @@ async fn auxiliary_retries_bill_once_each_without_reassigning_a_late_prompt() {
         .await
         .unwrap();
     h.handle
-        .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
+        .begin_auxiliary_attempt_usage(
+            sideband_id.clone(),
+            1,
+            "aux-model".into(),
+            Some(0),
+            Some(owner_origin.clone()),
+        )
         .await
         .unwrap();
-    record_prompt(&h.handle, "next").await;
+    let owner_next = record_prompt(&h.handle, "next").await;
     h.handle
         .settle_auxiliary_attempt_usage(
             sideband_id.clone(),
@@ -1906,7 +1957,13 @@ async fn auxiliary_retries_bill_once_each_without_reassigning_a_late_prompt() {
         .unwrap();
     assert!(h.handle.try_get_prompt_usage().await.unwrap().is_none());
     h.handle
-        .begin_auxiliary_attempt_usage(sideband_id.clone(), 2, "aux-model".into(), Some(1))
+        .begin_auxiliary_attempt_usage(
+            sideband_id.clone(),
+            2,
+            "aux-model".into(),
+            Some(1),
+            Some(owner_next),
+        )
         .await
         .unwrap();
     h.handle
@@ -1955,7 +2012,7 @@ async fn open_auxiliary_attempt_marks_origin_segment_incomplete_on_restore() {
         .await
         .unwrap();
     h.handle
-        .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), None)
+        .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), None, None)
         .await
         .unwrap();
     h.handle.begin_usage_resume_segment().await.unwrap();
@@ -1981,7 +2038,7 @@ async fn open_auxiliary_attempt_marks_origin_segment_incomplete_on_restore() {
 #[tokio::test]
 async fn model_attempt_usage_settlement_is_durable_and_idempotent() {
     let mut h = TestHarness::new();
-    record_prompt(&h.handle, "settle").await;
+    let owner = record_prompt(&h.handle, "settle").await;
     h.drain_events();
     let usage = sampling_types::TokenUsage {
         prompt_tokens: 100,
@@ -1995,6 +2052,7 @@ async fn model_attempt_usage_settlement_is_durable_and_idempotent() {
             .settle_model_attempt_usage(
                 "attempt-1".into(),
                 0,
+                Some(owner.clone()),
                 "model-a".into(),
                 Some(usage.clone()),
                 Some(7),
@@ -2021,6 +2079,7 @@ async fn model_attempt_usage_settlement_is_durable_and_idempotent() {
             .settle_model_attempt_usage(
                 "attempt-1".into(),
                 0,
+                Some(owner.clone()),
                 "model-a".into(),
                 Some(usage.clone()),
                 Some(7),
@@ -2043,8 +2102,31 @@ async fn model_attempt_usage_settlement_is_durable_and_idempotent() {
             .settle_model_attempt_usage(
                 "attempt-1".into(),
                 0,
+                Some(owner.clone()),
                 "model-b".into(),
                 Some(usage),
+                Some(7),
+                None
+            )
+            .await,
+        Err(crate::TimelineWriteError::AttemptUsageConflict)
+    ));
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-1".into(),
+                0,
+                Some(crate::UsagePromptOwner {
+                    turn_id: crate::TurnId(9999),
+                    prompt_id: "phantom".into()
+                }),
+                "model-a".into(),
+                Some(sampling_types::TokenUsage {
+                    prompt_tokens: 100,
+                    completion_tokens: 20,
+                    total_tokens: 120,
+                    ..Default::default()
+                }),
                 Some(7),
                 None
             )
@@ -2067,7 +2149,7 @@ async fn model_attempt_usage_settlement_is_durable_and_idempotent() {
 #[tokio::test]
 async fn model_attempt_usage_settlement_preserves_api_duration_and_matches_it() {
     let mut h = TestHarness::new();
-    record_prompt(&h.handle, "duration").await;
+    let owner = record_prompt(&h.handle, "duration").await;
     h.drain_events();
     let usage = sampling_types::TokenUsage {
         prompt_tokens: 3,
@@ -2081,6 +2163,7 @@ async fn model_attempt_usage_settlement_preserves_api_duration_and_matches_it() 
             .settle_model_attempt_usage(
                 "attempt-duration".into(),
                 0,
+                Some(owner.clone()),
                 "model-a".into(),
                 Some(usage.clone()),
                 None,
@@ -2123,6 +2206,7 @@ async fn model_attempt_usage_settlement_preserves_api_duration_and_matches_it() 
             .settle_model_attempt_usage(
                 "attempt-duration".into(),
                 0,
+                Some(owner.clone()),
                 "model-a".into(),
                 Some(usage.clone()),
                 None,
@@ -2136,6 +2220,7 @@ async fn model_attempt_usage_settlement_preserves_api_duration_and_matches_it() 
             .settle_model_attempt_usage(
                 "attempt-duration".into(),
                 0,
+                Some(owner),
                 "model-a".into(),
                 Some(usage),
                 None,
@@ -2149,13 +2234,14 @@ async fn model_attempt_usage_settlement_preserves_api_duration_and_matches_it() 
 #[tokio::test]
 async fn unknown_model_attempt_usage_marks_current_ledgers_incomplete() {
     let mut h = TestHarness::new();
-    record_prompt(&h.handle, "unknown").await;
+    let owner = record_prompt(&h.handle, "unknown").await;
     h.drain_events();
     assert!(matches!(
         h.handle
             .settle_model_attempt_usage(
                 "attempt-unknown".into(),
                 0,
+                Some(owner),
                 "model-a".into(),
                 None,
                 None,
@@ -2190,6 +2276,7 @@ async fn known_cache_samples_survive_unknown_attempt_and_cold_restore() {
             .settle_model_attempt_usage(
                 "attempt-a".into(),
                 0,
+                None,
                 "model-a".into(),
                 Some(first.clone()),
                 None,
@@ -2203,6 +2290,7 @@ async fn known_cache_samples_survive_unknown_attempt_and_cold_restore() {
             .settle_model_attempt_usage(
                 "attempt-interrupted".into(),
                 0,
+                None,
                 "model-a".into(),
                 None,
                 None,
@@ -2216,6 +2304,7 @@ async fn known_cache_samples_survive_unknown_attempt_and_cold_restore() {
             .settle_model_attempt_usage(
                 "attempt-interrupted-2".into(),
                 0,
+                None,
                 "model-a".into(),
                 None,
                 None,
@@ -2236,6 +2325,7 @@ async fn known_cache_samples_survive_unknown_attempt_and_cold_restore() {
             .settle_model_attempt_usage(
                 "attempt-b".into(),
                 0,
+                None,
                 "model-a".into(),
                 Some(second),
                 None,
@@ -2249,6 +2339,7 @@ async fn known_cache_samples_survive_unknown_attempt_and_cold_restore() {
             .settle_model_attempt_usage(
                 "attempt-a".into(),
                 0,
+                None,
                 "model-a".into(),
                 Some(first),
                 None,
@@ -2285,6 +2376,7 @@ async fn known_cache_samples_survive_unknown_attempt_and_cold_restore() {
             .settle_model_attempt_usage(
                 "attempt-interrupted".into(),
                 0,
+                None,
                 "model-a".into(),
                 None,
                 None,
@@ -2308,6 +2400,7 @@ async fn model_attempt_usage_waits_for_persistence_ack_before_folding() {
             .settle_model_attempt_usage(
                 "attempt-ack".into(),
                 0,
+                None,
                 "model-a".into(),
                 Some(sampling_types::TokenUsage {
                     prompt_tokens: 1,
@@ -2359,6 +2452,7 @@ async fn model_attempt_usage_retries_exact_event_and_restores_dedup_index() {
             .settle_model_attempt_usage(
                 "attempt-retry".into(),
                 0,
+                None,
                 "model-a".into(),
                 Some(settle_usage),
                 Some(9),
@@ -2405,6 +2499,7 @@ async fn model_attempt_usage_retries_exact_event_and_restores_dedup_index() {
             .settle_model_attempt_usage(
                 "attempt-retry".into(),
                 0,
+                None,
                 "model-a".into(),
                 Some(usage.clone()),
                 Some(9),
@@ -2420,6 +2515,7 @@ async fn model_attempt_usage_retries_exact_event_and_restores_dedup_index() {
             .settle_model_attempt_usage(
                 "attempt-retry".into(),
                 0,
+                None,
                 "model-a".into(),
                 Some(availability_conflict),
                 Some(9),
@@ -2443,7 +2539,7 @@ async fn model_attempt_usage_retries_exact_event_and_restores_dedup_index() {
 #[tokio::test]
 async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session_only() {
     let mut h = TestHarness::new();
-    record_prompt(&h.handle, "first").await;
+    let owner_first = record_prompt(&h.handle, "first").await;
     h.drain_events();
     let usage = sampling_types::TokenUsage {
         prompt_tokens: 10,
@@ -2455,6 +2551,7 @@ async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session
         .settle_model_attempt_usage(
             "attempt-restore".into(),
             0,
+            Some(owner_first.clone()),
             "model-a".into(),
             Some(usage.clone()),
             None,
@@ -2481,6 +2578,7 @@ async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session
             .settle_model_attempt_usage(
                 "attempt-restore".into(),
                 0,
+                Some(owner_first.clone()),
                 "model-a".into(),
                 Some(usage),
                 None,
@@ -2496,6 +2594,9 @@ async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session
             .settle_model_attempt_usage(
                 "attempt-late".into(),
                 0,
+                // The late attempt was captured under the original prompt; the
+                // rewind-free new prompt must not inherit its bill.
+                Some(owner_first),
                 "model-a".into(),
                 Some(sampling_types::TokenUsage {
                     prompt_tokens: 5,
@@ -2524,6 +2625,179 @@ async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session
 }
 
 #[tokio::test]
+async fn rewind_reused_prompt_index_keeps_old_usage_owner_settlements_session_only() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(marked_user("turn-a", 0));
+    let owner_a = record_prompt(&h.handle, "turn-a").await;
+
+    // Rewind discards Turn A and the next Turn reuses the same prompt slot,
+    // even with the same client prompt_id; only the stable TurnId differs.
+    h.handle.rewind_durably(0).await.unwrap();
+    assert_eq!(
+        h.handle.get_prompt_index().await,
+        0,
+        "rewind must let Turn B reuse Turn A's prompt position"
+    );
+    let turn_b = crate::TurnId(owner_a.turn_id.0 + 1);
+    let owner_b = crate::UsagePromptOwner {
+        turn_id: turn_b,
+        prompt_id: owner_a.prompt_id.clone(),
+    };
+    h.handle.push_user_message(marked_user("turn-b", 0));
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            id: turn_b,
+            prompt_id: owner_a.prompt_id.clone(),
+            input_ids: Vec::new(),
+            identity: crate::TurnIdentity {
+                origin: "user".into(),
+                turn_kind: "internal".into(),
+                goal_id: None,
+                goal_definition_revision: None,
+                stage_id: None,
+            },
+            model_id: "test-model".into(),
+            input_message_count: h.handle.get_conversation_len().await,
+            prompt_index: 0,
+            prompt_text: "turn-b".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+    let (b_index, b_owner) = h
+        .handle
+        .current_usage_prompt_owner()
+        .await
+        .expect("Turn B owns the reused slot");
+    assert_eq!(b_index, 0);
+    assert!(
+        b_owner.turn_id == turn_b && b_owner.prompt_id == owner_a.prompt_id,
+        "the reused slot is owned by Turn B, never by the rewound Turn A"
+    );
+
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
+            crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: crate::SidebandPurpose::PermissionJudgment,
+                source_refs: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    // Turn A's main attempt, auxiliary attempt, and child bill all complete
+    // late, after the rewind handed the reused slot to Turn B.
+    h.handle
+        .settle_model_attempt_usage(
+            "attempt-a-main".into(),
+            0,
+            Some(owner_a.clone()),
+            "model-a".into(),
+            Some(sampling_types::TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    h.handle
+        .begin_auxiliary_attempt_usage(
+            sideband_id.clone(),
+            1,
+            "aux-model".into(),
+            Some(0),
+            Some(owner_a.clone()),
+        )
+        .await
+        .unwrap();
+    h.handle
+        .settle_auxiliary_attempt_usage(
+            sideband_id.clone(),
+            1,
+            Some(sampling_types::TokenUsage {
+                prompt_tokens: 8,
+                completion_tokens: 2,
+                total_tokens: 10,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    h.handle
+        .record_subagent_usage(
+            "child-a".into(),
+            vec![(
+                "model-b".into(),
+                crate::UsageTotals {
+                    input_tokens: 100,
+                    output_tokens: 5,
+                    model_calls: 1,
+                    ..Default::default()
+                },
+            )],
+            Some(owner_a),
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Turn B's own settlement is the only bill allowed into the reused slot.
+    h.handle
+        .settle_model_attempt_usage(
+            "attempt-b-main".into(),
+            0,
+            Some(owner_b),
+            "model-a".into(),
+            Some(sampling_types::TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 2,
+                total_tokens: 7,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let prompt = h.handle.try_get_prompt_usage().await.unwrap().unwrap();
+    assert_eq!(
+        prompt.totals.total_tokens(),
+        7,
+        "the reused slot must only hold Turn B's own settlement"
+    );
+    assert_eq!(prompt.totals.model_calls, 1);
+
+    // The lifetime ledger still counts every late Turn A bill exactly once.
+    let lifetime = h.handle.try_get_session_usage().await.unwrap();
+    assert_eq!(lifetime.totals.total_tokens(), 12 + 10 + 105 + 7);
+    assert_eq!(lifetime.totals.input_tokens, 10 + 8 + 100 + 5);
+    assert_eq!(lifetime.totals.model_calls, 4);
+    assert_eq!(
+        lifetime.by_agent[&crate::UsageAgent::Owner].total_tokens(),
+        12 + 10 + 7
+    );
+    assert_eq!(
+        lifetime.by_agent[&crate::UsageAgent::Subagent("child-a".into())].total_tokens(),
+        105
+    );
+    // The most recent real model response is Turn B's, not a late Turn A bill.
+    assert_eq!(
+        h.handle.get_last_turn_usage().await.unwrap().total_tokens,
+        7
+    );
+}
+
+#[tokio::test]
 async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
     let h = TestHarness::new();
     let first = sampling_types::TokenUsage {
@@ -2538,6 +2812,7 @@ async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
         .settle_model_attempt_usage(
             "attempt-initial".into(),
             0,
+            None,
             "model-a".into(),
             Some(first),
             Some(5),
@@ -2560,7 +2835,7 @@ async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
     )];
     assert!(matches!(
         h.handle
-            .record_subagent_usage("child-1".into(), child_bill.clone(), false, false)
+            .record_subagent_usage("child-1".into(), child_bill.clone(), None, false)
             .await,
         Ok(true)
     ));
@@ -2569,6 +2844,7 @@ async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
         .settle_model_attempt_usage(
             "attempt-resume".into(),
             0,
+            None,
             "model-a".into(),
             Some(sampling_types::TokenUsage {
                 prompt_tokens: 5,
@@ -2626,13 +2902,27 @@ async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
 
     assert!(matches!(
         restored
-            .record_subagent_usage("child-1".into(), child_bill.clone(), false, false)
+            .record_subagent_usage("child-1".into(), child_bill.clone(), None, false)
             .await,
         Ok(false)
     ));
     assert!(matches!(
         restored
-            .record_subagent_usage("child-1".into(), Vec::new(), false, true)
+            .record_subagent_usage(
+                "child-1".into(),
+                child_bill.clone(),
+                Some(crate::UsagePromptOwner {
+                    turn_id: crate::TurnId(9999),
+                    prompt_id: "phantom".into()
+                }),
+                false
+            )
+            .await,
+        Err(crate::TimelineWriteError::SubagentUsageConflict)
+    ));
+    assert!(matches!(
+        restored
+            .record_subagent_usage("child-1".into(), Vec::new(), None, true)
             .await,
         Err(crate::TimelineWriteError::SubagentUsageConflict)
     ));
@@ -2670,6 +2960,7 @@ async fn restored_usage_checks_duplicate_payloads_across_resume_segments() {
         .settle_model_attempt_usage(
             "attempt-1".into(),
             0,
+            None,
             "model-a".into(),
             Some(sampling_types::TokenUsage {
                 prompt_tokens: 10,
@@ -2694,7 +2985,7 @@ async fn restored_usage_checks_duplicate_payloads_across_resume_segments() {
                     ..Default::default()
                 },
             )],
-            false,
+            None,
             false,
         )
         .await
@@ -3917,7 +4208,7 @@ async fn subagent_usage_ack_loss_retries_the_same_fact_and_deadline_stops_dispat
         let usage = usage.clone();
         tokio::spawn(async move {
             handle
-                .record_subagent_usage("child-ack-lost".into(), usage, false, false)
+                .record_subagent_usage("child-ack-lost".into(), usage, None, false)
                 .await
         })
     };
@@ -3996,7 +4287,7 @@ async fn subagent_usage_ack_loss_retries_the_same_fact_and_deadline_stops_dispat
         let handle = h.handle.clone();
         tokio::spawn(async move {
             handle
-                .record_subagent_usage("child-no-ack".into(), unresolved_usage, false, false)
+                .record_subagent_usage("child-no-ack".into(), unresolved_usage, None, false)
                 .await
         })
     };
@@ -4175,6 +4466,7 @@ async fn child_result_and_parent_ended_retries_keep_their_canonical_event_once()
                 context_normalized: false,
                 resumed_from: None,
                 parent_prompt_id: None,
+                parent_prompt_owner: None,
                 capability_mode: None,
                 birth_mcp_servers: Some(Default::default()),
                 permission_mode: None,
@@ -4397,7 +4689,7 @@ async fn already_elapsed_usage_deadline_reaches_chat_state_before_append() {
     );
     let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
     let result = handle
-        .record_subagent_usage_before("child-1".into(), Vec::new(), false, true, Some(deadline))
+        .record_subagent_usage_before("child-1".into(), Vec::new(), None, true, Some(deadline))
         .await;
 
     assert!(matches!(
@@ -13690,6 +13982,7 @@ fn runtime_tree_test_spawn(subagent_id: &str, child_session_id: &str) -> crate::
         context_normalized: false,
         resumed_from: None,
         parent_prompt_id: None,
+        parent_prompt_owner: None,
         capability_mode: None,
         birth_mcp_servers: Some(Default::default()),
         permission_mode: None,

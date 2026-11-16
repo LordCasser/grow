@@ -664,6 +664,7 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
     agent_id: AgentId,
     session_id: acp::SessionId,
     new_models: Option<shell::agent::models::SessionModelState>,
+    behavior: Option<shell::extensions::notification::BehaviorProjection>,
 ) -> Vec<Effect> {
     let agent_count = app.agents.len();
     let dispatch_controls = !app.reconnect_pending;
@@ -686,6 +687,9 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
             )));
         }
         agent.bind_session_id(session_id);
+        if let Some(behavior) = behavior {
+            crate::app::acp_handler::hydrate_behavior_projection(agent, behavior);
+        }
         if let Some(m) = new_models {
             agent.session.models = Some(m).into();
         }
@@ -784,6 +788,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
     worktree_path: std::path::PathBuf,
     session_cwd: std::path::PathBuf,
     new_models: Option<shell::agent::models::SessionModelState>,
+    behavior: Option<shell::extensions::notification::BehaviorProjection>,
 ) -> Vec<Effect> {
     let dispatch_controls = !app.reconnect_pending;
     if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -793,6 +798,9 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
         agent.bind_session_id(session_id);
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
+        if let Some(behavior) = behavior {
+            crate::app::acp_handler::hydrate_behavior_projection(agent, behavior);
+        }
         if let Some(m) = new_models {
             agent.session.models = Some(m).into();
         }

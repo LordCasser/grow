@@ -15,7 +15,10 @@ impl ChatStateActor {
 
     /// Take a full snapshot of the actor's state.
     pub(super) fn snapshot(&self) -> Result<ChatStateSnapshot, crate::TimelineError> {
-        let mut prompt_records = self.state.timeline.prompt_records_with_history(usize::MAX)?;
+        let mut prompt_records = self
+            .state
+            .timeline
+            .prompt_records_with_history(usize::MAX)?;
         prompt_records.reverse();
         Ok(ChatStateSnapshot {
             conversation: self.state.timeline.surface().to_vec(),

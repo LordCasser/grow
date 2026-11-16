@@ -44,8 +44,8 @@ pub(crate) fn session_load_descendant_ownership(
 /// downstream to the tracker and agent state.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct NotificationMeta {
-    /// Accumulated token count across the session (`totalTokens`).
-    pub total_tokens: Option<u64>,
+    /// Current context occupancy across the session (`contextUsedTokens`).
+    pub context_used_tokens: Option<u64>,
     /// UTC ms when this notification was sent (`agentTimestampMs`).
     pub agent_timestamp_ms: Option<i64>,
     /// UTC ms when the current LLM streaming response started (`streamStartMs`).
@@ -157,7 +157,7 @@ impl NotificationMeta {
             .and_then(|s| s.rsplit('-').next())
             .and_then(|c| c.parse::<u64>().ok());
         Self {
-            total_tokens: m.get("totalTokens").and_then(|v| v.as_u64()),
+            context_used_tokens: m.get("contextUsedTokens").and_then(|v| v.as_u64()),
             agent_timestamp_ms: m.get("agentTimestampMs").and_then(|v| v.as_i64()),
             stream_start_ms: m.get("streamStartMs").and_then(|v| v.as_i64()),
             turn_start_ms: m.get("turnStartMs").and_then(|v| v.as_i64()),
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn parse_full_meta() {
         let meta_json = json!({
-            "totalTokens": 5000u64,
+            "contextUsedTokens": 5000u64,
             "agentTimestampMs": 1700000000000i64,
             "streamStartMs": 1700000000000i64 - 3200,
             "turnStartMs": 1700000000000i64 - 5000,
@@ -251,7 +251,7 @@ mod tests {
         let map = meta_json.as_object().unwrap();
         let meta = NotificationMeta::from_json(Some(map));
 
-        assert_eq!(meta.total_tokens, Some(5000));
+        assert_eq!(meta.context_used_tokens, Some(5000));
         assert_eq!(meta.agent_timestamp_ms, Some(1700000000000));
         assert_eq!(meta.stream_start_ms, Some(1700000000000 - 3200));
         assert_eq!(meta.turn_start_ms, Some(1700000000000 - 5000));
@@ -264,13 +264,13 @@ mod tests {
     fn parse_missing_new_fields() {
         // Simulate old shell that doesn't send streamStartMs/turnStartMs
         let meta_json = json!({
-            "totalTokens": 1000u64,
+            "contextUsedTokens": 1000u64,
             "agentTimestampMs": 1700000000000i64,
         });
         let map = meta_json.as_object().unwrap();
         let meta = NotificationMeta::from_json(Some(map));
 
-        assert_eq!(meta.total_tokens, Some(1000));
+        assert_eq!(meta.context_used_tokens, Some(1000));
         assert_eq!(meta.agent_timestamp_ms, Some(1700000000000));
         assert_eq!(meta.stream_start_ms, None);
         assert_eq!(meta.turn_start_ms, None);
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn parse_none_meta() {
         let meta = NotificationMeta::from_json(None);
-        assert_eq!(meta.total_tokens, None);
+        assert_eq!(meta.context_used_tokens, None);
         assert_eq!(meta.agent_timestamp_ms, None);
         assert_eq!(meta.stream_start_ms, None);
         assert_eq!(meta.turn_start_ms, None);

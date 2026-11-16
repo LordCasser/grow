@@ -125,6 +125,7 @@ struct AgentLoadOutcome {
     /// Structured regular foreground owner from the reload response.
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
     descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
+    behavior: Option<shell::extensions::notification::BehaviorProjection>,
 }
 
 /// Fields of the reconnect `session/load`, derived from the agent being
@@ -1966,6 +1967,15 @@ pub(crate) async fn run(
                 if app.tick_scroll() {
                     presenter.request(false);
                 }
+                // The scroll funnel may have armed a history page request
+                // while flushing the stream; execute it now instead of
+                // waiting for the next unrelated input event.
+                if !app.pending_effects.is_empty() {
+                    let effs = std::mem::take(&mut app.pending_effects);
+                    if process_effects(effs, &mut tasks, &mut app) {
+                        break;
+                    }
+                }
                 // Scroll dispatch can start work that animates (e.g. viewport
                 // state), so keep the animation arm in sync too.
                 schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
@@ -2300,6 +2310,9 @@ pub(crate) async fn run(
                                                     effects::parse_session_load_foreground(
                                                         resp.meta.as_ref(),
                                                     ),
+                                                behavior: crate::app::session::AgentSession::behavior_projection_from_meta(
+                                                    resp.meta.as_ref(),
+                                                ),
                                             });
                                         }
                                         Err(e) => {
@@ -2313,6 +2326,7 @@ pub(crate) async fn run(
                                                 agent_name: None,
                                                 foreground: None,
                                                 descendant_ownership: None,
+                                                behavior: None,
                                             });
                                         }
                                     }
@@ -2452,6 +2466,9 @@ pub(crate) async fn run(
                                 .and_then(|load| load.agent_name.as_ref())
                             {
                                 agent.session.apply_agent_name(Some(agent_name.clone()));
+                            }
+                            if let Some(behavior) = load.as_ref().and_then(|load| load.behavior.clone()) {
+                                crate::app::acp_handler::hydrate_behavior_projection(agent, behavior);
                             }
                         }
                         finalized && ok
@@ -4103,6 +4120,7 @@ mod tests {
                 agent_name: None,
                 foreground: None,
                 descendant_ownership: None,
+                behavior: None,
             },
         );
         loads.insert(
@@ -4114,6 +4132,7 @@ mod tests {
                 agent_name: None,
                 foreground: None,
                 descendant_ownership: None,
+                behavior: None,
             },
         );
         let pending = vec![active, background];
@@ -4147,6 +4166,7 @@ mod tests {
                 agent_name: None,
                 foreground: None,
                 descendant_ownership: None,
+                behavior: None,
             },
         );
         loads.insert(
@@ -4158,6 +4178,7 @@ mod tests {
                 agent_name: None,
                 foreground: None,
                 descendant_ownership: None,
+                behavior: None,
             },
         );
         let pending = vec![active, background];
@@ -4187,6 +4208,7 @@ mod tests {
                 agent_name: None,
                 foreground: None,
                 descendant_ownership: None,
+                behavior: None,
             },
         );
         let pending = vec![active];
@@ -4227,6 +4249,7 @@ mod tests {
                 agent_name: None,
                 foreground: None,
                 descendant_ownership: None,
+                behavior: None,
             },
         );
         let pending = vec![background];

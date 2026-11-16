@@ -53,7 +53,15 @@ async fn settle_attempt(
         .usage
         .clone()
         .expect("settlement fixture requires provider usage");
-    let sink = actor.sampling_usage_sink(model_id.to_owned(), captured_prompt_index);
+    let sink = actor.sampling_usage_sink(
+        model_id.to_owned(),
+        captured_prompt_index,
+        actor
+            .chat_state_handle
+            .current_usage_prompt_owner()
+            .await
+            .map(|(_, owner)| owner),
+    );
     sink(sampler::AttemptUsage::Known {
         attempt_key: attempt_key.to_owned(),
         cost_usd_ticks: response.cost_usd_ticks,
@@ -93,7 +101,7 @@ async fn sampling_usage_sink_deduplicates_known_usage_and_debits_output_grant_on
                 .current_prompt_index()
                 .await
                 .expect("current prompt index");
-            let sink = actor.sampling_usage_sink("test-model".into(), captured_prompt_index);
+            let sink = actor.sampling_usage_sink("test-model".into(), captured_prompt_index, None);
 
             sink(sampler::AttemptUsage::Known {
                 attempt_key: "same-attempt".into(),
@@ -148,13 +156,17 @@ async fn sampling_usage_sink_marks_unknown_usage_and_exhausts_output_grant() {
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             let budget = crate::tools::tool_context::TaskOutputTokenBudget::limited(10);
             actor.tool_context.task_output_token_budget = Some(budget.clone());
-            record_test_prompt(&actor, "sink-incomplete").await;
-            let captured_prompt_index = actor
+            start_test_turn(&actor, "sink-incomplete").await;
+            let (captured_prompt_index, prompt_owner) = actor
                 .chat_state_handle
-                .current_prompt_index()
+                .current_usage_prompt_owner()
                 .await
-                .expect("current prompt index");
-            let sink = actor.sampling_usage_sink("test-model".into(), captured_prompt_index);
+                .expect("active prompt owner");
+            let sink = actor.sampling_usage_sink(
+                "test-model".into(),
+                captured_prompt_index,
+                Some(prompt_owner),
+            );
 
             sink(sampler::AttemptUsage::Incomplete {
                 attempt_key: "unknown-attempt".into(),
@@ -296,8 +308,12 @@ async fn anchors_projected_context_from_response_usage() {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-                let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
-                record_test_prompt(&actor, "anchor").await;
+                start_test_turn(&actor, "anchor").await;
+                let captured_prompt_index = actor
+                    .chat_state_handle
+                    .current_prompt_index()
+                    .await
+                    .expect("current prompt index");
                 actor
                     .chat_state_handle
                     .push_user_message_durably(ConversationItem::user("q".repeat(40_000)))
@@ -414,7 +430,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 .await
                 .unwrap()
                 .unwrap();
-            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index);
+            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index, None);
             let settlement = sink(sampler::AttemptUsage::Known {
                 attempt_key: "goal-attempt-1".into(),
                 cost_usd_ticks: first.cost_usd_ticks,
@@ -468,7 +484,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 .await
                 .unwrap()
                 .unwrap();
-            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index);
+            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index, None);
             let settlement = sink(sampler::AttemptUsage::Known {
                 attempt_key: "goal-attempt-2".into(),
                 cost_usd_ticks: after_compaction.cost_usd_ticks,
@@ -548,7 +564,7 @@ async fn descendant_model_usage_is_submitted_to_the_root_goal_window() {
                 .await
                 .unwrap()
                 .unwrap();
-            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index);
+            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index, None);
             let settlement = sink(sampler::AttemptUsage::Known {
                 attempt_key: "descendant-attempt".into(),
                 cost_usd_ticks: response.cost_usd_ticks,
@@ -679,7 +695,7 @@ async fn resumed_context_usage_is_portable_before_first_prompt() {
                 acp::SessionUpdate::AvailableCommandsUpdate(_)
             ));
             assert_eq!(
-                notification.meta.unwrap()["totalTokens"],
+                notification.meta.unwrap()["contextUsedTokens"],
                 serde_json::json!(1_100)
             );
         })
@@ -815,8 +831,12 @@ async fn stashes_per_turn_usage_in_chat_state() {
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
-            record_test_prompt(&actor, "metadata").await;
+            start_test_turn(&actor, "metadata").await;
+            let captured_prompt_index = actor
+                .chat_state_handle
+                .current_prompt_index()
+                .await
+                .expect("current prompt index");
 
             // Baseline: no stashed usage.
             assert!(

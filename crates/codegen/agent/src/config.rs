@@ -1550,7 +1550,13 @@ mod tests {
             )
         );
         assert!(!ids.contains(ToolConfig::from(&grow_build::WaitSubagentTool).id.as_str()));
-        assert!(!ids.contains(ToolConfig::from(&grow_build::GetSubagentResultTool).id.as_str()));
+        assert!(
+            !ids.contains(
+                ToolConfig::from(&grow_build::GetSubagentResultTool)
+                    .id
+                    .as_str()
+            )
+        );
         assert!(!ids.contains(ToolConfig::from(&grow_build::KillTaskTool).id.as_str()));
         assert!(!ids.contains(ToolConfig::from(&grow_build::TaskTool).id.as_str()));
         for t in &gc.tools {

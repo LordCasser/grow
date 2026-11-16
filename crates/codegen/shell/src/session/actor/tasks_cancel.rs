@@ -989,6 +989,15 @@ impl SessionActor {
             .borrow()
             .tool_bridge()
             .update_resource(
+                tools::implementations::grow_build::task::types::CurrentUsagePromptOwnerResource(
+                    None,
+                ),
+            )
+            .await;
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
                 tools::implementations::grow_build::update_goal::GoalDelegationSnapshotResource::default(),
             )
             .await;

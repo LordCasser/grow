@@ -2,6 +2,121 @@
 
 use super::*;
 use pretty_assertions::assert_eq;
+use shell::extensions::notification::{PromptUsage, PromptUsageModel};
+
+const USAGE_KEYS: &[&str] = &[
+    "input_tokens",
+    "full_input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_known_input_tokens",
+    "cache_read_unknown_calls",
+    "cache_write_unknown_calls",
+];
+
+const MODEL_KEYS: &[&str] = &[
+    "inputTokens",
+    "fullInputTokens",
+    "outputTokens",
+    "cacheReadInputTokens",
+    "cacheCreationInputTokens",
+    "cacheReadKnownInputTokens",
+    "cacheReadUnknownCalls",
+    "cacheWriteUnknownCalls",
+];
+
+fn messages_result(raw: Option<&Value>) -> Value {
+    let mut r = messages(false);
+    r.reduce(StreamEvent::AgentMessage("hi".into()));
+    let out = r.finish(&TurnEnd {
+        stop_reason: "end_turn",
+        session_id: "sess-1",
+        request_id: "req-1",
+        usage: raw,
+        structured_output: None,
+        result_text: "",
+        duration_ms: 0,
+    });
+    out.last().expect("result line").clone()
+}
+
+fn attached(raw: &Value) -> Value {
+    let mut scratch = json!({});
+    crate::headless::attach_result_usage(&mut scratch, raw);
+    scratch
+}
+
+fn billed(
+    input: u64,
+    cached_read: u64,
+    cache_creation: u64,
+    output: u64,
+    cost_ticks: Option<i64>,
+    read_unknown: u64,
+    write_unknown: u64,
+) -> PromptUsageModel {
+    PromptUsageModel {
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: input + output,
+        cached_read_tokens: cached_read,
+        cache_creation_tokens: cache_creation,
+        cache_read_known_input_tokens: input,
+        cache_read_unknown_calls: read_unknown,
+        cache_write_unknown_calls: write_unknown,
+        model_calls: 1,
+        cost_usd_ticks: cost_ticks,
+        ..Default::default()
+    }
+}
+
+fn prompt_usage(totals: PromptUsageModel, model: PromptUsageModel, incomplete: bool) -> Value {
+    let mut model_usage = indexmap::IndexMap::new();
+    model_usage.insert("grow-4".to_string(), model);
+    serde_json::to_value(PromptUsage {
+        totals,
+        model_usage,
+        num_turns: 1,
+        usage_is_incomplete: incomplete,
+    })
+    .expect("prompt usage")
+}
+
+/// Known cost matches the number from `attach_result_usage`, including zero.
+/// A missing source cost is null here, not an exact zero.
+fn assert_cost_synonym(got: &Value, source: Option<&Value>) {
+    match source {
+        Some(cost) => assert_eq!(got, cost),
+        None => assert!(got.is_null(), "unknown cost must be null, got {got}"),
+    }
+}
+
+fn assert_matches_attach(result: &Value, source: &Value) {
+    let incomplete = source
+        .get("usage_is_incomplete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    assert_eq!(result["usage_is_incomplete"], incomplete);
+    assert_cost_synonym(&result["total_cost_usd"], source.get("total_cost_usd"));
+    if let Some(usage) = source.get("usage") {
+        for key in USAGE_KEYS {
+            assert_eq!(result["usage"].get(*key), usage.get(*key), "usage.{key}");
+        }
+    }
+    match source.get("modelUsage").and_then(Value::as_object) {
+        Some(models) => {
+            for (name, row) in models {
+                let got = &result["modelUsage"][name];
+                assert_cost_synonym(&got["costUSD"], row.get("costUSD"));
+                for key in MODEL_KEYS {
+                    assert_eq!(got.get(*key), row.get(*key), "{name}.{key}");
+                }
+            }
+        }
+        None => assert_eq!(result["modelUsage"], json!({})),
+    }
+}
 
 #[test]
 fn messages_usage_drops_reasoning_tokens() {
@@ -58,10 +173,16 @@ fn messages_result_carries_required_fields() {
         "duration_api_ms",
         "num_turns",
         "total_cost_usd",
+        "usage_is_incomplete",
         "modelUsage",
     ] {
         assert!(result.get(key).is_some(), "missing {key}: {result:?}");
     }
+    assert_eq!(result["usage_is_incomplete"], true);
+    assert!(
+        result["total_cost_usd"].is_null(),
+        "no ledger is not an exact zero fee: {result:?}"
+    );
     assert!(result["permission_denials"].is_null());
     for key in [
         "input_tokens",
@@ -346,7 +467,7 @@ fn to_line_degrades_failing_serialize_to_error_line() {
 }
 
 #[test]
-fn non_finite_cost_serializes_to_finite_result_frame() {
+fn non_finite_cost_serializes_as_unknown_not_zero() {
     let line = to_line(&MessagesLine::Result(Box::new(ResultLine {
         subtype: "success",
         is_error: false,
@@ -355,7 +476,8 @@ fn non_finite_cost_serializes_to_finite_result_frame() {
         num_turns: 1,
         result: None,
         stop_reason: None,
-        total_cost_usd: f64::INFINITY,
+        total_cost_usd: Some(f64::INFINITY),
+        usage_is_incomplete: false,
         usage: MessageUsage::default(),
         model_usage: json!({}),
         structured_output: None,
@@ -364,8 +486,7 @@ fn non_finite_cost_serializes_to_finite_result_frame() {
         uuid: "u".into(),
     })));
     assert_eq!(line["type"], "result", "not the error fallback: {line}");
-    assert_eq!(line["total_cost_usd"], 0.0);
-    assert!(line["total_cost_usd"].as_f64().unwrap().is_finite());
+    assert!(line["total_cost_usd"].is_null(), "{line}");
 
     let mu = to_line(&ModelUsage {
         input_tokens: Some(0),
@@ -376,11 +497,89 @@ fn non_finite_cost_serializes_to_finite_result_frame() {
         cache_read_known_input_tokens: 0,
         cache_read_unknown_calls: 0,
         cache_write_unknown_calls: 0,
-        cost_usd: f64::NAN,
+        cost_usd: Some(f64::NAN),
         context_window: None,
     });
     assert_ne!(mu["type"], "error", "not the error fallback: {mu}");
-    assert_eq!(mu["costUSD"], 0.0);
+    assert!(mu["costUSD"].is_null(), "{mu}");
+}
+
+fn assert_result_matches_prompt(
+    totals: PromptUsageModel,
+    model: PromptUsageModel,
+    incomplete: bool,
+    check: impl FnOnce(&Value),
+) {
+    let raw = prompt_usage(totals, model, incomplete);
+    let source = attached(&raw);
+    check(&source);
+    assert_matches_attach(&messages_result(Some(&raw)), &source);
+}
+
+#[test]
+fn messages_result_without_usage_is_incomplete_and_cost_unknown() {
+    let result = messages_result(None);
+    assert_eq!(result["usage_is_incomplete"], true);
+    assert!(result["total_cost_usd"].is_null(), "{result}");
+    assert_eq!(result["modelUsage"], json!({}));
+}
+
+#[test]
+fn messages_result_cost_and_completeness_match_attach() {
+    let known = billed(100, 40, 5, 10, Some(2_000_000_000), 0, 0);
+    assert_result_matches_prompt(known.clone(), known, false, |source| {
+        assert_eq!(source["total_cost_usd"], 0.2);
+        assert_eq!(source["modelUsage"]["grow-4"]["costUSD"], 0.2);
+        assert_eq!(source["usage"]["input_tokens"], 55);
+        assert!(source.get("usage_is_incomplete").is_none());
+    });
+
+    let zero = billed(8, 0, 0, 0, Some(0), 0, 0);
+    assert_result_matches_prompt(zero.clone(), zero, false, |source| {
+        assert_eq!(source["total_cost_usd"], 0.0);
+        assert_eq!(source["modelUsage"]["grow-4"]["costUSD"], 0.0);
+    });
+
+    let incomplete = billed(50, 20, 0, 5, Some(5_000_000_000), 0, 0);
+    assert_result_matches_prompt(incomplete.clone(), incomplete, true, |source| {
+        assert_eq!(source["usage_is_incomplete"], true);
+        assert!(source.get("total_cost_usd").is_none());
+        assert!(source["modelUsage"]["grow-4"].get("costUSD").is_none());
+        assert_eq!(source["usage"]["input_tokens"], 30);
+        assert_eq!(source["usage"]["cache_read_input_tokens"], 20);
+    });
+
+    let unknown = billed(30, 0, 0, 3, None, 0, 0);
+    assert_result_matches_prompt(unknown.clone(), unknown, false, |source| {
+        assert!(source.get("usage_is_incomplete").is_none());
+        assert!(source.get("total_cost_usd").is_none());
+        assert_eq!(source["usage"]["input_tokens"], 30);
+        assert_eq!(source["usage"]["output_tokens"], 3);
+    });
+
+    let mut partial = billed(100, 40, 0, 10, Some(1_000_000_000), 0, 0);
+    partial.cost_is_partial = true;
+    partial.cost_missing_calls = 1;
+    assert_result_matches_prompt(partial.clone(), partial, false, |source| {
+        assert_eq!(source["cost_is_partial"], true);
+        assert!(source.get("usage_is_incomplete").is_none());
+        assert!(source.get("total_cost_usd").is_none());
+        assert!(source["modelUsage"]["grow-4"].get("costUSD").is_none());
+        assert_eq!(source["usage"]["input_tokens"], 60);
+        assert_eq!(source["usage"]["cache_read_input_tokens"], 40);
+    });
+
+    let totals = billed(80, 10, 5, 4, Some(1_000_000_000), 0, 0);
+    let model = billed(80, 0, 0, 4, None, 1, 2);
+    assert_result_matches_prompt(totals, model, false, |source| {
+        assert_eq!(source["total_cost_usd"], 0.1);
+        assert!(source["usage"]["input_tokens"].as_u64().is_some());
+        assert!(source["modelUsage"]["grow-4"]["inputTokens"].is_null());
+        assert!(source["modelUsage"]["grow-4"].get("costUSD").is_none());
+        assert_eq!(source["modelUsage"]["grow-4"]["fullInputTokens"], 80);
+        assert_eq!(source["modelUsage"]["grow-4"]["cacheReadUnknownCalls"], 1);
+        assert_eq!(source["modelUsage"]["grow-4"]["cacheWriteUnknownCalls"], 2);
+    });
 }
 
 #[test]

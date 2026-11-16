@@ -7,7 +7,6 @@ use crate::acp::meta::NotificationMeta;
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
 use crate::scrollback::blocks::{
     BgTaskBlock, NoticeCategory, NoticeTone, SessionEvent, SubagentBlock, SubagentPermissionEvent,
     WorkflowBlock, WorkflowBlockPhase, WorkflowBlockStatus,
@@ -295,7 +294,7 @@ impl TranscriptProjection {
                 }
                 let mut meta = NotificationMeta::from_json(notification.meta.as_ref());
                 meta.is_replay = true;
-                if let Some(tokens) = meta.total_tokens {
+                if let Some(tokens) = meta.context_used_tokens {
                     self.surfaces.total_tokens = Some(tokens);
                 }
                 let prompt = meta
@@ -429,32 +428,7 @@ impl TranscriptProjection {
             self.surfaces.apply(&update);
         }
         match update {
-            GrowUpdate::ToolOutputFragment(fragment) => {
-                let end = fragment.byte_start + fragment.json.len() as u64;
-                let older = if fragment.byte_start == 0 {
-                    "earliest"
-                } else {
-                    "older bytes available"
-                };
-                let summary = format!(
-                    "{} · {:?} · {:?} · bytes {}–{}/{} · {older}",
-                    fragment.title,
-                    fragment.kind,
-                    fragment.status,
-                    fragment.byte_start,
-                    end,
-                    fragment.total_bytes,
-                );
-                let output = format!(
-                    "Tool {} · source {} · JSON digest {}\n{}",
-                    fragment.tool_call_id, fragment.source_position, fragment.digest, fragment.json,
-                );
-                self.scrollback
-                    .push_block(RenderBlock::ToolCall(ToolCallBlock::Other(
-                        OtherToolCallBlock::new("Historical Tool output", summary)
-                            .with_output(output),
-                    )));
-            }
+            GrowUpdate::ToolOutputFragment(_) => {}
             GrowUpdate::ControlStateUpdate(update) => {
                 use shell::extensions::notification::ControlPhase;
                 if update.current.domain() != update.domain

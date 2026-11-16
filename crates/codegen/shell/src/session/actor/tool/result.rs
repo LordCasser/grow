@@ -885,18 +885,6 @@ impl SessionActor {
         }
     }
 
-    /// Model-facing rejection for an ordinary file edit while Plan is active.
-    pub(super) async fn plan_mode_edit_rejected_message(&self) -> String {
-        self.render_plan_template(
-            crate::session::behavior::plan_mode_edit_rejected_template(),
-            "",
-        )
-        .await
-        .unwrap_or_else(|| {
-            "Rejected: ordinary file editing is prohibited while Plan behavior is active."
-                .to_string()
-        })
-    }
     pub(in crate::session::actor) async fn handle_tool_not_executed(
         &self,
         model_call_id: &str,

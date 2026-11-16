@@ -288,6 +288,7 @@ fn new_children_receive_project_instructions_without_changing_mirror_forks() {
                         parent_session_id: root.0.to_string(),
                         parent_step_id: None,
                         parent_prompt_id: None,
+                        parent_prompt_owner: None,
                         resume_from: None,
                         cwd: None,
                         runtime_overrides: Default::default(),

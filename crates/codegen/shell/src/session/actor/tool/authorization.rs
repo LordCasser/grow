@@ -582,73 +582,28 @@ pub(super) fn split_control_preflight_barrier(
     let control = calls.remove(index);
     (Some(control), calls)
 }
-/// Verdict for a tool call evaluated against the plan-mode edit gate.
+/// Verdict for a tool call evaluated against the Plan/Workflow gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlanEditGate {
-    /// Execute normally (plan mode inactive or not an edit).
+    /// Continue to the ordinary permission path.
     Allow,
-    /// Any ordinary file edit while Plan behavior is active.
-    RejectEdit,
-    /// Dynamic sub-planning is incompatible with an approved Plan contract.
+    /// Public Workflow is incompatible with an active Plan contract.
     RejectWorkflow,
 }
-/// Gate edit-class tool calls while plan mode is active.
+/// Keep Plan/Workflow mutual exclusion in front of ordinary permissions.
 ///
-/// Every potentially mutating access class is rejected before the normal
-/// permission flow. MCP calls are allowed only when the call's server is
-/// config-declared query-only (`read_write`, or the stricter `read` mask);
-/// unknown or write-capable MCP calls fail closed
-/// while drafting/amending. Plan artifact
-/// persistence is performed only by the shell control plane; Behavior
-/// never grants an edit capability and never bypasses session permissions.
-///
-/// Read, grep, web fetch, and Plan control/question calls continue to the
-/// ordinary permission path. Bash, edits, and non-read-only MCP calls are
-/// blocked until the approved Plan enters Executing.
-///
-/// `mcp_scope`: the declared MCP server scope, or `None` for
-/// non-MCP access kinds. Callers resolve it from `McpState` (async) BEFORE
-/// taking the `behavior` lock.
+/// Drafting, AwaitingApproval, Amending, and Executing do not add a Bash,
+/// Edit, MCP, or Task capability ban. Those calls use the same allow, ask,
+/// and deny path as Normal. Policy deny, hooks, sandbox, child capability,
+/// and Workflow definition protection stay on that ordinary path.
 pub(super) fn plan_mode_edit_gate(
     tracker: &crate::session::behavior::BehaviorCoordinator,
     tool_input: &ToolInput,
-    access_kind: &AccessKind,
-    mcp_max_access: Option<tool_protocol::ToolAccess>,
 ) -> PlanEditGate {
-    if !tracker.is_plan() {
-        return PlanEditGate::Allow;
-    }
-    if matches!(tool_input, ToolInput::Workflow(_)) {
-        return PlanEditGate::RejectWorkflow;
-    }
-    if tracker.plan_allows_edits() {
-        return PlanEditGate::Allow;
-    }
-    if let ToolInput::Task(task) = tool_input {
-        return if task.capability_mode.unwrap_or_default()
-            == tool_types::SubagentCapabilityMode::ReadOnly
-        {
-            PlanEditGate::Allow
-        } else {
-            PlanEditGate::RejectEdit
-        };
-    }
-    match access_kind {
-        AccessKind::Edit(_) | AccessKind::Bash(_) => PlanEditGate::RejectEdit,
-        AccessKind::MCPTool { .. } => {
-            if matches!(
-                mcp_max_access,
-                Some(tool_protocol::ToolAccess::Read | tool_protocol::ToolAccess::ReadWrite,)
-            ) {
-                PlanEditGate::Allow
-            } else {
-                PlanEditGate::RejectEdit
-            }
-        }
-        AccessKind::Read(_)
-        | AccessKind::Grep { .. }
-        | AccessKind::WebFetch(_)
-        | AccessKind::InternalControl { .. } => PlanEditGate::Allow,
+    if tracker.is_plan() && matches!(tool_input, ToolInput::Workflow(_)) {
+        PlanEditGate::RejectWorkflow
+    } else {
+        PlanEditGate::Allow
     }
 }
 
@@ -794,5 +749,262 @@ mod tests {
                 .as_str()
                 .is_some_and(|v| v.len() <= WRITE_PERMISSION_PREVIEW_BYTES && v.ends_with('…'))
         );
+    }
+
+    /// Ordinary permission chain reached by Normal and every Plan phase.
+    ///
+    /// The Plan gate is applied first. One real permission manager resolves
+    /// every call: an explicit `Bash(git:*)` allow records `policy_allow`
+    /// (`git remote -v` is a real investigation command outside the
+    /// always-safe list), `pwd` records the always-safe `safe_command`
+    /// auto-allow, an explicit deny records `policy_deny`, and Ask is the
+    /// same manager reaching its gateway prompt. Phase is not an input to
+    /// any of those decisions.
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_phases_share_ordinary_bash_permission_decisions() {
+        // The real permission manager spawns its actor with spawn_local, so
+        // the whole test body must run inside a LocalSet (same shape as
+        // subagent_bash_permission_tests.rs).
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use std::sync::{Arc, Mutex};
+
+                use crate::session::behavior::BehaviorCoordinator;
+                use acp_transport::protocol as acp;
+                use acp_transport::{AcpAgentGatewaySender, AcpClientMessage};
+                use paths::AbsPathBuf;
+                use tools::implementations::BashToolInput;
+                use workspace::permission::types::{
+                    PermissionConfig, PermissionRule, PromptPolicy, RuleAction, ToolFilter,
+                };
+                use workspace::permission::{
+                    AccessKind, ClientType, Decision, PermissionEvent, spawn_permission_manager,
+                };
+
+                fn bash(command: &str) -> ToolInput {
+                    ToolInput::Bash(BashToolInput {
+                        command: command.into(),
+                        timeout: None,
+                        description: "ordinary permission parity".into(),
+                        is_background: false,
+                    })
+                }
+
+                fn phases() -> Vec<(&'static str, BehaviorCoordinator)> {
+                    let normal = BehaviorCoordinator::new();
+                    let mut drafting = BehaviorCoordinator::new();
+                    assert!(drafting.select_behavior(tool_types::BehaviorId::Plan));
+                    let mut awaiting = BehaviorCoordinator::new();
+                    assert!(awaiting.select_behavior(tool_types::BehaviorId::Plan));
+                    awaiting.record_plan_artifact("# submitted");
+                    assert!(awaiting.submit_initial_plan());
+                    let mut executing = BehaviorCoordinator::new();
+                    assert!(executing.select_behavior(tool_types::BehaviorId::Plan));
+                    executing.record_plan_artifact("# approved");
+                    assert!(executing.submit_initial_plan());
+                    assert!(executing.approve_submitted_plan());
+                    let mut amending = BehaviorCoordinator::new();
+                    assert!(amending.select_behavior(tool_types::BehaviorId::Plan));
+                    amending.record_plan_artifact("# approved");
+                    assert!(amending.submit_initial_plan());
+                    assert!(amending.approve_submitted_plan());
+                    assert!(amending.submit_plan_amendment());
+                    vec![
+                        ("normal", normal),
+                        ("drafting", drafting),
+                        ("awaiting_approval", awaiting),
+                        ("amending", amending),
+                        ("executing", executing),
+                    ]
+                }
+
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+                let recorded = Arc::clone(&prompts);
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = gateway_rx.recv().await {
+                        if let AcpClientMessage::RequestPermission(args) = message {
+                            recorded
+                                .lock()
+                                .expect("prompt log")
+                                .push(args.request.tool_call.tool_call_id.0.to_string());
+                            let response = acp::RequestPermissionResponse::new(
+                                acp::RequestPermissionOutcome::Selected(
+                                    acp::SelectedPermissionOutcome::new(
+                                        acp::PermissionOptionId::new(Arc::from("allow-once")),
+                                    ),
+                                ),
+                            );
+                            let _ = args.response_tx.send(Ok(response));
+                        }
+                    }
+                });
+
+                let cwd = AbsPathBuf::new(std::env::temp_dir()).expect("temporary cwd");
+                let config = PermissionConfig {
+                    rules: vec![
+                        // `git remote -v` is outside the always-safe list, so
+                        // this explicit rule is what records `policy_allow`
+                        // (same shape proven by the manager's own git-allow
+                        // regression test). `pwd` stays rule-free: the
+                        // always-safe list resolves it as `safe_command`.
+                        workspace::permission::rules::parse_permission_rule(
+                            "Bash(git:*)",
+                            RuleAction::Allow,
+                        )
+                        .expect("valid git allow rule"),
+                        PermissionRule {
+                            action: RuleAction::Deny,
+                            tool: ToolFilter::Bash,
+                            pattern: Some("rm -rf /".into()),
+                            pattern_mode: Default::default(),
+                        },
+                    ],
+                    prompt_policy: PromptPolicy::Ask,
+                };
+                let (permissions, mut events) = spawn_permission_manager(
+                    acp::SessionId::new("plan-ordinary-permission"),
+                    AcpAgentGatewaySender::new(gateway_tx),
+                    cwd,
+                    ClientType::Generic,
+                    std::time::Duration::from_secs(5),
+                    Some(config),
+                    Vec::new(),
+                    Vec::new(),
+                    ::diagnostics::enums::PermissionMode::Ask,
+                    None,
+                    false,
+                );
+
+                let mut policy_allows = Vec::new();
+                let mut safe_allows = Vec::new();
+                let mut denies = Vec::new();
+                let mut asks = Vec::new();
+                for (phase, tracker) in phases() {
+                    let policy_allowed = bash("git remote -v");
+                    let safe_allowed = bash("pwd");
+                    let denied = bash("rm -rf /");
+                    let asked = bash("cargo check");
+                    for input in [&policy_allowed, &safe_allowed, &denied, &asked] {
+                        assert_eq!(
+                            plan_mode_edit_gate(&tracker, input),
+                            PlanEditGate::Allow,
+                            "{phase} must reach ordinary authorization"
+                        );
+                    }
+
+                    let request = |command: &str, id: String| {
+                        permissions.request_with_context(
+                            AccessKind::Bash(command.into()),
+                            acp::ToolCallUpdate::new(acp::ToolCallId::new(id), Default::default()),
+                            None,
+                            workspace::permission::types::PermissionRequestContext {
+                                source:
+                                    workspace::permission::types::PermissionRequestSource::Primary {
+                                        session_id: None,
+                                    },
+                                request_mode: None,
+                                within_capability_fence: false,
+                                execution_cwd: None,
+                                classifier_turns: None,
+                                call_evidence: None,
+                                human_interaction: None,
+                            },
+                        )
+                    };
+                    policy_allows.push((
+                        phase,
+                        request("git remote -v", format!("{phase}-policy-allow")).await,
+                    ));
+                    safe_allows.push((phase, request("pwd", format!("{phase}-safe-allow")).await));
+                    denies.push((phase, request("rm -rf /", format!("{phase}-deny")).await));
+                    asks.push((phase, request("cargo check", format!("{phase}-ask")).await));
+                }
+
+                let policy_allow_decision = policy_allows[0].1.clone();
+                let safe_allow_decision = safe_allows[0].1.clone();
+                let deny_decision = denies[0].1.clone();
+                let ask_decision = asks[0].1.clone();
+                assert!(
+                    matches!(policy_allow_decision, Decision::Allow),
+                    "baseline policy allow: {policy_allow_decision:?}"
+                );
+                assert!(
+                    matches!(safe_allow_decision, Decision::Allow),
+                    "baseline safe allow: {safe_allow_decision:?}"
+                );
+                assert!(
+                    matches!(deny_decision, Decision::PolicyDeny(_)),
+                    "baseline deny: {deny_decision:?}"
+                );
+                assert!(
+                    matches!(ask_decision, Decision::Allow),
+                    "ask path must receive the gateway selection: {ask_decision:?}"
+                );
+                for (phase, decision) in &policy_allows {
+                    assert_eq!(
+                        decision, &policy_allow_decision,
+                        "{phase} policy allow diverged"
+                    );
+                }
+                for (phase, decision) in &safe_allows {
+                    assert_eq!(
+                        decision, &safe_allow_decision,
+                        "{phase} safe allow diverged"
+                    );
+                }
+                for (phase, decision) in &denies {
+                    assert_eq!(decision, &deny_decision, "{phase} deny diverged");
+                }
+                for (phase, decision) in &asks {
+                    assert_eq!(decision, &ask_decision, "{phase} ask diverged");
+                }
+
+                let mut seen = std::collections::BTreeMap::<String, PermissionEvent>::new();
+                while seen.len() < 20 {
+                    let event =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                            .await
+                            .expect("permission event")
+                            .expect("permission manager");
+                    seen.insert(event.tool_id.clone(), event);
+                }
+                for phase in [
+                    "normal",
+                    "drafting",
+                    "awaiting_approval",
+                    "amending",
+                    "executing",
+                ] {
+                    let policy_allowed = &seen[&format!("{phase}-policy-allow")];
+                    let safe_allowed = &seen[&format!("{phase}-safe-allow")];
+                    let denied = &seen[&format!("{phase}-deny")];
+                    let asked = &seen[&format!("{phase}-ask")];
+                    assert_eq!(policy_allowed.decision, "allow");
+                    assert_eq!(
+                        policy_allowed.decision_reason.as_deref(),
+                        Some("policy_allow")
+                    );
+                    assert!(!policy_allowed.user_prompted);
+                    assert_eq!(safe_allowed.decision, "allow");
+                    assert_eq!(
+                        safe_allowed.decision_reason.as_deref(),
+                        Some("safe_command")
+                    );
+                    assert!(!safe_allowed.user_prompted);
+                    assert_eq!(denied.decision, "reject");
+                    assert_eq!(denied.decision_reason.as_deref(), Some("policy_deny"));
+                    assert!(!denied.user_prompted);
+                    assert_eq!(asked.decision, "allow");
+                    assert!(asked.user_prompted, "{phase} did not reach the Ask gateway");
+                }
+                let prompted = prompts.lock().expect("prompt log");
+                assert_eq!(
+                    prompted.len(),
+                    5,
+                    "every phase prompts exactly once: {prompted:?}"
+                );
+            })
+            .await;
     }
 }

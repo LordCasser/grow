@@ -2304,6 +2304,9 @@ impl SessionActor {
         let current_prompt_id = current_bridge
             .read_resource::<tools::implementations::grow_build::task::types::CurrentPromptIdResource>()
             .await;
+        let current_prompt_owner = current_bridge
+            .read_resource::<tools::implementations::grow_build::task::types::CurrentUsagePromptOwnerResource>()
+            .await;
         let current_subagent_owner = current_bridge
             .read_resource::<tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource>()
             .await;
@@ -2406,6 +2409,9 @@ impl SessionActor {
         }
         if let Some(prompt_id) = current_prompt_id {
             candidate_bridge.update_resource(prompt_id).await;
+        }
+        if let Some(prompt_owner) = current_prompt_owner {
+            candidate_bridge.update_resource(prompt_owner).await;
         }
         if let Some(owner) = current_subagent_owner {
             candidate_bridge.update_resource(owner).await;

@@ -253,7 +253,7 @@ fn transient_context_pressure_refreshes_state_without_scrollback() {
     )
     .meta(
         serde_json::json!({
-            "totalTokens": 123_456,
+            "contextUsedTokens": 123_456,
             "transient": true,
         })
         .as_object()
@@ -540,7 +540,7 @@ pub(super) fn make_deleted_ext_notif(
 }
 pub(super) fn make_token_notification_message(
     session_id: &str,
-    total_tokens: u64,
+    context_used_tokens: u64,
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     let request = acp::SessionNotification::new(
@@ -552,7 +552,7 @@ pub(super) fn make_token_notification_message(
             ),
         )
         .meta(serde_json::json!({
-                "totalTokens": total_tokens,
+                "contextUsedTokens": context_used_tokens,
             }).as_object().cloned());
     AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
         request,
@@ -705,11 +705,11 @@ pub(super) fn grow_unhandled_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-/// Build an `agent_message_chunk` notification carrying both `totalTokens`
+/// Build an `agent_message_chunk` notification carrying both `contextUsedTokens`
 /// and an explicit `eventId`, for context/dedup interaction tests.
 pub(super) fn make_token_notification_with_event(
     session_id: &str,
-    total_tokens: u64,
+    context_used_tokens: u64,
     event_id: &str,
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -723,7 +723,7 @@ pub(super) fn make_token_notification_with_event(
         )
         .meta(
             serde_json::json!({
-                "totalTokens": total_tokens,
+                "contextUsedTokens": context_used_tokens,
                 "eventId": event_id,
             })
                 .as_object()
@@ -1201,6 +1201,7 @@ pub(super) fn write_subagent_spawn_timeline(
                 context_normalized: false,
                 resumed_from: None,
                 parent_prompt_id: None,
+                parent_prompt_owner: None,
                 capability_mode: None,
                 birth_mcp_servers: Some(Default::default()),
                 permission_mode: None,

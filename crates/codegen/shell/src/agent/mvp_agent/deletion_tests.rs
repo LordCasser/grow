@@ -20,6 +20,7 @@ fn linked_spawn(root: &Info, child: &Info) -> chat_state::TimelineEventKind {
             context_normalized: false,
             resumed_from: None,
             parent_prompt_id: None,
+            parent_prompt_owner: None,
             capability_mode: None,
             birth_mcp_servers: Some(Default::default()),
             permission_mode: None,

@@ -10,3 +10,4 @@ Session usage (lifetime):
   Total tokens:   110
   Model calls:    1 · API time: 1.0s
   Cost:           not available (not reported)
+  Note: recorded consumption; work still running may add usage.

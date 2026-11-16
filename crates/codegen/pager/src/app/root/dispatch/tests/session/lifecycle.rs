@@ -49,6 +49,7 @@ fn session_created_sets_session_id() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -103,6 +104,7 @@ fn session_created_models_do_not_overwrite_new_session_default() {
                     "Exact Current",
                 )],
             )),
+            behavior: None,
         }),
         &mut app,
     );
@@ -128,6 +130,7 @@ fn session_created_omits_cta_catalog_when_disabled() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -172,6 +175,7 @@ fn session_created_banner_advertises_resume_in_minimal_mode() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -254,6 +258,7 @@ fn worktree_session_created_sets_session_and_cwd() {
             worktree_path: worktree_path.clone(),
             session_cwd: session_cwd.clone(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -320,6 +325,7 @@ fn worktree_session_models_do_not_overwrite_new_session_default() {
                     "Exact Current",
                 )],
             )),
+            behavior: None,
         }),
         &mut app,
     );
@@ -354,6 +360,7 @@ fn worktree_session_preserves_subdirectory_offset() {
             worktree_path: worktree_root.clone(),
             session_cwd: session_cwd.clone(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -482,6 +489,7 @@ fn worktree_session_created_drains_queued_prompts() {
             worktree_path,
             session_cwd: PathBuf::from("/tmp/grow-worktrees/pager-abc"),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -515,6 +523,7 @@ fn session_created_drains_queued_prompts() {
             agent_id: id,
             session_id: acp::SessionId::new("sess-drain-1"),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -551,6 +560,7 @@ fn session_created_with_flag_emits_five_fetches_and_clears_flag() {
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -571,6 +581,7 @@ fn session_created_without_flag_emits_no_extension_fetches() {
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -890,6 +901,7 @@ fn deferred_model_switch_applied_on_session_created() {
             agent_id: id,
             session_id: session_id.clone(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -930,6 +942,7 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
             worktree_path: PathBuf::from("/tmp/worktree"),
             session_cwd: PathBuf::from("/tmp/worktree"),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );

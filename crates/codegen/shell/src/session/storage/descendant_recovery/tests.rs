@@ -39,6 +39,7 @@ fn spawn(parent: &Info, child: &Info) -> chat_state::SubagentSpawnEvent {
         context_normalized: false,
         resumed_from: None,
         parent_prompt_id: None,
+        parent_prompt_owner: None,
         capability_mode: None,
         birth_mcp_servers: Some(Default::default()),
         permission_mode: None,
@@ -179,7 +180,13 @@ async fn settled_child_is_available_to_exact_queries_after_cold_load() {
     assert_eq!(seq, spawn.seq);
     assert_eq!(operation.child_session_id, child.id.to_string());
     assert_eq!(terminal.unwrap().outcome, SubagentOutcome::Cancelled);
-    assert!(restored.timeline.subagent_operation("missing").unwrap().is_none());
+    assert!(
+        restored
+            .timeline
+            .subagent_operation("missing")
+            .unwrap()
+            .is_none()
+    );
 
     // Indexed cold ownership omits settled spawn details, while the newest
     // replay page can still name this child. Resolve only that emitted id
@@ -203,15 +210,21 @@ async fn settled_child_is_available_to_exact_queries_after_cold_load() {
         .iter()
         .filter_map(|update| match update {
             SessionUpdate::Grow(notification) => match &notification.update {
-                GrowUpdate::SubagentFinished { subagent_id, child_session_id, .. } => {
-                    Some((child_session_id.clone(), subagent_id.clone()))
-                }
+                GrowUpdate::SubagentFinished {
+                    subagent_id,
+                    child_session_id,
+                    ..
+                } => Some((child_session_id.clone(), subagent_id.clone())),
                 _ => None,
             },
             _ => None,
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(replayed_children.len(), 1, "the newest page names the terminal child without its Spawned row");
+    assert_eq!(
+        replayed_children.len(),
+        1,
+        "the newest page names the terminal child without its Spawned row"
+    );
     ownership
         .include_replayed_children(&restored.timeline, &replayed_children)
         .unwrap();
@@ -263,7 +276,10 @@ async fn delivered_child_is_settled_but_remains_exactly_queryable_after_cold_loa
             data: Some(serde_json::json!("publish child seed".repeat(65_536))),
         }))
         .unwrap();
-    adapter.append_timeline_event_durable(&child, &child_publication).await.unwrap();
+    adapter
+        .append_timeline_event_durable(&child, &child_publication)
+        .await
+        .unwrap();
     let child_result = child_timeline
         .record(TimelineEventKind::SubagentResult(SubagentResultEvent {
             subagent_id: "agent-child".into(),
@@ -433,15 +449,27 @@ async fn delivered_child_is_settled_but_remains_exactly_queryable_after_cold_loa
     let terminal = terminal.unwrap();
     assert_eq!(terminal.outcome, SubagentOutcome::Completed);
     let opened_child = adapter.open_session(&child).unwrap();
-    assert_eq!(opened_child.validated_child_result(parent.id.0.as_ref(), spawn_seq, &operation, &terminal).unwrap().tokens_used, 12);
+    assert_eq!(
+        opened_child
+            .validated_child_result(parent.id.0.as_ref(), spawn_seq, &operation, &terminal)
+            .unwrap()
+            .tokens_used,
+        12
+    );
     let mut conflicting = terminal.clone();
     conflicting.tokens_used = 13;
-    assert!(opened_child.validated_child_result(parent.id.0.as_ref(), spawn_seq, &operation, &conflicting).is_err());
+    assert!(
+        opened_child
+            .validated_child_result(parent.id.0.as_ref(), spawn_seq, &operation, &conflicting)
+            .is_err()
+    );
     let expected_receipt_id =
         chat_state::notification_id(parent.id.0.as_ref(), &source, &source_version).unwrap();
-    assert!(matches!(&restored.exact_notification(&source, &source_version).unwrap().unwrap().kind,
-        TimelineEventKind::Notification(NotificationEvent::Received { id, .. }) if id == &expected_receipt_id
-    ));
+    assert!(
+        matches!(&restored.exact_notification(&source, &source_version).unwrap().unwrap().kind,
+            TimelineEventKind::Notification(NotificationEvent::Received { id, .. }) if id == &expected_receipt_id
+        )
+    );
     assert!(restored.pending_notifications().is_empty());
     assert_eq!(
         restored.consumed_notification_turn(&source, &source_version),
@@ -480,12 +508,13 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
     let mut child_summary = child_opened.summary().clone();
     child_summary.parent_session_id = Some(parent.id.0.to_string());
     child_summary.session_kind = Some("subagent_explore".into());
-    let summary_path = child_opened
-        .directory()
-        .display_path()
-        .join("summary.json");
+    let summary_path = child_opened.directory().display_path().join("summary.json");
     drop(child_opened);
-    std::fs::write(&summary_path, serde_json::to_vec_pretty(&child_summary).unwrap()).unwrap();
+    std::fs::write(
+        &summary_path,
+        serde_json::to_vec_pretty(&child_summary).unwrap(),
+    )
+    .unwrap();
 
     init(&adapter, &grandchild).await;
     let mut child_timeline = chat_state::Timeline::default();
@@ -504,9 +533,9 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
         .unwrap();
     let nested_spawn = spawn(&child, &grandchild);
     let nested_spawn_event = child_timeline
-        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(
-            nested_spawn.clone(),
-        ))))
+        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+            Box::new(nested_spawn.clone()),
+        )))
         .unwrap();
     adapter
         .append_timeline_event_durable(&child, &nested_spawn_event)
@@ -624,10 +653,7 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
     assert!(indexed.has_child_presentation());
     let mut reader = indexed.page_reader().unwrap();
     let indexed_lifecycle = reader
-        .read_subagent_lifecycle(
-            &child.id,
-            &loaded.history,
-        )
+        .read_subagent_lifecycle(&child.id, &loaded.history)
         .unwrap();
     assert_eq!(indexed_lifecycle.len(), 3);
     assert!(matches!(
@@ -654,7 +680,11 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
     .unwrap()
     .unwrap();
     assert!(ownership.is_complete());
-    assert!(ownership.into_spawns().contains_key(grandchild.id.0.as_ref()));
+    assert!(
+        ownership
+            .into_spawns()
+            .contains_key(grandchild.id.0.as_ref())
+    );
     let lifecycle = presentation
         .iter()
         .filter_map(|notification| match &notification.update {

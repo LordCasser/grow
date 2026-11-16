@@ -808,10 +808,6 @@ impl BehaviorCoordinator {
         self.is_plan() && self.plan.phase == PlanPhase::Drafting
     }
 
-    pub fn plan_allows_edits(&self) -> bool {
-        self.is_plan() && self.plan.phase == PlanPhase::Executing
-    }
-
     pub fn plan_phase_label(&self) -> Option<&'static str> {
         self.is_plan().then_some(match self.plan.phase {
             PlanPhase::Drafting => "drafting",
@@ -1384,7 +1380,7 @@ pub fn plan_phase_model_context(snapshot: &BehaviorSnapshot, plan_content: &str)
         .filter(|feedback| !feedback.is_empty());
     let context = match phase {
         PlanPhase::Drafting => format!(
-            "{}\n\nPlan phase: Drafting. Workspace mutation and execution are forbidden. Investigate, resolve material uncertainties, and submit one complete plan for approval with `plan_control` action `submit`.{}{}{}",
+            "{}\n\nPlan phase: Drafting. Form and verify one complete plan, then submit it for approval with `plan_control` action `submit`. Do not implement the planned product change.{}{}{}",
             plan_behavior_template().trim(),
             if plan.is_empty() {
                 ""
@@ -1397,17 +1393,17 @@ pub fn plan_phase_model_context(snapshot: &BehaviorSnapshot, plan_content: &str)
             )),
         ),
         PlanPhase::AwaitingApproval => format!(
-            "{}\n\nPlan phase: AwaitingApproval. The plan below is frozen and awaiting a human decision. Do not execute it, modify the workspace, or replace it unless the approval result moves the phase.\n\nFrozen plan:\n\n{}",
+            "{}\n\nPlan phase: AwaitingApproval. The plan below is frozen and awaiting a human decision. Do not execute it, modify the frozen plan, or resubmit it. A tool permission grant or further investigation does not replace that decision or move the phase.\n\nFrozen plan:\n\n{}",
             plan_behavior_template().trim(),
             plan,
         ),
         PlanPhase::Amending if snapshot.approval_pending => format!(
-            "{}\n\nPlan phase: Amending. The replacement plan below is frozen and awaiting a human decision. Workspace mutation and execution are forbidden; do not revise or resubmit it until the approval result moves the phase.\n\nFrozen replacement plan:\n\n{}",
+            "{}\n\nPlan phase: Amending. The replacement plan below is frozen and awaiting a human decision. Do not execute it, revise the frozen plan, or resubmit it until the approval result moves the phase. A tool permission grant is not plan approval.\n\nFrozen replacement plan:\n\n{}",
             plan_behavior_template().trim(),
             plan,
         ),
         PlanPhase::Amending => format!(
-            "{}\n\nPlan phase: Amending. Workspace mutation and execution are forbidden. Revise the complete plan in response to the review feedback, then submit the complete replacement with `plan_control` action `amend`.\n\nPlan requiring amendment:\n\n{}{}",
+            "{}\n\nPlan phase: Amending. Use tools only to verify and revise this complete plan in response to the review feedback. Do not implement the unapproved scope. Submit the complete replacement with `plan_control` action `amend`.\n\nPlan requiring amendment:\n\n{}{}",
             plan_behavior_template().trim(),
             plan,
             feedback.map_or_else(String::new, |feedback| format!(
@@ -1415,7 +1411,7 @@ pub fn plan_phase_model_context(snapshot: &BehaviorSnapshot, plan_content: &str)
             )),
         ),
         PlanPhase::Executing => format!(
-            "The following plan is a frozen, human-approved contract and is now in the Executing phase. Implement and verify only work within its scope. If its objective, architecture, major steps, risk boundary, or deletion behavior must change, stop workspace mutation and submit a complete replacement with `plan_control` action `amend`. When all approved work is verified, call `plan_control` with action `complete` and a non-empty final user-facing `report`; that tool result is the only final report.\n\nApproved plan:\n\n{}{}",
+            "The following plan is a frozen, human-approved contract and is now in the Executing phase. Implement and verify only work within its scope. Ordinary permission grants do not expand that approved scope. If its objective, architecture, major steps, risk boundary, or deletion behavior must change, stop workspace mutation and submit a complete replacement with `plan_control` action `amend`. When all approved work is verified, call `plan_control` with action `complete` and a non-empty final user-facing `report`; that tool result is the only final report.\n\nApproved plan:\n\n{}{}",
             plan,
             feedback.map_or_else(String::new, |feedback| format!(
                 "\n\nApproval review:\n\n{feedback}"
@@ -1423,10 +1419,6 @@ pub fn plan_phase_model_context(snapshot: &BehaviorSnapshot, plan_content: &str)
         ),
     };
     Some(context)
-}
-
-pub fn plan_mode_edit_rejected_template() -> &'static str {
-    include_str!("../../prompts/behaviors/plan/edit-rejected.md")
 }
 
 pub fn clarify_reminder_template() -> &'static str {
@@ -1557,21 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn only_executing_plan_allows_edits() {
-        let mut controller = controller();
-        controller.select_behavior(BehaviorId::Plan);
-        controller.record_plan_artifact("# plan");
-        assert!(!controller.plan_allows_edits());
-        assert!(controller.submit_initial_plan());
-        assert!(!controller.plan_allows_edits());
-        assert!(controller.approve_submitted_plan());
-        assert!(controller.plan_allows_edits());
-        assert!(controller.submit_plan_amendment());
-        assert!(!controller.plan_allows_edits());
-    }
-
-    #[test]
-    fn amendment_rejection_stays_read_only_for_revision() {
+    fn amendment_rejection_stays_in_amending_for_revision() {
         let mut controller = controller();
         controller.select_behavior(BehaviorId::Plan);
         controller.record_plan_artifact("# initial");
@@ -1582,7 +1560,6 @@ mod tests {
         controller.set_approval_pending(false);
         assert!(controller.reject_submitted_plan());
         assert_eq!(controller.state(), BehaviorState::Plan(PlanPhase::Amending));
-        assert!(!controller.plan_allows_edits());
         assert!(controller.submit_plan_amendment());
     }
 
@@ -1689,11 +1666,11 @@ mod tests {
                 ));
                 controller = BehaviorCoordinator::from_snapshot(controller.snapshot());
                 assert_eq!(controller.state(), BehaviorState::Plan(phase));
-                assert!(!controller.plan_allows_edits());
                 let context = plan_phase_model_context(&controller.snapshot(), plan).unwrap();
                 assert!(context.contains(plan));
                 assert!(context.contains(&format!("action `{action}`")));
-                assert!(context.contains("Workspace mutation and execution are forbidden"));
+                assert!(context.contains("every tool call serves only to form, verify, or revise"));
+                assert!(!context.contains("Workspace mutation and execution are forbidden"));
                 if let Some(feedback) = feedback.filter(|text| !text.trim().is_empty()) {
                     assert_eq!(context.matches(feedback).count(), 1, "{phase:?}: {context}");
                 } else {
@@ -2573,6 +2550,99 @@ mod tests {
             owner_confirmation.outcome,
             BehaviorChangeOutcome::Applied
         ));
+    }
+
+    #[test]
+    fn planning_phase_contexts_share_research_limits_and_leave_execution_open() {
+        let base = plan_behavior_template();
+        for phrase in [
+            "must not replace the primary Agent's",
+            "every tool call serves only to form, verify, or revise",
+            "not plan approval",
+            "limited recoverable experiment",
+            "MCP tool",
+            "subagent",
+            "Workflow",
+        ] {
+            assert!(base.contains(phrase), "{phrase}");
+        }
+        assert!(!base.contains("Workspace mutation and execution are forbidden"));
+
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        let drafting = plan_phase_model_context(&controller.snapshot(), "").unwrap();
+        assert!(drafting.contains("Plan phase: Drafting"));
+        assert!(drafting.contains("action `submit`"));
+        assert!(drafting.contains("every tool call serves only to form, verify, or revise"));
+        assert!(!drafting.contains("action `complete`"));
+
+        controller.record_plan_artifact("# frozen");
+        assert!(controller.submit_initial_plan());
+        let awaiting = plan_phase_model_context(&controller.snapshot(), "# frozen").unwrap();
+        assert!(awaiting.contains("Frozen plan:"));
+        assert!(awaiting.contains("Do not execute it, modify the frozen plan, or resubmit it"));
+        assert!(awaiting.contains("# frozen"));
+        assert!(!awaiting.contains("Approval feedback:"));
+
+        assert!(
+            controller.approve_submitted_plan_with_feedback(Some(
+                "ship only the approved boundary".into(),
+            ))
+        );
+        let executing = plan_phase_model_context(&controller.snapshot(), "# frozen").unwrap();
+        assert!(executing.contains("action `amend`"));
+        assert!(executing.contains("action `complete`"));
+        assert!(executing.contains("within its scope"));
+        assert!(executing.contains("do not expand that approved scope"));
+        assert_eq!(
+            executing.matches("ship only the approved boundary").count(),
+            1
+        );
+        assert!(!executing.contains("every tool call serves only"));
+        assert!(!executing.contains("Workspace mutation and execution are forbidden"));
+
+        controller.record_plan_artifact("# replacement");
+        assert!(controller.submit_plan_amendment());
+        assert!(controller.approval_pending());
+        let frozen_amendment =
+            plan_phase_model_context(&controller.snapshot(), "# replacement").unwrap();
+        assert!(frozen_amendment.contains("Frozen replacement plan:"));
+        assert!(
+            frozen_amendment.contains("Do not execute it, revise the frozen plan, or resubmit it")
+        );
+        assert!(frozen_amendment.contains("# replacement"));
+        assert!(!frozen_amendment.contains("# frozen"));
+
+        let pending = controller.snapshot();
+        assert!(controller.reject_submitted_plan_if_with_feedback(
+            &pending,
+            Some("keep this revision note verbatim".into()),
+        ));
+        let amending = plan_phase_model_context(&controller.snapshot(), "# replacement").unwrap();
+        assert!(amending.contains("Plan phase: Amending"));
+        assert!(amending.contains("action `amend`"));
+        assert!(amending.contains("every tool call serves only to form, verify, or revise"));
+        assert_eq!(
+            amending.matches("keep this revision note verbatim").count(),
+            1
+        );
+        assert!(!amending.contains("Frozen replacement plan:"));
+
+        let full = include_str!("../../prompts/behaviors/plan/full.md");
+        let sparse = include_str!("../../prompts/behaviors/plan/sparse.md");
+        let executing_template = include_str!("../../prompts/behaviors/plan/executing.md");
+        let exit_template = include_str!("../../prompts/behaviors/plan/exit.md");
+        for prompt in [full, sparse] {
+            assert!(prompt.contains("every tool call serves only to form, verify, or revise"));
+            assert!(prompt.contains("not plan approval"));
+            assert!(!prompt.contains("Workspace mutation is prohibited"));
+        }
+        assert!(executing_template.contains("action=\"amend\""));
+        assert!(executing_template.contains("action=\"complete\""));
+        assert!(executing_template.contains("do not expand that"));
+        assert!(!executing_template.contains("every tool call serves only"));
+        assert!(exit_template.contains("no longer applies"));
+        assert!(!exit_template.contains("apply again"));
     }
 
     #[test]

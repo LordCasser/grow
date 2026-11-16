@@ -69,11 +69,11 @@ pub use timeline::{
     HookHandlerKind, HookHandlerLifecycle, HookHandlerPlan, HookHandlerPlanAction,
     HookHandlerProvenance, HookLifecycleProjection, HookRunControl, HookRunOutcome,
     HookRunSkipReason, HookStopDecision, ImageProjectionEvent, ImageShadow, ImageShadowSource,
-    ImageToolCallShadow, InputAdmissionDecision, InputBlockReason, InputCheckpointEntry, InputDismissReason, InputEvent,
-    InputIntent, InputLifecycle, InputPayloadRef, InputRoute, InputState, InteractionEvent,
-    InteractionKind, InteractionResolution, MAX_HOOK_CONTROL_TEXT_BYTES,
-    MAX_HOOK_HANDLER_NAME_BYTES, MAX_HOOK_HANDLERS, MAX_HOOK_ID_BYTES, MAX_INPUT_PAYLOAD_BYTES,
-    MAX_NOTIFICATION_ID_BYTES, MAX_NOTIFICATION_PAYLOAD_BYTES,
+    ImageToolCallShadow, InputAdmissionDecision, InputBlockReason, InputCheckpointEntry,
+    InputDismissReason, InputEvent, InputIntent, InputLifecycle, InputPayloadRef, InputRoute,
+    InputState, InteractionEvent, InteractionKind, InteractionResolution,
+    MAX_HOOK_CONTROL_TEXT_BYTES, MAX_HOOK_HANDLER_NAME_BYTES, MAX_HOOK_HANDLERS, MAX_HOOK_ID_BYTES,
+    MAX_INPUT_PAYLOAD_BYTES, MAX_NOTIFICATION_ID_BYTES, MAX_NOTIFICATION_PAYLOAD_BYTES,
     MAX_PENDING_MONITOR_PROGRESS_PER_TASK, MAX_TURN_INPUTS, MAX_WORKFLOW_INITIAL_MANIFEST_BYTES,
     MAX_WORKFLOW_RUN_ID_BYTES, MessageCause, MessageEvent, NotificationDismissReason,
     NotificationEvent, NotificationOwner, NotificationPayloadRef, NotificationSource,
@@ -88,9 +88,12 @@ pub use timeline::{
     UserDisplayEcho, WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle,
     WorkflowTurnHandoff, notification_id,
 };
+pub use tool_types::UsagePromptOwner;
 pub use trajectory::{
     SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryIssueSeverity, TrajectoryProjector,
     TrajectoryRow, TrajectorySnapshot, trajectory_issue_severity,
 };
 pub use types::*;
-pub use usage::{UsageAgent, UsageLedger, UsageSegment, UsageSegmentId, UsageSegmentPage, UsageTotals};
+pub use usage::{
+    UsageAgent, UsageLedger, UsageSegment, UsageSegmentId, UsageSegmentPage, UsageTotals,
+};

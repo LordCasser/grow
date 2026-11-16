@@ -177,6 +177,65 @@ pub(super) fn read(
     )))
 }
 
+/// Read the next bounded set of chunks from an exact serialized JSON byte start.
+pub(super) fn read_after(
+    tx: &ReadTransaction,
+    source_position: u64,
+    start: u64,
+) -> io::Result<
+    Option<(
+        Option<u64>,
+        i64,
+        crate::extensions::notification::ToolOutputFragment,
+    )>,
+> {
+    let table = tx.open_table(TOOL_FRAGMENTS).map_err(io::Error::other)?;
+    let Some(value) = table.get(source_position).map_err(io::Error::other)? else {
+        return Ok(None);
+    };
+    let header: Header = serde_json::from_slice(value.value())?;
+    if header.source_position != source_position || start >= header.total_bytes {
+        return Err(invalid("Tool fragment start is outside its indexed body"));
+    }
+    let chunks = tx
+        .open_table(TOOL_FRAGMENT_CHUNKS)
+        .map_err(io::Error::other)?;
+    let mut json = Vec::new();
+    let mut end = start;
+    for entry in chunks
+        .range((source_position, start)..=(source_position, u64::MAX))
+        .map_err(io::Error::other)?
+        .take(FRAGMENT_PAGE_CHUNKS)
+    {
+        let (key, value) = entry.map_err(io::Error::other)?;
+        if key.value().1 != end {
+            return Err(invalid(
+                "Tool fragment start does not align with an indexed chunk",
+            ));
+        }
+        end += value.value().len() as u64;
+        json.extend_from_slice(value.value());
+    }
+    if end == start || end > header.total_bytes {
+        return Err(invalid("Tool fragment chunks cross their indexed body"));
+    }
+    Ok(Some((
+        (end < header.total_bytes).then_some(end),
+        header.at_ms,
+        crate::extensions::notification::ToolOutputFragment {
+            tool_call_id: header.tool_call_id,
+            source_position,
+            digest: header.digest,
+            title: header.title,
+            kind: header.kind,
+            status: header.status,
+            byte_start: start,
+            total_bytes: header.total_bytes,
+            json: String::from_utf8(json).map_err(io::Error::other)?,
+        },
+    )))
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }

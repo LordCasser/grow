@@ -25,6 +25,8 @@ mod compaction_history;
 #[cfg(unix)]
 mod consultation_history;
 #[cfg(unix)]
+mod history_timeline;
+#[cfg(unix)]
 mod hook_history;
 #[cfg(unix)]
 mod input_history;
@@ -443,18 +445,32 @@ impl OpenedSession {
         let sidebands = match &history.indexed {
             Some(index) => {
                 let mut required = std::collections::BTreeMap::new();
-                let resident = timeline.events().iter().filter_map(|event| match &event.kind {
-                    chat_state::TimelineEventKind::Sideband(spawn) => Some(spawn.sideband_id.as_str()),
-                    _ => None,
-                }).collect::<std::collections::BTreeSet<_>>();
+                let resident = timeline
+                    .events()
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Sideband(spawn) => {
+                            Some(spawn.sideband_id.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
                 for event in timeline.events() {
                     let Some(crate::coordination::InquiryEvent::Incoming { audit, .. }) =
-                        crate::coordination::InquiryEvent::from_timeline(event).map_err(io::Error::other)?
-                    else { continue; };
-                    let Some(proof) = audit.answer_context.filter(|proof| proof.target_session_id == timeline_id)
-                    else { continue; };
+                        crate::coordination::InquiryEvent::from_timeline(event)
+                            .map_err(io::Error::other)?
+                    else {
+                        continue;
+                    };
+                    let Some(proof) = audit
+                        .answer_context
+                        .filter(|proof| proof.target_session_id == timeline_id)
+                    else {
+                        continue;
+                    };
                     let id = proof.result_ref.timeline_id;
-                    if !resident.contains(id.as_str()) && !required.contains_key(&id)
+                    if !resident.contains(id.as_str())
+                        && !required.contains_key(&id)
                         && let Some(spawn) = index.sideband_spawn(&id)?
                         && timeline.event(spawn.seq).is_none()
                     {
@@ -463,7 +479,10 @@ impl OpenedSession {
                 }
                 let spawns = required.into_values().collect::<Vec<_>>();
                 JsonlStorageAdapter::read_sideband_ledgers_with_spawns(
-                    &self.directory, timeline_id, &timeline, &spawns,
+                    &self.directory,
+                    timeline_id,
+                    &timeline,
+                    &spawns,
                 )?
             }
             None => self.sideband_ledgers(timeline_id, &timeline)?,
@@ -844,9 +863,13 @@ impl JsonlStorageAdapter {
                     let mut file = directory.open_regular(name, "mandatory Timeline ledger")?;
                     let file_len = file.metadata()?.len();
                     let complete_len = Self::timeline_complete_len(&mut file, file_len)?;
-                    if let Some((validated, _)) =
-                        working_snapshot::load(&opened, &mut file, complete_len, &path, Some(indexed))?
-                    {
+                    if let Some((validated, _)) = working_snapshot::load(
+                        &opened,
+                        &mut file,
+                        complete_len,
+                        &path,
+                        Some(indexed),
+                    )? {
                         return Ok(validated.timeline);
                     }
                 }
@@ -899,7 +922,9 @@ impl JsonlStorageAdapter {
             let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
             let path = opened.directory().display_path().join(name);
             let _lock = Self::lock_append_contained(opened.directory(), name, &path)?;
-            let mut file = opened.directory().open_regular(name, "mandatory Timeline ledger")?;
+            let mut file = opened
+                .directory()
+                .open_regular(name, "mandatory Timeline ledger")?;
             let file_len = file.metadata()?.len();
             let complete_len = Self::timeline_complete_len(&mut file, file_len)?;
             if let Some((validated, _)) =
@@ -1144,9 +1169,16 @@ impl JsonlStorageAdapter {
                 // manifest. Repair this cut while owning its append lock so
                 // even an immediate second exit cannot repeat the full fold.
                 let transformed = validated.timeline.has_rewound()
-                    || validated.history.sources.iter().any(working_snapshot::is_rewind_marker)
+                    || validated
+                        .history
+                        .sources
+                        .iter()
+                        .any(working_snapshot::is_rewind_marker)
                     || validated.timeline.events().iter().any(|event| {
-                        matches!(event.kind, chat_state::TimelineEventKind::ImageProjection(_))
+                        matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::ImageProjection(_)
+                        )
                     });
                 let repaired = if transformed {
                     working_snapshot::attach_to_validated_prefix(
@@ -1604,7 +1636,12 @@ impl JsonlStorageAdapter {
                 ledgers.insert(sideband_id, events);
             }
         }
-        super::validate_sideband_ledgers_with_spawns(parent_timeline_id, parent, &ledgers, extra_spawns)?;
+        super::validate_sideband_ledgers_with_spawns(
+            parent_timeline_id,
+            parent,
+            &ledgers,
+            extra_spawns,
+        )?;
         Ok(ledgers)
     }
 
@@ -5194,12 +5231,7 @@ impl JsonlStorageAdapter {
         let storage = self.clone();
         let info = info.clone();
         tokio::task::spawn_blocking(move || {
-            let runs = storage.load_workflow_runs_sync(
-                &info,
-                &timeline,
-                &session,
-                false,
-            )?;
+            let runs = storage.load_workflow_runs_sync(&info, &timeline, &session, false)?;
             let mut lifecycles = std::collections::HashMap::new();
             for run in &runs {
                 let run_id = &run.manifest.state.run_id;

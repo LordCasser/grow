@@ -2609,13 +2609,13 @@ fn validate_sideband_ledgers_with_spawns(
             && spawn.purpose == chat_state::SidebandPurpose::InfoRequest
         {
             let mut read_error = None;
-            let validation = timeline.validate_spawn(parent_timeline_id, spawn, |id| {
-                match parent.exact_event(id.event) {
-                    Ok(event) => event.is_some_and(|event| event.owns_surface_id(id)),
-                    Err(error) => {
-                        read_error = Some(error);
-                        false
-                    }
+            let validation = timeline.validate_spawn(parent_timeline_id, spawn, |id| match parent
+                .exact_event(id.event)
+            {
+                Ok(event) => event.is_some_and(|event| event.owns_surface_id(id)),
+                Err(error) => {
+                    read_error = Some(error);
+                    false
                 }
             });
             if let Some(error) = read_error {
@@ -3774,6 +3774,97 @@ pub trait StorageAdapter: Send + Sync {
 }
 
 pub use jsonl::JsonlStorageAdapter;
+
+/// History page rows. The private projector owns these values; paging clients
+/// share them through this storage surface rather than a second wire model.
+pub use crate::session::history::{
+    HistoryEntity, HistoryFragment, HistoryFragmentCoordinate, HistoryRange, HistoryRow,
+    HistorySourceKey, HistoryTimelineEntry,
+};
+
+/// `grow/read_history_page` request. `cut` is the opaque load token.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadHistoryPage {
+    pub session_id: acp::SessionId,
+    pub cut: String,
+    pub query: HistoryPageQuery,
+}
+
+/// Direction inside one fixed cut. A before cursor cannot be submitted as after.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HistoryPageQuery {
+    Latest,
+    Before {
+        cursor: String,
+    },
+    After {
+        cursor: String,
+    },
+    /// Opaque target signed by the same cut. Seek that source; do not walk from latest.
+    Around {
+        target: String,
+    },
+}
+
+/// One bounded page. Rows are `HistoryRow`; there is no bare `updates` alias.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPageResponse {
+    pub session_id: acp::SessionId,
+    pub cut: String,
+    pub rows: Vec<HistoryRow>,
+    pub range: Option<HistoryRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newer_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_source: Option<HistorySourceKey>,
+}
+
+/// `grow/read_history_timeline` request. `cut` is the history page cut.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadHistoryTimeline {
+    pub session_id: acp::SessionId,
+    pub cut: String,
+    pub limit: usize,
+    pub query: HistoryTimelineQuery,
+}
+
+/// Catalog page inside one fixed cut. The before cursor is not a page cursor.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HistoryTimelineQuery {
+    Newest,
+    Before { cursor: String },
+    AroundOrdinal { ordinal: u64 },
+}
+
+/// One directory row plus the opaque around target for its source.
+///
+/// `entry` is the shared catalog record. `target` is signed separately so
+/// combined display segments of one source stay distinct without a fake part.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryTimelineTarget {
+    #[serde(flatten)]
+    pub entry: HistoryTimelineEntry,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryTimelineResponse {
+    pub session_id: acp::SessionId,
+    pub cut: String,
+    pub total_entries: u64,
+    pub entries: Vec<HistoryTimelineTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<String>,
+}
 
 /// An identity-bound read capability for one canonical Timeline ledger.
 ///

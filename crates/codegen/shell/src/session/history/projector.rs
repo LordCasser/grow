@@ -10,6 +10,12 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
+#[path = "timeline_suffix.rs"]
+mod timeline_suffix;
+#[path = "window.rs"]
+mod window;
+pub(crate) use window::PreparedPages;
+
 pub(crate) const HISTORY_CURSOR_KEY: &str = "grow/historyCursor";
 
 #[derive(Serialize, Deserialize)]
@@ -130,18 +136,33 @@ pub(crate) struct IndexedPages {
     history: HistorySnapshot,
     rows: Vec<(PagePosition, SessionUpdate)>,
     task_completions_in_tail: HashSet<String>,
+    /// Prompt metadata the published catalog does not yet rank. Empty when
+    /// the retained cut adds no visible prompt.
+    timeline: timeline_suffix::TimelineOverlay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PagePosition {
-    record: u64,
-    part: u64,
-    offset: Option<usize>,
+    pub(crate) record: u64,
+    pub(crate) part: u64,
+    pub(crate) offset: Option<usize>,
 }
 
 impl PagePosition {
     pub(crate) fn newest() -> Self {
-        Self { record: u64::MAX, part: u64::MAX, offset: None }
+        Self {
+            record: u64::MAX,
+            part: u64::MAX,
+            offset: None,
+        }
+    }
+
+    pub(crate) fn oldest() -> Self {
+        Self {
+            record: 0,
+            part: 0,
+            offset: Some(0),
+        }
     }
 
     fn key(self) -> (u64, u64) {
@@ -163,9 +184,15 @@ impl IndexedPages {
             return Ok(false);
         }
         let reader = self.index.page_reader()?;
-        Ok(reader.response_rows_before((u64::MAX, u64::MAX), 1, self.history.response_branch)?.is_empty()
-            && reader.user_echo_rows_before((u64::MAX, u64::MAX), 1)?.is_empty()
-            && reader.task_terminals_before((u64::MAX, u64::MAX), 1, self.history.record_count())?.is_empty())
+        Ok(reader
+            .response_rows_before((u64::MAX, u64::MAX), 1, self.history.response_branch)?
+            .is_empty()
+            && reader
+                .user_echo_rows_before((u64::MAX, u64::MAX), 1)?
+                .is_empty()
+            && reader
+                .task_terminals_before((u64::MAX, u64::MAX), 1, self.history.record_count())?
+                .is_empty())
     }
 
     pub(crate) fn page_before(
@@ -187,7 +214,11 @@ impl IndexedPages {
                 return Ok((None, Vec::new()));
             }
             if *window.end() != anchor {
-                before = PagePosition { record: *window.end() + 1, part: 0, offset: None };
+                before = PagePosition {
+                    record: *window.end() + 1,
+                    part: 0,
+                    offset: None,
+                };
             }
             let (older, updates) = self.page_in_window(session, before, *window.start())?;
             match older {
@@ -207,7 +238,13 @@ impl IndexedPages {
         let limit = HISTORY_PAGE_ROWS + 1;
         let inclusive = before.offset.is_some();
         let bound = if inclusive {
-            (before.record, before.part.checked_add(1).ok_or_else(|| invalid("invalid history byte cursor"))?)
+            (
+                before.record,
+                before
+                    .part
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("invalid history byte cursor"))?,
+            )
         } else {
             before.key()
         };
@@ -219,18 +256,23 @@ impl IndexedPages {
             candidates.push((row.position(), PageRow::UserEcho(row)));
         }
         let terminals = reader.task_terminals_before(bound, limit, self.history.record_count())?;
-        let terminal_floor = terminals.last().filter(|_| terminals.len() == limit)
+        let terminal_floor = terminals
+            .last()
+            .filter(|_| terminals.len() == limit)
             .map(|row| row.position());
         for row in terminals {
             candidates.push((row.position(), PageRow::TaskTerminal(row)));
         }
-        let end = self.rows.partition_point(|(position, _)| position.key() < bound);
+        let end = self
+            .rows
+            .partition_point(|(position, _)| position.key() < bound);
         for index in end.saturating_sub(limit)..end {
             candidates.push((self.rows[index].0.key(), PageRow::Retained(index)));
         }
         let display_end = self.index.omitted_before(before.record)?
             + if bound.1 != 0 && before.record != u64::MAX {
-                self.index.omitted_before(before.record + 1)? - self.index.omitted_before(before.record)?
+                self.index.omitted_before(before.record + 1)?
+                    - self.index.omitted_before(before.record)?
             } else {
                 0
             };
@@ -253,49 +295,102 @@ impl IndexedPages {
             if updates.len() >= HISTORY_PAGE_ROWS {
                 break;
             }
-            if terminal_floor.max(display_floor).is_some_and(|floor| (record, part) < floor) {
+            if terminal_floor
+                .max(display_floor)
+                .is_some_and(|floor| (record, part) < floor)
+            {
                 break;
             }
             if let PageRow::TaskTerminal(row) = &row {
                 if row.superseded()
                     || self.task_completions_in_tail.contains(row.task_id())
-                    || !self.index.visible_range(row.start())?.contains(&row.start())
+                    || !self
+                        .index
+                        .visible_range(row.start())?
+                        .contains(&row.start())
                 {
-                    cursor = Some(PagePosition { record, part, offset: None });
+                    cursor = Some(PagePosition {
+                        record,
+                        part,
+                        offset: None,
+                    });
                     continue;
                 }
             }
-            let offset = ((record, part) == before.key()).then_some(before.offset).flatten();
+            let offset = ((record, part) == before.key())
+                .then_some(before.offset)
+                .flatten();
             let (older_offset, update) = match row {
                 PageRow::Response(row) => {
                     let bytes = offset.map_or(row.encoded_bytes(), |offset| offset as u64);
                     if !updates.is_empty() && bytes.saturating_add(1024) > budget as u64 {
                         break;
                     }
-                    reader.read_response_row(row, offset, session, &self.history,
-                        (budget.saturating_sub(1024)) as u64)?
+                    reader.read_response_row(
+                        row,
+                        offset,
+                        session,
+                        &self.history,
+                        (budget.saturating_sub(1024)) as u64,
+                    )?
                 }
                 PageRow::Retained(index) => {
                     let mut update = self.rows[index].1.clone();
+                    let total = text_body(&mut update).map(|body| body.len());
+                    let end = offset.or(total);
                     if let Some(offset) = offset {
-                        let text = response_body(&mut update)
-                            .filter(|text| offset > 0 && text.is_char_boundary(offset))
-                            .ok_or_else(|| invalid("history continuation crosses a response character"))?;
+                        let text = text_body(&mut update)
+                            .filter(|text| {
+                                offset > 0 && offset <= text.len() && text.is_char_boundary(offset)
+                            })
+                            .ok_or_else(|| {
+                                invalid("history continuation crosses a response character")
+                            })?;
                         text.truncate(offset);
                     }
-                    if updates.is_empty() && serde_json::to_vec(&update)?.len() + 1 > budget {
-                        let start = take_response_suffix(&mut update, budget)?;
-                        meta_mut(&mut update).insert("grow/historyResponseStartByte".into(), start.into());
-                        (Some(start), update)
-                    } else {
-                        (None, update)
+                    let older =
+                        if updates.is_empty() && serde_json::to_vec(&update)?.len() + 1 > budget {
+                            Some(take_response_suffix(
+                                &mut update,
+                                budget.saturating_sub(512),
+                            )?)
+                        } else {
+                            None
+                        };
+                    if older.is_some() || offset.is_some() {
+                        let meta = meta_mut(&mut update);
+                        meta.insert(
+                            "grow/historyResponseStartByte".into(),
+                            older.unwrap_or(0).into(),
+                        );
+                        meta.insert(
+                            "grow/historyResponseEndByte".into(),
+                            end.expect("text fragment end").into(),
+                        );
+                        meta.insert(
+                            "grow/historyResponseTotalBytes".into(),
+                            total.expect("text fragment length").into(),
+                        );
                     }
+                    (older, update)
                 }
-                PageRow::UserEcho(row) => (None, reader.read_user_echo_row(row, session, &self.history)?),
-                PageRow::TaskTerminal(row) => (None, reader.read_task_terminal(row, session, &self.history)?),
+                PageRow::UserEcho(row) => (
+                    None,
+                    reader.read_user_echo_row(row, session, &self.history)?,
+                ),
+                PageRow::TaskTerminal(row) => (
+                    None,
+                    reader.read_task_terminal(row, session, &self.history)?,
+                ),
                 PageRow::Display(rank) => {
-                    let Some((older, update)) = reader.read_display_page(rank, session, &self.history, offset)? else {
-                        cursor = Some(PagePosition { record, part, offset: None });
+                    let Some((older, update)) =
+                        reader.read_display_page(rank, session, &self.history, offset)?
+                    else {
+                        cursor = Some(PagePosition {
+                            record,
+                            part,
+                            offset: None,
+                        });
                         continue;
                     };
                     (older, update)
@@ -310,7 +405,11 @@ impl IndexedPages {
             }
             budget -= bytes;
             updates.push(update);
-            cursor = Some(PagePosition { record, part, offset: older_offset });
+            cursor = Some(PagePosition {
+                record,
+                part,
+                offset: older_offset,
+            });
             if older_offset.is_some() {
                 break;
             }
@@ -320,27 +419,45 @@ impl IndexedPages {
         // continuation remains inclusive until its oldest fragment arrives.
         if let Some(position) = cursor
             && position.offset.is_none()
-            && !self.rows.iter().any(|(row, _)| row.record >= lower && row.key() < position.key())
+            && !self
+                .rows
+                .iter()
+                .any(|(row, _)| row.record >= lower && row.key() < position.key())
             && self.index.omitted_before(position.record)? == first_display
-            && reader.response_rows_before(position.key(), 1, self.history.response_branch)?.first().is_none_or(|row| row.position().0 < lower)
-            && reader.user_echo_rows_before(position.key(), 1)?.first().is_none_or(|row| row.position().0 < lower)
-            && reader.task_terminals_before(position.key(), 1, self.history.record_count())?.first().is_none_or(|row| row.position().0 < lower)
+            && reader
+                .response_rows_before(position.key(), 1, self.history.response_branch)?
+                .first()
+                .is_none_or(|row| row.position().0 < lower)
+            && reader
+                .user_echo_rows_before(position.key(), 1)?
+                .first()
+                .is_none_or(|row| row.position().0 < lower)
+            && reader
+                .task_terminals_before(position.key(), 1, self.history.record_count())?
+                .first()
+                .is_none_or(|row| row.position().0 < lower)
         {
             cursor = None;
         }
         if cursor.is_none() && lower != 0 {
-            cursor = Some(PagePosition { record: lower, part: 0, offset: None });
+            cursor = Some(PagePosition {
+                record: lower,
+                part: 0,
+                offset: None,
+            });
         }
         Ok((cursor, updates))
     }
-
 }
 
-fn response_body(update: &mut SessionUpdate) -> Option<&mut String> {
-    response_coordinates(update)?;
-    let SessionUpdate::Acp(notification) = update else { return None };
+fn text_body(update: &mut SessionUpdate) -> Option<&mut String> {
+    let SessionUpdate::Acp(notification) = update else {
+        return None;
+    };
     let chunk = match &mut notification.update {
-        acp::SessionUpdate::AgentMessageChunk(chunk) | acp::SessionUpdate::AgentThoughtChunk(chunk) => chunk,
+        acp::SessionUpdate::UserMessageChunk(chunk)
+        | acp::SessionUpdate::AgentMessageChunk(chunk)
+        | acp::SessionUpdate::AgentThoughtChunk(chunk) => chunk,
         _ => return None,
     };
     match &mut chunk.content {
@@ -350,7 +467,8 @@ fn response_body(update: &mut SessionUpdate) -> Option<&mut String> {
 }
 
 fn take_response_suffix(update: &mut SessionUpdate, budget: usize) -> io::Result<usize> {
-    let body = response_body(update).ok_or_else(|| invalid("history row exceeds the page byte budget"))?;
+    let body =
+        text_body(update).ok_or_else(|| invalid("history row exceeds the page byte budget"))?;
     let source = std::mem::take(body);
     let mut available = budget.saturating_sub(serde_json::to_vec(update)?.len() + 64);
     let mut split = source.len();
@@ -367,14 +485,18 @@ fn take_response_suffix(update: &mut SessionUpdate, budget: usize) -> io::Result
         split = position;
     }
     if split == 0 || split == source.len() {
-        return Err(invalid("history response cannot fit in the page byte budget"));
+        return Err(invalid(
+            "history response cannot fit in the page byte budget",
+        ));
     }
-    *response_body(update).expect("response update") = source[split..].to_owned();
+    *text_body(update).expect("response update") = source[split..].to_owned();
     Ok(split)
 }
 
 fn response_coordinates(update: &SessionUpdate) -> Option<(u64, usize)> {
-    let SessionUpdate::Acp(notification) = update else { return None };
+    let SessionUpdate::Acp(notification) = update else {
+        return None;
+    };
     let meta = notification.meta.as_ref()?;
     (meta.get("responseProjection")?.as_bool()? && meta.contains_key(RESPONSE_REQUEST_KEY))
         .then_some(())?;
@@ -428,13 +550,21 @@ pub(crate) fn command_settlement_update(
     settlement: &RuntimeCommandSettlement,
     end_ms: i64,
 ) -> SessionUpdate {
-    let GrowUpdate::TaskBackgrounded { command, cwd, description, monitor_description, .. } = start else {
+    let GrowUpdate::TaskBackgrounded {
+        command,
+        cwd,
+        description,
+        monitor_description,
+        ..
+    } = start
+    else {
         unreachable!("indexed task start");
     };
     let interrupted = settlement.outcome == CommandSettlementStatus::Interrupted;
     let (goal_id, goal_definition_revision) = match &settlement.owner {
-        chat_state::NotificationOwner::Session
-        | chat_state::NotificationOwner::Plan { .. } => (None, None),
+        chat_state::NotificationOwner::Session | chat_state::NotificationOwner::Plan { .. } => {
+            (None, None)
+        }
         chat_state::NotificationOwner::Goal {
             goal_id,
             definition_revision,
@@ -451,9 +581,7 @@ pub(crate) fn command_settlement_update(
                 start_time: settlement
                     .start_time
                     .unwrap_or_else(|| time_from_ms(start_ms)),
-                end_time: settlement
-                    .end_time
-                    .or_else(|| Some(time_from_ms(end_ms))),
+                end_time: settlement.end_time.or_else(|| Some(time_from_ms(end_ms))),
                 output: String::new(),
                 output_file: settlement.output_file.clone().into(),
                 truncated: false,
@@ -478,9 +606,7 @@ pub(crate) fn command_settlement_update(
                 owner_session_id: Some(session.0.to_string()),
                 goal_id,
                 goal_definition_revision,
-                description: description
-                    .clone()
-                    .or_else(|| monitor_description.clone()),
+                description: description.clone().or_else(|| monitor_description.clone()),
                 is_backgrounded: true,
             },
         },
@@ -498,35 +624,52 @@ fn time_from_ms(at_ms: i64) -> SystemTime {
 }
 
 impl HistorySnapshot {
-    pub(crate) fn indexed_pages(&self, prepared: PreparedHistory) -> io::Result<Option<IndexedPages>> {
-        let Some(index) = self.indexed.clone() else { return Ok(None); };
+    pub(crate) fn indexed_pages(
+        &self,
+        prepared: PreparedHistory,
+    ) -> io::Result<Option<IndexedPages>> {
+        let Some(index) = self.indexed.clone() else {
+            return Ok(None);
+        };
         let mut rows = Vec::with_capacity(prepared.updates.len());
         let mut pending = HashMap::<acp::ToolCallId, acp::ToolCall>::new();
         let mut reader = index.page_reader()?;
-        let task_completions_in_tail = self.sources.iter().zip(self.positions.iter())
+        let task_completions_in_tail = self
+            .sources
+            .iter()
+            .zip(self.positions.iter())
             .filter_map(|(source, position)| match source {
-                HistorySource::Presentation { fact, .. } if *position >= index.records() => match &fact.content {
-                    HistoryContent::Grow(value) => match value.as_ref() {
-                        super::GrowHistoryFact::TaskCompleted { task_snapshot } => Some(task_snapshot.task_id.clone()),
+                HistorySource::Presentation { fact, .. } if *position >= index.records() => {
+                    match &fact.content {
+                        HistoryContent::Grow(value) => match value.as_ref() {
+                            super::GrowHistoryFact::TaskCompleted { task_snapshot } => {
+                                Some(task_snapshot.task_id.clone())
+                            }
+                            _ => None,
+                        },
                         _ => None,
-                    },
-                    _ => None,
-                },
+                    }
+                }
                 _ => None,
-            }).collect();
+            })
+            .collect();
         for mut update in prepared.updates {
             let cursor = cursor_from_update(&update).expect("projected row has a cursor");
             if let SessionUpdate::Acp(notification) = &mut update {
                 match &mut notification.update {
                     acp::SessionUpdate::ToolCall(call)
-                        if !matches!(call.status, acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed) =>
+                        if !matches!(
+                            call.status,
+                            acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+                        ) =>
                     {
                         pending.insert(call.tool_call_id.clone(), call.clone());
                         continue;
                     }
                     acp::SessionUpdate::ToolCallUpdate(change) => {
                         let id = &change.tool_call_id;
-                        let terminal = matches!(change.fields.status,
+                        let terminal = matches!(
+                            change.fields.status,
                             Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
                         );
                         let prior = match pending.remove(id) {
@@ -548,10 +691,18 @@ impl HistorySnapshot {
                     _ => {}
                 }
             }
-            rows.push((PagePosition { record: cursor.record, part: cursor.part as u64, offset: None }, update));
+            rows.push((
+                PagePosition {
+                    record: cursor.record,
+                    part: cursor.part as u64,
+                    offset: None,
+                },
+                update,
+            ));
         }
         drop(reader);
         rows.sort_unstable_by_key(|(position, _)| position.key());
+        let timeline = timeline_suffix::capture(&index, &rows)?;
         Ok(Some(IndexedPages {
             index,
             history: HistorySnapshot {
@@ -565,6 +716,7 @@ impl HistorySnapshot {
             },
             rows,
             task_completions_in_tail,
+            timeline,
         }))
     }
     /// One pure projector for live resume, offline readers and child views.
@@ -644,14 +796,23 @@ impl HistorySnapshot {
         let (anchored, notice_refs) = Self::source_indexes(&self.sources);
         let mut discarded = Vec::new();
         self.project(
-            session, timeline, None, self.record_count(),
-            self.sources.iter().map(Cow::Borrowed), anchored, notice_refs, false,
+            session,
+            timeline,
+            None,
+            self.record_count(),
+            self.sources.iter().map(Cow::Borrowed),
+            anchored,
+            notice_refs,
+            false,
             Some(&mut discarded),
         )?;
         discarded.sort_unstable_by_key(|range| range.start);
         let mut combined: Vec<std::ops::Range<u64>> = Vec::new();
         for range in discarded {
-            if let Some(previous) = combined.last_mut().filter(|previous| previous.end >= range.start) {
+            if let Some(previous) = combined
+                .last_mut()
+                .filter(|previous| previous.end >= range.start)
+            {
                 previous.end = previous.end.max(range.end);
             } else {
                 combined.push(range);
@@ -700,7 +861,8 @@ impl HistorySnapshot {
     ) -> io::Result<PreparedHistory> {
         Self::validate_owner(timeline, session.0.as_ref())?;
         let admitted = match self.indexed.as_ref().filter(|_| indexed_page) {
-            Some(index) => timeline.admitted_response_views_since(chat_state::EventSeq::new(index.published_domain())),
+            Some(index) => timeline
+                .admitted_response_views_since(chat_state::EventSeq::new(index.published_domain())),
             None => timeline.admitted_response_views(),
         };
         let by_key = admitted
@@ -747,7 +909,9 @@ impl HistorySnapshot {
                 .unwrap_or(position as u64);
             match source {
                 HistorySource::Domain { event, .. } => {
-                    if let Some(target) = timeline.rewind_display_target(chat_state::EventSeq::new(*event)) {
+                    if let Some(target) =
+                        timeline.rewind_display_target(chat_state::EventSeq::new(*event))
+                    {
                         recovered_markers.extend(pending_rewind.replace((position, target)));
                     }
                 }
@@ -827,7 +991,11 @@ impl HistorySnapshot {
                     if let HistorySource::Domain { event, .. } = source {
                         meta.insert(
                             "grow/historyTimestampMs".into(),
-                            timeline.event(chat_state::EventSeq::new(*event)).expect("validated response source").at_ms.into(),
+                            timeline
+                                .event(chat_state::EventSeq::new(*event))
+                                .expect("validated response source")
+                                .at_ms
+                                .into(),
                         );
                     }
                     meta.extend(serde_json::json!({"responseProjection":true,"samplingRequestId":response.identity.request_id,"samplingAttempt":response.identity.attempt}).as_object().cloned().unwrap());
@@ -848,21 +1016,40 @@ impl HistorySnapshot {
                 continue;
             }
             if let HistorySource::Domain { event, .. } = source {
-                let domain = timeline.event(chat_state::EventSeq::new(*event)).expect("validated domain source");
+                let domain = timeline
+                    .event(chat_state::EventSeq::new(*event))
+                    .expect("validated domain source");
                 if self.indexed.is_some()
                     && let chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Completed {
-                        occurrence_id, ..
+                        occurrence_id,
+                        ..
                     }) = &domain.kind
                     && let Some(projection) = timeline.hook_projection(occurrence_id)
                 {
                     let name = crate::session::actor::timeline_hook_event_name(projection.event);
-                    if let Some(update) = crate::session::actor::SessionActor::project_hook_execution(
-                        name, None, None, &projection, true,
-                    ) {
+                    if let Some(update) =
+                        crate::session::actor::SessionActor::project_hook_execution(
+                            name,
+                            None,
+                            None,
+                            &projection,
+                            true,
+                        )
+                    {
                         let mut update = SessionUpdate::Grow(Box::new(GrowNotification {
-                            session_id: session.clone(), update, meta: None,
+                            session_id: session.clone(),
+                            update,
+                            meta: None,
                         }));
-                        self.stamp_cursor(session, cut, Some(domain.at_ms), position, 0, true, &mut update)?;
+                        self.stamp_cursor(
+                            session,
+                            cut,
+                            Some(domain.at_ms),
+                            position,
+                            0,
+                            true,
+                            &mut update,
+                        )?;
                         updates.push(update);
                     }
                 }
@@ -1005,8 +1192,12 @@ impl HistorySnapshot {
         }
         let updates = if let Some(discarded) = rewind_visibility {
             crate::session::storage::filter_rewind_updates_with(updates, |first, marker| {
-                let end = cursor_from_update(marker).expect("projected marker has a cursor").record;
-                let start = first.and_then(cursor_from_update).map_or(end, |first| first.record);
+                let end = cursor_from_update(marker)
+                    .expect("projected marker has a cursor")
+                    .record;
+                let start = first
+                    .and_then(cursor_from_update)
+                    .map_or(end, |first| first.record);
                 discarded.push(start..end + 1);
             })
         } else {
@@ -1016,13 +1207,17 @@ impl HistorySnapshot {
             self.project_command_terminals(session, cut, updates, settlement_sources)?;
         if indexed_page && let Some(index) = &self.indexed {
             updates.retain(|update| {
-                let Some(cursor) = cursor_from_update(update) else { return true };
+                let Some(cursor) = cursor_from_update(update) else {
+                    return true;
+                };
                 if cursor.record >= index.records() {
                     return true;
                 }
                 // An unresolved start joins a tail settlement in the
                 // execution projection. Its start row is already on disk.
-                let Ok(i) = self.positions.binary_search(&cursor.record) else { return true };
+                let Ok(i) = self.positions.binary_search(&cursor.record) else {
+                    return true;
+                };
                 !matches!(&self.sources[i], HistorySource::Presentation { fact, .. }
                     if super::indexes_background_task(fact))
             });
@@ -1090,11 +1285,7 @@ impl HistorySnapshot {
                 else {
                     continue;
                 };
-                let GrowUpdate::TaskBackgrounded {
-                    tool_call_id,
-                    ..
-                } = &notification.update
-                else {
+                let GrowUpdate::TaskBackgrounded { tool_call_id, .. } = &notification.update else {
                     unreachable!("indexed task start")
                 };
                 if tool_call_id != &settlement.call_id
@@ -1110,7 +1301,11 @@ impl HistorySnapshot {
                     .and_then(serde_json::Value::as_i64)
                     .expect("stamped task start");
                 completions.push(command_settlement_update(
-                    session, &notification.update, start_ms, settlement, event.at_ms,
+                    session,
+                    &notification.update,
+                    start_ms,
+                    settlement,
+                    event.at_ms,
                 ));
             }
             if completions.is_empty() {

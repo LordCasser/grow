@@ -158,7 +158,11 @@ impl MvpAgent {
         let source = self.require_coordination_source(source_session_id)?;
         self.coordination
             .handle()
-            .get_inquiry_with_source(inquiry_id, source_session_id, Some(&source.chat_state_handle))
+            .get_inquiry_with_source(
+                inquiry_id,
+                source_session_id,
+                Some(&source.chat_state_handle),
+            )
             .await
     }
 
@@ -397,7 +401,11 @@ impl tools::implementations::grow_build::coordination::CoordinationBackend
     > {
         let state = self
             .coordination
-            .get_inquiry_with_source(&inquiry_id, &self.source_session_id, Some(&self.source.chat_state_handle))
+            .get_inquiry_with_source(
+                &inquiry_id,
+                &self.source_session_id,
+                Some(&self.source.chat_state_handle),
+            )
             .await?;
         Ok(
             tools::implementations::grow_build::coordination::CoordinationInquiryState {

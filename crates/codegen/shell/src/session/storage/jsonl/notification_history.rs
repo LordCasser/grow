@@ -54,15 +54,29 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 pub(super) fn has_notice_anchor(
-    tx: &ReadTransaction, journal: &mut File, cut: Frontier, receipt: u64, records: u64,
+    tx: &ReadTransaction,
+    journal: &mut File,
+    cut: Frontier,
+    receipt: u64,
+    records: u64,
 ) -> io::Result<bool> {
     let table = tx.open_table(NOTICE_ANCHORS).map_err(io::Error::other)?;
-    let Some((key, row)) = table.range((receipt, 0)..(receipt, records)).map_err(io::Error::other)?
-        .next().transpose().map_err(io::Error::other)?
-    else { return Ok(false) };
+    let Some((key, row)) = table
+        .range((receipt, 0)..(receipt, records))
+        .map_err(io::Error::other)?
+        .next()
+        .transpose()
+        .map_err(io::Error::other)?
+    else {
+        return Ok(false);
+    };
     let reference: DisplayReference = serde_json::from_slice(row.value())?;
     if reference.position != key.value().1
-        || reference.record.offset.checked_add(reference.record.len).is_none_or(|end| end >= cut.bytes)
+        || reference
+            .record
+            .offset
+            .checked_add(reference.record.len)
+            .is_none_or(|end| end >= cut.bytes)
     {
         return Err(invalid("agent message notice anchor crosses its frontier"));
     }
@@ -71,7 +85,9 @@ pub(super) fn has_notice_anchor(
         || !matches!(record.fact, JournalFact::Presentation { event, .. }
             if matches!(event.content, HistoryContent::Notice { event: source } if source == receipt))
     {
-        return Err(invalid("agent message notice anchor differs from its journal"));
+        return Err(invalid(
+            "agent message notice anchor differs from its journal",
+        ));
     }
     Ok(true)
 }
@@ -97,20 +113,27 @@ pub(super) fn notice_source(
     {
         let reference: DomainReference = serde_json::from_slice(row.value())?;
         let original = read_domain(journal, reference, bytes)?;
-        if original.seq.get() != found.value().3 || communication_history::receipt_identity(&original)?.as_ref() != Some(identity) {
+        if original.seq.get() != found.value().3
+            || communication_history::receipt_identity(&original)?.as_ref() != Some(identity)
+        {
             return Err(invalid("notice source differs from its journal identity"));
         }
         return Ok(Some(ReceiptSource::from_event(&original)?));
     }
     if reject_conflict {
-        for row in table.range((key.0, key.1, "", 0)..).map_err(io::Error::other)? {
+        for row in table
+            .range((key.0, key.1, "", 0)..)
+            .map_err(io::Error::other)?
+        {
             let (found, _) = row.map_err(io::Error::other)?;
             let (correlation, subject, _, seq) = found.value();
             if (correlation, subject) != (key.0, key.1) {
                 break;
             }
             if seq < before {
-                return Err(invalid("notice source does not match its canonical receipt"));
+                return Err(invalid(
+                    "notice source does not match its canonical receipt",
+                ));
             }
         }
     }
@@ -371,11 +394,18 @@ pub(super) fn pending(
         .ok_or_else(|| invalid("missing task notification checkpoint"))?;
     let mut refs: Vec<DomainReference> = serde_json::from_slice(row.value())?;
     refs.sort_unstable_by_key(|reference| reference.seq);
-    refs.into_iter().map(|reference| {
-        read_before(journal, reference, cut, EventSeq::new(cut.domain))?
-            .filter(|event| matches!(&event.kind, TimelineEventKind::Notification(NotificationEvent::Received { .. })))
-            .ok_or_else(|| invalid("task inbox checkpoint differs from its journal"))
-    }).collect()
+    refs.into_iter()
+        .map(|reference| {
+            read_before(journal, reference, cut, EventSeq::new(cut.domain))?
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        TimelineEventKind::Notification(NotificationEvent::Received { .. })
+                    )
+                })
+                .ok_or_else(|| invalid("task inbox checkpoint differs from its journal"))
+        })
+        .collect()
 }
 
 pub(super) fn receipt(

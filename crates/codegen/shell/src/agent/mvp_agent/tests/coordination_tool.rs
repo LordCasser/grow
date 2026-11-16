@@ -63,13 +63,15 @@ fn ask_session_tool_blank_ids_create_inquiries_and_explicit_ids_remain_strict() 
         // from a full SessionActor and model provider.
         let audit_task = tokio::spawn(async move {
             while let Some(command) = commands.recv().await {
-                let crate::session::SessionCommand::RecordCoordinationInquiry {
-                    event, respond_to,
-                } = command
+                let crate::session::SessionCommand::RecordCoordinationInquiry { event, respond_to } =
+                    command
                 else {
                     panic!("unexpected source command");
                 };
-                source_timeline.record_timeline_event_durably(event.timeline_kind()).await.unwrap();
+                source_timeline
+                    .record_timeline_event_durably(event.timeline_kind())
+                    .await
+                    .unwrap();
                 respond_to.send(Ok(())).unwrap();
             }
         });

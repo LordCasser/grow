@@ -15,8 +15,18 @@ pub(super) struct ResultUsage {
     pub(super) usage: MessageUsage,
     pub(super) model_usage: Value,
     pub(super) num_turns: u64,
-    pub(super) total_cost_usd: f64,
+    /// `None` when the projected ledger omitted the fee (unknown, partial, or incomplete).
+    pub(super) total_cost_usd: Option<f64>,
+    pub(super) usage_is_incomplete: bool,
     pub(super) duration_api_ms: u64,
+}
+
+/// Finite USD from a projected cost field. Missing and non-finite values stay
+/// unknown (`None`); a known `0` stays `Some(0.0)`.
+fn finite_usd(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|cost| cost.is_finite())
 }
 
 impl MessagesReducer {
@@ -32,20 +42,22 @@ impl MessagesReducer {
                 .unwrap_or(0)
         };
         let u = scratch.get("usage");
-        let usage_is_incomplete = scratch
-            .get("usage_is_incomplete")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        // No ledger cannot prove a complete bill. A present ledger keeps the
+        // flag `attach_result_usage` projected, including parse failure.
+        let usage_is_incomplete = end_usage.is_none()
+            || scratch
+                .get("usage_is_incomplete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         if end_usage.is_none() {
             tracing::warn!(
                 "streaming-messages-json: no aggregate usage ledger at turn end; \
-                 `result.usage` input/cache counts remain unknown and output \
-                 falls back to zero"
+                 result is incomplete and cost stays unknown"
             );
         } else if usage_is_incomplete {
             tracing::warn!(
-                "streaming-messages-json: usage is incomplete; `result.usage` token \
-                 counts may be unknown or under-count"
+                "streaming-messages-json: usage is incomplete; result token counts \
+                 may under-count and cost stays unknown"
             );
         }
         let usage = MessageUsage {
@@ -70,10 +82,7 @@ impl MessagesReducer {
             .get("num_turns")
             .and_then(Value::as_u64)
             .unwrap_or(self.completed_responses);
-        let total_cost_usd = scratch
-            .get("total_cost_usd")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
+        let total_cost_usd = finite_usd(scratch.get("total_cost_usd"));
         // `apiDurationMs` is dropped by the projection, so read it from `end_usage`.
         let duration_api_ms = end_usage.map_or(0, |u| field(Some(u), "apiDurationMs"));
         let model_usage = messages_model_usage(
@@ -86,6 +95,7 @@ impl MessagesReducer {
             model_usage,
             num_turns,
             total_cost_usd,
+            usage_is_incomplete,
             duration_api_ms,
         }
     }
@@ -117,7 +127,7 @@ pub(super) fn messages_model_usage(
                     cache_read_known_input_tokens: n("cacheReadKnownInputTokens"),
                     cache_read_unknown_calls: n("cacheReadUnknownCalls"),
                     cache_write_unknown_calls: n("cacheWriteUnknownCalls"),
-                    cost_usd: row.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0),
+                    cost_usd: finite_usd(row.get("costUSD")),
                     context_window: if is_current { context_window } else { None },
                 }),
             )

@@ -116,7 +116,7 @@ async fn cold_goal_pressure_is_initialized_before_first_advertisement() {
                     panic!("expected first command advertisement");
                 };
                 assert_eq!(
-                    notification.meta.unwrap()["totalTokens"],
+                    notification.meta.unwrap()["contextUsedTokens"],
                     serde_json::json!(expected),
                     "{case}"
                 );
@@ -226,7 +226,7 @@ async fn cold_goal_scope_reconciles_runtime_pause_before_advertisement() {
                 panic!("expected reconciled command advertisement");
             };
             assert_eq!(
-                notification.meta.unwrap()["totalTokens"],
+                notification.meta.unwrap()["contextUsedTokens"],
                 serde_json::json!(paused)
             );
             assert_eq!(

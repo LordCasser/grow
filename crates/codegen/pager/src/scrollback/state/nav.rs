@@ -571,9 +571,8 @@ impl ScrollbackState {
 
     fn capture_follow_anchor(&self) -> Option<(ScrollAnchor, usize)> {
         let anchor = self.capture_scroll_anchor()?;
-        // Manual resize anchors clamp gap rows onto the preceding content.
-        // Prompt-less preserve may start in a gap; retain its existing absolute
-        // offset policy when the content anchor cannot represent that row.
+        // Preserve only anchors that resolve to the current absolute offset.
+        // Content and gap anchors both keep their original row until overflow.
         (self.scroll_anchor_offset(anchor)? == self.scroll_offset)
             .then_some((anchor, self.scroll_offset))
     }

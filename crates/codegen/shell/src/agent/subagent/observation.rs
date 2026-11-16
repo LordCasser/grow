@@ -21,7 +21,9 @@ pub(crate) fn backend(
     .with_history_query(move |id| {
         inspect_history(source_session_id.clone(), source_state.clone(), id)
     })
-    .with_history_list(move |scope| list_history(history_source.clone(), history_state.clone(), scope))
+    .with_history_list(move |scope| {
+        list_history(history_source.clone(), history_state.clone(), scope)
+    })
     .with_history_status(move |ids| {
         read_source(
             status_source.clone(),
@@ -275,8 +277,7 @@ fn lifecycle_root(
         })?;
     validate_child_session_identity(&source, root_id, source_spawn.1)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    seed
-        .validate_spawn_link(root_id, source_spawn.0, source_spawn.1)
+    seed.validate_spawn_link(root_id, source_spawn.0, source_spawn.1)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     Ok((root_id.to_owned(), Some(root)))
 }
@@ -360,7 +361,9 @@ fn read_history_list_from_source(
             // fact is enough to suppress a stale nonterminal runtime row.
             let evidence = match scope {
                 SubagentListScope::Active => Ok(None),
-                SubagentListScope::All => terminal_result(storage, &root_id, event.seq, spawn, terminal),
+                SubagentListScope::All => {
+                    terminal_result(storage, &root_id, event.seq, spawn, terminal)
+                }
             };
             match evidence {
                 Ok(_) => {

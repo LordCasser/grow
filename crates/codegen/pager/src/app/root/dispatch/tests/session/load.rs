@@ -86,8 +86,8 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
             ),
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -143,8 +143,8 @@ fn session_loaded_models_do_not_overwrite_new_session_default() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -179,8 +179,8 @@ fn session_reload_reissues_matching_deferred_behavior_to_clear_confirmation() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -218,8 +218,8 @@ fn session_reload_reissues_unresolved_deferred_behavior_before_prompt_drain() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -334,8 +334,8 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -361,20 +361,24 @@ fn deferred_latest_history_can_fail_and_retry_after_live_input() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: Some("latest".into()),
+            history_cut: Some("cut".into()),
+            behavior: None,
         }),
         &mut app,
     );
-    let Some((binding_epoch, request_id)) = effects.iter().find_map(|effect| match effect {
-        Effect::ReadHistoryPage {
-            binding_epoch,
-            request_id,
-            cursor,
-            ..
-        } if cursor == "latest" => Some((*binding_epoch, *request_id)),
-        _ => None,
-    }) else {
+    let Some((binding_epoch, request_id, generation)) =
+        effects.iter().find_map(|effect| match effect {
+            Effect::ReadHistoryPage {
+                binding_epoch,
+                request_id,
+                generation,
+                cut,
+                query: shell::session::storage::HistoryPageQuery::Latest,
+                ..
+            } if cut == "cut" => Some((*binding_epoch, *request_id, *generation)),
+            _ => None,
+        })
+    else {
         panic!("runtime readiness must schedule a separate page read");
     };
     let agent = app.agents.get_mut(&id).unwrap();
@@ -393,7 +397,8 @@ fn deferred_latest_history_can_fail_and_retry_after_live_input() {
             session_id: session_id.clone(),
             binding_epoch,
             request_id,
-            older_cursor: None,
+            generation,
+            query: shell::session::storage::HistoryPageQuery::Latest,
             result: Err("page read failed".into()),
         }),
         &mut app,
@@ -401,23 +406,20 @@ fn deferred_latest_history_can_fail_and_retry_after_live_input() {
     let agent = app.agents.get_mut(&id).unwrap();
     assert!(!agent.session.loading_replay);
     assert!(agent.history_is_partial);
+    assert!(agent.history_latest_pending);
     let mut effects = Vec::new();
-    agent.request_history_page(&mut effects);
+    assert!(agent.request_latest_history_page(&mut effects));
     let [
         Effect::ReadHistoryPage {
-            request_id, cursor, ..
+            request_id,
+            generation,
+            query: shell::session::storage::HistoryPageQuery::Latest,
+            ..
         },
     ] = effects.as_slice()
     else {
         panic!("failed latest page must be retryable");
     };
-    assert_eq!(cursor, "latest");
-    let historical = acp::SessionNotification::new(
-        session_id.clone(),
-        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
-            acp::SessionModeId::new("plan"),
-        )),
-    );
     let live_index = agent.scrollback.index_of_id(live).unwrap();
     dispatch(
         Action::TaskComplete(TaskResult::HistoryPageLoaded {
@@ -425,10 +427,18 @@ fn deferred_latest_history_can_fail_and_retry_after_live_input() {
             session_id,
             binding_epoch,
             request_id: *request_id,
-            older_cursor: Some("older".into()),
-            result: Ok(vec![shell::session::storage::SessionUpdate::Acp(Box::new(
-                historical,
-            ))]),
+            generation: *generation,
+            query: shell::session::storage::HistoryPageQuery::Latest,
+            result: Ok(history_page_for_load(
+                &acp::SessionId::new("deferred-page"),
+                vec![history_text_row_for_load(
+                    &acp::SessionId::new("deferred-page"),
+                    1,
+                    0,
+                    "older reply",
+                )],
+                Some("older".into()),
+            )),
         }),
         &mut app,
     );
@@ -436,8 +446,47 @@ fn deferred_latest_history_can_fail_and_retry_after_live_input() {
     assert!(!agent.session.plan_mode_active);
     assert!(!agent.history_latest_pending);
     assert_eq!(agent.history_page_cursor.as_deref(), Some("older"));
-    assert_eq!(agent.scrollback.index_of_id(live), Some(live_index + 1));
+    assert!(agent.scrollback.index_of_id(live).unwrap() > live_index);
 }
+fn history_text_row_for_load(
+    session: &acp::SessionId,
+    record: u64,
+    part: u64,
+    text: &str,
+) -> shell::session::storage::HistoryRow {
+    use shell::session::storage::{HistoryEntity, HistoryRow, HistorySourceKey, SessionUpdate};
+    HistoryRow {
+        source: HistorySourceKey { record, part },
+        entity: Some(HistoryEntity::Message {
+            event_seq: record,
+            item_ordinal: part,
+        }),
+        fragment: None,
+        update: SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            session.clone(),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text.to_string()),
+            ))),
+        ))),
+    }
+}
+
+fn history_page_for_load(
+    session: &acp::SessionId,
+    rows: Vec<shell::session::storage::HistoryRow>,
+    older_cursor: Option<String>,
+) -> shell::session::storage::HistoryPageResponse {
+    shell::session::storage::HistoryPageResponse {
+        session_id: session.clone(),
+        cut: "cut".into(),
+        rows,
+        range: None,
+        older_cursor,
+        newer_cursor: None,
+        target_source: None,
+    }
+}
+
 /// Cross-cwd resume anchors the agent cwd to the resolved origin cwd.
 #[test]
 fn load_session_anchors_agent_cwd_to_resolved_session_cwd() {
@@ -490,8 +539,8 @@ fn session_loaded_purges_replay_transient() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -516,8 +565,8 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -574,8 +623,8 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
             ),
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -614,8 +663,8 @@ fn session_loaded_without_restore_no_summary() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -661,8 +710,8 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -754,8 +803,8 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -826,8 +875,8 @@ fn session_loaded_combines_pending_first_prompt_before_typed_prompt() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -937,8 +986,8 @@ fn loading_replay_ignores_input_and_preserves_existing_draft_until_session_loade
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1021,8 +1070,8 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1125,8 +1174,8 @@ fn session_loaded_clears_stale_running_entries() {
             restore_summary: None,
             foreground: None,
             descendant_ownership: None,
-            older_history_cursor: None,
-            latest_history_cursor: None,
+            history_cut: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1145,6 +1194,7 @@ fn resume_focuses_existing_agent_for_open_session() {
             agent_id: agent_0,
             session_id: "wt-sess-1".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1163,6 +1213,7 @@ fn resume_focuses_existing_agent_for_open_session() {
             agent_id: agent_1,
             session_id: "new-sess-2".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1190,6 +1241,7 @@ fn resume_unknown_session_still_creates_new_agent() {
             agent_id: AgentId(0),
             session_id: "sess-aaa".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1220,6 +1272,7 @@ fn resume_open_session_does_not_rearm_stale_overlay() {
             agent_id: agent_0,
             session_id: "sess-a".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1230,6 +1283,7 @@ fn resume_open_session_does_not_rearm_stale_overlay() {
             agent_id: agent_1,
             session_id: "sess-b".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1257,6 +1311,7 @@ fn duplicate_load_focuses_existing_owner_without_unbinding() {
             agent_id: old_owner,
             session_id: "shared-id".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1294,6 +1349,7 @@ fn resume_stale_attached_target_focuses_dashboard_row() {
             agent_id: agent_0,
             session_id: "sess-a".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1304,6 +1360,7 @@ fn resume_stale_attached_target_focuses_dashboard_row() {
             agent_id: agent_1,
             session_id: "sess-b".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );

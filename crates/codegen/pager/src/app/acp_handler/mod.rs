@@ -67,13 +67,16 @@ pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
 
 use session_notification::{
-    advance_reconnect_cursor, behavior_mode_update_resolution, behavior_mode_update_target,
-    confirm_context_used, detect_plan_mode_change, drop_unexpected_replay,
+    advance_reconnect_cursor, confirm_context_used, drop_unexpected_replay, observe_mode_update,
+    take_admitted_behavior_drain,
 };
 pub(crate) use session_notification::{
     apply_deferred_authoritative_controls, apply_image_recovery_operation,
-    handle_descendant_state_replay, handle_session_notification, sync_child_control_projection,
+    handle_descendant_state_replay, handle_session_notification, hydrate_behavior_projection,
+    sync_child_control_projection,
 };
+#[cfg(test)]
+use session_notification::{behavior_mode_update_resolution, detect_plan_mode_change};
 
 pub(crate) fn sync_child_control_projection_by_session_id(
     app: &mut AppView,
@@ -248,16 +251,17 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     // Gate on `!dedup_drop`: a deduped delta is an
                     // already-applied or stale out-of-order event (its
                     // `eventId` is `<=` the highwater). A fresher event has
-                    // already advanced the highwater and set newer `totalTokens`
+                    // already advanced the highwater and set newer
+                    // `contextUsedTokens`
                     // / `turnStartMs`, so applying the stale values here would
                     // REGRESS them. This is the replay/live-overlap case (leader
                     // fan-out, reconnect, re-emit after the gate): a historical
-                    // replay delta carrying a LOWER `totalTokens` arriving after
+                    // replay delta carrying a LOWER `contextUsedTokens` arriving after
                     // a live one would otherwise drop the context bar below the
                     // real usage. The dedup already drops the render; the
                     // token/timing state must respect it too.
                     if !dedup_drop {
-                        if let Some(tokens) = meta.total_tokens {
+                        if let Some(tokens) = meta.context_used_tokens {
                             confirm_context_used(agent, tokens);
                         }
                         if let Some(ts) = meta.turn_start_ms {
@@ -402,12 +406,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // always has `attached_as_viewer == false`).
                         !agent.session.loading_replay
                     } else {
-                        let behavior_resolution = (!meta.is_replay)
-                            .then(|| behavior_mode_update_resolution(&notif.request.update))
-                            .flatten();
-                        let behavior_target = (!meta.is_replay)
-                            .then(|| behavior_mode_update_target(&notif.request.update))
-                            .flatten();
                         if !meta.is_replay {
                             agent.session.last_prompt_event_at = Some(observed_at);
                             if meta.prompt_id.is_some() {
@@ -450,8 +448,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             .plan_artifact_preview
                             .as_ref()
                             .is_none_or(|preview| preview.completion_report.is_none());
-                        settings_modal_refresh_needed |=
-                            detect_plan_mode_change(&notif.request.update, agent);
+                        let mode_observation =
+                            observe_mode_update(&notif.request.update, agent, !meta.is_replay);
+                        settings_modal_refresh_needed |= mode_observation.refresh;
                         if !meta.is_replay
                             && !was_plan_completed
                             && agent.session.plan_completed
@@ -600,37 +599,17 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                         advance_reconnect_cursor(agent, &mut meta);
 
-                        if let Some(resolution) = behavior_resolution
-                            && agent
-                                .session
-                                .resolve_in_flight_behavior(
-                                    agent.session.behavior_mode,
-                                    resolution,
-                                    behavior_target,
-                                )
-                                .is_some()
-                        {
-                            crate::app::acp_handler::apply_deferred_authoritative_controls(
-                                agent,
-                                notif.request.session_id.0.as_ref(),
-                            );
-                        }
-                        if matches!(
-                            behavior_resolution,
-                            Some(crate::app::session::BehaviorControlResolution::Applied)
-                        ) && agent
-                            .session
-                            .deferred_session_mode
-                            .is_some_and(|target| target == agent.session.behavior_mode)
-                        {
-                            // The admission latch can predate the live control
-                            // FIFO (for example, a session created from the
-                            // Dashboard). Any matching authoritative applied
-                            // update releases it; an unrelated initial update,
-                            // rejection, or confirmation never does.
-                            agent.session.deferred_session_mode = None;
-                            behavior_drain =
-                                Some(crate::app::root::dispatch::maybe_drain_queue(agent));
+                        // The admission latch can predate the live control FIFO
+                        // (for example, a session created from the Dashboard).
+                        // Only the mode this update itself admitted can release
+                        // it. A rejected or older notification must not borrow
+                        // the confirmed mode.
+                        if let Some(drain) = take_admitted_behavior_drain(
+                            agent,
+                            notif.request.session_id.0.as_ref(),
+                            mode_observation.control,
+                        ) {
+                            behavior_drain = Some(drain);
                         }
 
                         !meta.is_replay && !agent.session.loading_replay
@@ -727,19 +706,14 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 child_view.session.last_applied_event_seq = Some(seq);
                             }
                         }
-                        if let Some(tokens) = meta.total_tokens {
+                        if let Some(tokens) = meta.context_used_tokens {
                             confirm_context_used(child_view, tokens);
                         }
                         if let Some(ts) = meta.turn_start_ms {
                             child_view.session.turn_start_ms = Some(ts);
                         }
-                        let behavior_resolution = (!meta.is_replay)
-                            .then(|| behavior_mode_update_resolution(&notif.request.update))
-                            .flatten();
-                        let behavior_target = (!meta.is_replay)
-                            .then(|| behavior_mode_update_target(&notif.request.update))
-                            .flatten();
-                        let _ = detect_plan_mode_change(&notif.request.update, child_view);
+                        let mode_observation =
+                            observe_mode_update(&notif.request.update, child_view, !meta.is_replay);
                         child_view.session.handle_update(
                             notif.request.update,
                             &meta,
@@ -748,32 +722,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         for entry_id in child_view.session.tracker.take_pending_edit_hl() {
                             child_view.submit_edit_highlight(entry_id);
                         }
-                        if let Some(resolution) = behavior_resolution
-                            && child_view
-                                .session
-                                .resolve_in_flight_behavior(
-                                    child_view.session.behavior_mode,
-                                    resolution,
-                                    behavior_target,
-                                )
-                                .is_some()
-                        {
-                            crate::app::acp_handler::apply_deferred_authoritative_controls(
-                                child_view,
-                                notif.request.session_id.0.as_ref(),
-                            );
-                        }
-                        if matches!(
-                            behavior_resolution,
-                            Some(crate::app::session::BehaviorControlResolution::Applied)
-                        ) && child_view
-                            .session
-                            .deferred_session_mode
-                            .is_some_and(|target| target == child_view.session.behavior_mode)
-                        {
-                            child_view.session.deferred_session_mode = None;
-                            child_behavior_drain =
-                                Some(crate::app::root::dispatch::maybe_drain_queue(child_view));
+                        if let Some(drain) = take_admitted_behavior_drain(
+                            child_view,
+                            notif.request.session_id.0.as_ref(),
+                            mode_observation.control,
+                        ) {
+                            child_behavior_drain = Some(drain);
                         }
                         subagent_activity_label(child_view)
                     };

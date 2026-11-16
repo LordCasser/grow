@@ -1028,6 +1028,7 @@ impl SchedulerActor {
             parent_session_id,
             parent_step_id: None,
             parent_prompt_id: None,
+            parent_prompt_owner: None,
             resume_from,
             cwd: None,
             runtime_overrides: SubagentRuntimeOverrides {

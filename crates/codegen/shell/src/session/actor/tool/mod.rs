@@ -1003,37 +1003,30 @@ impl SessionActor {
                 };
             }
         }
-        let previous = self.behavior.lock().snapshot();
-        let outcome = self.behavior.lock().decide_submitted_plan_if(
-            expected,
-            response.submission_id,
-            &response.decision_id,
-            action,
-            feedback,
-        );
-        match outcome {
-            RetainedPlanDecisionOutcome::Applied(_) => {
-                let receipt = self
-                    .behavior
-                    .lock()
-                    .retained_plan()
-                    .and_then(|candidate| candidate.decisions.last())
-                    .cloned()
-                    .expect("applied Plan decision records its receipt");
-                if response.outcome == PlanApprovalOutcome::Abandoned {
-                    self.behavior.lock().finish_plan();
+        let decision_id = response.decision_id.clone();
+        let submission_id = response.submission_id;
+        let outcome = response.outcome;
+        let expected = expected.clone();
+        self.commit_behavior_mutation(move |candidate| {
+            let result = candidate.decide_submitted_plan_if(
+                &expected,
+                submission_id,
+                &decision_id,
+                action,
+                feedback,
+            );
+            match result {
+                RetainedPlanDecisionOutcome::Applied(_) => {
+                    if outcome == PlanApprovalOutcome::Abandoned {
+                        candidate.finish_plan();
+                    }
+                    Ok(true)
                 }
-                self.commit_behavior_mutation_or_restore(previous).await?;
-                let mode = self.behavior.lock().behavior();
-                self.enqueue_current_mode_update_with_plan_decision(
-                    acp::SessionModeId::new(mode.as_id()),
-                    &receipt,
-                );
-                Ok(true)
+                RetainedPlanDecisionOutcome::Duplicate(_) => Ok(false),
+                other => Err(format!("Plan decision was rejected: {other:?}")),
             }
-            RetainedPlanDecisionOutcome::Duplicate(_) => Ok(false),
-            other => Err(format!("Plan decision was rejected: {other:?}")),
-        }
+        })
+        .await
     }
 
     pub(super) async fn review_retained_plan(
@@ -1045,7 +1038,7 @@ impl SessionActor {
         if decision_id.trim().is_empty() || decision_id.len() > 128 {
             return Err("invalid Plan review identity".into());
         }
-        let expected = self.behavior.lock().snapshot();
+        let expected = Box::new(self.behavior.lock().snapshot());
         let candidate = expected.retained_plan.as_ref().ok_or("no retained Plan")?;
         if candidate.submission_id != submission_id {
             return Err("retained Plan was replaced".into());
@@ -1115,8 +1108,11 @@ impl SessionActor {
                 );
             }
             let previous = self.behavior.lock().snapshot();
-            let outcome = self.behavior.lock().review_retained_plan_if(
-                &expected,
+            let mut candidate = Box::new(
+                crate::session::behavior::BehaviorCoordinator::from_snapshot(previous.clone()),
+            );
+            let outcome = candidate.review_retained_plan_if(
+                expected.as_ref(),
                 submission_id,
                 decision_id,
                 None,
@@ -1130,31 +1126,34 @@ impl SessionActor {
             state.foreground = ForegroundState::ApplyingControl;
             drop(state);
 
-            let next = self.behavior.lock().snapshot();
+            let next = candidate.snapshot();
             let goal = self.goal_tracker.lock().snapshot().cloned();
-            let persisted = if previous.behavior() != next.behavior() {
+            let behavior_changed = previous.behavior() != next.behavior();
+            let plan_phase_changed =
+                next.behavior() == tool_types::BehaviorId::Plan && previous != next;
+            drop(previous);
+            let persisted = if behavior_changed {
                 self.persist_behavior_transition_durably(next, goal).await
-            } else if next.behavior() == tool_types::BehaviorId::Plan && previous != next {
+            } else if plan_phase_changed {
                 self.persist_plan_phase_transition_durably(next, goal).await
             } else {
                 self.persist_control_snapshot_durably(next, goal).await
             };
             if let Err(error) = persisted {
-                *self.behavior.lock() =
-                    crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
                 self.state.lock().await.foreground = ForegroundState::Idle;
                 return Err(format!("Behavior control state was not persisted: {error}"));
             }
+            // Readers keep the confirmed coordinator until this ACK. The mode
+            // notification is stamped from that adopted value before another
+            // selection can pass the same gates.
+            *self.behavior.lock() = *candidate;
             self.state.lock().await.foreground = ForegroundState::Idle;
+            let current_mode_id = acp::SessionModeId::new(self.behavior.lock().behavior().as_id());
+            self.enqueue_current_mode_update(current_mode_id);
         }
-        // The workflow admission lock and step/Goal gates have remained held
-        // through persistence, so no competing owner can enter the gap.
         drop(workflow_admission);
         drop(_goal_transaction);
         drop(_boundary);
-        self.enqueue_current_mode_update(acp::SessionModeId::new(
-            tool_types::BehaviorId::Plan.as_id(),
-        ));
         self.send_available_commands_update().await;
         Ok(())
     }
@@ -1196,11 +1195,10 @@ impl SessionActor {
         // Canonical readers must see the completed reference only after its
         // Control snapshot is durable, serialized with manual selections.
         *self.behavior.lock() = next;
+        let current_mode_id = acp::SessionModeId::new(self.behavior.lock().behavior().as_id());
+        self.enqueue_current_mode_update(current_mode_id);
         drop(transaction);
         drop(boundary);
-        self.enqueue_current_mode_update(acp::SessionModeId::new(
-            tools::types::BehaviorId::Normal.as_id(),
-        ));
         self.send_available_commands_update().await;
         Ok(true)
     }
@@ -1247,6 +1245,11 @@ impl SessionActor {
                 format!("Plan approval normalization was not persisted: {error}")
             })?;
             *self.behavior.lock() = next;
+            let current_mode_id = acp::SessionModeId::new(self.behavior.lock().behavior().as_id());
+            self.enqueue_current_mode_update(current_mode_id);
+            drop(_transaction);
+            drop(_boundary);
+            self.send_available_commands_update().await;
             return Ok(None);
         }
         let content = match snapshot.plan_artifact_hash.clone() {
@@ -2018,27 +2021,47 @@ mod plan_mode_edit_gate_tests {
             None,
         ));
     }
-    /// Non-MCP inputs resolve no read-only classification (`None`).
+    /// The Plan gate no longer consults access kind or MCP scope.
     fn gate(tracker: &BehaviorCoordinator, input: &ToolInput) -> PlanEditGate {
-        plan_mode_edit_gate(
-            tracker,
-            input,
-            &AccessKind::from_tool_call("test", input),
-            None,
-        )
+        plan_mode_edit_gate(tracker, input)
     }
-    /// MCP inputs carry the call-site-resolved trust-domain RWX ceiling.
-    fn gate_mcp(
-        tracker: &BehaviorCoordinator,
-        input: &ToolInput,
-        max_access: tool_protocol::ToolAccess,
-    ) -> PlanEditGate {
-        plan_mode_edit_gate(
-            tracker,
-            input,
-            &AccessKind::from_tool_call("test", input),
-            Some(max_access),
-        )
+    fn task(mode: Option<tool_types::SubagentCapabilityMode>) -> ToolInput {
+        ToolInput::Task(tool_types::TaskToolInput {
+            parent_step_id: "step".into(),
+            required_deliverable: false,
+            prompt: "inspect".into(),
+            description: "inspect".into(),
+            subagent_type: "explore".into(),
+            run_in_background: true,
+            capability_mode: mode,
+            isolation: None,
+            resume_from: None,
+            cwd: None,
+            model: None,
+            effort: None,
+            task_id: None,
+        })
+    }
+    fn planning_phases() -> Vec<(&'static str, BehaviorCoordinator)> {
+        let drafting = active_tracker();
+        let mut awaiting = active_tracker();
+        awaiting.record_plan_artifact("# submitted");
+        assert!(awaiting.submit_initial_plan());
+        let mut executing = active_tracker();
+        executing.record_plan_artifact("# approved");
+        assert!(executing.submit_initial_plan());
+        assert!(executing.approve_submitted_plan());
+        let mut amending = active_tracker();
+        amending.record_plan_artifact("# approved");
+        assert!(amending.submit_initial_plan());
+        assert!(amending.approve_submitted_plan());
+        assert!(amending.submit_plan_amendment());
+        vec![
+            ("drafting", drafting),
+            ("awaiting_approval", awaiting),
+            ("amending", amending),
+            ("executing", executing),
+        ]
     }
     fn mcp_tool(qualified_name: &str) -> ToolInput {
         use tools::implementations::use_tool::UseToolInput;
@@ -2063,31 +2086,32 @@ mod plan_mode_edit_gate_tests {
             content: "x".into(),
         })
     }
-    /// Every ordinary edit is rejected while Plan is active.
+    /// Ordinary edits are no longer rejected before the permission path.
     #[test]
     fn grow_edits_outside_plan_file_rejected() {
         let t = active_tracker();
         assert_eq!(
             gate(&t, &search_replace("/tmp/src/main.rs")),
-            PlanEditGate::RejectEdit
+            PlanEditGate::Allow
         );
-        assert_eq!(gate(&t, &write("/tmp/README.md")), PlanEditGate::RejectEdit);
+        assert_eq!(gate(&t, &write("/tmp/README.md")), PlanEditGate::Allow);
     }
-    /// The session artifact path has no Edit carve-out.
+    /// The session artifact path has no separate Plan edit carve-out or ban.
     #[test]
     fn plan_artifact_edit_is_rejected() {
         let t = active_tracker();
         assert_eq!(
             gate(&t, &search_replace("/tmp/gate-session/plan.md")),
-            PlanEditGate::RejectEdit
+            PlanEditGate::Allow
         );
         assert_eq!(
             gate(&t, &write("/tmp/gate-session/plan.md")),
-            PlanEditGate::RejectEdit
+            PlanEditGate::Allow
         );
     }
-    /// Drafting rejects shell execution as potentially mutating; read-only
-    /// discovery continues through the normal permission path.
+    /// Drafting used to reject shell execution here. It now reaches the same
+    /// ordinary permission path as Normal; this gate no longer classifies the
+    /// command.
     #[test]
     fn bash_is_gated_during_drafting() {
         use tools::implementations::BashToolInput;
@@ -2102,30 +2126,21 @@ mod plan_mode_edit_gate_tests {
                     is_background: false,
                 })
             ),
-            PlanEditGate::RejectEdit
+            PlanEditGate::Allow
         );
     }
-    /// A config-declared read-only server's MCP tools pass while drafting;
-    /// every other MCP tool fails closed (unconfigured server, or a
-    /// `Some(false)` classification from the call-site lookup).
+    /// MCP scope no longer changes the Plan gate. Read-only and write-capable
+    /// servers both continue to ordinary authorization.
     #[test]
     fn read_only_mcp_tools_allowed_while_drafting() {
         let t = active_tracker();
         assert_eq!(
-            gate_mcp(
-                &t,
-                &mcp_tool("docs__search_docs"),
-                tool_protocol::ToolAccess::ReadWrite
-            ),
+            gate(&t, &mcp_tool("docs__search_docs")),
             PlanEditGate::Allow
         );
         assert_eq!(
-            gate_mcp(
-                &t,
-                &mcp_tool("unknown__search_docs"),
-                tool_protocol::ToolAccess::All
-            ),
-            PlanEditGate::RejectEdit
+            gate(&t, &mcp_tool("unknown__search_docs")),
+            PlanEditGate::Allow
         );
     }
     #[test]
@@ -2136,25 +2151,58 @@ mod plan_mode_edit_gate_tests {
         assert!(t.submit_initial_plan());
         assert!(t.approve_submitted_plan());
         assert_eq!(gate(&t, &write("/tmp/src/main.rs")), PlanEditGate::Allow);
-        // MCP tools are unrestricted in Executing; the read-only classification
-        // only narrows non-executing phases.
-        assert_eq!(
-            gate_mcp(&t, &mcp_tool("any__tool"), tool_protocol::ToolAccess::All),
-            PlanEditGate::Allow
-        );
-        assert_eq!(
-            gate_mcp(
-                &t,
-                &mcp_tool("any__tool"),
-                tool_protocol::ToolAccess::ReadWrite,
-            ),
-            PlanEditGate::Allow
-        );
+        assert_eq!(gate(&t, &mcp_tool("any__tool")), PlanEditGate::Allow);
         let workflow = ToolInput::Workflow(WorkflowToolInput::Search {
             query: "review".into(),
             limit: None,
         });
         assert_eq!(gate(&t, &workflow), PlanEditGate::RejectWorkflow);
+    }
+    /// Planning phases share one admission with Normal for Bash, Edit, MCP,
+    /// and Task capability. Workflow stays on the Plan gate.
+    #[test]
+    fn planning_phases_use_ordinary_tool_admission() {
+        use tools::implementations::BashToolInput;
+        use tools::implementations::grow_build::workflow::WorkflowToolInput;
+        let normal = BehaviorCoordinator::new();
+        let bash = ToolInput::Bash(BashToolInput {
+            command: "echo hi > /tmp/f".into(),
+            timeout: None,
+            description: "write via bash".into(),
+            is_background: false,
+        });
+        let workflow = ToolInput::Workflow(WorkflowToolInput::Search {
+            query: "review".into(),
+            limit: None,
+        });
+        let ordinary = [
+            bash,
+            search_replace("/tmp/src/main.rs"),
+            write("/tmp/README.md"),
+            mcp_tool("unknown__write"),
+            task(None),
+            task(Some(tool_types::SubagentCapabilityMode::ReadOnly)),
+            task(Some(tool_types::SubagentCapabilityMode::Execute)),
+            task(Some(tool_types::SubagentCapabilityMode::All)),
+        ];
+        for input in &ordinary {
+            assert_eq!(gate(&normal, input), PlanEditGate::Allow);
+        }
+        assert_eq!(gate(&normal, &workflow), PlanEditGate::Allow);
+        for (phase, tracker) in planning_phases() {
+            for input in &ordinary {
+                assert_eq!(
+                    gate(&tracker, input),
+                    PlanEditGate::Allow,
+                    "{phase} must not add a capability ban"
+                );
+            }
+            assert_eq!(
+                gate(&tracker, &workflow),
+                PlanEditGate::RejectWorkflow,
+                "{phase} keeps the Workflow gate"
+            );
+        }
     }
     /// The call-site lookup: parse `server__tool`, hit the cached read-only
     /// set, and fail closed for unparseable names and unconfigured servers.
@@ -2203,21 +2251,22 @@ mod plan_mode_edit_gate_tests {
             .mcp_server_max_access
             .insert("docs".to_string(), tool_protocol::ToolAccess::ReadWrite);
         let tracker = active_tracker();
-        for (qualified, expected) in [
-            ("docs__search_docs", PlanEditGate::Allow),
-            ("other__search_docs", PlanEditGate::RejectEdit),
-        ] {
+        for qualified in ["docs__search_docs", "other__search_docs"] {
             let input = mcp_tool(qualified);
             let access_kind = AccessKind::from_tool_call("workflow", &input);
             let scope = mcp_call_max_access(&mcp_state, &access_kind).await;
+            assert!(
+                scope.is_some(),
+                "ordinary MCP projection still resolves a ceiling for {qualified}"
+            );
             assert_eq!(
-                plan_mode_edit_gate(&tracker, &input, &access_kind, scope),
-                expected,
-                "unexpected gate outcome for {qualified}"
+                plan_mode_edit_gate(&tracker, &input),
+                PlanEditGate::Allow,
+                "Plan phase must not reject {qualified} before ordinary authorization"
             );
         }
     }
-    /// Normal allows edits; a selected Drafting Plan already narrows them.
+    /// Normal and a selected Drafting Plan share edit admission at this gate.
     #[test]
     fn inactive_allows_edits_but_pending_plan_rejects_them() {
         let inactive = BehaviorCoordinator::new();
@@ -2229,7 +2278,7 @@ mod plan_mode_edit_gate_tests {
         assert!(pending.select_behavior(tool_types::BehaviorId::Plan));
         assert_eq!(
             gate(&pending, &search_replace("/tmp/src/main.rs")),
-            PlanEditGate::RejectEdit
+            PlanEditGate::Allow
         );
     }
 }
@@ -3231,7 +3280,12 @@ mod plan_control_failure_regressions {
 
                 assert!(matches!(outcome, ToolLoop::Continue));
                 assert_eq!(actor.behavior.lock().snapshot(), before);
-                assert!(actor.behavior.lock().plan_allows_edits());
+                assert_eq!(
+                    actor.behavior.lock().state(),
+                    crate::session::behavior::BehaviorState::Plan(
+                        crate::session::behavior::PlanPhase::Executing
+                    )
+                );
                 assert_eq!(
                     actor.behavior.lock().plan_artifact_hash(),
                     Some(original_hash.as_str())
@@ -3358,7 +3412,12 @@ mod plan_control_failure_regressions {
                     "expected the durable completion failure, got {error:?}"
                 );
                 assert_eq!(actor.behavior.lock().snapshot(), before);
-                assert!(actor.behavior.lock().plan_allows_edits());
+                assert_eq!(
+                    actor.behavior.lock().state(),
+                    crate::session::behavior::BehaviorState::Plan(
+                        crate::session::behavior::PlanPhase::Executing
+                    )
+                );
                 assert_eq!(
                     actor.behavior.lock().plan_artifact_hash(),
                     Some(plan_hash.as_str())
@@ -5145,7 +5204,8 @@ mod retained_plan_review_gate_tests {
                 assert!(context.contains(plan));
                 assert_eq!(context.matches(feedback).count(), 1, "{context}");
                 assert!(context.contains("action `submit`"));
-                assert!(context.contains("Workspace mutation and execution are forbidden"));
+                assert!(context.contains("every tool call serves only to form, verify, or revise"));
+                assert!(!context.contains("Workspace mutation and execution are forbidden"));
                 assert_eq!(
                     replay
                         .surface()
@@ -5477,6 +5537,500 @@ mod retained_plan_review_gate_tests {
                     "reconciliation must not duplicate the execute handoff"
                 );
             })
+            .await;
+    }
+
+    struct ControlFaultGate {
+        events: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+        reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        hold_next: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        held: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>,
+        >,
+        started: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    }
+
+    struct ControlFaultPersistence {
+        events: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+        reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        hold_next: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        held: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>,
+        >,
+        started: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    }
+
+    impl chat_state::TimelinePersistence for ControlFaultPersistence {
+        fn persist_timeline_event_and_ack(
+            &mut self,
+            event: &chat_state::TimelineEvent,
+        ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let is_control = matches!(&event.kind, chat_state::TimelineEventKind::Control(_));
+            if !is_control {
+                self.events.lock().expect("event log").push(event.clone());
+                let _ = tx.send(Ok(()));
+                return rx;
+            }
+            if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = tx.send(Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "injected permanent Control failure",
+                )));
+                return rx;
+            }
+            self.events.lock().expect("event log").push(event.clone());
+            if self
+                .hold_next
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                *self.held.lock().expect("held ack") = Some(tx);
+                if let Some(started) = self.started.lock().expect("start signal").take() {
+                    let _ = started.send(());
+                }
+            } else {
+                let _ = tx.send(Ok(()));
+            }
+            rx
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    async fn install_control_fault(actor: &mut SessionActor) -> ControlFaultGate {
+        let sampling_config = actor
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .expect("read sampling config");
+        let initial_events = actor
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .expect("read seed Timeline");
+        let events = std::sync::Arc::new(std::sync::Mutex::new(initial_events.clone()));
+        let reject = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hold_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let started = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+            initial_events,
+            sampling_config,
+            Box::new(ControlFaultPersistence {
+                events: events.clone(),
+                reject: reject.clone(),
+                hold_next: hold_next.clone(),
+                held: held.clone(),
+                started: started.clone(),
+            }),
+            event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("start fault-injecting durable owner");
+        actor.events = crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+        ControlFaultGate {
+            events,
+            reject,
+            hold_next,
+            held,
+            started,
+        }
+    }
+
+    fn take_mode_updates(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<
+            crate::session::replay_events::SessionEvent,
+        >,
+    ) -> Vec<acp::CurrentModeUpdate> {
+        let mut updates = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            let crate::session::replay_events::SessionEvent::Notification(
+                crate::session::replay_events::SessionNotification::Acp(notification),
+            ) = event
+            else {
+                continue;
+            };
+            if let acp::SessionUpdate::CurrentModeUpdate(update) = notification.update {
+                updates.push(update);
+            }
+        }
+        updates
+    }
+
+    fn assert_mode_matches_adopted_snapshot(
+        update: &acp::CurrentModeUpdate,
+        actor: &SessionActor,
+        durable_revision: u64,
+    ) {
+        let behavior_id = actor.behavior.lock().behavior().as_id();
+        assert_eq!(update.current_mode_id.0.as_ref(), behavior_id);
+        let snapshot = update
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("grow/behaviorSnapshot"))
+            .expect("mode update carries the adopted behavior snapshot");
+        assert_eq!(
+            snapshot
+                .get("behaviorId")
+                .and_then(serde_json::Value::as_str),
+            Some(behavior_id)
+        );
+        let revision = snapshot
+            .get("controlRevision")
+            .and_then(serde_json::Value::as_u64)
+            .expect("durable control revision");
+        assert_eq!(
+            revision,
+            actor
+                .control_revision
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert_eq!(revision, durable_revision);
+    }
+
+    async fn latest_durable_revision(actor: &SessionActor) -> u64 {
+        actor
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .expect("timeline")
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Control(control) => Some(control.revision),
+                _ => None,
+            })
+            .expect("durable control revision")
+    }
+
+    async fn during_durable_ack<T: 'static>(
+        actor: &SessionActor,
+        gate: &ControlFaultGate,
+        before: &crate::session::behavior::BehaviorSnapshot,
+        operation: impl std::future::Future<Output = T> + 'static,
+    ) -> T {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        *gate.started.lock().expect("start slot") = Some(started_tx);
+        gate.hold_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        gate.reject
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let revision_before = actor
+            .control_revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        let task = tokio::task::spawn_local(operation);
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("control persistence must reach its acknowledgement")
+            .expect("start signal");
+        assert_eq!(
+            actor.behavior.lock().snapshot(),
+            *before,
+            "coordinator stays on the confirmed value until the durable ACK"
+        );
+        assert_eq!(
+            actor
+                .control_revision
+                .load(std::sync::atomic::Ordering::Acquire),
+            revision_before
+        );
+        gate.held
+            .lock()
+            .expect("held ack")
+            .take()
+            .expect("ack sender")
+            .send(Ok(()))
+            .expect("release ack");
+        task.await.expect("control operation")
+    }
+
+    fn control_count(events: &[chat_state::TimelineEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(&event.kind, chat_state::TimelineEventKind::Control(_)))
+            .count()
+    }
+
+    async fn fresh_actor() -> (
+        SessionActor,
+        tokio::sync::mpsc::UnboundedReceiver<crate::session::replay_events::SessionEvent>,
+    ) {
+        let (gateway_tx, _gateway_rx) =
+            tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+        let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::session::actor::tests::support::create_test_actor_ex(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx,
+        )
+        .await
+    }
+
+    struct ConfirmedFault {
+        actor: std::sync::Arc<SessionActor>,
+        events: tokio::sync::mpsc::UnboundedReceiver<crate::session::replay_events::SessionEvent>,
+        before: crate::session::behavior::BehaviorSnapshot,
+        revision: u64,
+        controls: usize,
+        gate: ControlFaultGate,
+    }
+
+    async fn install_confirmed(
+        mut actor: SessionActor,
+        mut events: tokio::sync::mpsc::UnboundedReceiver<
+            crate::session::replay_events::SessionEvent,
+        >,
+    ) -> ConfirmedFault {
+        assert!(take_mode_updates(&mut events).is_empty());
+        let before = actor.behavior.lock().snapshot();
+        let revision = actor
+            .control_revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        let gate = install_control_fault(&mut actor).await;
+        let controls = control_count(&gate.events.lock().expect("event log"));
+        ConfirmedFault {
+            actor: std::sync::Arc::new(actor),
+            events,
+            before,
+            revision,
+            controls,
+            gate,
+        }
+    }
+
+    /// A rejected Control ACK retires the durable owner. Facts already captured
+    /// by the fault log remain readable; the timeline query does not.
+    async fn assert_rejected_keeps_confirmed(fault: &mut ConfirmedFault) {
+        assert_eq!(fault.actor.behavior.lock().snapshot(), fault.before);
+        assert_eq!(
+            fault
+                .actor
+                .control_revision
+                .load(std::sync::atomic::Ordering::Acquire),
+            fault.revision
+        );
+        assert!(fault.actor.state.lock().await.foreground.is_idle());
+        assert!(take_mode_updates(&mut fault.events).is_empty());
+        assert_eq!(
+            control_count(&fault.gate.events.lock().expect("event log")),
+            fault.controls
+        );
+    }
+
+    fn arm_rejection(gate: &ControlFaultGate) {
+        gate.reject.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    async fn deferred_review_actor() -> (
+        SessionActor,
+        tokio::sync::mpsc::UnboundedReceiver<crate::session::replay_events::SessionEvent>,
+        u64,
+    ) {
+        let (actor, events) = fresh_actor().await;
+        let content = "# retained plan";
+        crate::session::behavior::write_plan_artifact(&actor.session_directory, content).unwrap();
+        let submission_id = {
+            let mut behavior = actor.behavior.lock();
+            behavior.select_behavior(tool_types::BehaviorId::Plan);
+            behavior.record_plan_artifact(content);
+            assert!(behavior.submit_initial_plan());
+            let submission_id = behavior.plan_submission_id().unwrap();
+            let expected = behavior.snapshot();
+            assert_eq!(
+                behavior.decide_submitted_plan_if(
+                    &expected,
+                    submission_id,
+                    "defer-retained",
+                    RetainedPlanAction::Defer,
+                    None,
+                ),
+                RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+            );
+            assert!(behavior.finish_plan());
+            submission_id
+        };
+        (actor, events, submission_id)
+    }
+
+    async fn executing_plan_actor() -> (
+        SessionActor,
+        tokio::sync::mpsc::UnboundedReceiver<crate::session::replay_events::SessionEvent>,
+    ) {
+        let (actor, events) = fresh_actor().await;
+        let mut behavior = actor.behavior.lock();
+        behavior.select_behavior(tool_types::BehaviorId::Plan);
+        behavior.record_plan_artifact("# Approved plan");
+        assert!(behavior.submit_initial_plan());
+        assert!(behavior.approve_submitted_plan());
+        drop(behavior);
+        (actor, events)
+    }
+
+    async fn stale_approval_actor() -> (
+        SessionActor,
+        tokio::sync::mpsc::UnboundedReceiver<crate::session::replay_events::SessionEvent>,
+    ) {
+        let (actor, events) = fresh_actor().await;
+        let content = "# Draft candidate retained while normalizing transport";
+        crate::session::behavior::write_plan_artifact(&actor.session_directory, content).unwrap();
+        let before = {
+            let mut behavior = actor.behavior.lock();
+            behavior.select_behavior(tool_types::BehaviorId::Plan);
+            behavior.record_plan_artifact(content);
+            behavior.set_approval_pending(true);
+            behavior.snapshot()
+        };
+        actor
+            .persist_control_snapshot_durably(before, None)
+            .await
+            .expect("persist stale approval bit");
+        (actor, events)
+    }
+
+    fn assert_one_adopted_mode(
+        updates: &[acp::CurrentModeUpdate],
+        actor: &SessionActor,
+        durable_revision: u64,
+    ) {
+        assert_eq!(updates.len(), 1, "one mode update is stamped at adoption");
+        assert_mode_matches_adopted_snapshot(&updates[0], actor, durable_revision);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_plan_review_adopts_coordinator_only_after_durable_ack() {
+        tokio::task::LocalSet::new()
+            .run_until(Box::pin(async {
+                let (actor, events, submission_id) = deferred_review_actor().await;
+                let mut rejected = install_confirmed(actor, events).await;
+                arm_rejection(&rejected.gate);
+                let error = rejected
+                    .actor
+                    .review_retained_plan(submission_id, "review-rejected")
+                    .await
+                    .expect_err("rejected review must not adopt");
+                assert!(error.contains("not persisted"), "{error}");
+                assert_rejected_keeps_confirmed(&mut rejected).await;
+
+                let (actor, events, submission_id) = deferred_review_actor().await;
+                let mut accepted = install_confirmed(actor, events).await;
+                let actor_op = accepted.actor.clone();
+                let before = accepted.before.clone();
+                during_durable_ack(&accepted.actor, &accepted.gate, &before, async move {
+                    actor_op
+                        .review_retained_plan(submission_id, "review-durable-ack")
+                        .await
+                })
+                .await
+                .expect("acknowledged review");
+                let updates = take_mode_updates(&mut accepted.events);
+                assert_one_adopted_mode(
+                    &updates,
+                    &accepted.actor,
+                    latest_durable_revision(&accepted.actor).await,
+                );
+                let receipt = accepted
+                    .actor
+                    .behavior
+                    .lock()
+                    .snapshot()
+                    .retained_plan
+                    .expect("retained plan")
+                    .decisions
+                    .pop()
+                    .expect("review receipt");
+                assert_eq!(receipt.decision_id, "review-durable-ack");
+                assert_eq!(receipt.action, RetainedPlanAction::Review);
+            }))
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_plan_completion_adopts_normal_only_after_durable_ack() {
+        tokio::task::LocalSet::new()
+            .run_until(Box::pin(async {
+                let (actor, events) = executing_plan_actor().await;
+                let mut rejected = install_confirmed(actor, events).await;
+                arm_rejection(&rejected.gate);
+                let expected = rejected.before.clone();
+                let error = rejected
+                    .actor
+                    .finish_plan_to_default_if(&expected, Some("Completed report"))
+                    .await
+                    .expect_err("rejected completion must not adopt");
+                assert!(error.contains("not persisted"), "{error}");
+                assert_rejected_keeps_confirmed(&mut rejected).await;
+
+                let (actor, events) = executing_plan_actor().await;
+                let mut accepted = install_confirmed(actor, events).await;
+                let actor_op = accepted.actor.clone();
+                let before = accepted.before.clone();
+                let expected = before.clone();
+                assert!(
+                    during_durable_ack(&accepted.actor, &accepted.gate, &before, async move {
+                        actor_op
+                            .finish_plan_to_default_if(&expected, Some("Completed report"))
+                            .await
+                    })
+                    .await
+                    .expect("acknowledged completion")
+                );
+                let updates = take_mode_updates(&mut accepted.events);
+                assert_one_adopted_mode(
+                    &updates,
+                    &accepted.actor,
+                    latest_durable_revision(&accepted.actor).await,
+                );
+                assert_eq!(
+                    accepted.actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Normal
+                );
+            }))
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_plan_restore_normalization_adopts_only_after_durable_ack() {
+        tokio::task::LocalSet::new()
+            .run_until(Box::pin(async {
+                let (actor, events) = stale_approval_actor().await;
+                let mut rejected = install_confirmed(actor, events).await;
+                arm_rejection(&rejected.gate);
+                let error = rejected
+                    .actor
+                    .prepare_restored_plan_approval()
+                    .await
+                    .expect_err("rejected normalization must not adopt");
+                assert!(error.contains("not persisted"), "{error}");
+                assert_rejected_keeps_confirmed(&mut rejected).await;
+
+                let (actor, events) = stale_approval_actor().await;
+                let mut accepted = install_confirmed(actor, events).await;
+                let actor_op = accepted.actor.clone();
+                let before = accepted.before.clone();
+                assert!(
+                    during_durable_ack(&accepted.actor, &accepted.gate, &before, async move {
+                        actor_op.prepare_restored_plan_approval().await
+                    })
+                    .await
+                    .expect("acknowledged normalization")
+                    .is_none()
+                );
+                let updates = take_mode_updates(&mut accepted.events);
+                assert_one_adopted_mode(
+                    &updates,
+                    &accepted.actor,
+                    latest_durable_revision(&accepted.actor).await,
+                );
+                assert!(!accepted.actor.behavior.lock().snapshot().approval_pending);
+                assert_eq!(
+                    accepted.actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Plan
+                );
+            }))
             .await;
     }
 }
@@ -6065,7 +6619,9 @@ mod subagent_result_receipt_tests {
                 let delivered_ids = timeline
                     .iter()
                     .flat_map(|event| match &event.kind {
-                        chat_state::TimelineEventKind::Messages(message) => message.items.as_slice(),
+                        chat_state::TimelineEventKind::Messages(message) => {
+                            message.items.as_slice()
+                        }
                         _ => &[],
                     })
                     .filter_map(|item| match item {

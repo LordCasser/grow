@@ -1,6 +1,31 @@
 use acp_transport::protocol as acp;
 use tools::types::TaskSnapshot;
 
+/// Confirmed Behavior state from one live SessionActor incarnation.
+/// `control_revision` identifies the durably acknowledged Control snapshot,
+/// independently of pending client intent revisions.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BehaviorProjection {
+    pub control_epoch: String,
+    pub control_revision: u64,
+    pub behavior_id: tool_types::BehaviorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_phase: Option<String>,
+    pub plan_completed: bool,
+}
+
+impl BehaviorProjection {
+    pub const META_KEY: &str = "grow/behaviorSnapshot";
+
+    pub fn insert_meta(&self, meta: &mut acp::Meta) {
+        meta.insert(
+            Self::META_KEY.to_owned(),
+            serde_json::to_value(self).expect("BehaviorProjection is JSON-serializable"),
+        );
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowPhaseInfo {
     pub title: String,

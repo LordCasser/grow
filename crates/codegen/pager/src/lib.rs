@@ -27,17 +27,18 @@ pub mod memory_release;
 pub mod memory_trace;
 pub(crate) mod transcript_projection;
 // ── Minimal (scrollback-native) mode seam ────────────────────────────────────
-// The *only* minimal-specific surface in this (the "full pager") crate. Both
-// modules are grouped under `src/minimal/` so a full-pager contributor sees one
-// folder to ignore, not files scattered through the module list. All the actual
-// minimal rendering lives in the sibling `pager-minimal` crate; these
-// are just the two narrow seams it connects through:
+// Minimal-specific integration is grouped under `src/minimal/`. Native
+// rendering lives in the sibling `pager-minimal` crate; these seams connect it:
 //   - `minimal_hook` — pager → minimal dispatch (fn-pointer IoC seam).
-//   - `minimal_api`  — minimal → pager read surface (facade over `pub(crate)`s).
+//   - `minimal_api`  — minimal → pager facade over the view model.
+// The internal `minimal_history` host redraws the shared scrollback on a
+// temporary alternate screen without changing the native commit frontier.
 // Module names are kept flat (via `#[path]`) so existing references and
 // every `crate::minimal_{api,hook}` call site stay valid.
 #[path = "minimal/api.rs"]
 pub mod minimal_api;
+#[path = "minimal/history.rs"]
+pub(crate) mod minimal_history;
 #[path = "minimal/hook.rs"]
 pub mod minimal_hook;
 pub mod models;

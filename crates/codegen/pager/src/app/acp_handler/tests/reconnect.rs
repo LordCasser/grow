@@ -133,8 +133,8 @@
                         restore_summary: None,
                         foreground: None,
                         descendant_ownership: None,
-                        older_history_cursor: None,
-                        latest_history_cursor: None,
+                        history_cut: None,
+                        behavior: None,
                     },
                 ),
                 &mut app,
@@ -1128,7 +1128,7 @@
         // Regression: the context bar must not drop when a stale, already-passed
         // replay delta arrives after a fresher live one. In leader / reconnect /
         // replay-live-overlap, a historical delta (LOWER eventId, LOWER
-        // totalTokens) is deduped for rendering — but `refresh_context_used`
+        // contextUsedTokens) is deduped for rendering — but `refresh_context_used`
         // must respect the dedup too, otherwise the bar regresses below the real
         // usage (the reported "resume shows lower context" bug).
         let mut app = make_app_with_agent("sess-ctx");

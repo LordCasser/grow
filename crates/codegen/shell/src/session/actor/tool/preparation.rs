@@ -1000,20 +1000,12 @@ impl SessionActor {
                 .await?;
             return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
-        // Lock order: resolve the read-only MCP classification from the
-        // (async) `mcp_state` BEFORE taking the `behavior` lock — never hold
-        // one lock while awaiting the other.
         let plan_gate = if admitted_behavior == tool_types::BehaviorId::Plan {
-            plan_mode_edit_gate(
-                &self.behavior.lock(),
-                &tool_input,
-                &access_kind,
-                mcp_max_access,
-            )
+            plan_mode_edit_gate(&self.behavior.lock(), &tool_input)
         } else {
             PlanEditGate::Allow
         };
-        if plan_gate != PlanEditGate::Allow {
+        if let PlanEditGate::RejectWorkflow = plan_gate {
             tracing::info_span!(
                 "tool.decision",
                 tool_name = %call.function.name,
@@ -1023,11 +1015,7 @@ impl SessionActor {
                 wait_ms = 0_i64,
             )
             .in_scope(|| {});
-            let msg = match plan_gate {
-                PlanEditGate::RejectWorkflow => "Rejected: Workflow cannot be launched while Plan behavior is active. Complete or cancel the approved Plan first.".to_owned(),
-                PlanEditGate::RejectEdit => self.plan_mode_edit_rejected_message().await,
-                PlanEditGate::Allow => unreachable!(),
-            };
+            let msg = "Rejected: Workflow cannot be launched while Plan behavior is active. Complete or cancel the approved Plan first.".to_owned();
             self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
                 .await?;
             return Ok(ToolPreflight::resolved(ToolLoop::Continue));
@@ -1510,6 +1498,7 @@ impl SessionActor {
                     .expect("validated submit/amend plan")
                     .trim()
                     .to_owned();
+                let artifact_content = plan_content.clone();
 
                 if restoring_submission {
                     let snapshot = self.behavior.lock().snapshot();
@@ -1575,28 +1564,25 @@ impl SessionActor {
                             return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                         }
                     };
-                    let previous_behavior = self.behavior.lock().snapshot();
-                    self.behavior.lock().record_plan_artifact(&plan_content);
-                    debug_assert_eq!(
-                        self.behavior.lock().plan_artifact_hash(),
-                        Some(artifact_hash.as_str())
-                    );
-                    let submitted = match input.action {
-                        PlanControlAction::Submit => self.behavior.lock().submit_initial_plan(),
-                        PlanControlAction::Amend => self.behavior.lock().submit_plan_amendment(),
-                        PlanControlAction::Complete | PlanControlAction::Cancel => unreachable!(),
-                    };
-                    if !submitted {
-                        self.handle_tool_not_executed(
-                    &call.id,
-                    &tool_call_id,
-                    "Rejected: a plan can only be submitted while drafting or while executing an approved plan that needs amendment.".to_owned(),
-                )
-                .await?;
-                        return Ok(ToolPreflight::resolved(ToolLoop::Continue));
-                    }
+                    let action = input.action;
                     if let Err(message) = self
-                        .commit_behavior_mutation_or_restore(previous_behavior)
+                        .commit_behavior_mutation(move |candidate| {
+                            candidate.record_plan_artifact(&artifact_content);
+                            debug_assert_eq!(
+                                candidate.plan_artifact_hash(),
+                                Some(artifact_hash.as_str())
+                            );
+                            let submitted = match action {
+                                PlanControlAction::Submit => candidate.submit_initial_plan(),
+                                PlanControlAction::Amend => candidate.submit_plan_amendment(),
+                                PlanControlAction::Complete | PlanControlAction::Cancel => {
+                                    unreachable!()
+                                }
+                            };
+                            submitted.then_some(()).ok_or_else(|| {
+                                "Rejected: a plan can only be submitted while drafting or while executing an approved plan that needs amendment.".to_owned()
+                            })
+                        })
                         .await
                     {
                         self.handle_tool_not_executed(&call.id, &tool_call_id, message)
@@ -1724,25 +1710,23 @@ impl SessionActor {
                     Err(err) => {
                         if ext_method_no_client(&err) {
                             tracing::warn!(%err, "plan_control: no approval client; failing closed");
-                            let previous_behavior = self.behavior.lock().snapshot();
-                            if !self
-                                .behavior
-                                .lock()
-                                .fail_pending_plan_approval_if(&approval_snapshot)
-                            {
-                                tracing::info!("plan_control: dropping stale no-client decision");
-                                self.handle_tool_not_executed(
-                                    &call.id,
-                                    &tool_call_id,
-                                    "Plan approval was stale and was discarded.".to_owned(),
-                                )
-                                .await?;
-                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
-                            }
+                            let expected_approval = approval_snapshot.clone();
                             if let Err(message) = self
-                                .commit_behavior_mutation_or_restore(previous_behavior)
+                                .commit_behavior_mutation(move |candidate| {
+                                    candidate
+                                        .fail_pending_plan_approval_if(&expected_approval)
+                                        .then_some(())
+                                        .ok_or_else(|| {
+                                            "Plan approval was stale and was discarded.".to_owned()
+                                        })
+                                })
                                 .await
                             {
+                                if message.contains("stale") {
+                                    tracing::info!(
+                                        "plan_control: dropping stale no-client decision"
+                                    );
+                                }
                                 self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                                     .await?;
                                 return Ok(ToolPreflight::resolved(ToolLoop::Continue));

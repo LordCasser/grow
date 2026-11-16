@@ -87,7 +87,7 @@ pub fn app_visible_agent_mut(app: &mut AppView, id: AgentId) -> Option<&mut Agen
     app.agents.get_mut(&id).map(visible_agent_mut)
 }
 
-fn visible_agent_mut(root: &mut AgentView) -> &mut AgentView {
+pub(crate) fn visible_agent_mut(root: &mut AgentView) -> &mut AgentView {
     if let Some(key) = selected_child_key(root).cloned() {
         return root.subagent_views.get_mut(&key).expect("key checked");
     }
@@ -506,6 +506,12 @@ pub(crate) struct MinimalState {
     pub(crate) committed_plans: Vec<(TranscriptOwner, String)>,
     /// Exact owner printed in this terminal's visible Minimal screen epoch.
     pub(crate) visible_owner: Option<TranscriptOwner>,
+    /// Temporary alternate-screen browser over this view's scrollback.
+    ///
+    /// Bound to the visible [`TranscriptOwner`]. It is a render host only:
+    /// the history window stays on the agent scrollback, and native commit
+    /// state is not part of this value.
+    pub(crate) history_browser: Option<crate::minimal_history::HistoryBrowser>,
 }
 
 pub fn minimal_visible_owner(app: &AppView) -> Option<TranscriptOwner> {
@@ -541,6 +547,61 @@ pub fn begin_minimal_visible_epoch(app: &mut AppView, owner: Option<TranscriptOw
     }
     app.minimal_state.pending_expand.clear();
     app.minimal_state.visible_owner = owner;
+}
+
+/// The visible agent still has an unloaded history cut, so Minimal can offer PageUp.
+pub fn agent_has_history_cut(agent: &AgentView) -> bool {
+    agent.history_cut.is_some()
+}
+
+/// True while a history screen is entering, showing, or waiting to leave.
+/// Native commit and the live frame stay paused until the leave write succeeds.
+pub fn minimal_history_browsing(app: &AppView) -> bool {
+    app.minimal_state.history_browser.is_some()
+}
+
+/// Live-row hint. Hidden once the alternate screen owns the frame.
+pub fn minimal_history_pageup_hint(app: &AppView) -> bool {
+    if minimal_history_browsing(app) {
+        return false;
+    }
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    app_visible_agent(app, id).is_some_and(agent_has_history_cut)
+}
+
+/// Drive the temporary history screen. `Ok(true)` means this frame painted the
+/// browser and native commit must not run. `Ok(false)` means Minimal should
+/// continue the live frame. `Err` means an alternate-screen switch failed; the
+/// browser state is unchanged and the caller must close the synchronized update.
+pub fn present_minimal_history(
+    app: &mut AppView,
+    terminal: &mut crate::app::PagerTerminal,
+    frame: crate::motion::FrameStamp,
+) -> std::io::Result<bool> {
+    crate::minimal_history::present(app, terminal, frame)
+}
+
+/// Test-only: install an older prefix through the real history replace path.
+/// Existing tail ids and their commit bits stay in place.
+#[cfg(any(test, feature = "test-support"))]
+pub fn prepend_committed_history_for_test(sb: &mut ScrollbackState, text: &str) {
+    let mut history = ScrollbackState::new();
+    history.push_block(crate::scrollback::block::RenderBlock::notice(text));
+    sb.replace_history_prefix(history, 0, true);
+}
+
+/// Test-only screen mode so sibling crates can drive Minimal's input hook.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_screen_mode_minimal_for_test(app: &mut AppView) {
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+}
+
+/// Test-only history cut, used by the live-row PageUp hint.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_history_cut_for_test(agent: &mut AgentView, cut: Option<String>) {
+    agent.history_cut = cut;
 }
 
 /// `AppView::minimal_state.show_todos`.

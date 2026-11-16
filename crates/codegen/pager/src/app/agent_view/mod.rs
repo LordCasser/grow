@@ -133,6 +133,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod cta;
 mod goal;
+mod history_navigation;
+mod history_timeline;
+pub(in crate::app) use history_timeline::{
+    ensure_visible_history_timeline, resume_visible_history_timeline, visible_history_session,
+};
+mod history_window;
+pub(crate) use history_window::HistoryPageOutcome;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 /// Off-thread full-file syntax highlight upgrade for edit diffs.
@@ -644,8 +651,11 @@ pub struct AgentView {
     pub(crate) descendant_restore_pending: bool,
     pub(crate) descendant_model_control_generation: u64,
     pub(crate) descendant_agent_control_generation: u64,
-    /// Branch-bound cursor and request ownership for observational older pages.
+    /// Branch-bound older cursor mirrored from the history window.
     pub(crate) history_page_cursor: Option<String>,
+    pub(crate) history_cut: Option<String>,
+    pub(crate) history_generation: u64,
+    history_window: history_window::HistoryWindow,
     pub(crate) history_latest_pending: bool,
     /// The resident scrollback is only a display window, even if its older
     /// cursor has been exhausted. Complete-history actions must reject it.
@@ -653,6 +663,7 @@ pub struct AgentView {
     pub(crate) history_page_request: Option<u64>,
     pub(crate) history_page_request_seq: u64,
     pub(crate) history_page_viewer: Option<crate::transcript_projection::TranscriptProjection>,
+    history_timeline: history_timeline::HistoryTimeline,
     /// Last `/agent` picker discovery request; late results from older views are ignored.
     pub(crate) switch_catalog_request: u64,
     pub scrollback: ScrollbackState,
@@ -1144,7 +1155,7 @@ pub struct AgentView {
     /// Cached tick-hover preview `(turn_idx, text)`. Filled when hover
     /// lands on a tick; borrowed during render so streaming redraws don't
     /// rescan/allocate the prompt every frame.
-    pub(crate) timeline_hover_preview: Option<(usize, String)>,
+    pub(crate) timeline_hover_preview: Option<(u64, String)>,
     /// Child subagent views. Keyed by child_session_id.
     /// Created eagerly on SubagentSpawned so updates are tracked from the start.
     pub subagent_views: HashMap<String, Box<AgentView>>,

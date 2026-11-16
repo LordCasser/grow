@@ -176,11 +176,16 @@ pub(crate) fn format_tokens_compact(tokens: i64) -> String {
 }
 
 /// Build the ordinary session usage projection shown in the Goal slot.
+/// `pending_work` marks that the turn or a subagent is still active, so the
+/// recorded lifetime numbers may still grow; it is an observation hint, not a
+/// billing-completeness flag.
 pub fn session_usage_status_line(
     usage: Option<&shell::extensions::notification::PromptUsage>,
     theme: &Theme,
     hovered: bool,
+    pending_work: bool,
 ) -> Line<'static> {
+    let pending = if pending_work { "pending · " } else { "" };
     let text = match usage {
         Some(usage) => {
             let totals = &usage.totals;
@@ -208,11 +213,11 @@ pub fn session_usage_status_line(
                 None => "N/A cache".to_string(),
             };
             format!(
-                "{lower_bound}{} tokens · {cache}",
+                "{lower_bound}{} recorded tokens · {pending}{cache}",
                 format_tokens_compact_u64(total_tokens),
             )
         }
-        None => "— tokens · — cache".to_string(),
+        None => format!("— recorded tokens · {pending}— cache"),
     };
     let mut style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
     if hovered {
@@ -419,61 +424,80 @@ mod tests {
     fn session_usage_formats_measured_cache_independently_from_total_completeness() {
         let theme = Theme::current();
         assert_eq!(
-            line_text(session_usage_status_line(None, &theme, false)),
-            "— tokens · — cache"
+            line_text(session_usage_status_line(None, &theme, false, false)),
+            "— recorded tokens · — cache"
         );
         assert_eq!(
             line_text(session_usage_status_line(
                 Some(&usage(1_350_000, 150_000, 1_215_000, false)),
                 &theme,
                 false,
+                false,
             )),
-            "1.5M tokens · 90.00% cache"
+            "1.5M recorded tokens · 90.00% cache"
         );
         assert_eq!(
             line_text(session_usage_status_line(
                 Some(&usage(100, 20, 90, true)),
                 &theme,
                 false,
+                false,
             )),
-            "≥120 tokens · measured cache 90.00%"
+            "≥120 recorded tokens · measured cache 90.00%"
         );
         assert_eq!(
             line_text(session_usage_status_line(
                 Some(&usage(0, 5, 1, false)),
                 &theme,
                 false,
+                false,
             )),
-            "5 tokens · N/A cache"
+            "5 recorded tokens · N/A cache"
         );
         assert_eq!(
             line_text(session_usage_status_line(
                 Some(&usage(10, 5, 11, false)),
                 &theme,
                 false,
+                false,
             )),
-            "15 tokens · N/A cache"
+            "15 recorded tokens · N/A cache"
         );
         let mut partial = usage(1_000, 0, 80, false);
         partial.totals.cache_read_known_input_tokens = 100;
         partial.totals.cache_read_unknown_calls = 1;
         assert_eq!(
-            line_text(session_usage_status_line(Some(&partial), &theme, false)),
-            "1k tokens · measured cache 80.00%"
+            line_text(session_usage_status_line(
+                Some(&partial),
+                &theme,
+                false,
+                false
+            )),
+            "1k recorded tokens · measured cache 80.00%"
         );
 
         let mut late_sample = usage(1_000, 0, 0, true);
         late_sample.totals.cache_read_known_input_tokens = 0;
         assert_eq!(
-            line_text(session_usage_status_line(Some(&late_sample), &theme, false)),
-            "≥1k tokens · N/A cache"
+            line_text(session_usage_status_line(
+                Some(&late_sample),
+                &theme,
+                false,
+                false
+            )),
+            "≥1k recorded tokens · N/A cache"
         );
 
         let mut zero_reads = usage(1_000, 0, 0, false);
         zero_reads.totals.cache_write_unknown_calls = 1;
         assert_eq!(
-            line_text(session_usage_status_line(Some(&zero_reads), &theme, false)),
-            "1k tokens · 0.00% cache"
+            line_text(session_usage_status_line(
+                Some(&zero_reads),
+                &theme,
+                false,
+                false
+            )),
+            "1k recorded tokens · 0.00% cache"
         );
 
         let mut no_read_coverage = usage(1_000, 0, 0, false);
@@ -482,9 +506,10 @@ mod tests {
             line_text(session_usage_status_line(
                 Some(&no_read_coverage),
                 &theme,
+                false,
                 false
             )),
-            "1k tokens · N/A cache"
+            "1k recorded tokens · N/A cache"
         );
 
         let mut cached_exceeds_measured = usage(100, 0, 0, false);
@@ -495,8 +520,9 @@ mod tests {
                 Some(&cached_exceeds_measured),
                 &theme,
                 false,
+                false,
             )),
-            "100 tokens · N/A cache"
+            "100 recorded tokens · N/A cache"
         );
 
         let mut measured_exceeds_recorded = usage(100, 0, 0, false);
@@ -508,9 +534,46 @@ mod tests {
                 Some(&measured_exceeds_recorded),
                 &theme,
                 false,
+                false,
             )),
-            "100 tokens · N/A cache"
+            "100 recorded tokens · N/A cache"
         );
+    }
+
+    #[test]
+    fn session_usage_pending_hint_tracks_runtime_without_touching_incomplete() {
+        let theme = Theme::current();
+        // Recorded lifetime 120 while a child is still live: the interim
+        // child snapshot must not be folded in, only flagged as pending.
+        let recorded = usage(100, 20, 90, false);
+        assert!(!recorded.usage_is_incomplete);
+        assert_eq!(
+            line_text(session_usage_status_line(
+                Some(&recorded),
+                &theme,
+                false,
+                true,
+            )),
+            "120 recorded tokens · pending · 90.00% cache"
+        );
+        // After the child's final bill folds in (via the existing SessionUsage
+        // reducer), pending clears and only the settled snapshot shows.
+        let settled = usage(190, 20, 171, false);
+        assert_eq!(
+            line_text(session_usage_status_line(
+                Some(&settled),
+                &theme,
+                false,
+                false,
+            )),
+            "210 recorded tokens · 90.00% cache"
+        );
+        // No ledger yet: still unknown, never zero, pending stays visible.
+        assert_eq!(
+            line_text(session_usage_status_line(None, &theme, false, true)),
+            "— recorded tokens · pending · — cache"
+        );
+        assert!(!recorded.usage_is_incomplete);
     }
 
     #[test]
@@ -543,20 +606,28 @@ mod tests {
     fn known_samples_remain_visible_across_unknown_and_late_settlement() {
         let theme = Theme::current();
         let snapshots = [
-            (usage(0, 0, 0, true), "≥0 tokens · N/A cache"),
-            (usage(100, 0, 80, false), "100 tokens · 80.00% cache"),
+            (usage(0, 0, 0, true), "≥0 recorded tokens · N/A cache"),
+            (
+                usage(100, 0, 80, false),
+                "100 recorded tokens · 80.00% cache",
+            ),
             (
                 usage(100, 0, 80, true),
-                "≥100 tokens · measured cache 80.00%",
+                "≥100 recorded tokens · measured cache 80.00%",
             ),
             (
                 usage(1_000, 0, 890, true),
-                "≥1k tokens · measured cache 89.00%",
+                "≥1k recorded tokens · measured cache 89.00%",
             ),
         ];
         for (snapshot, expected) in &snapshots {
             assert_eq!(
-                line_text(session_usage_status_line(Some(snapshot), &theme, false)),
+                line_text(session_usage_status_line(
+                    Some(snapshot),
+                    &theme,
+                    false,
+                    false
+                )),
                 *expected
             );
         }

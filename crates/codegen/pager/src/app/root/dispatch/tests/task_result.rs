@@ -17,19 +17,14 @@ fn observational_history_page_is_owned_and_does_not_touch_live_controls() {
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.session_id = Some(session_id.clone());
     agent.session_binding_epoch = 7;
-    agent.history_page_cursor = Some("older-2".into());
+    agent.history_cut = Some("cut".into());
+    agent.history_generation = 4;
     agent.history_is_partial = true;
     agent.history_page_request = Some(3);
     agent.session.plan_mode_active = false;
     let live_scrollback_len = agent.scrollback.len();
-    let historical_mode = acp_transport::protocol::SessionNotification::new(
-        session_id.clone(),
-        acp_transport::protocol::SessionUpdate::CurrentModeUpdate(
-            acp_transport::protocol::CurrentModeUpdate::new(
-                acp_transport::protocol::SessionModeId::new("plan"),
-            ),
-        ),
-    );
+    let usage = agent.session.session_usage.clone();
+    let event_seq = agent.session.last_applied_event_seq;
 
     dispatch_task_result(
         TaskResult::HistoryPageLoaded {
@@ -37,23 +32,27 @@ fn observational_history_page_is_owned_and_does_not_touch_live_controls() {
             session_id: session_id.clone(),
             binding_epoch: 7,
             request_id: 3,
-            older_cursor: None,
-            result: Ok(vec![shell::session::storage::SessionUpdate::Acp(Box::new(
-                historical_mode,
-            ))]),
+            generation: 4,
+            query: shell::session::storage::HistoryPageQuery::Latest,
+            result: Ok(history_page(
+                &session_id,
+                "cut",
+                vec![history_text_row(&session_id, 2, 0, "older reply")],
+                Some("older".into()),
+                None,
+            )),
         },
         &mut app,
     );
     let agent = &app.agents[&id];
-    assert!(agent.history_page_viewer.is_some());
-    assert_eq!(
-        agent.history_page_viewer.as_ref().unwrap().scrollback.len(),
-        1
-    );
-    assert_eq!(agent.scrollback.len(), live_scrollback_len);
-    assert_eq!(agent.history_page_cursor, None);
+    assert!(agent.history_page_viewer.is_none());
+    assert!(transcript_text(agent).contains("older reply"));
+    assert!(agent.scrollback.len() > live_scrollback_len);
+    assert_eq!(agent.history_older_cursor(), Some("older"));
     assert!(agent.history_is_partial);
     assert!(!agent.session.plan_mode_active);
+    assert_eq!(agent.session.session_usage, usage);
+    assert_eq!(agent.session.last_applied_event_seq, event_seq);
 
     app.agents.get_mut(&id).unwrap().history_page_request = Some(4);
     dispatch_task_result(
@@ -62,15 +61,566 @@ fn observational_history_page_is_owned_and_does_not_touch_live_controls() {
             session_id,
             binding_epoch: 7,
             request_id: 3,
-            older_cursor: None,
-            result: Ok(vec![]),
+            generation: 4,
+            query: shell::session::storage::HistoryPageQuery::Latest,
+            result: Ok(history_page(
+                &acp::SessionId::new("history-session"),
+                "cut",
+                vec![],
+                None,
+                None,
+            )),
         },
         &mut app,
     );
     let agent = &app.agents[&id];
     assert_eq!(agent.history_page_request, Some(4));
-    assert_eq!(agent.history_page_cursor, None);
+    assert_eq!(agent.history_older_cursor(), Some("older"));
     assert!(agent.history_is_partial);
+}
+
+fn history_text_row(
+    session: &acp::SessionId,
+    record: u64,
+    part: u64,
+    text: &str,
+) -> shell::session::storage::HistoryRow {
+    use shell::session::storage::{HistoryEntity, HistoryRow, HistorySourceKey, SessionUpdate};
+    HistoryRow {
+        source: HistorySourceKey { record, part },
+        entity: Some(HistoryEntity::Message {
+            event_seq: record,
+            item_ordinal: part,
+        }),
+        fragment: None,
+        update: SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            session.clone(),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text.to_string()),
+            ))),
+        ))),
+    }
+}
+
+fn history_page(
+    session: &acp::SessionId,
+    cut: &str,
+    rows: Vec<shell::session::storage::HistoryRow>,
+    older_cursor: Option<String>,
+    newer_cursor: Option<String>,
+) -> shell::session::storage::HistoryPageResponse {
+    shell::session::storage::HistoryPageResponse {
+        session_id: session.clone(),
+        cut: cut.to_string(),
+        rows,
+        range: None,
+        older_cursor,
+        newer_cursor,
+        target_source: None,
+    }
+}
+
+fn transcript_text(agent: &crate::app::agent_view::AgentView) -> String {
+    (0..agent.scrollback.len())
+        .filter_map(|index| {
+            agent
+                .scrollback
+                .entry(index)
+                .and_then(|entry| entry.block.searchable_text())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn history_pages_merge_into_the_main_transcript_without_moving_the_live_tail() {
+    use shell::extensions::notification::{
+        SessionNotification as GrowNotification, SessionUpdate as GrowUpdate, ToolOutputFragment,
+    };
+    use shell::session::storage::{
+        HistoryEntity, HistoryFragment, HistoryFragmentCoordinate, HistoryPageQuery, HistoryRow,
+        HistorySourceKey, SessionUpdate,
+    };
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = acp::SessionId::new("merged-history");
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.session_id = Some(session_id.clone());
+    agent.session_binding_epoch = 2;
+    agent.history_cut = Some("cut".into());
+    agent.history_generation = 9;
+    agent.history_page_request = Some(1);
+    let finished = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::<str>::from("running-tool")),
+            "finished-live",
+        )
+        .kind(acp::ToolKind::Execute)
+        .status(acp::ToolCallStatus::Completed),
+    );
+    let meta = crate::acp::meta::NotificationMeta::default();
+    let crate::app::agent_view::AgentView {
+        session,
+        scrollback,
+        ..
+    } = agent;
+    session.handle_update(finished, &meta, scrollback);
+    let live_tool = scrollback
+        .entry(scrollback.len() - 1)
+        .expect("live tool")
+        .id;
+    scrollback.push_block(crate::scrollback::block::RenderBlock::notice(
+        "live-tail\nkept-line\nbelow",
+    ));
+    scrollback.prepare_layout(40, 3);
+    let selected = scrollback.len() - 1;
+    scrollback.scroll_to_entry_top(selected);
+    scrollback.set_selected(Some(selected));
+    let entry_top = scrollback.capture_scroll_bookmark();
+    scrollback.set_scroll_offset(scrollback.scroll_offset() + 1);
+    let selected_id = scrollback.entry(selected).unwrap().id;
+    let anchor = scrollback.capture_scroll_bookmark();
+    assert_ne!(anchor, entry_top, "logical line inside the live tail");
+    let event_seq = session.last_applied_event_seq;
+    let usage = session.session_usage.clone();
+    let plan_mode = session.plan_mode_active;
+
+    let json = r#"{"content":[{"type":"content","content":{"type":"text","text":"joined-output"}}],"locations":[],"rawInput":null,"rawOutput":null}"#;
+    let split = 18;
+    assert!(json.is_char_boundary(split));
+    let utf8_total = "hello world";
+    let encoded_total = "abcdefghi";
+    let latest_rows = vec![
+        text_fragment(
+            &session_id,
+            10,
+            0,
+            HistoryFragmentCoordinate::Utf8Bytes,
+            4,
+            utf8_total.len() as u64,
+            utf8_total.len() as u64,
+            &utf8_total[4..],
+        ),
+        text_fragment(
+            &session_id,
+            11,
+            0,
+            HistoryFragmentCoordinate::EncodedResponseBytes,
+            encoded_piece_len(&encoded_total[..4]),
+            encoded_piece_len(encoded_total),
+            encoded_piece_len(encoded_total),
+            &encoded_total[4..],
+        ),
+        tool_fragment(
+            &session_id,
+            12,
+            split as u64,
+            json.len() as u64,
+            &json[split..],
+        ),
+        tool_update_row(&session_id, 14, "span-tool"),
+    ];
+    dispatch_task_result(
+        loaded_page(
+            id,
+            &session_id,
+            2,
+            1,
+            9,
+            HistoryPageQuery::Latest,
+            latest_rows,
+            Some("before".into()),
+            None,
+        ),
+        &mut app,
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.history_page_request = Some(2);
+    let before_rows = vec![
+        user_row(&session_id, 1, "same words"),
+        user_row(&session_id, 2, "same words"),
+        text_fragment(
+            &session_id,
+            10,
+            0,
+            HistoryFragmentCoordinate::Utf8Bytes,
+            0,
+            7,
+            utf8_total.len() as u64,
+            &utf8_total[..7],
+        ),
+        text_fragment(
+            &session_id,
+            11,
+            0,
+            HistoryFragmentCoordinate::EncodedResponseBytes,
+            0,
+            encoded_piece_len(&encoded_total[..6]),
+            encoded_piece_len(encoded_total),
+            &encoded_total[..6],
+        ),
+        tool_fragment(&session_id, 12, 0, json.len() as u64, &json[..30]),
+        tool_call_row(&session_id, 13, "span-tool"),
+        stale_progress_row(&session_id, 7),
+    ];
+    dispatch_task_result(
+        loaded_page(
+            id,
+            &session_id,
+            2,
+            2,
+            9,
+            HistoryPageQuery::Before {
+                cursor: "before".into(),
+            },
+            before_rows,
+            Some("older".into()),
+            None,
+        ),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    let text = transcript_text(agent);
+    assert_eq!(text.matches("hello world").count(), 1);
+    assert_eq!(text.matches("abcdefghi").count(), 1);
+    assert_eq!(text.matches("joined-output").count(), 1);
+    // Two rows with distinct message ids stay two entities.
+    assert_eq!(text.matches("same words").count(), 2);
+    assert!(!text.contains("still-running"));
+    assert_eq!(text.matches("{\"content\"").count(), 0);
+    assert!(agent.scrollback.index_of_id(live_tool).unwrap() > 0);
+    assert_eq!(
+        agent
+            .scrollback
+            .entry(agent.scrollback.selected().unwrap())
+            .unwrap()
+            .id,
+        selected_id
+    );
+    assert_eq!(agent.scrollback.capture_scroll_bookmark(), anchor);
+    assert_eq!(agent.session.last_applied_event_seq, event_seq);
+    assert_eq!(agent.session.session_usage, usage);
+    assert_eq!(agent.session.plan_mode_active, plan_mode);
+    let live_index = agent.scrollback.index_of_id(live_tool).unwrap();
+    let (interval_first, interval_last) = agent.history_interval_entry_ids().unwrap();
+    assert!(agent.scrollback.index_of_id(interval_first).unwrap() < live_index);
+    assert!(agent.scrollback.index_of_id(interval_last).unwrap() < live_index);
+    assert!(
+        agent
+            .scrollback
+            .is_committed(agent.scrollback.entry(0).unwrap().id)
+    );
+    assert!(!agent.scrollback.is_committed(live_tool));
+
+    let again = transcript_text(agent);
+    app.agents.get_mut(&id).unwrap().history_page_request = Some(3);
+    dispatch_task_result(
+        loaded_page(
+            id,
+            &session_id,
+            2,
+            3,
+            9,
+            HistoryPageQuery::Latest,
+            vec![text_fragment(
+                &session_id,
+                10,
+                0,
+                HistoryFragmentCoordinate::Utf8Bytes,
+                4,
+                utf8_total.len() as u64,
+                utf8_total.len() as u64,
+                &utf8_total[4..],
+            )],
+            Some("before".into()),
+            None,
+        ),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(transcript_text(agent), again);
+    assert_eq!(agent.scrollback.index_of_id(live_tool), Some(live_index));
+
+    app.agents.get_mut(&id).unwrap().history_page_request = Some(4);
+    dispatch_task_result(
+        loaded_page(
+            id,
+            &session_id,
+            2,
+            4,
+            9,
+            HistoryPageQuery::After {
+                cursor: "newer".into(),
+            },
+            vec![history_text_row(&session_id, 0, 0, "gap-page")],
+            None,
+            None,
+        ),
+        &mut app,
+    );
+    app.agents.get_mut(&id).unwrap().history_page_request = Some(5);
+    dispatch_task_result(
+        TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: 2,
+            request_id: 5,
+            generation: 9,
+            query: HistoryPageQuery::Latest,
+            result: Ok(history_page(
+                &session_id,
+                "other-cut",
+                vec![history_text_row(&session_id, 20, 0, "wrong-cut")],
+                None,
+                None,
+            )),
+        },
+        &mut app,
+    );
+    app.agents.get_mut(&id).unwrap().history_page_request = Some(6);
+    dispatch_task_result(
+        TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: 99,
+            request_id: 6,
+            generation: 9,
+            query: HistoryPageQuery::Latest,
+            result: Ok(history_page(
+                &session_id,
+                "cut",
+                vec![history_text_row(&session_id, 21, 0, "wrong-binding")],
+                None,
+                None,
+            )),
+        },
+        &mut app,
+    );
+    app.agents.get_mut(&id).unwrap().history_page_request = Some(7);
+    dispatch_task_result(
+        TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: 2,
+            request_id: 7,
+            generation: 1,
+            query: HistoryPageQuery::Latest,
+            result: Ok(history_page(
+                &session_id,
+                "cut",
+                vec![history_text_row(&session_id, 22, 0, "wrong-generation")],
+                None,
+                None,
+            )),
+        },
+        &mut app,
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert_eq!(agent.history_page_request, Some(7));
+    agent.history_page_request = Some(8);
+    dispatch_task_result(
+        TaskResult::HistoryPageLoaded {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: 2,
+            request_id: 8,
+            generation: 9,
+            query: HistoryPageQuery::Before {
+                cursor: "older".into(),
+            },
+            result: Err("page read failed".into()),
+        },
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    let text = transcript_text(agent);
+    assert!(!text.contains("gap-page"));
+    assert!(!text.contains("wrong-cut"));
+    assert!(!text.contains("wrong-binding"));
+    assert!(!text.contains("wrong-generation"));
+    assert_eq!(agent.history_older_cursor(), Some("older"));
+    assert!(agent.history_page_request.is_none());
+    assert_eq!(agent.scrollback.index_of_id(live_tool), Some(live_index));
+
+    fn encoded_piece_len(text: &str) -> u64 {
+        (serde_json::to_string(text).unwrap().len() - 2) as u64
+    }
+    fn text_fragment(
+        session: &acp::SessionId,
+        record: u64,
+        part: u64,
+        coordinate: HistoryFragmentCoordinate,
+        start: u64,
+        end: u64,
+        total: u64,
+        text: &str,
+    ) -> HistoryRow {
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "grow/historyResponseTotalBytes".into(),
+            serde_json::json!(total),
+        );
+        HistoryRow {
+            source: HistorySourceKey { record, part },
+            entity: Some(HistoryEntity::Message {
+                event_seq: record,
+                item_ordinal: part,
+            }),
+            fragment: Some(HistoryFragment {
+                coordinate,
+                start,
+                end_exclusive: end,
+                complete: start == 0 && end == total,
+            }),
+            update: SessionUpdate::Acp(Box::new(
+                acp::SessionNotification::new(
+                    session.clone(),
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(text.to_string())),
+                    )),
+                )
+                .meta(Some(meta)),
+            )),
+        }
+    }
+    fn tool_fragment(
+        session: &acp::SessionId,
+        record: u64,
+        start: u64,
+        total: u64,
+        json: &str,
+    ) -> HistoryRow {
+        HistoryRow {
+            source: HistorySourceKey { record, part: 0 },
+            entity: Some(HistoryEntity::Tool {
+                tool_call_id: "frag-tool".into(),
+            }),
+            fragment: Some(HistoryFragment {
+                coordinate: HistoryFragmentCoordinate::ToolPayloadJsonBytes,
+                start,
+                end_exclusive: start + json.len() as u64,
+                complete: start == 0 && json.len() as u64 == total,
+            }),
+            update: SessionUpdate::Grow(Box::new(GrowNotification {
+                session_id: session.clone(),
+                update: GrowUpdate::ToolOutputFragment(ToolOutputFragment {
+                    tool_call_id: acp::ToolCallId::new("frag-tool"),
+                    source_position: record,
+                    digest: "same".into(),
+                    title: "Fragmented".into(),
+                    kind: acp::ToolKind::Other,
+                    status: acp::ToolCallStatus::Completed,
+                    byte_start: start,
+                    total_bytes: total,
+                    json: json.to_string(),
+                }),
+                meta: None,
+            })),
+        }
+    }
+    fn user_row(session: &acp::SessionId, record: u64, text: &str) -> HistoryRow {
+        // Independent occurrences carry distinct identities: one message's
+        // chunks share a messageId, so same-text rows stay two entities only
+        // with different ids.
+        let message_id = format!("same-user-{record}");
+        let mut meta = acp::Meta::new();
+        meta.insert("messageId".into(), serde_json::json!(message_id.clone()));
+        HistoryRow {
+            source: HistorySourceKey { record, part: 0 },
+            entity: Some(HistoryEntity::UserMessage { message_id }),
+            fragment: None,
+            update: SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                session.clone(),
+                acp::SessionUpdate::UserMessageChunk(
+                    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                        text.to_string(),
+                    )))
+                    .meta(Some(meta)),
+                ),
+            ))),
+        }
+    }
+    fn tool_call_row(session: &acp::SessionId, record: u64, tool_id: &str) -> HistoryRow {
+        HistoryRow {
+            source: HistorySourceKey { record, part: 0 },
+            entity: Some(HistoryEntity::Tool {
+                tool_call_id: tool_id.to_string(),
+            }),
+            fragment: None,
+            update: SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                session.clone(),
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(acp::ToolCallId::new(Arc::<str>::from(tool_id)), "span")
+                        .kind(acp::ToolKind::Other)
+                        .status(acp::ToolCallStatus::Pending),
+                ),
+            ))),
+        }
+    }
+    fn tool_update_row(session: &acp::SessionId, record: u64, tool_id: &str) -> HistoryRow {
+        HistoryRow {
+            source: HistorySourceKey { record, part: 0 },
+            entity: Some(HistoryEntity::Tool {
+                tool_call_id: tool_id.to_string(),
+            }),
+            fragment: None,
+            update: SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                session.clone(),
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(Arc::<str>::from(tool_id)),
+                    acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+                )),
+            ))),
+        }
+    }
+    fn stale_progress_row(session: &acp::SessionId, record: u64) -> HistoryRow {
+        HistoryRow {
+            source: HistorySourceKey { record, part: 0 },
+            entity: Some(HistoryEntity::Tool {
+                tool_call_id: "running-tool".into(),
+            }),
+            fragment: None,
+            update: SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                session.clone(),
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(Arc::<str>::from("running-tool")),
+                    acp::ToolCallUpdateFields::new()
+                        .status(Some(acp::ToolCallStatus::Pending))
+                        .title(Some("still-running".into())),
+                )),
+            ))),
+        }
+    }
+    fn loaded_page(
+        agent_id: AgentId,
+        session_id: &acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        generation: u64,
+        query: HistoryPageQuery,
+        rows: Vec<HistoryRow>,
+        older_cursor: Option<String>,
+        newer_cursor: Option<String>,
+    ) -> TaskResult {
+        TaskResult::HistoryPageLoaded {
+            agent_id,
+            session_id: session_id.clone(),
+            binding_epoch,
+            request_id,
+            generation,
+            query,
+            result: Ok(history_page(
+                session_id,
+                "cut",
+                rows,
+                older_cursor,
+                newer_cursor,
+            )),
+        }
+    }
 }
 
 #[test]
@@ -3143,6 +3693,7 @@ fn no_deferred_switch_means_no_extra_effect() {
             agent_id: id,
             session_id: "new-session".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );

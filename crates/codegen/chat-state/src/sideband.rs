@@ -537,9 +537,15 @@ impl SidebandTimeline {
             .ok_or(SidebandError::ParentMaterializationMismatch)?;
         let high_water = usize::try_from(high_water)
             .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
-        let source = parent.canonical_branch().map_err(|_| SidebandError::ParentMaterializationMismatch)?;
-        let prefix = source.events().iter().take_while(|event| event.seq.get() <= high_water as u64)
-            .cloned().collect::<Vec<_>>();
+        let source = parent
+            .canonical_branch()
+            .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
+        let prefix = source
+            .events()
+            .iter()
+            .take_while(|event| event.seq.get() <= high_water as u64)
+            .cloned()
+            .collect::<Vec<_>>();
         if prefix.len() != high_water.saturating_add(1) {
             return Err(SidebandError::ParentMaterializationMismatch);
         }
@@ -582,8 +588,7 @@ impl SidebandTimeline {
         if self.ended {
             return Err(SidebandError::AlreadyEnded);
         }
-        if self.recall_materialization_observed
-            && !matches!(&event.kind, SidebandEventKind::End(_))
+        if self.recall_materialization_observed && !matches!(&event.kind, SidebandEventKind::End(_))
         {
             return Err(SidebandError::InvalidRecallMaterializationObservation);
         }
@@ -739,12 +744,16 @@ impl SidebandTimeline {
                     || request.source_refs.as_slice() != [observation.source_ref.clone()]
                     || observation.prefix_last_seq.checked_add(1) != Some(event.seq)
                     || sideband_prefix_blake3(&self.events)? != observation.prefix_blake3
-                    || self.events.iter().filter_map(|event| match &event.kind {
-                        SidebandEventKind::Attempt(attempt) => {
-                            Some(attempt.assembly_manifest.source_revision)
-                        }
-                        _ => None,
-                    }).any(|revision| revision != Some(observation.surface_revision))
+                    || self
+                        .events
+                        .iter()
+                        .filter_map(|event| match &event.kind {
+                            SidebandEventKind::Attempt(attempt) => {
+                                Some(attempt.assembly_manifest.source_revision)
+                            }
+                            _ => None,
+                        })
+                        .any(|revision| revision != Some(observation.surface_revision))
                 {
                     return Err(SidebandError::InvalidRecallMaterializationObservation);
                 }

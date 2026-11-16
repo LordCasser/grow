@@ -4,13 +4,13 @@ mod auxiliary_load_tests;
 mod dependency_admission_tests;
 mod mcp_child_policy_reload_tests;
 mod plan_decision_status_tests;
-mod session_model_tests;
-mod skills_catalog_tests;
 mod project_rules_recovery_tests;
 mod restore_retry_tests;
+mod session_model_tests;
+mod skills_catalog_tests;
 mod steer_cold_restore_tests;
-mod subagent_restore_authority_tests;
 mod subagent_observation_tests;
+mod subagent_restore_authority_tests;
 mod subagent_toggle_reload_tests;
 mod task_resume_presentation_tests;
 
@@ -2164,7 +2164,11 @@ fn stale_tasks(dir: &std::path::Path) -> Vec<OrphanedTask> {
     else {
         return Vec::new();
     };
-    MvpAgent::find_stale_background_task_projections(&acp::SessionId::new("s"), &journal.history, &journal.events)
+    MvpAgent::find_stale_background_task_projections(
+        &acp::SessionId::new("s"),
+        &journal.history,
+        &journal.events,
+    )
 }
 fn bg_update(task_id: &str) -> crate::session::storage::SessionUpdate {
     use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};

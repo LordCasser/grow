@@ -1510,6 +1510,7 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
             agent_id: id,
             session_id: session_id.clone(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -1545,6 +1546,7 @@ fn dashboard_deferred_behavior_parks_first_prompt_until_mode_applies() {
             agent_id: id,
             session_id,
             models: None,
+            behavior: None,
         }),
         &mut app,
     );
@@ -4540,6 +4542,7 @@ fn dashboard_attach_roster_focuses_existing_local_agent() {
             agent_id: id,
             session_id: "local-owned".into(),
             models: None,
+            behavior: None,
         }),
         &mut app,
     );

@@ -1766,7 +1766,11 @@ impl WorkflowTracker {
     ) -> Result<(), &'static str> {
         let mut restored = Self::from_snapshot(snapshots)?;
         for run in restored.runs.drain(..) {
-            if !self.runs.iter().any(|existing| existing.state.run_id == run.state.run_id) {
+            if !self
+                .runs
+                .iter()
+                .any(|existing| existing.state.run_id == run.state.run_id)
+            {
                 self.runs.push(run);
             }
         }
@@ -2453,7 +2457,10 @@ mod tests {
 
         live.append_restored_history(history.snapshot()).unwrap();
         assert_eq!(live.get("wf_1").unwrap().status, WorkflowRunStatus::Active);
-        assert_eq!(live.get("wf_old").unwrap().status, WorkflowRunStatus::Complete);
+        assert_eq!(
+            live.get("wf_old").unwrap().status,
+            WorkflowRunStatus::Complete
+        );
     }
 
     #[test]

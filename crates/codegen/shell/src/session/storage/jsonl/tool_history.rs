@@ -218,17 +218,39 @@ impl Index {
         frontier: Frontier,
         anchor: u64,
     ) -> io::Result<std::ops::RangeInclusive<u64>> {
-        let Some(publication) = frontier.display_branch else { return Ok(0..=anchor) };
+        let Some(publication) = frontier.display_branch else {
+            return Ok(0..=anchor);
+        };
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         super::branch_history::visible_range(&tx, publication, anchor)
     }
 
-    pub(super) fn pending_consultations(&self, frontier: Frontier) -> io::Result<Vec<TimelineEvent>> {
+    pub(super) fn visible_range_after(
+        &self,
+        frontier: Frontier,
+        anchor: u64,
+        last: u64,
+    ) -> io::Result<std::ops::RangeInclusive<u64>> {
+        let Some(publication) = frontier.display_branch else {
+            return Ok(anchor..=last);
+        };
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        super::branch_history::visible_range_after(&tx, publication, anchor, last)
+    }
+
+    pub(super) fn pending_consultations(
+        &self,
+        frontier: Frontier,
+    ) -> io::Result<Vec<TimelineEvent>> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         super::consultation_history::pending(&tx, &mut self.journal()?, frontier)
     }
 
-    pub(super) fn sideband_spawn(&self, frontier: Frontier, id: &str) -> io::Result<Option<TimelineEvent>> {
+    pub(super) fn sideband_spawn(
+        &self,
+        frontier: Frontier,
+        id: &str,
+    ) -> io::Result<Option<TimelineEvent>> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         super::compaction_history::sideband_spawn(&tx, &mut self.journal()?, id, frontier)
     }
@@ -310,8 +332,15 @@ impl Index {
         let mut journal = self.journal()?;
         let domain_journal = std::cell::RefCell::new(self.journal()?);
         let read_event = |seq| {
-            let Some(record) = read_reference(seq)? else { return Ok(None); };
-            read_domain(&mut domain_journal.borrow_mut(), DomainReference { seq, record }, bytes).map(Some)
+            let Some(record) = read_reference(seq)? else {
+                return Ok(None);
+            };
+            read_domain(
+                &mut domain_journal.borrow_mut(),
+                DomainReference { seq, record },
+                bytes,
+            )
+            .map(Some)
         };
         {
             let mut tools = tx.open_table(TOOL).map_err(io::Error::other)?;
@@ -324,6 +353,7 @@ impl Index {
             let mut hooks = hook_history::Writer::open(&tx, frontier.bytes)?;
             let mut inputs = input_history::Writer::open(&tx)?;
             let mut echoes = super::user_echo_history::Writer::open(&tx)?;
+            let mut prompt_catalog = super::history_timeline::Writer::open(&tx)?;
             let mut consumed_echoes = Vec::new();
             let mut subagents = subagent_history::Writer::open(&tx)?;
             let mut notifications = notification_history::Writer::open(&tx)?;
@@ -336,8 +366,12 @@ impl Index {
             let mut compaction_terminals = Vec::new();
             let mut notices = tx.open_table(DISPLAY).map_err(io::Error::other)?;
             let mut subagent_display = tx.open_table(SUBAGENT_DISPLAY).map_err(io::Error::other)?;
-            let mut notice_anchors = tx.open_table(notification_history::NOTICE_ANCHORS).map_err(io::Error::other)?;
-            let mut notice_sources = tx.open_table(notification_history::NOTICE_SOURCES).map_err(io::Error::other)?;
+            let mut notice_anchors = tx
+                .open_table(notification_history::NOTICE_ANCHORS)
+                .map_err(io::Error::other)?;
+            let mut notice_sources = tx
+                .open_table(notification_history::NOTICE_SOURCES)
+                .map_err(io::Error::other)?;
             let mut notice_ids = tx.open_table(DISPLAY_IDS).map_err(io::Error::other)?;
             let mut tool_display = tx.open_table(TOOL_DISPLAY).map_err(io::Error::other)?;
             let mut background_tasks = tx.open_table(OPEN_TASKS).map_err(io::Error::other)?;
@@ -386,6 +420,9 @@ impl Index {
                 None,
                 |record, offset, json| {
                     check_cancelled()?;
+                    if let JournalFact::Presentation { event, .. } = &record.fact {
+                        prompt_catalog.observe(record.seq, event, &mut journal, &read_reference)?;
+                    }
                     responses.accept(&record, offset, json, frontier.history_branch())?;
                     let reference = RecordRef {
                         offset,
@@ -395,31 +432,51 @@ impl Index {
                     let class = super::working_snapshot::classify(&record);
                     if class == super::working_snapshot::RecordClass::BranchMarker {
                         let (selected, history) = super::branch_history::read_transformation(
-                            &self.directory, offset + json.len() as u64 + 1,
-                            frontier.domain, true, &check_cancelled,
+                            &self.directory,
+                            offset + json.len() as u64 + 1,
+                            frontier.domain,
+                            true,
+                            &check_cancelled,
                         )?;
                         super::branch_history::publish_display(
-                            &tx, &self.directory, session, &selected, history, record.seq,
+                            &tx,
+                            &self.directory,
+                            session,
+                            &selected,
+                            history,
+                            record.seq,
                         )?;
                         frontier.display_branch = Some(record.seq);
                     }
                     if let JournalFact::Presentation { event, .. } = &record.fact {
                         event.validate_projection_identity()?;
                         if let Some(id) = event.event_id() {
-                            let display = DisplayReference { position: record.seq, record: reference };
-                            if notice_ids.insert(id, serde_json::to_vec(&display)?.as_slice())
-                                .map_err(io::Error::other)?.is_some()
+                            let display = DisplayReference {
+                                position: record.seq,
+                                record: reference,
+                            };
+                            if notice_ids
+                                .insert(id, serde_json::to_vec(&display)?.as_slice())
+                                .map_err(io::Error::other)?
+                                .is_some()
                             {
                                 return Err(invalid("duplicate indexed display identity"));
                             }
-                            frontier.event_counter_floor = frontier.event_counter_floor
+                            frontier.event_counter_floor = frontier
+                                .event_counter_floor
                                 .max(crate::session::history::event_counter_after(id).unwrap_or(0));
                         }
                     }
                     if let JournalFact::Presentation { at_ms, event } = &record.fact
                         && class == super::working_snapshot::RecordClass::InheritedText
                     {
-                        responses.inherit(record.seq, *at_ms, event, &mut journal, &read_reference)?;
+                        responses.inherit(
+                            record.seq,
+                            *at_ms,
+                            event,
+                            &mut journal,
+                            &read_reference,
+                        )?;
                         frontier.inherited_text_rows += 1;
                     }
                     if let JournalFact::Presentation { event, .. } = &record.fact
@@ -428,14 +485,30 @@ impl Index {
                         let source = read_event(EventSeq::new(*seq))?
                             .filter(|event| *seq < frontier.domain && event.seq.get() == *seq)
                             .ok_or_else(|| invalid("missing communication notice source"))?;
-                        let identity = crate::session::storage::communication_history::receipt_identity(&source)?
+                        let identity =
+                            crate::session::storage::communication_history::receipt_identity(
+                                &source,
+                            )?
                             .ok_or_else(|| invalid("history notice names a different source"))?;
-                        let original = notification_history::notice_source(&notice_sources, &mut journal, bytes, frontier.domain, &identity, false)?;
+                        let original = notification_history::notice_source(
+                            &notice_sources,
+                            &mut journal,
+                            bytes,
+                            frontier.domain,
+                            &identity,
+                            false,
+                        )?;
                         if original.is_none_or(|original| original.event != *seq) {
-                            return Err(invalid("notice reference does not select its original receipt"));
+                            return Err(invalid(
+                                "notice reference does not select its original receipt",
+                            ));
                         }
-                        let display = DisplayReference { position: record.seq, record: reference };
-                        notice_anchors.insert((*seq, record.seq), serde_json::to_vec(&display)?.as_slice())
+                        let display = DisplayReference {
+                            position: record.seq,
+                            record: reference,
+                        };
+                        notice_anchors
+                            .insert((*seq, record.seq), serde_json::to_vec(&display)?.as_slice())
                             .map_err(io::Error::other)?;
                     }
                     if matches!(
@@ -554,7 +627,13 @@ impl Index {
                             &mut journal,
                             &event.content,
                             reference,
-                            |position| super::branch_history::visible_at_write(&tx, frontier.display_branch, position),
+                            |position| {
+                                super::branch_history::visible_at_write(
+                                    &tx,
+                                    frontier.display_branch,
+                                    position,
+                                )
+                            },
                         )? {
                             tool_fragments::publish(&tx, reference.position, at_ms, &call)?;
                         }
@@ -591,16 +670,41 @@ impl Index {
                         seq: event.seq,
                         record: reference,
                     };
-                    if let Some(identity) = crate::session::storage::communication_history::receipt_identity(&event)? {
-                        let original = notification_history::notice_source(&notice_sources, &mut journal, bytes, event.seq.get(), &identity, false)?;
+                    if let Some(identity) =
+                        crate::session::storage::communication_history::receipt_identity(&event)?
+                    {
+                        let original = notification_history::notice_source(
+                            &notice_sources,
+                            &mut journal,
+                            bytes,
+                            event.seq.get(),
+                            &identity,
+                            false,
+                        )?;
                         let (id, subject, sender) = identity;
                         let subject = serde_json::to_string(&subject)?;
                         let sender = serde_json::to_string(&sender)?;
-                        notice_sources.insert((id.as_str(), subject.as_str(), sender.as_str(), reference.seq.get()),
-                            serde_json::to_vec(&reference)?.as_slice()).map_err(io::Error::other)?;
+                        notice_sources
+                            .insert(
+                                (
+                                    id.as_str(),
+                                    subject.as_str(),
+                                    sender.as_str(),
+                                    reference.seq.get(),
+                                ),
+                                serde_json::to_vec(&reference)?.as_slice(),
+                            )
+                            .map_err(io::Error::other)?;
                         if original.is_none() {
-                            let display = DisplayReference { position: record.seq, record: reference.record };
-                            notices.insert(frontier.display_rows, serde_json::to_vec(&display)?.as_slice())
+                            let display = DisplayReference {
+                                position: record.seq,
+                                record: reference.record,
+                            };
+                            notices
+                                .insert(
+                                    frontier.display_rows,
+                                    serde_json::to_vec(&display)?.as_slice(),
+                                )
                                 .map_err(io::Error::other)?;
                             frontier.display_rows += 1;
                             frontier.fallback_notice_rows += 1;
@@ -694,11 +798,22 @@ impl Index {
                         compaction_terminals.push(terminal);
                     }
                     consultations.accept(
-                        &event, reference, session,
-                        |audit, result| super::consultation_history::validate_answer(
-                            compaction.spawn_reference(&result.timeline_id)?, &mut journal,
-                            &self.directory, reference, session, bytes, audit, result, &read_event,
-                        ),
+                        &event,
+                        reference,
+                        session,
+                        |audit, result| {
+                            super::consultation_history::validate_answer(
+                                compaction.spawn_reference(&result.timeline_id)?,
+                                &mut journal,
+                                &self.directory,
+                                reference,
+                                session,
+                                bytes,
+                                audit,
+                                result,
+                                &read_event,
+                            )
+                        },
                         &read_event,
                     )?;
                     if let TimelineEventKind::ImageProjection(projection) = &event.kind {
@@ -711,19 +826,28 @@ impl Index {
                         )?;
                         runtime.surface.accept_projected_image_surface(&projected);
                         runtime.image_projection = Some(reference);
-                    } else if event.messages().is_some_and(|message| {
-                        message.cause == chat_state::MessageCause::Rewind
-                    }) {
+                    } else if event
+                        .messages()
+                        .is_some_and(|message| message.cause == chat_state::MessageCause::Rewind)
+                    {
                         let (rewound, history) = super::branch_history::read_transformation(
-                            &self.directory, offset + json.len() as u64 + 1,
-                            frontier.domain, true, &check_cancelled,
+                            &self.directory,
+                            offset + json.len() as u64 + 1,
+                            frontier.domain,
+                            true,
+                            &check_cancelled,
                         )?;
                         boundaries.select_rewind(event.seq, &rewound)?;
                         responses.select_rewind(frontier.history_branch(), event.seq, &rewound)?;
                         runtime.surface.accept_rewound_surface(&rewound);
                         frontier.rewind = Some(event.seq);
                         super::branch_history::publish_display(
-                            &tx, &self.directory, session, &rewound, history, record.seq,
+                            &tx,
+                            &self.directory,
+                            session,
+                            &rewound,
+                            history,
+                            record.seq,
                         )?;
                         frontier.display_branch = Some(record.seq);
                     } else {
@@ -974,7 +1098,8 @@ impl Index {
             )?;
             // Bulk copy writes domain records before the presentation facts.
             for (echo, reference) in consumed_echoes {
-                echoes.consume(&mut journal, &echo, reference, bytes)?;
+                let revealed = echoes.consume(&mut journal, &echo, reference, bytes)?;
+                prompt_catalog.reveal(&revealed)?;
             }
             let mut cuts = tx.open_table(OPEN_CUT).map_err(io::Error::other)?;
             cuts.retain(|key, _| key == previous.bytes)
@@ -1058,6 +1183,7 @@ impl Index {
             usage_cuts
                 .insert(bytes, serde_json::to_vec(&usage)?.as_slice())
                 .map_err(io::Error::other)?;
+            prompt_catalog.finish(&tx, frontier.display_branch, bytes)?;
         }
         if frontier.domain != domain {
             return Err(invalid("Tool index did not cover the domain frontier"));
@@ -1128,6 +1254,39 @@ impl Index {
         Ok(result)
     }
 
+    pub(super) fn task_terminals_after(
+        &self,
+        after: (u64, u64),
+        limit: usize,
+        cut: u64,
+    ) -> io::Result<Vec<(TaskTerminalRow, bool)>> {
+        use std::ops::Bound::Included;
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        let rows = tx.open_table(TASK_TERMINALS).map_err(io::Error::other)?;
+        let finishes = tx.open_table(TASK_FINISHES).map_err(io::Error::other)?;
+        let mut result = Vec::with_capacity(limit);
+        for entry in rows
+            .range((Included(after), Included((cut, 0))))
+            .map_err(io::Error::other)?
+            .take(limit)
+        {
+            let (_, value) = entry.map_err(io::Error::other)?;
+            let row: TaskTerminalRow = decode(value.value())?;
+            if row.position >= cut {
+                break;
+            }
+            let superseded = finishes
+                .range((row.task_id.as_str(), row.position)..(row.task_id.as_str(), cut))
+                .map_err(io::Error::other)?
+                .next()
+                .transpose()
+                .map_err(io::Error::other)?
+                .is_some();
+            result.push((row, superseded));
+        }
+        Ok(result)
+    }
+
     pub(super) fn display_at(&self, ordinal: u64) -> io::Result<DisplayReference> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         let notices = tx.open_table(DISPLAY).map_err(io::Error::other)?;
@@ -1153,19 +1312,31 @@ impl Index {
     }
 
     pub(super) fn notice_source(
-        &self, frontier: Frontier,
+        &self,
+        frontier: Frontier,
         identity: &(String, Option<String>, Option<String>),
         reject_conflict: bool,
     ) -> io::Result<Option<crate::session::storage::communication_history::ReceiptSource>> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
-        let table = tx.open_table(notification_history::NOTICE_SOURCES).map_err(io::Error::other)?;
+        let table = tx
+            .open_table(notification_history::NOTICE_SOURCES)
+            .map_err(io::Error::other)?;
         notification_history::notice_source(
-            &table, &mut self.journal()?, frontier.bytes, frontier.domain, identity, reject_conflict,
+            &table,
+            &mut self.journal()?,
+            frontier.bytes,
+            frontier.domain,
+            identity,
+            reject_conflict,
         )
     }
 
     pub(super) fn has_notice_anchor(
-        &self, frontier: Frontier, journal: &mut File, seq: u64, records: u64,
+        &self,
+        frontier: Frontier,
+        journal: &mut File,
+        seq: u64,
+        records: u64,
     ) -> io::Result<bool> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         notification_history::has_notice_anchor(&tx, journal, frontier, seq, records)
@@ -1179,6 +1350,96 @@ impl Index {
     ) -> io::Result<Vec<super::user_echo_history::Row>> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         super::user_echo_history::rows_before(&tx, before, frontier, limit)
+    }
+
+    pub(super) fn user_echo_rows_after(
+        &self,
+        after: u64,
+        frontier: Frontier,
+        limit: usize,
+    ) -> io::Result<Vec<super::user_echo_history::Row>> {
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        super::user_echo_history::rows_after(&tx, after, frontier, limit)
+    }
+
+    pub(super) fn timeline_page(
+        &self,
+        bytes: u64,
+        query: crate::session::history::TimelineQuery,
+        limit: usize,
+    ) -> io::Result<crate::session::history::HistoryTimelinePage> {
+        super::history_timeline::read_page(&self.db, bytes, query, limit)
+    }
+
+    /// Tests prove a consecutive consume extends the published generation
+    /// instead of rebuilding ranks.
+    #[cfg(test)]
+    pub(crate) fn timeline_generation(&self, bytes: u64) -> io::Result<u64> {
+        super::history_timeline::read_generation(&self.db, bytes)
+    }
+
+    pub(super) fn timeline_base_count(&self, bytes: u64) -> io::Result<Option<u64>> {
+        super::history_timeline::read_count(&self.db, bytes)
+    }
+
+    pub(super) fn timeline_rank_bound(
+        &self,
+        bytes: u64,
+        source: crate::session::history::HistorySourceKey,
+        display_segment: Option<u32>,
+    ) -> io::Result<super::history_timeline::RankBound> {
+        super::history_timeline::rank_lower_bound(&self.db, bytes, source, display_segment)
+    }
+
+    pub(super) fn timeline_message_seen(&self, bytes: u64, message_id: &str) -> io::Result<bool> {
+        super::history_timeline::message_seen(&self.db, bytes, message_id)
+    }
+
+    pub(super) fn timeline_rank_window(
+        &self,
+        bytes: u64,
+        start: u64,
+        end: u64,
+    ) -> io::Result<Vec<crate::session::history::HistoryTimelineEntry>> {
+        super::history_timeline::read_rank_window(&self.db, bytes, start, end)
+    }
+
+    pub(super) fn response_rows_after(
+        &self,
+        after: (u64, u64),
+        frontier: Frontier,
+        records: u64,
+        limit: usize,
+    ) -> io::Result<Vec<response_history::Row>> {
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        response_history::rows_after(&tx, after, frontier, records, limit)
+    }
+
+    pub(super) fn response_fragment_after(
+        &self,
+        journal: &mut File,
+        row: &response_history::Row,
+        start: u64,
+        frontier: Frontier,
+        limit: u64,
+    ) -> io::Result<(u64, String)> {
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        response_history::read_row_after(&tx, journal, row, start, frontier.bytes, limit)
+    }
+
+    pub(super) fn tool_fragment_after(
+        &self,
+        position: u64,
+        start: u64,
+    ) -> io::Result<
+        Option<(
+            Option<u64>,
+            i64,
+            crate::extensions::notification::ToolOutputFragment,
+        )>,
+    > {
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        tool_fragments::read_after(&tx, position, start)
     }
 
     pub(super) fn user_echo_blocks(
@@ -2047,9 +2308,19 @@ impl ExecutionHistory for Cut {
         )
     }
 
-    fn incoming_inquiry_events(&self, sender: &str, inquiry: &str) -> io::Result<Vec<TimelineEvent>> {
+    fn incoming_inquiry_events(
+        &self,
+        sender: &str,
+        inquiry: &str,
+    ) -> io::Result<Vec<TimelineEvent>> {
         let tx = self.index.db.begin_read().map_err(io::Error::other)?;
-        super::consultation_history::facts_before(&tx, &mut self.index.journal()?, self.frontier, sender, inquiry)
+        super::consultation_history::facts_before(
+            &tx,
+            &mut self.index.journal()?,
+            self.frontier,
+            sender,
+            inquiry,
+        )
     }
 
     fn user_image_paths(

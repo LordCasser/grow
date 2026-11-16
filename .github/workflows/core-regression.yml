@@ -158,5 +158,9 @@ jobs:
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume plan_approval_restored_after_resume
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume deferred_plan_reviewed_after_resume
           python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume plan_two_revisions_complete
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_history_resume_browser::minimal_history_resume_browser
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored repair_session_resume_presentation::ctrl_d_resume_keeps_plan_and_usage_across_history_pages
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored repair_session_resume_presentation::ctrl_d_resume_keeps_split_turn_usage
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored timeline_history_direct_seek::timeline_history_direct_seek_returns_live
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::cold_resume_after_partial_leaf_release_does_not_replay_checkpoint
           python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::concurrent_cold_resume_claims_one_root_without_replaying_tree_work

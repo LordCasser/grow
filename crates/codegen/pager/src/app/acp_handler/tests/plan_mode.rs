@@ -140,7 +140,7 @@
                     .as_object().cloned().unwrap(),
             ),
         );
-        assert!(detect_plan_mode_change(&update, app.agents.get_mut(&AgentId(0)).unwrap()));
+        assert!(detect_plan_mode_change(&update, app.agents.get_mut(&AgentId(0)).unwrap(), true));
         assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_none());
         assert!(app.agents[&AgentId(0)].plan_approval_view.is_none());
 
@@ -178,7 +178,7 @@
         let plain_update = acp::SessionUpdate::CurrentModeUpdate(
             acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")),
         );
-        assert!(detect_plan_mode_change(&plain_update, &mut agent));
+        assert!(detect_plan_mode_change(&plain_update, &mut agent, true));
         assert!(agent.pending_plan_approval_decision.is_some());
 
         let wrong_receipt = serde_json::json!({
@@ -190,7 +190,7 @@
                 "grow/planDecisionReceipt": wrong_receipt
             }).as_object().cloned().unwrap()),
         );
-        assert!(detect_plan_mode_change(&bad, &mut agent));
+        assert!(detect_plan_mode_change(&bad, &mut agent, true));
         assert!(agent.pending_plan_approval_decision.is_some());
 
         for (action, feedback) in [("approve", "please revise"), ("revise", "different feedback")] {
@@ -205,7 +205,7 @@
                     }).as_object().cloned().unwrap(),
                 ),
             );
-            assert!(detect_plan_mode_change(&bad, &mut agent));
+            assert!(detect_plan_mode_change(&bad, &mut agent, true));
             assert!(agent.pending_plan_approval_decision.is_some());
         }
 
@@ -215,12 +215,12 @@
                 "grow/planDecisionReceipt": receipt
             }).as_object().cloned().unwrap()),
         );
-        assert!(detect_plan_mode_change(&bad, &mut agent));
+        assert!(detect_plan_mode_change(&bad, &mut agent, true));
         assert!(agent.pending_plan_approval_decision.is_some());
 
         agent.pending_plan_approval_decision.as_mut().unwrap().session_id = "sess-1".into();
         agent.pending_plan_approval_decision.as_mut().unwrap().binding_epoch += 1;
-        assert!(detect_plan_mode_change(&bad, &mut agent));
+        assert!(detect_plan_mode_change(&bad, &mut agent, true));
         assert!(agent.pending_plan_approval_decision.is_some());
 
         let binding_epoch = agent.session_binding_epoch;
@@ -230,7 +230,7 @@
                 "grow/planDecisionReceipt": receipt
             }).as_object().cloned().unwrap()),
         );
-        assert!(detect_plan_mode_change(&exact, &mut agent));
+        assert!(detect_plan_mode_change(&exact, &mut agent, true));
         assert!(agent.pending_plan_approval_decision.is_none());
         assert!(agent.plan_approval_view.is_none());
     }
@@ -611,7 +611,7 @@
             make_tool_call_update("Plan selected"),
         ];
         for update in &updates {
-            let refresh_needed = detect_plan_mode_change(update, &mut agent);
+            let refresh_needed = detect_plan_mode_change(update, &mut agent, true);
             assert!(
                 !refresh_needed,
                 "tool-call title (not a CurrentModeUpdate) must not request refresh"
@@ -635,7 +635,7 @@
             make_tool_call_update("Plan completed"),
         ];
         for update in &updates {
-            let refresh_needed = detect_plan_mode_change(update, &mut agent);
+            let refresh_needed = detect_plan_mode_change(update, &mut agent, true);
             assert!(!refresh_needed);
             assert!(
                 agent.session.plan_mode_active,
@@ -649,7 +649,7 @@
         let mut agent = make_agent(Some("s1"));
         assert!(!agent.session.plan_mode_active);
 
-        let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent);
+        let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent, true);
         assert!(refresh_needed);
         assert!(agent.session.plan_mode_active);
     }
@@ -660,7 +660,7 @@
         agent.session.plan_mode_active = true;
 
         let refresh_needed =
-            detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent);
+            detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent, true);
         assert!(refresh_needed);
         assert!(!agent.session.plan_mode_active);
     }
@@ -673,7 +673,7 @@
         agent.session.plan_mode_active = true;
 
         let refresh_needed =
-            detect_plan_mode_change(&make_current_mode_update("browser_use"), &mut agent);
+            detect_plan_mode_change(&make_current_mode_update("browser_use"), &mut agent, true);
         assert!(!refresh_needed);
         assert!(agent.session.plan_mode_active);
     }
@@ -684,7 +684,7 @@
         let mut agent = make_agent(Some("s1"));
         agent.session.plan_mode_active = true;
 
-        let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent);
+        let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent, true);
         assert!(
             refresh_needed,
             "CurrentModeUpdate must always signal refresh"
@@ -732,6 +732,7 @@
         assert!(detect_plan_mode_change(
             &plan_completion_update("plan", false, "applied"),
             &mut agent,
+            true,
         ));
 
         assert_ne!(agent.plan_preview_request_id, old_request_id);
@@ -751,7 +752,7 @@
 
         let mut agent = make_agent(Some("s1"));
         let completion = plan_completion_update("normal", true, "applied");
-        assert!(detect_plan_mode_change(&completion, &mut agent));
+        assert!(detect_plan_mode_change(&completion, &mut agent, true));
         assert!(agent.session.plan_completed);
 
         let plan = "# Plan";
@@ -773,14 +774,14 @@
             .is_some_and(|plan| plan.completed_read_only));
 
         let waiting = plan_completion_update("normal", true, "confirmation_required");
-        assert!(detect_plan_mode_change(&waiting, &mut agent));
+        assert!(detect_plan_mode_change(&waiting, &mut agent, true));
         assert!(agent.session.plan_completed);
         assert!(agent.plan_artifact_preview.is_some());
         assert!(agent.line_viewer.is_some());
 
         let request_id = agent.plan_preview_request_id;
         let applied_same_mode = plan_completion_update("normal", false, "applied");
-        assert!(detect_plan_mode_change(&applied_same_mode, &mut agent));
+        assert!(detect_plan_mode_change(&applied_same_mode, &mut agent, true));
         assert!(!agent.session.plan_completed);
         assert!(agent.plan_artifact_preview.is_none());
         assert!(agent.line_viewer.is_none());
@@ -817,6 +818,7 @@
         assert!(detect_plan_mode_change(
             &plan_completion_update("normal", true, "applied"),
             &mut agent,
+            true,
         ));
         assert!(!agent.line_viewer.as_ref().unwrap().show_footer());
         agent.resolve_plan_preview(response(Some("# Original report".into()))).unwrap();
@@ -917,6 +919,7 @@
         let refresh = detect_plan_mode_change(
             &behavior_change_update("confirmation_required", "plan", "normal"),
             &mut agent,
+            true,
         );
         assert!(refresh);
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
@@ -945,10 +948,12 @@
             detect_plan_mode_change(
                 &behavior_change_update("confirmation_required", "plan", "normal"),
                 &mut agent,
+                true,
             );
             detect_plan_mode_change(
                 &behavior_change_update(status, "plan", "normal"),
                 &mut agent,
+                true,
             );
             assert!(agent.behavior_switch_target.is_none());
             assert!(agent.mode_switch_banner.is_none());
@@ -957,6 +962,7 @@
         detect_plan_mode_change(
             &behavior_change_update("confirmation_required", "plan", "normal"),
             &mut agent,
+            true,
         );
         agent.begin_replay_window();
         assert!(agent.behavior_switch_target.is_none());
@@ -1071,7 +1077,7 @@
         agent.session.plan_mode_active = true;
 
         let update = behavior_change_update("applied", "normal", "normal");
-        detect_plan_mode_change(&update, &mut agent);
+        detect_plan_mode_change(&update, &mut agent, true);
 
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
         assert!(!agent.session.plan_mode_active);
@@ -1087,7 +1093,7 @@
         agent.session.behavior_mode = tools::types::BehaviorId::Workflow;
         agent.show_workflows = true;
 
-        detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent);
+        detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent, true);
 
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
         assert!(!agent.show_workflows);
@@ -1102,7 +1108,7 @@
         agent.session.plan_mode_active = true;
 
         let update = behavior_change_update("rejected", "plan", "normal");
-        detect_plan_mode_change(&update, &mut agent);
+        detect_plan_mode_change(&update, &mut agent, true);
 
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
         assert!(agent.session.plan_mode_active);
@@ -1111,4 +1117,469 @@
             Some(crate::app::session::BehaviorControlResolution::Rejected)
         );
         assert!(agent.toast.is_none());
+    }
+
+    fn projection(
+        epoch: &str,
+        revision: u64,
+        behavior: &str,
+        phase: Option<&str>,
+        completed: bool,
+    ) -> shell::extensions::notification::BehaviorProjection {
+        shell::extensions::notification::BehaviorProjection {
+            control_epoch: epoch.into(),
+            control_revision: revision,
+            behavior_id: tools::types::BehaviorId::try_from_id(behavior).unwrap(),
+            plan_phase: phase.map(str::to_owned),
+            plan_completed: completed,
+        }
+    }
+
+    fn mode_with_projection(
+        mode: &str,
+        snapshot: shell::extensions::notification::BehaviorProjection,
+        extra: serde_json::Value,
+    ) -> acp::SessionUpdate {
+        let mut meta = serde_json::json!({
+            shell::extensions::notification::BehaviorProjection::META_KEY: snapshot,
+        });
+        if let (Some(target), Some(source)) = (meta.as_object_mut(), extra.as_object()) {
+            target.extend(source.clone());
+        }
+        acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new(mode))
+                .meta(meta.as_object().cloned().unwrap()),
+        )
+    }
+
+    #[test]
+    fn historical_mode_without_snapshot_does_not_replace_confirmed_state() {
+        let mut agent = make_agent(Some("s1"));
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-a", 4, "plan", Some("executing"), false),
+        );
+        assert!(!detect_plan_mode_change(
+            &make_current_mode_update("normal"),
+            &mut agent,
+            true,
+        ));
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert_eq!(agent.session.plan_phase.as_deref(), Some("executing"));
+    }
+
+    #[test]
+    fn confirmed_plan_snapshot_hydrates_each_phase() {
+        for phase in ["drafting", "awaiting_approval", "amending", "executing"] {
+            let mut agent = make_agent(Some("s1"));
+            crate::app::acp_handler::hydrate_behavior_projection(
+                &mut agent,
+                projection("actor-a", 1, "plan", Some(phase), false),
+            );
+            assert_eq!(agent.session.plan_phase.as_deref(), Some(phase));
+            assert!(agent.session.plan_mode_active);
+            assert!(!agent.session.plan_completed);
+        }
+    }
+
+    #[test]
+    fn newer_live_mode_survives_an_older_load_snapshot() {
+        let mut agent = make_agent(Some("s1"));
+        agent.session.loading_replay = true;
+        assert!(!detect_plan_mode_change(
+            &mode_with_projection(
+                "goal",
+                projection("actor-a", 8, "goal", None, false),
+                serde_json::json!({}),
+            ),
+            &mut agent,
+            true,
+        ));
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-a", 3, "normal", None, false),
+        );
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Goal);
+        assert!(agent.session.pending_mode_updates.is_empty());
+    }
+
+    #[test]
+    fn wrong_epoch_and_rewound_history_cannot_replace_established_snapshot() {
+        let mut agent = make_agent(Some("s1"));
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-a", 5, "workflow", None, false),
+        );
+        assert!(!detect_plan_mode_change(
+            &mode_with_projection(
+                "plan",
+                projection("actor-b", 1, "plan", Some("drafting"), false),
+                serde_json::json!({}),
+            ),
+            &mut agent,
+            true,
+        ));
+        assert!(!detect_plan_mode_change(
+            &mode_with_projection(
+                "normal",
+                projection("actor-a", 2, "normal", None, false),
+                serde_json::json!({}),
+            ),
+            &mut agent,
+            true,
+        ));
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Workflow);
+    }
+
+    #[test]
+    fn binding_change_rejects_the_previous_actor_snapshot() {
+        let mut agent = make_agent(Some("old"));
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-old", 2, "plan", Some("drafting"), false),
+        );
+        agent.bind_session_id(acp::SessionId::new("new"));
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
+        assert!(!agent.session.behavior_snapshot_established());
+        assert!(!detect_plan_mode_change(
+            &mode_with_projection(
+                "plan",
+                projection("actor-old", 9, "plan", Some("executing"), false),
+                serde_json::json!({}),
+            ),
+            &mut agent,
+            true,
+        ));
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
+    }
+
+    #[test]
+    fn completed_plan_snapshot_keeps_details_without_starting_execution() {
+        let mut agent = make_agent(Some("s1"));
+        agent.session.begin_behavior_switch(tools::types::BehaviorId::Plan);
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-a", 6, "normal", None, true),
+        );
+        assert!(agent.session.plan_completed);
+        assert!(agent.session.behavior_control_target().is_some());
+        assert!(agent.session.deferred_session_mode.is_none());
+    }
+
+    #[test]
+    fn same_revision_receipt_settles_without_changing_confirmed_state() {
+        let mut app = make_app_with_agent("sess-1");
+        open_approval(&mut app, "# Plan", 1);
+        let mut agent = app.agents.swap_remove(&AgentId(0)).unwrap();
+        let receipt = install_pending_decision(
+            &mut agent,
+            "decision-1",
+            crate::views::plan_approval_view::PlanApprovalOutcome::Approved,
+            None,
+        );
+        let snapshot = projection("actor-a", 4, "plan", Some("awaiting_approval"), false);
+        crate::app::acp_handler::hydrate_behavior_projection(&mut agent, snapshot.clone());
+        let update = mode_with_projection(
+            "plan",
+            snapshot,
+            serde_json::json!({"grow/planDecisionReceipt": receipt}),
+        );
+        assert!(detect_plan_mode_change(&update, &mut agent, true));
+        assert!(agent.pending_plan_approval_decision.is_none());
+        assert_eq!(agent.session.plan_phase.as_deref(), Some("awaiting_approval"));
+    }
+
+    #[test]
+    fn ordinary_new_uses_the_same_confirmed_snapshot() {
+        let mut app = make_app_with_agent("pending");
+        let id = AgentId(0);
+        let effects = crate::app::root::dispatch::dispatch(
+            crate::app::actions::Action::TaskComplete(
+                crate::app::actions::TaskResult::SessionCreated {
+                    agent_id: id,
+                    session_id: acp::SessionId::new("created"),
+                    models: None,
+                    behavior: Some(projection("actor-new", 1, "plan", Some("drafting"), false)),
+                },
+            ),
+            &mut app,
+        );
+        let agent = &app.agents[&id];
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert_eq!(agent.session.plan_phase.as_deref(), Some("drafting"));
+        assert!(agent.session.behavior_control_target().is_none());
+        assert!(effects.iter().all(|effect| !matches!(
+            effect,
+            Effect::SwitchBehavior { .. }
+        )));
+    }
+
+    #[test]
+    fn resident_reconnect_keeps_newer_live_mode_through_finalize() {
+        let mut agent = make_agent(Some("s1"));
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-a", 2, "normal", None, false),
+        );
+        agent.begin_session_reload(7);
+        assert!(detect_plan_mode_change(
+            &mode_with_projection(
+                "plan",
+                projection("actor-a", 9, "plan", Some("amending"), false),
+                serde_json::json!({}),
+            ),
+            &mut agent,
+            true,
+        ));
+        assert!(agent.finalize_reload_and_maybe_adopt(7, true, None));
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-a", 4, "normal", None, false),
+        );
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert_eq!(agent.session.plan_phase.as_deref(), Some("amending"));
+        assert!(agent.session.behavior_control_target().is_none());
+    }
+
+    #[test]
+    fn replay_does_not_settle_receipts_or_queue_history() {
+        let mut app = make_app_with_agent("sess-1");
+        open_approval(&mut app, "# Plan", 1);
+        let mut agent = app.agents.swap_remove(&AgentId(0)).unwrap();
+        let receipt = install_pending_decision(
+            &mut agent,
+            "decision-1",
+            crate::views::plan_approval_view::PlanApprovalOutcome::Approved,
+            None,
+        );
+        crate::app::acp_handler::hydrate_behavior_projection(
+            &mut agent,
+            projection("actor-a", 4, "plan", Some("awaiting_approval"), false),
+        );
+        agent.session.begin_behavior_switch(tools::types::BehaviorId::Normal);
+        let historical = mode_with_projection(
+            "normal",
+            projection("actor-a", 4, "normal", None, false),
+            serde_json::json!({"grow/planDecisionReceipt": receipt}),
+        );
+        assert!(!detect_plan_mode_change(&historical, &mut agent, false));
+        assert!(agent.pending_plan_approval_decision.is_some());
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert!(agent.session.pending_mode_updates.is_empty());
+        assert!(agent.session.behavior_control_target().is_some());
+    }
+
+    fn mode_message(session_id: &str, update: acp::SessionUpdate, replay: bool) -> AcpClientMessage {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let mut request =
+            acp::SessionNotification::new(acp::SessionId::new(session_id), update);
+        if replay {
+            request = request.meta(serde_json::json!({ "isReplay": true }).as_object().cloned());
+        }
+        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request,
+            response_tx,
+        })
+    }
+
+    fn behavior_outcome(
+        snapshot: shell::extensions::notification::BehaviorProjection,
+        status: &str,
+        receipt: &serde_json::Value,
+    ) -> acp::SessionUpdate {
+        mode_with_projection(
+            "plan",
+            snapshot,
+            serde_json::json!({
+                "grow/behaviorChange": {
+                    "status": status,
+                    "source": "normal",
+                    "target": "plan",
+                },
+                "grow/planDecisionReceipt": receipt,
+            }),
+        )
+    }
+
+    fn assert_plan_control_held(agent: &AgentView) {
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert_eq!(agent.session.plan_phase.as_deref(), Some("awaiting_approval"));
+        assert!(!agent.session.plan_completed);
+        assert_eq!(
+            agent.session.behavior_control_target(),
+            Some(tools::types::BehaviorId::Plan)
+        );
+        assert_eq!(
+            agent.session.deferred_session_mode,
+            Some(tools::types::BehaviorId::Plan)
+        );
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+    }
+
+    /// A mode notification settles the local intent only when this actor admits
+    /// that notification. The confirmed mode is not a substitute receipt.
+    #[test]
+    fn rejected_or_historical_mode_does_not_settle_root_control() {
+        let mut app = make_app_with_agent("sess-1");
+        open_approval(&mut app, "# Plan", 1);
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let receipt = install_pending_decision(
+            agent,
+            "decision-1",
+            crate::views::plan_approval_view::PlanApprovalOutcome::Approved,
+            None,
+        );
+        let current = projection("actor-a", 4, "plan", Some("awaiting_approval"), false);
+        crate::app::acp_handler::hydrate_behavior_projection(agent, current.clone());
+        agent.session.begin_behavior_switch(tools::types::BehaviorId::Plan);
+        agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+        agent.session.enqueue_prompt("held for the admitted receipt".into());
+
+        let stale = [
+            behavior_outcome(
+                projection("actor-old", 9, "plan", Some("executing"), true),
+                "applied",
+                &receipt,
+            ),
+            behavior_outcome(
+                projection("actor-old", 9, "plan", Some("executing"), true),
+                "rejected",
+                &receipt,
+            ),
+            behavior_outcome(
+                projection("actor-old", 9, "plan", Some("executing"), true),
+                "confirmation_required",
+                &receipt,
+            ),
+            behavior_outcome(
+                projection("actor-a", 2, "plan", Some("drafting"), false),
+                "applied",
+                &receipt,
+            ),
+            behavior_outcome(
+                projection("actor-a", 4, "plan", Some("awaiting_approval"), true),
+                "applied",
+                &receipt,
+            ),
+        ];
+        for update in stale {
+            assert!(handle(mode_message("sess-1", update, false), &mut app));
+            assert_plan_control_held(&app.agents[&AgentId(0)]);
+            assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_some());
+        }
+        assert!(!handle(
+            mode_message(
+                "sess-1",
+                behavior_outcome(current.clone(), "applied", &receipt),
+                true,
+            ),
+            &mut app,
+        ));
+        assert_plan_control_held(&app.agents[&AgentId(0)]);
+        assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_some());
+
+        assert!(handle(
+            mode_message(
+                "sess-1",
+                behavior_outcome(current.clone(), "applied", &receipt),
+                false,
+            ),
+            &mut app,
+        ));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.pending_plan_approval_decision.is_none());
+        assert!(agent.session.behavior_control_target().is_none());
+        assert!(agent.session.deferred_session_mode.is_none());
+        assert!(agent.session.pending_prompts.is_empty());
+        assert_eq!(agent.session.plan_phase.as_deref(), Some("awaiting_approval"));
+        assert!(!agent.session.plan_completed);
+
+        assert!(handle(
+            mode_message(
+                "sess-1",
+                behavior_outcome(current.clone(), "applied", &receipt),
+                false,
+            ),
+            &mut app,
+        ));
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(agent.session.plan_phase.as_deref(), Some("awaiting_approval"));
+        assert!(agent.pending_plan_approval_decision.is_none());
+        agent.session.begin_behavior_switch(tools::types::BehaviorId::Plan);
+        agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+        agent.session.enqueue_prompt("still held across replay".into());
+        assert!(!handle(
+            mode_message("sess-1", behavior_outcome(current, "applied", &receipt), true),
+            &mut app,
+        ));
+        assert_plan_control_held(&app.agents[&AgentId(0)]);
+        assert!(app.agents[&AgentId(0)].pending_plan_approval_decision.is_none());
+    }
+
+    #[test]
+    fn rejected_or_historical_mode_does_not_settle_child_control() {
+        let mut app = make_app_with_agent("sess-root");
+        let mut child = make_agent(Some("sess-child"));
+        let current = projection("actor-a", 4, "plan", Some("awaiting_approval"), false);
+        crate::app::acp_handler::hydrate_behavior_projection(&mut child, current.clone());
+        child.session.begin_behavior_switch(tools::types::BehaviorId::Plan);
+        child.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+        child.session.enqueue_prompt("held on the child".into());
+        {
+            let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+            parent
+                .session
+                .subagent_sessions
+                .insert("sess-child".into(), make_subagent_info("sess-child"));
+            parent
+                .subagent_views
+                .insert("sess-child".into(), Box::new(child));
+        }
+
+        let receipt = serde_json::json!({
+            "decision_id": "decision-1",
+            "submission_id": 1,
+            "action": "approve",
+        });
+        for update in [
+            behavior_outcome(
+                projection("actor-old", 1, "plan", Some("drafting"), false),
+                "applied",
+                &receipt,
+            ),
+            behavior_outcome(
+                projection("actor-old", 1, "plan", Some("drafting"), false),
+                "rejected",
+                &receipt,
+            ),
+            behavior_outcome(
+                projection("actor-old", 1, "plan", Some("drafting"), false),
+                "confirmation_required",
+                &receipt,
+            ),
+        ] {
+            assert!(handle(mode_message("sess-child", update, false), &mut app));
+            assert_plan_control_held(app.agents[&AgentId(0)].subagent_views["sess-child"].as_ref());
+        }
+        handle(mode_message(
+            "sess-child",
+            behavior_outcome(current.clone(), "applied", &receipt),
+            true,
+        ), &mut app);
+        assert_plan_control_held(app.agents[&AgentId(0)].subagent_views["sess-child"].as_ref());
+
+        assert!(handle(
+            mode_message(
+                "sess-child",
+                behavior_outcome(current, "applied", &receipt),
+                false,
+            ),
+            &mut app,
+        ));
+        let child = app.agents[&AgentId(0)].subagent_views["sess-child"].as_ref();
+        assert!(child.session.behavior_control_target().is_none());
+        assert!(child.session.deferred_session_mode.is_none());
+        assert!(child.session.pending_prompts.is_empty());
+        assert_eq!(child.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert_eq!(child.session.plan_phase.as_deref(), Some("awaiting_approval"));
     }

@@ -124,6 +124,9 @@ fn control_shortcuts(agent: &AgentView) -> Vec<pager::views::modal_window::Short
 ///
 /// Call once per frame from [`crate::draw`], before the commit pass.
 pub fn maybe_commit_plan(app: &mut AppView) {
+    if minimal_api::minimal_history_browsing(app) {
+        return;
+    }
     let ActiveView::Agent(id) = minimal_api::app_active_view(app) else {
         return;
     };

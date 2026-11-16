@@ -3090,7 +3090,8 @@ pub(crate) async fn durable_child_operation(
     subagent_id: &str,
     parent: &chat_state::ChatStateHandle,
 ) -> Result<DurableChildOperation, String> {
-    let Some((spawn_seq, spawn, terminal)) = parent.subagent_operation(subagent_id.to_owned()).await?
+    let Some((spawn_seq, spawn, terminal)) =
+        parent.subagent_operation(subagent_id.to_owned()).await?
     else {
         return Ok(DurableChildOperation::Missing);
     };
@@ -3839,8 +3840,13 @@ fn released_child_matches_restore(
 
 async fn observe_recovery_child(child_id: &str) -> Option<chat_state::Timeline> {
     let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
-    let opened = storage.open_session_by_id_shared_read(child_id).ok().flatten()?;
-    let result = storage.observe_execution_timeline(&opened.summary().info).await;
+    let opened = storage
+        .open_session_by_id_shared_read(child_id)
+        .ok()
+        .flatten()?;
+    let result = storage
+        .observe_execution_timeline(&opened.summary().info)
+        .await;
     match result {
         Ok(timeline) => Some(timeline),
         Err(error) => {
@@ -3941,17 +3947,13 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             tracing::debug!(%subagent_id, "child absence is not actionable outside cold recovery");
             continue;
         }
-        if cold_recovery && runtime.phase == chat_state::session_runtime::RuntimePhase::Restoring
-        {
+        if cold_recovery && runtime.phase == chat_state::session_runtime::RuntimePhase::Restoring {
             let child_id = spawn.child_session_id.clone();
-            let child_runtime = observe_recovery_child(&child_id).await
+            let child_runtime = observe_recovery_child(&child_id)
+                .await
                 .map(|timeline| timeline.runtime_lifecycle().clone());
             if !child_runtime.as_ref().is_some_and(|child| {
-                released_child_matches_restore(
-                    &runtime,
-                    &spawn.child_session_id,
-                    child,
-                )
+                released_child_matches_restore(&runtime, &spawn.child_session_id, child)
             }) {
                 // An unused checkpoint still belongs to tree adoption. Cold
                 // interruption may consume only a right already released by
@@ -3989,8 +3991,11 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             }
         };
         if let Some(reference) = &result_ref {
-            let usage = observe_recovery_child(&reference.timeline_id).await
-                .and_then(|timeline| chat_state::actor::state::project_timeline_usage_totals(&timeline).ok());
+            let usage = observe_recovery_child(&reference.timeline_id)
+                .await
+                .and_then(|timeline| {
+                    chat_state::actor::state::project_timeline_usage_totals(&timeline).ok()
+                });
             let Some(usage) = usage else {
                 continue;
             };
@@ -3998,6 +4003,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 parent_cmd_tx,
                 subagent_id.clone(),
                 Some(usage.by_model.into_iter().collect()),
+                spawn.parent_prompt_owner.clone(),
                 spawn.parent_prompt_id.clone(),
                 usage.incomplete,
             )
@@ -4069,7 +4075,13 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         if emit_replay_projections && !projections.finished.contains(subagent_id) {
             match finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal) {
                 Ok(update) => {
-                    emit_subagent_notification(gateway, parent_session_id, update, parent_cmd_tx, true);
+                    emit_subagent_notification(
+                        gateway,
+                        parent_session_id,
+                        update,
+                        parent_cmd_tx,
+                        true,
+                    );
                 }
                 Err(error) => {
                     tracing::error!(%subagent_id, %error, "refusing to publish an unverified subagent result");

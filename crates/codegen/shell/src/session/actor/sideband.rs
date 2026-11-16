@@ -41,8 +41,14 @@ pub(crate) struct SidebandRun {
     goal_usage_window: super::goal_support::GoalUsageWindow,
     usage_owner: Option<chat_state::ChatStateHandle>,
     captured_prompt_index: Option<usize>,
+    prompt_owner: Option<chat_state::UsagePromptOwner>,
     admitted_auxiliary_attempt_no: Option<u32>,
-    pending_auxiliary_start: Option<(u32, String, Option<usize>)>,
+    pending_auxiliary_start: Option<(
+        u32,
+        String,
+        Option<usize>,
+        Option<chat_state::UsagePromptOwner>,
+    )>,
     pending_auxiliary_settlement:
         Option<(Option<sampling_types::TokenUsage>, Option<i64>, Option<u64>)>,
     usage_owner_id: String,
@@ -422,7 +428,11 @@ impl SessionActor {
             .into());
         }
         let sideband_id = uuid::Uuid::now_v7().to_string();
-        let captured_prompt_index = self.chat_state_handle.current_prompt_index().await;
+        let captured = self.chat_state_handle.current_usage_prompt_owner().await;
+        let (captured_prompt_index, prompt_owner) = match captured {
+            Some((index, owner)) => (Some(index), Some(owner)),
+            None => (self.chat_state_handle.current_prompt_index().await, None),
+        };
         let mut timeline = chat_state::SidebandTimeline::new(sideband_id)?;
         let spawn_source_refs = source_refs.clone();
         let request = timeline.prepare(chat_state::SidebandEventKind::Request(
@@ -467,6 +477,7 @@ impl SessionActor {
             goal_usage_window: self.goal_usage_window.clone(),
             usage_owner: Some(self.chat_state_handle.clone()),
             captured_prompt_index,
+            prompt_owner,
             admitted_auxiliary_attempt_no: None,
             pending_auxiliary_start: None,
             pending_auxiliary_settlement: None,
@@ -513,11 +524,8 @@ impl SidebandRun {
         transcript_ids: &[chat_state::SurfaceId],
         unloaded_surface_ids: &[chat_state::SurfaceId],
     ) -> Result<(), SidebandRunError> {
-        let Some(chat_state::SidebandEventKind::Request(request)) = self
-            .timeline
-            .events()
-            .first()
-            .map(|event| &event.kind)
+        let Some(chat_state::SidebandEventKind::Request(request)) =
+            self.timeline.events().first().map(|event| &event.kind)
         else {
             return Err(chat_state::SidebandError::AttemptWithoutRequest.into());
         };
@@ -526,10 +534,14 @@ impl SidebandRun {
         {
             return Err(chat_state::SidebandError::ParentMaterializationMismatch.into());
         }
-        let attempts = self.timeline.events().iter().filter_map(|event| match &event.kind {
-            chat_state::SidebandEventKind::Attempt(attempt) => Some(&attempt.assembly_manifest),
-            _ => None,
-        });
+        let attempts = self
+            .timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::SidebandEventKind::Attempt(attempt) => Some(&attempt.assembly_manifest),
+                _ => None,
+            });
         let mut found_attempt = false;
         for manifest in attempts {
             found_attempt = true;
@@ -544,10 +556,7 @@ impl SidebandRun {
         if !found_attempt || self.recall_materialization.is_some() {
             return Err(chat_state::SidebandError::InvalidRecallMaterializationObservation.into());
         }
-        self.recall_materialization = Some((
-            source_ref.clone(),
-            surface_revision,
-        ));
+        self.recall_materialization = Some((source_ref.clone(), surface_revision));
         Ok(())
     }
 
@@ -917,13 +926,20 @@ impl SidebandRun {
                 })
                 .expect("Sideband request precedes attempt");
             let prompt_index = self.captured_prompt_index;
-            self.pending_auxiliary_start = Some((attempt_no, model_id.clone(), prompt_index));
+            let prompt_owner = self.prompt_owner.clone();
+            self.pending_auxiliary_start = Some((
+                attempt_no,
+                model_id.clone(),
+                prompt_index,
+                prompt_owner.clone(),
+            ));
             let result = owner
                 .begin_auxiliary_attempt_usage(
                     self.timeline.sideband_id().to_owned(),
                     attempt_no,
                     model_id,
                     prompt_index,
+                    prompt_owner,
                 )
                 .await;
             match result {
@@ -1173,12 +1189,12 @@ impl Drop for SidebandRun {
         runtime.spawn(async move {
             let _activity = activity;
             let _admission_permit = admission_permit;
-            if let (Some(owner), Some((attempt_no, model_id, prompt_index))) =
+            if let (Some(owner), Some((attempt_no, model_id, prompt_index, prompt_owner))) =
                 (usage_owner.as_ref(), pending_auxiliary_start)
             {
                 loop {
                     match owner.begin_auxiliary_attempt_usage(
-                        timeline.sideband_id().to_owned(), attempt_no, model_id.clone(), prompt_index,
+                        timeline.sideband_id().to_owned(), attempt_no, model_id.clone(), prompt_index, prompt_owner.clone(),
                     ).await {
                         Ok(_) => break,
                         Err(chat_state::TimelineWriteError::AcknowledgementLost) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
@@ -1462,6 +1478,7 @@ mod tests {
                 ),
                 usage_owner: None,
                 captured_prompt_index: None,
+                prompt_owner: None,
                 admitted_auxiliary_attempt_no: None,
                 pending_auxiliary_start: None,
                 pending_auxiliary_settlement: None,
@@ -2055,6 +2072,7 @@ mod tests {
                         1,
                         "test-model".into(),
                         None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -2143,6 +2161,7 @@ mod tests {
                         1,
                         "test-model".into(),
                         None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -2214,7 +2233,7 @@ mod tests {
                     .unwrap();
                 actor
                     .chat_state_handle
-                    .begin_auxiliary_attempt_usage(sideband_id, 1, "test-model".into(), None)
+                    .begin_auxiliary_attempt_usage(sideband_id, 1, "test-model".into(), None, None)
                     .await
                     .unwrap();
                 run.usage_owner = Some(actor.chat_state_handle.clone());

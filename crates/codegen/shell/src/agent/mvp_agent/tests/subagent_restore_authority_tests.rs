@@ -27,6 +27,7 @@ fn delegate(
                 parent_session_id: parent.0.to_string(),
                 parent_step_id: None,
                 parent_prompt_id: None,
+                parent_prompt_owner: None,
                 resume_from: None,
                 cwd: None,
                 runtime_overrides:

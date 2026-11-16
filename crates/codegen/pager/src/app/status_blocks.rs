@@ -230,6 +230,7 @@ pub(crate) fn session_usage_block_text(
         format_duration(std::time::Duration::from_millis(t.api_duration_ms)),
     ));
     rows.push(format!("  Cost:           {}", format_cost(t)));
+    rows.push("  Note: recorded consumption; work still running may add usage.".to_string());
 
     if !usage.model_usage.is_empty() {
         rows.push("  By provider/model:".to_string());

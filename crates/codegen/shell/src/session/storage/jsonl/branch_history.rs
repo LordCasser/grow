@@ -116,6 +116,37 @@ pub(super) fn visible_range(
     visible_range_in(&table, publication, anchor)
 }
 
+/// Forward counterpart of `visible_range`, jumping over an excluded interval
+/// with B-tree seeks instead of inspecting its source records.
+pub(super) fn visible_range_after(
+    tx: &ReadTransaction,
+    publication: u64,
+    anchor: u64,
+    last: u64,
+) -> io::Result<std::ops::RangeInclusive<u64>> {
+    let table = tx.open_table(EXCLUDED).map_err(io::Error::other)?;
+    let next = |position: u64| -> io::Result<Option<(u64, u64)>> {
+        table
+            .range((publication, position.saturating_add(1))..=(publication, u64::MAX))
+            .map_err(io::Error::other)?
+            .next()
+            .transpose()
+            .map_err(io::Error::other)
+            .map(|entry| entry.map(|(key, start)| (start.value(), key.value().1)))
+    };
+    let mut lower = anchor;
+    if let Some((start, end)) = next(anchor)? {
+        if start <= anchor {
+            lower = end;
+        }
+    }
+    if lower > last {
+        return Ok(1..=0);
+    }
+    let upper = next(lower)?.map_or(last, |(start, _)| start.saturating_sub(1).min(last));
+    Ok(lower..=upper)
+}
+
 pub(super) fn visible_at_write(
     tx: &WriteTransaction,
     publication: Option<u64>,

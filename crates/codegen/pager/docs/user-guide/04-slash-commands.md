@@ -182,6 +182,8 @@ A handful of commands only work in one of the two modes, because the surface the
 
 Fullscreen and inline retain a mutable status/footer layer. Minimal instead writes final blocks into the terminal's native Scrollback, so pending and applying controls stay in the single live status line and are never committed as disposable history. Applied, rejected, cancelled, and Subagent-finished terminals are committed once; relaunching between render modes restores pending state from the Shell rather than inventing another result row.
 
+In Minimal, `PageUp` opens a temporary history screen. Use `PageUp` / `PageDown` or the arrow keys to browse; `Esc` returns to the live prompt. Older pages load into this screen as needed. Returning keeps the native scrollback in its original order and prints only new live content.
+
 ### `/plan`
 
 Enter plan mode.
@@ -397,7 +399,7 @@ View local token and context usage for the current session.
 
 In fullscreen and inline modes this opens the tabbed usage modal on the Usage tab; `Esc` closes it and nothing is written into the transcript. Minimal mode keeps the inline scrollback output.
 
-The status bar shows the session's recorded lifetime tokens. `≥` means at least one attempt has unknown total usage. A `measured cache` percentage uses only input samples with a reported cache read count; the Usage tab also shows how much of the recorded input those samples cover. An interrupted attempt with confirmed complete usage is included in the recorded totals, while missing usage remains unknown. See the [usage display contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage).
+The status bar shows the session's `recorded tokens`: lifetime consumption that has already settled. `pending` means a turn or subagent is still active and may add usage; it does not mark the saved bill as incomplete. `≥` means at least one attempt has unknown total usage. A `measured cache` percentage uses only input samples with a reported cache read count; the Usage tab also shows how much of the recorded input those samples cover. An interrupted attempt with confirmed complete usage is included in the recorded totals, while missing usage remains unknown. Context occupancy is separate from consumption: compaction can reduce the context count while recorded tokens continue to grow. Browsing history does not add consumption or change a completed turn's saved result. See the [usage display contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage) and the [resume accounting change](../../../../../openspec/changes/archive/2026-11-17-repair-session-resume-presentation/specs/client-surfaces/spec.md#requirement-token-surfaces-preserve-accounting-scope-and-completeness).
 
 ```
 /usage

@@ -88,14 +88,17 @@ impl SessionActor {
             });
     }
     /// Apply subagent usage. `Ok` after chat-state acked; `Err` if apply failed.
+    /// `prompt_owner` is the owner captured when the delegation was admitted;
+    /// attribution matches it against the live prompt ledger owner — a reused
+    /// prompt id must never re-bind a late child bill to a different Turn.
     pub(super) async fn record_subagent_usage(
         &self,
         subagent_id: &str,
         by_model: &[(String, chat_state::UsageTotals)],
-        parent_prompt_id: Option<&str>,
+        prompt_owner: Option<chat_state::UsagePromptOwner>,
         incomplete: bool,
     ) -> Result<SubagentUsageApply, ()> {
-        self.record_subagent_usage_before(subagent_id, by_model, parent_prompt_id, incomplete, None)
+        self.record_subagent_usage_before(subagent_id, by_model, prompt_owner, incomplete, None)
             .await
     }
 
@@ -103,23 +106,23 @@ impl SessionActor {
         &self,
         subagent_id: &str,
         by_model: &[(String, chat_state::UsageTotals)],
-        parent_prompt_id: Option<&str>,
+        prompt_owner: Option<chat_state::UsagePromptOwner>,
         incomplete: bool,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<SubagentUsageApply, ()> {
-        let current = self
-            .current_prompt_id
-            .lock()
-            .expect("current_prompt_id mutex poisoned")
-            .clone();
-        let attributable = parent_prompt_id.is_some() && parent_prompt_id == current.as_deref();
+        let live_owner = self
+            .chat_state_handle
+            .current_usage_prompt_owner()
+            .await
+            .map(|(_, owner)| owner);
+        let attributable = prompt_owner.is_some() && prompt_owner == live_owner;
         if (!by_model.is_empty() || incomplete)
             && self
                 .chat_state_handle
                 .record_subagent_usage_before(
                     subagent_id.to_owned(),
                     by_model.to_vec(),
-                    attributable,
+                    prompt_owner,
                     incomplete,
                     deadline,
                 )
@@ -135,17 +138,29 @@ impl SessionActor {
         })
     }
 
-    /// True-miss / unpinned fail-closed: sticky for freeze report + pin-aware
-    /// ledger marks. Prompt ledger is stained only when the stamped pin is the
-    /// live open prompt (never stain a different live turn). Session always.
-    pub(super) async fn mark_apply_miss_incomplete(&self, stamped_pin: Option<&str>) -> bool {
-        let sticky = self.mark_subagent_usage_not_applied(stamped_pin).await;
-        let live = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
-        let stain_prompt = match (stamped_pin, live.as_deref()) {
-            (Some(pin), Some(live_id)) => pin == live_id,
-            (Some(_), None) => false,
-            (None, Some(_)) => true,
-            (None, None) => false,
+    /// True-miss / unpinned fail-closed. Prompt ledger and report sticky are
+    /// stained only when the stamped owner still owns the live prompt. The
+    /// sticky key is that captured prompt id; a divergent `report_pin` is
+    /// refused. A stale or absent owner stains the session lifetime only, and
+    /// never the live prompt's report channel.
+    pub(super) async fn mark_apply_miss_incomplete(
+        &self,
+        stamped_owner: Option<&chat_state::UsagePromptOwner>,
+        report_pin: Option<&str>,
+    ) -> bool {
+        let live_owner = self
+            .chat_state_handle
+            .current_usage_prompt_owner()
+            .await
+            .map(|(_, owner)| owner);
+        let stain_prompt = stamped_owner.is_some() && stamped_owner == live_owner.as_ref();
+        let sticky = if let Some(owner) = stamped_owner
+            .filter(|owner| stain_prompt && !report_pin.is_some_and(|pin| pin != owner.prompt_id))
+        {
+            self.mark_subagent_usage_not_applied(Some(owner.prompt_id.as_str()))
+                .await
+        } else {
+            false
         };
         let ledger_ok = self
             .chat_state_handle
@@ -205,7 +220,7 @@ impl SessionActor {
                 }
             }
         }
-        let total_tokens = self.chat_state_handle.get_projected_tokens().await;
+        let context_used_tokens = self.chat_state_handle.get_projected_tokens().await;
         let meta_info = self.chat_state_handle.get_notification_meta().await;
         let (stream_start_ms, turn_start_ms) = meta_info
             .map(|m| (m.stream_start_ms, m.turn_start_ms))
@@ -215,7 +230,7 @@ impl SessionActor {
             agent_timestamp_ms_override.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
         let (update_type, update_params) = Self::extract_update_info(&update);
         let mut meta = json!({
-            "totalTokens": total_tokens,
+            "contextUsedTokens": context_used_tokens,
             "eventId": event_id,
             "agentTimestampMs": agent_timestamp_ms,
         });
@@ -299,6 +314,40 @@ impl SessionActor {
             .event_tx
             .send(SessionEvent::Notification(notification.into()));
     }
+    /// Capture only after the Control writer and its coordinator application
+    /// have crossed the same Step boundary. Pending request revisions are a
+    /// separate domain and must never version confirmed Behavior state.
+    pub(super) async fn confirmed_behavior_projection(
+        &self,
+    ) -> Result<crate::extensions::notification::BehaviorProjection, String> {
+        let _step = self.step_control_gate.lock().await;
+        let _transaction = self.goal_transaction_gate.lock().await;
+        if !self.state.lock().await.execution_open()
+            || self.chat_state_handle.is_closed()
+            || self.chat_state_handle.pending_timeline_commit().is_some()
+        {
+            return Err("Session is unavailable for a confirmed Behavior snapshot".to_owned());
+        }
+        Ok(self.behavior_projection_at_control_boundary())
+    }
+
+    /// The caller owns the Control transition boundary, or is still in the
+    /// serial initialization path before this actor becomes visible.
+    fn behavior_projection_at_control_boundary(
+        &self,
+    ) -> crate::extensions::notification::BehaviorProjection {
+        let behavior = self.behavior.lock();
+        crate::extensions::notification::BehaviorProjection {
+            control_epoch: self.control_epoch.clone(),
+            control_revision: self
+                .control_revision
+                .load(std::sync::atomic::Ordering::Acquire),
+            behavior_id: behavior.behavior(),
+            plan_phase: behavior.plan_phase_label().map(str::to_owned),
+            plan_completed: behavior.snapshot().completed_plan.is_some(),
+        }
+    }
+
     /// Enqueue a `CurrentModeUpdate` on the FIFO event pipeline, stamped at
     /// enqueue time like `send_update`, so its id is minted in delivery order
     /// relative to already-queued chunks. A direct `emit_notification_direct`
@@ -329,27 +378,16 @@ impl SessionActor {
         behavior_change: Option<serde_json::Value>,
         plan_decision: Option<&crate::session::behavior::RetainedPlanDecision>,
     ) {
-        let behavior = self.behavior.lock();
-        let plan_phase = behavior.plan_phase_label();
-        let plan_completed = behavior.snapshot().completed_plan.is_some();
-        let behavior_name = match behavior.behavior() {
-            tool_types::BehaviorId::Normal => "normal",
-            tool_types::BehaviorId::Clarify => "clarify",
-            tool_types::BehaviorId::Plan => "plan",
-            tool_types::BehaviorId::Workflow => "workflow",
-            tool_types::BehaviorId::Goal => "goal",
-        };
-        drop(behavior);
-        let control_revision = self
-            .control_revision
-            .load(std::sync::atomic::Ordering::Acquire);
+        let projection = self.behavior_projection_at_control_boundary();
+        let behavior_name = projection.behavior_id.as_id();
         let mut behavior_meta = serde_json::json!({
+            "grow/behaviorSnapshot": projection,
             "grow/behavior": behavior_name,
-            "grow/planPhase": plan_phase,
-            "grow/planCompleted": plan_completed,
+            "grow/planPhase": projection.plan_phase,
+            "grow/planCompleted": projection.plan_completed,
             "grow/behaviorChange": behavior_change,
             "grow/displayProjectionSource": format!("behavior:{behavior_name}"),
-            "grow/displayProjectionRevision": control_revision,
+            "grow/displayProjectionRevision": projection.control_revision,
         });
         if let Some(receipt) = plan_decision {
             behavior_meta["grow/planDecisionReceipt"] = serde_json::json!(receipt);
@@ -663,7 +701,7 @@ impl SessionActor {
         )
         .meta(
             serde_json::json!({
-                "totalTokens": projected_tokens,
+                "contextUsedTokens": projected_tokens,
                 "agentTimestampMs": chrono::Utc::now().timestamp_millis(),
                 "transient": true,
             })
@@ -1568,6 +1606,7 @@ mod grow_event_id_stamping_tests {
                                 context_normalized: false,
                                 resumed_from: None,
                                 parent_prompt_id: None,
+                                parent_prompt_owner: None,
                                 capability_mode: None,
                                 birth_mcp_servers: Some(Default::default()),
                                 permission_mode: None,
@@ -1687,7 +1726,7 @@ mod grow_event_id_stamping_tests {
                         .meta
                         .as_ref()
                         .unwrap()
-                        .get("totalTokens")
+                        .get("contextUsedTokens")
                         .is_none()
                 );
                 let acp::SessionUpdate::SessionInfoUpdate(update) = args.request.update else {

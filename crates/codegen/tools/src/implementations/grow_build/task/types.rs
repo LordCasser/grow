@@ -114,6 +114,9 @@ pub struct SubagentRequest {
     /// Used to cancel only the subagents spawned by the currently-cancelled turn,
     /// without affecting background subagents from earlier turns.
     pub parent_prompt_id: Option<String>,
+    /// Stable owner of the parent turn captured at delegation admission.
+    /// `None` means session-only (background/unattributable or legacy source).
+    pub parent_prompt_owner: Option<tool_types::UsagePromptOwner>,
     /// Resume from a previously completed subagent's conversation.
     /// Inherits the canonical raw transcript and model. System prompt, live
     /// grants, and tool runtime are freshly constructed.
@@ -973,6 +976,19 @@ register_resource!(
     "grow_build",
     "CurrentPromptIdResource",
     CurrentPromptIdResource
+);
+
+/// Stable prompt owner captured when the parent turn's work is admitted.
+/// TaskTool copies this into `SubagentRequest::parent_prompt_owner` so a
+/// child's late usage bill settles against the turn that actually delegated
+/// it; a reused `parent_prompt_id` alone must never re-bind a different Turn.
+#[derive(Debug, Clone, Default)]
+pub struct CurrentUsagePromptOwnerResource(pub Option<tool_types::UsagePromptOwner>);
+
+register_resource!(
+    "grow_build",
+    "CurrentUsagePromptOwnerResource",
+    CurrentUsagePromptOwnerResource
 );
 
 /// Producer-stamped ownership for TaskTool children launched by the current

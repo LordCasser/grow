@@ -70,7 +70,7 @@ impl IndexedUserEchoRow {
     }
 }
 
-const VERSION: u8 = 49;
+const VERSION: u8 = 51;
 const MANIFEST: &str = "working-history.json";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 #[cfg(unix)]
@@ -430,9 +430,13 @@ pub(super) fn classify(record: &JournalRecord) -> RecordClass {
         return RecordClass::ResponseCandidate;
     }
     #[cfg(unix)]
-    if matches!(event.content, HistoryContent::Message {
-        channel: history::TextChannel::Assistant | history::TextChannel::Reasoning, ..
-    }) {
+    if matches!(
+        event.content,
+        HistoryContent::Message {
+            channel: history::TextChannel::Assistant | history::TextChannel::Reasoning,
+            ..
+        }
+    ) {
         return RecordClass::InheritedText;
     }
     #[cfg(unix)]
@@ -580,12 +584,30 @@ impl IndexedHistory {
         if !write_manifest(&self.directory, &manifest)? {
             return Err(invalid("cannot refresh the repaired Timeline stamp"));
         }
-        Ok(Some(Self { manifest: Arc::new(manifest), ..self.clone() }))
+        Ok(Some(Self {
+            manifest: Arc::new(manifest),
+            ..self.clone()
+        }))
+    }
+
+    pub(crate) fn visible_range_after(
+        &self,
+        anchor: u64,
+        last: u64,
+    ) -> io::Result<std::ops::RangeInclusive<u64>> {
+        #[cfg(unix)]
+        return self
+            .tools
+            .visible_range_after(self.manifest.tool_frontier, anchor, last);
+        #[cfg(not(unix))]
+        Ok(anchor..=last)
     }
 
     pub(crate) fn visible_range(&self, anchor: u64) -> io::Result<std::ops::RangeInclusive<u64>> {
         #[cfg(unix)]
-        return self.tools.visible_range(self.manifest.tool_frontier, anchor);
+        return self
+            .tools
+            .visible_range(self.manifest.tool_frontier, anchor);
         #[cfg(not(unix))]
         Ok(0..=anchor)
     }
@@ -597,9 +619,7 @@ impl IndexedHistory {
         false
     }
 
-    pub(crate) fn subagent_lifecycle_events(
-        &self,
-    ) -> io::Result<Vec<chat_state::TimelineEvent>> {
+    pub(crate) fn subagent_lifecycle_events(&self) -> io::Result<Vec<chat_state::TimelineEvent>> {
         #[cfg(unix)]
         return self
             .tools
@@ -614,7 +634,9 @@ impl IndexedHistory {
         reject_conflict: bool,
     ) -> io::Result<Option<crate::session::storage::communication_history::ReceiptSource>> {
         #[cfg(unix)]
-        return self.tools.notice_source(self.manifest.tool_frontier, identity, reject_conflict);
+        return self
+            .tools
+            .notice_source(self.manifest.tool_frontier, identity, reject_conflict);
         #[cfg(not(unix))]
         {
             let _ = (identity, reject_conflict);
@@ -800,6 +822,116 @@ impl IndexedHistory {
             history: self,
             journal,
         })
+    }
+
+    pub(crate) fn timeline_newest(&self, limit: usize) -> io::Result<history::HistoryTimelinePage> {
+        self.timeline(history::TimelineQuery::Newest, limit)
+    }
+
+    pub(crate) fn timeline_before(
+        &self,
+        before: u64,
+        limit: usize,
+    ) -> io::Result<history::HistoryTimelinePage> {
+        self.timeline(history::TimelineQuery::Before(before), limit)
+    }
+
+    pub(crate) fn timeline_around_ordinal(
+        &self,
+        ordinal: u64,
+        limit: usize,
+    ) -> io::Result<history::HistoryTimelinePage> {
+        self.timeline(history::TimelineQuery::Around(ordinal), limit)
+    }
+
+    /// Read a span frozen at `bytes`. The open history uses its own frontier;
+    /// tests use an older frontier to prove a later append did not rewrite it.
+    pub(super) fn timeline_at(
+        &self,
+        bytes: u64,
+        query: history::TimelineQuery,
+        limit: usize,
+    ) -> io::Result<history::HistoryTimelinePage> {
+        #[cfg(unix)]
+        return self.tools.timeline_page(bytes, query, limit);
+        #[cfg(not(unix))]
+        {
+            let _ = (bytes, query, limit);
+            Err(invalid("indexed history is unsupported"))
+        }
+    }
+
+    fn timeline(
+        &self,
+        query: history::TimelineQuery,
+        limit: usize,
+    ) -> io::Result<history::HistoryTimelinePage> {
+        #[cfg(unix)]
+        return self.timeline_at(self.manifest.tool_frontier.bytes, query, limit);
+        #[cfg(not(unix))]
+        {
+            let _ = (query, limit);
+            Err(invalid("indexed history is unsupported"))
+        }
+    }
+
+    /// Tests prove a consecutive consume extends the published generation
+    /// instead of rebuilding ranks.
+    #[cfg(test)]
+    pub(crate) fn timeline_generation(&self, bytes: u64) -> io::Result<u64> {
+        self.tools.timeline_generation(bytes)
+    }
+
+    /// Published prompt count at the open frontier. `None` means this cut has
+    /// no catalog span yet. The count is not the unpublished suffix.
+    #[cfg(unix)]
+    pub(crate) fn timeline_base_count(&self) -> io::Result<Option<u64>> {
+        self.tools
+            .timeline_base_count(self.manifest.tool_frontier.bytes)
+    }
+
+    /// Insertion rank of one source in the published catalog. `exact` means
+    /// that source and display segment are already ranked.
+    #[cfg(unix)]
+    pub(crate) fn timeline_rank_bound(
+        &self,
+        source: history::HistorySourceKey,
+        display_segment: Option<u32>,
+    ) -> io::Result<(u64, bool)> {
+        let bound = self.tools.timeline_rank_bound(
+            self.manifest.tool_frontier.bytes,
+            source,
+            display_segment,
+        )?;
+        Ok((bound.ordinal, bound.exact))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn timeline_message_seen(&self, message_id: &str) -> io::Result<bool> {
+        self.tools
+            .timeline_message_seen(self.manifest.tool_frontier.bytes, message_id)
+    }
+
+    /// One bounded rank range. `end` is exclusive and must already be inside
+    /// the published count; this does not scan the generation.
+    #[cfg(unix)]
+    pub(crate) fn timeline_rank_window(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> io::Result<Vec<history::HistoryTimelineEntry>> {
+        self.tools
+            .timeline_rank_window(self.manifest.tool_frontier.bytes, start, end)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn reset_timeline_rank_reads() {
+        super::history_timeline::reset_rank_reads();
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn timeline_rank_reads() -> u64 {
+        super::history_timeline::rank_reads()
     }
 }
 
@@ -1163,6 +1295,26 @@ pub(crate) struct IndexedHistoryReader<'a> {
 }
 
 impl IndexedHistoryReader<'_> {
+    pub(crate) fn timeline_newest(&self, limit: usize) -> io::Result<history::HistoryTimelinePage> {
+        self.history.timeline_newest(limit)
+    }
+
+    pub(crate) fn timeline_before(
+        &self,
+        before: u64,
+        limit: usize,
+    ) -> io::Result<history::HistoryTimelinePage> {
+        self.history.timeline_before(before, limit)
+    }
+
+    pub(crate) fn timeline_around_ordinal(
+        &self,
+        ordinal: u64,
+        limit: usize,
+    ) -> io::Result<history::HistoryTimelinePage> {
+        self.history.timeline_around_ordinal(ordinal, limit)
+    }
+
     pub(crate) fn read_subagent_lifecycle(
         &mut self,
         session: &acp::SessionId,
@@ -1181,7 +1333,11 @@ impl IndexedHistoryReader<'_> {
                 else {
                     return Err(invalid("indexed child lifecycle row has no Grow update"));
                 };
-                if !self.history.visible_range(reference.position)?.contains(&reference.position) {
+                if !self
+                    .history
+                    .visible_range(reference.position)?
+                    .contains(&reference.position)
+                {
                     continue;
                 }
                 let parent = match &notification.update {
@@ -1229,6 +1385,30 @@ impl IndexedHistoryReader<'_> {
         #[cfg(not(unix))]
         {
             let _ = (before, limit);
+            Ok(Vec::new())
+        }
+    }
+
+    pub(crate) fn user_echo_rows_after(
+        &self,
+        after: (u64, u64),
+        limit: usize,
+    ) -> io::Result<Vec<IndexedUserEchoRow>> {
+        #[cfg(unix)]
+        return Ok(self
+            .history
+            .tools
+            .user_echo_rows_after(
+                after.0.saturating_add(u64::from(after.1 > 0)),
+                self.history.manifest.tool_frontier,
+                limit,
+            )?
+            .into_iter()
+            .map(IndexedUserEchoRow)
+            .collect());
+        #[cfg(not(unix))]
+        {
+            let _ = (after, limit);
             Ok(Vec::new())
         }
     }
@@ -1308,6 +1488,63 @@ impl IndexedHistoryReader<'_> {
             .collect())
     }
 
+    pub(crate) fn response_rows_after(
+        &self,
+        after: (u64, u64),
+        limit: usize,
+        branch: Option<chat_state::EventSeq>,
+    ) -> io::Result<Vec<IndexedResponseRow>> {
+        #[cfg(unix)]
+        {
+            let mut frontier = self.history.manifest.tool_frontier;
+            frontier.context_rebuild = branch;
+            Ok(self
+                .history
+                .tools
+                .response_rows_after(after, frontier, self.history.records(), limit)?
+                .into_iter()
+                .map(IndexedResponseRow)
+                .collect())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (after, limit, branch);
+            Ok(Vec::new())
+        }
+    }
+
+    pub(crate) fn read_response_row_after(
+        &mut self,
+        row: IndexedResponseRow,
+        offset: Option<usize>,
+        session: &acp::SessionId,
+        history: &HistorySnapshot,
+        budget: u64,
+    ) -> io::Result<(Option<usize>, SessionUpdate)> {
+        #[cfg(unix)]
+        {
+            let IndexedResponseRow(row) = row;
+            let start = offset.unwrap_or(0) as u64;
+            let (end, text) = self.history.tools.response_fragment_after(
+                &mut self.journal,
+                &row,
+                start,
+                self.history.manifest.tool_frontier,
+                budget,
+            )?;
+            let newer = (end < row.encoded_bytes).then_some(end as usize);
+            Ok((
+                newer,
+                Self::response_update(row, start, end, text, session, history)?,
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (offset, session, history, budget);
+            match row {}
+        }
+    }
+
     #[cfg(unix)]
     pub(crate) fn read_response_row(
         &mut self,
@@ -1326,17 +1563,38 @@ impl IndexedHistoryReader<'_> {
             self.history.manifest.tool_frontier,
             budget,
         )?;
+        Ok((
+            (start != 0).then_some(start as usize),
+            Self::response_update(row, start, end, text, session, history)?,
+        ))
+    }
+
+    #[cfg(unix)]
+    fn response_update(
+        row: super::response_history::Row,
+        start: u64,
+        end: u64,
+        text: String,
+        session: &acp::SessionId,
+        history: &HistorySnapshot,
+    ) -> io::Result<SessionUpdate> {
         use super::response_history::TextOrigin;
         let mut meta = row.meta.unwrap_or_default();
         let (reasoning, chunk_meta) = match row.origin {
-            TextOrigin::Response { identity, reasoning } => {
+            TextOrigin::Response {
+                identity,
+                reasoning,
+            } => {
                 meta.remove("eventId");
                 meta.insert("responseProjection".into(), true.into());
                 meta.insert("samplingRequestId".into(), identity.request_id.into());
                 meta.insert("samplingAttempt".into(), identity.attempt.into());
                 (reasoning, None)
             }
-            TextOrigin::Inherited { reasoning, chunk_meta } => (reasoning, chunk_meta),
+            TextOrigin::Inherited {
+                reasoning,
+                chunk_meta,
+            } => (reasoning, chunk_meta),
         };
         let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))
             .meta(chunk_meta);
@@ -1347,9 +1605,12 @@ impl IndexedHistoryReader<'_> {
         };
         meta.insert("grow/historyMessageEvent".into(), row.source.get().into());
         meta.insert("grow/historyMessageItem".into(), row.ordinal.into());
-        if start != 0 || end != row.encoded_bytes {
-            meta.insert("grow/historyResponseEncodedStartByte".into(), start.into());
-        }
+        meta.insert("grow/historyResponseEncodedStartByte".into(), start.into());
+        meta.insert("grow/historyResponseEncodedEndByte".into(), end.into());
+        meta.insert(
+            "grow/historyResponseTotalBytes".into(),
+            row.encoded_bytes.into(),
+        );
         let mut update = SessionUpdate::Acp(Box::new(
             acp::SessionNotification::new(session.clone(), update).meta(Some(meta)),
         ));
@@ -1362,7 +1623,33 @@ impl IndexedHistoryReader<'_> {
             row.complete && end == row.encoded_bytes,
             &mut update,
         )?;
-        Ok(((start != 0).then_some(start as usize), update))
+        Ok(update)
+    }
+
+    pub(crate) fn task_terminals_after(
+        &self,
+        after: (u64, u64),
+        limit: usize,
+        cut: u64,
+    ) -> io::Result<Vec<IndexedTaskTerminal>> {
+        #[cfg(unix)]
+        {
+            if after >= (self.history.records(), 0) {
+                return Ok(Vec::new());
+            }
+            Ok(self
+                .history
+                .tools
+                .task_terminals_after(after, limit, cut.min(self.history.records()))?
+                .into_iter()
+                .map(|(row, superseded)| IndexedTaskTerminal(row, superseded))
+                .collect())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (after, limit, cut);
+            Ok(Vec::new())
+        }
     }
 
     pub(crate) fn task_terminals_before(
@@ -1485,7 +1772,9 @@ impl IndexedHistoryReader<'_> {
         if end_offset.is_some() {
             return Err(invalid("Tool byte cursor names an ordinary display row"));
         }
-        Ok(self.project_display(reference, session, history)?.map(|update| (None, update)))
+        Ok(self
+            .project_display(reference, session, history)?
+            .map(|update| (None, update)))
     }
 
     #[cfg(not(unix))]
@@ -1497,6 +1786,57 @@ impl IndexedHistoryReader<'_> {
         _end_offset: Option<usize>,
     ) -> io::Result<Option<(Option<usize>, SessionUpdate)>> {
         Err(invalid("indexed history is unsupported"))
+    }
+
+    pub(crate) fn read_display_page_after(
+        &mut self,
+        rank: usize,
+        session: &acp::SessionId,
+        history: &HistorySnapshot,
+        start_offset: Option<usize>,
+    ) -> io::Result<Option<(Option<usize>, SessionUpdate)>> {
+        #[cfg(unix)]
+        {
+            let reference = self.history.tools.display_at(rank as u64)?;
+            if let Some((newer, at_ms, fragment)) = self
+                .history
+                .tools
+                .tool_fragment_after(reference.position, start_offset.unwrap_or(0) as u64)?
+            {
+                let mut update = SessionUpdate::Grow(Box::new(
+                    crate::extensions::notification::SessionNotification {
+                        session_id: session.clone(),
+                        update: crate::extensions::notification::SessionUpdate::ToolOutputFragment(
+                            fragment,
+                        ),
+                        meta: None,
+                    },
+                ));
+                history.stamp_cursor(
+                    session,
+                    history.record_count(),
+                    Some(at_ms),
+                    reference.position,
+                    0,
+                    true,
+                    &mut update,
+                )?;
+                return Ok(Some((newer.map(|offset| offset as usize), update)));
+            }
+            // Byte zero only selects the source itself. A nonzero cursor on a
+            // row without an indexed Tool payload is a mismatched coordinate.
+            if start_offset.is_some_and(|offset| offset != 0) {
+                return Err(invalid("Tool byte cursor names an ordinary display row"));
+            }
+            Ok(self
+                .project_display(reference, session, history)?
+                .map(|update| (None, update)))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (rank, session, history, start_offset);
+            Err(invalid("indexed history is unsupported"))
+        }
     }
 
     #[cfg(unix)]
@@ -1511,34 +1851,52 @@ impl IndexedHistoryReader<'_> {
         let (at_ms, mut update) = match record.fact {
             JournalFact::Presentation { at_ms, event } => {
                 let update = if let HistoryContent::Notice { event: seq } = &event.content {
-                    let original = read_indexed_domain(&self.history.directory, &self.history.manifest, chat_state::EventSeq::new(*seq))?
-                        .ok_or_else(|| invalid("indexed notice source is absent"))?;
+                    let original = read_indexed_domain(
+                        &self.history.directory,
+                        &self.history.manifest,
+                        chat_state::EventSeq::new(*seq),
+                    )?
+                    .ok_or_else(|| invalid("indexed notice source is absent"))?;
                     self.project_notice(session, &original, event.meta)?
                 } else {
-                    event.into_update(session)?.expect("indexed display record has a row")
+                    event
+                        .into_update(session)?
+                        .expect("indexed display record has a row")
                 };
                 (at_ms, update)
-            },
+            }
             JournalFact::Domain { event, .. }
-                if crate::session::storage::communication_history::receipt_identity(&event)?.is_some() =>
+                if crate::session::storage::communication_history::receipt_identity(&event)?
+                    .is_some() =>
             {
                 let seq = event.seq.get();
                 if history.notice_anchors_in_tail.contains(&seq)
                     || self.history.tools.has_notice_anchor(
-                        self.history.manifest.tool_frontier, &mut self.journal, seq, self.history.records(),
+                        self.history.manifest.tool_frontier,
+                        &mut self.journal,
+                        seq,
+                        self.history.records(),
                     )?
                 {
                     return Ok(None);
                 }
                 let mut meta = acp::Meta::new();
-                meta.insert("eventId".into(), format!("{}-receipt-{seq}", session.0).into());
+                meta.insert(
+                    "eventId".into(),
+                    format!("{}-receipt-{seq}", session.0).into(),
+                );
                 meta.insert("grow/historyTimestampMs".into(), event.at_ms.into());
-                (event.at_ms, self.project_notice(session, &event, Some(meta))?)
+                (
+                    event.at_ms,
+                    self.project_notice(session, &event, Some(meta))?,
+                )
             }
             JournalFact::Domain { event, .. } => {
                 use crate::extensions::notification::SessionNotification;
                 use chat_state::{HookEvent, TimelineEventKind};
-                let TimelineEventKind::Hook(HookEvent::Completed { occurrence_id, .. }) = event.kind else {
+                let TimelineEventKind::Hook(HookEvent::Completed { occurrence_id, .. }) =
+                    event.kind
+                else {
                     return Err(invalid("indexed Hook display has no terminal"));
                 };
                 let cut = self.history.tools.cut(self.history.clone())?;
@@ -1588,15 +1946,23 @@ impl IndexedHistoryReader<'_> {
 
     #[cfg(unix)]
     fn project_notice(
-        &self, session: &acp::SessionId, event: &chat_state::TimelineEvent, meta: Option<acp::Meta>,
+        &self,
+        session: &acp::SessionId,
+        event: &chat_state::TimelineEvent,
+        meta: Option<acp::Meta>,
     ) -> io::Result<SessionUpdate> {
-        let notice = crate::session::storage::communication_history::read_notice(&self.history.directory, event)?
-            .ok_or_else(|| invalid("indexed notice source has no presentation"))?;
-        Ok(SessionUpdate::Grow(Box::new(crate::extensions::notification::SessionNotification {
-            session_id: session.clone(),
-            update: crate::extensions::notification::SessionUpdate::UiNotice(notice),
-            meta: meta.map(serde_json::Value::Object),
-        })))
+        let notice = crate::session::storage::communication_history::read_notice(
+            &self.history.directory,
+            event,
+        )?
+        .ok_or_else(|| invalid("indexed notice source has no presentation"))?;
+        Ok(SessionUpdate::Grow(Box::new(
+            crate::extensions::notification::SessionNotification {
+                session_id: session.clone(),
+                update: crate::extensions::notification::SessionUpdate::UiNotice(notice),
+                meta: meta.map(serde_json::Value::Object),
+            },
+        )))
     }
 
     #[cfg(unix)]
@@ -1606,13 +1972,13 @@ impl IndexedHistoryReader<'_> {
     ) -> io::Result<JournalRecord> {
         let record = self.read_published_record(reference)?;
         if !(matches!(
-                classify(&record),
-                RecordClass::Display
-                    | RecordClass::UserEcho
-                    | RecordClass::ResponseCandidate
-                    | RecordClass::BackgroundTask
-                    | RecordClass::CommunicationNotice
-            ) || matches!(&record.fact,
+            classify(&record),
+            RecordClass::Display
+                | RecordClass::UserEcho
+                | RecordClass::ResponseCandidate
+                | RecordClass::BackgroundTask
+                | RecordClass::CommunicationNotice
+        ) || matches!(&record.fact,
                 JournalFact::Domain { event, .. } if matches!(&event.kind,
                     chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Completed { .. }))
                         || crate::session::storage::communication_history::receipt_identity(event)?.is_some()))
@@ -1660,7 +2026,11 @@ impl IndexedHistoryReader<'_> {
         if start.position >= position {
             return Err(invalid("Tool display start crosses the page position"));
         }
-        if !self.history.visible_range(start.position)?.contains(&start.position) {
+        if !self
+            .history
+            .visible_range(start.position)?
+            .contains(&start.position)
+        {
             return Ok(None);
         }
         let JournalFact::Presentation { event, .. } = self.read_display(start)?.fact else {
@@ -1676,7 +2046,11 @@ impl IndexedHistoryReader<'_> {
             if reference.position >= position || reference.position <= start.position {
                 return Err(invalid("Tool display field crosses the page position"));
             }
-            if !self.history.visible_range(reference.position)?.contains(&reference.position) {
+            if !self
+                .history
+                .visible_range(reference.position)?
+                .contains(&reference.position)
+            {
                 continue;
             }
             let JournalFact::Presentation { event, .. } = self.read_display(reference)?.fact else {
@@ -2161,7 +2535,10 @@ pub(super) fn attach_to_validated_prefix(
         .state
         .anchors
         .retain(|_, position| *position >= manifest.records);
-    prefix.state.receipts.retain(|_, source| source.event >= manifest.domain_events);
+    prefix
+        .state
+        .receipts
+        .retain(|_, source| source.event >= manifest.domain_events);
     prefix.state.identities = identities;
     prefix.indexed = Some(open_history(directory, manifest, cached)?);
     Ok(())
@@ -2443,7 +2820,8 @@ fn hydrate(
     data.events.extend(boundaries.events);
     let compaction = index.tools.compaction(source.tool_frontier)?;
     data.events.extend(compaction.events);
-    data.events.extend(index.tools.pending_consultations(source.tool_frontier)?);
+    data.events
+        .extend(index.tools.pending_consultations(source.tool_frontier)?);
     let execution = index.tools.execution_checkpoint(source.tool_frontier)?;
     if let Some(reference) = execution.image_projection {
         if reference.seq.get() >= source.domain_events
@@ -2452,13 +2830,18 @@ fn hydrate(
                 chat_state::TimelineEventKind::ImageProjection(_)
             )
         {
-            return Err(invalid("working Surface image projection differs from the journal"));
+            return Err(invalid(
+                "working Surface image projection differs from the journal",
+            ));
         }
     }
     if let Some(rewind) = source.tool_frontier.rewind {
         let event = read_indexed_domain(&index.directory, source, rewind)?
             .ok_or_else(|| invalid("working Surface rewind is missing from the Timeline"))?;
-        if !event.messages().is_some_and(|message| message.cause == chat_state::MessageCause::Rewind) {
+        if !event
+            .messages()
+            .is_some_and(|message| message.cause == chat_state::MessageCause::Rewind)
+        {
             return Err(invalid("working Surface rewind differs from the Timeline"));
         }
     }
@@ -2479,16 +2862,15 @@ fn hydrate(
     }
     data.events.extend(recovery);
     if tail.events.iter().any(|event| {
-            matches!(
-                &event.kind,
-                chat_state::TimelineEventKind::ImageProjection(_)
-                    | chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
-                        cause: chat_state::MessageCause::Rewind,
-                        ..
-                    })
-            )
-        })
-    {
+        matches!(
+            &event.kind,
+            chat_state::TimelineEventKind::ImageProjection(_)
+                | chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
+                    cause: chat_state::MessageCause::Rewind,
+                    ..
+                })
+        )
+    }) {
         return Ok(None);
     }
     data.events
@@ -2682,6 +3064,8 @@ mod tests {
     use crate::session::{info::Info, persistence::default_model_id, storage::StorageAdapter};
 
     include!("working_snapshot/large_publication_test.rs");
+    include!("working_snapshot/timeline_catalog_test.rs");
+    include!("working_snapshot/timeline_suffix_test.rs");
     mod branch_publication {
         use super::*;
         include!("working_snapshot/branch_publication_test.rs");
@@ -3076,58 +3460,101 @@ mod tests {
     async fn published_nonpage_presentation_retries_preserve_exact_identity() {
         let root = tempfile::tempdir().unwrap();
         let (storage, info) = fixture(root.path());
-        storage.init_session(&info, default_model_id()).await.unwrap();
-        let retained_update = |text: &str| SessionUpdate::Acp(Box::new(
-            acp::SessionNotification::new(
-                info.id.clone(),
-                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new(text)),
-                )),
-            ).meta(Some(acp::Meta::from_iter([("eventId".into(), "retained-example".into())]))),
-        ));
+        storage
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
+        let retained_update = |text: &str| {
+            SessionUpdate::Acp(Box::new(
+                acp::SessionNotification::new(
+                    info.id.clone(),
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(text)),
+                    )),
+                )
+                .meta(Some(acp::Meta::from_iter([(
+                    "eventId".into(),
+                    "retained-example".into(),
+                )]))),
+            ))
+        };
         let update = retained_update("original");
-        storage.append_update_durable_commit_aware(&info, &update).await.unwrap();
+        storage
+            .append_update_durable_commit_aware(&info, &update)
+            .await
+            .unwrap();
         let mut timeline = chat_state::Timeline::default();
-        let publish = timeline.record(observation("publish-all-presentation-identities")).unwrap();
-        storage.append_timeline_event_durable(&info, &publish).await.unwrap();
+        let publish = timeline
+            .record(observation("publish-all-presentation-identities"))
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &publish)
+            .await
+            .unwrap();
         let directory = storage.open_session(&info).unwrap().directory_handle();
         let path = directory.display_path().join(TIMELINE_FILE);
         let bytes = std::fs::metadata(&path).unwrap().len();
         assert_eq!(read_manifest(&directory).unwrap().unwrap().bytes, bytes);
-        storage.append_update_durable_commit_aware(&info, &update).await.unwrap();
+        storage
+            .append_update_durable_commit_aware(&info, &update)
+            .await
+            .unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes);
         drop(storage);
         let storage = JsonlStorageAdapter::with_root(root.path().to_owned());
-        storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
-        storage.append_update_durable_commit_aware(&info, &update).await.unwrap();
-        assert!(storage.append_update_durable_commit_aware(&info, &retained_update("changed")).await.is_err());
+        storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
+        storage
+            .append_update_durable_commit_aware(&info, &update)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .append_update_durable_commit_aware(&info, &retained_update("changed"))
+                .await
+                .is_err()
+        );
         assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes);
     }
 
     #[tokio::test]
     async fn consultation_checkpoints_drop_settled_history_and_restore_an_uninjected_answer() {
-        use crate::coordination::{IncomingInquiryAudit, InquiryAnswerContextProof, InquiryDirection, InquiryEvent, InquiryOutcome};
+        use crate::coordination::{
+            IncomingInquiryAudit, InquiryAnswerContextProof, InquiryDirection, InquiryEvent,
+            InquiryOutcome,
+        };
         use chat_state::{
-            NotificationEvent, NotificationSource, NotificationSourceVersion, SidebandAssemblyManifest,
-            SidebandAttempt, SidebandBudgetPolicy, SidebandEnd, SidebandEventKind, SidebandOutcome,
-            SidebandPurpose, SidebandRequest, SidebandResult, SidebandRoute, SidebandSpawnEvent,
-            SidebandTimeline, TimelineRangeRef,
+            NotificationEvent, NotificationSource, NotificationSourceVersion,
+            SidebandAssemblyManifest, SidebandAttempt, SidebandBudgetPolicy, SidebandEnd,
+            SidebandEventKind, SidebandOutcome, SidebandPurpose, SidebandRequest, SidebandResult,
+            SidebandRoute, SidebandSpawnEvent, SidebandTimeline, TimelineRangeRef,
         };
 
         let root = tempfile::tempdir().unwrap();
         let (storage, info) = fixture(root.path());
-        storage.init_session(&info, default_model_id()).await.unwrap();
+        storage
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
         let mut dense = chat_state::Timeline::default();
         let owner = info.id.to_string();
         let turn = TurnId(1);
         let turn_start = dense.record(turn_start(turn, "current", 0, 0)).unwrap();
-        storage.append_timeline_event(&info, &turn_start).await.unwrap();
+        storage
+            .append_timeline_event(&info, &turn_start)
+            .await
+            .unwrap();
         let mut last = None;
         for n in 0..8 {
             let inquiry_id = format!("consult-{n}");
             let sideband_id = uuid::Uuid::from_u128(n as u128 + 1).to_string();
             let sideband = |seq, kind| chat_state::SidebandEvent {
-                sideband_id: sideband_id.clone(), seq, at_ms: 1, kind,
+                sideband_id: sideband_id.clone(),
+                seq,
+                at_ms: 1,
+                kind,
                 version: chat_state::SIDEBAND_SCHEMA_VERSION,
             };
             let mut audit = IncomingInquiryAudit {
@@ -3137,137 +3564,323 @@ mod tests {
                 source_cwd: "/work".into(),
                 delegated_subagent_task_name: None,
                 question: format!("question {n}"),
-                approval: None, outcome: None, answer_context: None,
+                approval: None,
+                outcome: None,
+                answer_context: None,
             };
-            let started = dense.record(InquiryEvent::Incoming { inquiry_id: inquiry_id.clone(), audit: audit.clone() }.timeline_kind()).unwrap();
-            storage.append_timeline_event(&info, &started).await.unwrap();
-            let input_ref = TimelineRangeRef { timeline_id: owner.clone(), first_seq: 0, last_seq: 0 };
-            let spawn = dense.record(TimelineEventKind::Sideband(SidebandSpawnEvent {
-                sideband_id: sideband_id.clone(), purpose: SidebandPurpose::InfoRequest, source_refs: vec![input_ref.clone()],
-            })).unwrap();
+            let started = dense
+                .record(
+                    InquiryEvent::Incoming {
+                        inquiry_id: inquiry_id.clone(),
+                        audit: audit.clone(),
+                    }
+                    .timeline_kind(),
+                )
+                .unwrap();
+            storage
+                .append_timeline_event(&info, &started)
+                .await
+                .unwrap();
+            let input_ref = TimelineRangeRef {
+                timeline_id: owner.clone(),
+                first_seq: 0,
+                last_seq: 0,
+            };
+            let spawn = dense
+                .record(TimelineEventKind::Sideband(SidebandSpawnEvent {
+                    sideband_id: sideband_id.clone(),
+                    purpose: SidebandPurpose::InfoRequest,
+                    source_refs: vec![input_ref.clone()],
+                }))
+                .unwrap();
             storage.append_timeline_event(&info, &spawn).await.unwrap();
             let answer = format!("answer {n}");
             let events = vec![
-                sideband(0, SidebandEventKind::Request(SidebandRequest {
-                    purpose: SidebandPurpose::InfoRequest,
-                    prompt: crate::coordination::inquiry_prompt("sender", "/work", &audit.question),
-                    source_refs: vec![input_ref.clone()],
-                    budget_policy: SidebandBudgetPolicy { max_attempts: 1, max_input_tokens_per_attempt: 8, max_output_tokens_per_attempt: None },
-                    route: SidebandRoute { model: "mock/mock".into(), backend: sampling_types::ApiBackend::Messages },
-                    initiator_ref: format!("t:{owner}/sideband:{sideband_id}"), executor: "test".into(), output_schema: None,
-                })),
-                sideband(1, SidebandEventKind::Attempt(SidebandAttempt {
-                    attempt_no: 1, input_refs: vec![input_ref.clone()],
-                    assembly_manifest: SidebandAssemblyManifest {
-                        strategy: "consultation".into(), strategy_version: 1, source_revision: Some(0),
-                        context_surface_ids: Vec::new(), selected_surface_ids: Vec::new(),
-                        materialized_input_tokens: 1, max_output_tokens: None,
-                    }, feedback: None,
-                })),
-                sideband(2, SidebandEventKind::Result(SidebandResult {
-                    raw_output: answer.clone(), structured_output: None, usage: Default::default(),
-                    finish: "end_turn".into(), source_event_seqs: [0, 1], evidence_refs: vec![input_ref],
-                })),
-                sideband(3, SidebandEventKind::End(SidebandEnd { outcome: SidebandOutcome::Completed, error: None })),
+                sideband(
+                    0,
+                    SidebandEventKind::Request(SidebandRequest {
+                        purpose: SidebandPurpose::InfoRequest,
+                        prompt: crate::coordination::inquiry_prompt(
+                            "sender",
+                            "/work",
+                            &audit.question,
+                        ),
+                        source_refs: vec![input_ref.clone()],
+                        budget_policy: SidebandBudgetPolicy {
+                            max_attempts: 1,
+                            max_input_tokens_per_attempt: 8,
+                            max_output_tokens_per_attempt: None,
+                        },
+                        route: SidebandRoute {
+                            model: "mock/mock".into(),
+                            backend: sampling_types::ApiBackend::Messages,
+                        },
+                        initiator_ref: format!("t:{owner}/sideband:{sideband_id}"),
+                        executor: "test".into(),
+                        output_schema: None,
+                    }),
+                ),
+                sideband(
+                    1,
+                    SidebandEventKind::Attempt(SidebandAttempt {
+                        attempt_no: 1,
+                        input_refs: vec![input_ref.clone()],
+                        assembly_manifest: SidebandAssemblyManifest {
+                            strategy: "consultation".into(),
+                            strategy_version: 1,
+                            source_revision: Some(0),
+                            context_surface_ids: Vec::new(),
+                            selected_surface_ids: Vec::new(),
+                            materialized_input_tokens: 1,
+                            max_output_tokens: None,
+                        },
+                        feedback: None,
+                    }),
+                ),
+                sideband(
+                    2,
+                    SidebandEventKind::Result(SidebandResult {
+                        raw_output: answer.clone(),
+                        structured_output: None,
+                        usage: Default::default(),
+                        finish: "end_turn".into(),
+                        source_event_seqs: [0, 1],
+                        evidence_refs: vec![input_ref],
+                    }),
+                ),
+                sideband(
+                    3,
+                    SidebandEventKind::End(SidebandEnd {
+                        outcome: SidebandOutcome::Completed,
+                        error: None,
+                    }),
+                ),
             ];
             SidebandTimeline::from_events(events.clone()).unwrap();
             for event in &events {
-                storage.append_sideband_event_durable(&info, event).await.unwrap();
+                storage
+                    .append_sideband_event_durable(&info, event)
+                    .await
+                    .unwrap();
             }
             audit.outcome = Some(InquiryOutcome::answered(&inquiry_id, answer));
             audit.answer_context = Some(InquiryAnswerContextProof {
                 target_session_id: owner.clone(),
-                result_ref: TimelineRangeRef { timeline_id: sideband_id.clone(), first_seq: 2, last_seq: 2 },
+                result_ref: TimelineRangeRef {
+                    timeline_id: sideband_id.clone(),
+                    first_seq: 2,
+                    last_seq: 2,
+                },
             });
-            let terminal = dense.record(InquiryEvent::Incoming { inquiry_id: inquiry_id.clone(), audit: audit.clone() }.timeline_kind()).unwrap();
-            storage.append_timeline_event(&info, &terminal).await.unwrap();
+            let terminal = dense
+                .record(
+                    InquiryEvent::Incoming {
+                        inquiry_id: inquiry_id.clone(),
+                        audit: audit.clone(),
+                    }
+                    .timeline_kind(),
+                )
+                .unwrap();
+            storage
+                .append_timeline_event(&info, &terminal)
+                .await
+                .unwrap();
             let body = audit.answer_context_body().unwrap();
-            let source = NotificationSource::InquiryAnswered { source_session_id: "sender".into(), inquiry_id: inquiry_id.clone(), continue_if_idle: false };
-            let source_version = NotificationSourceVersion::Opaque { value: format!("{owner}:{}", terminal.seq.get()) };
+            let source = NotificationSource::InquiryAnswered {
+                source_session_id: "sender".into(),
+                inquiry_id: inquiry_id.clone(),
+                continue_if_idle: false,
+            };
+            let source_version = NotificationSourceVersion::Opaque {
+                value: format!("{owner}:{}", terminal.seq.get()),
+            };
             let id = chat_state::notification_id(&owner, &source, &source_version).unwrap();
-            let payload_ref = chat_state::NotificationPayloadRef { bytes: body.len() as u64, blake3: blake3::hash(body.as_bytes()).to_hex().to_string() };
-            let receipt = NotificationEvent::Received { id: id.clone(), owner_session_id: owner.clone(), source, source_version, payload_ref };
+            let payload_ref = chat_state::NotificationPayloadRef {
+                bytes: body.len() as u64,
+                blake3: blake3::hash(body.as_bytes()).to_hex().to_string(),
+            };
+            let receipt = NotificationEvent::Received {
+                id: id.clone(),
+                owner_session_id: owner.clone(),
+                source,
+                source_version,
+                payload_ref,
+            };
             if n == 7 {
                 last = Some((inquiry_id, terminal, receipt));
                 break;
             }
-            let received = dense.record(TimelineEventKind::Notification(receipt)).unwrap();
-            let consumed = dense.record(TimelineEventKind::Notification(NotificationEvent::Consumed {
-                notification_ids: vec![id.clone()], turn,
-                input: Some(sampling_types::ConversationItem::received_agent_message(sampling_types::AgentMessage {
-                    receipt_id: id, source_session_id: "sender".into(), target_session_id: owner.clone(),
-                    message_id: inquiry_id, reply_to: None, message: body.into(),
-                })),
-            })).unwrap();
-            storage.append_timeline_event(&info, &received).await.unwrap();
-            storage.append_timeline_event(&info, &consumed).await.unwrap();
+            let received = dense
+                .record(TimelineEventKind::Notification(receipt))
+                .unwrap();
+            let consumed = dense
+                .record(TimelineEventKind::Notification(
+                    NotificationEvent::Consumed {
+                        notification_ids: vec![id.clone()],
+                        turn,
+                        input: Some(sampling_types::ConversationItem::received_agent_message(
+                            sampling_types::AgentMessage {
+                                receipt_id: id,
+                                source_session_id: "sender".into(),
+                                target_session_id: owner.clone(),
+                                message_id: inquiry_id,
+                                reply_to: None,
+                                message: body.into(),
+                            },
+                        )),
+                    },
+                ))
+                .unwrap();
+            storage
+                .append_timeline_event(&info, &received)
+                .await
+                .unwrap();
+            storage
+                .append_timeline_event(&info, &consumed)
+                .await
+                .unwrap();
         }
         let (inquiry, terminal, receipt) = last.unwrap();
         let publish = dense.record(observation("consultation-cut")).unwrap();
-        storage.append_timeline_event_durable(&info, &publish).await.unwrap();
+        storage
+            .append_timeline_event_durable(&info, &publish)
+            .await
+            .unwrap();
         drop(storage);
 
         let storage = JsonlStorageAdapter::with_root(root.path().to_owned());
-        let restored = storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
-        assert_eq!(restored.timeline.events().iter().filter(|event| matches!(InquiryEvent::from_timeline(event).unwrap(), Some(InquiryEvent::Incoming { .. }))).map(|event| event.seq).collect::<Vec<_>>(), [terminal.seq]);
-        assert_eq!(restored.timeline.incoming_inquiry_events("sender", "consult-0").unwrap().len(), 2);
-        let received = dense.record(TimelineEventKind::Notification(receipt)).unwrap();
-        storage.append_timeline_event_durable(&info, &received).await.unwrap();
+        let restored = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
+        assert_eq!(
+            restored
+                .timeline
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    InquiryEvent::from_timeline(event).unwrap(),
+                    Some(InquiryEvent::Incoming { .. })
+                ))
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            [terminal.seq]
+        );
+        assert_eq!(
+            restored
+                .timeline
+                .incoming_inquiry_events("sender", "consult-0")
+                .unwrap()
+                .len(),
+            2
+        );
+        let received = dense
+            .record(TimelineEventKind::Notification(receipt))
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &received)
+            .await
+            .unwrap();
         drop(restored);
         drop(storage);
 
         let storage = JsonlStorageAdapter::with_root(root.path().to_owned());
-        let restored = storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
+        let restored = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
         let pending = restored.timeline.pending_notifications();
         assert_eq!(pending.len(), 1);
-        assert!(matches!(&pending[0].source, NotificationSource::InquiryAnswered { inquiry_id, .. } if inquiry_id == &inquiry));
+        assert!(
+            matches!(&pending[0].source, NotificationSource::InquiryAnswered { inquiry_id, .. } if inquiry_id == &inquiry)
+        );
     }
 
     #[tokio::test]
     async fn indexed_agent_messages_keep_receipts_roots_and_anchors_across_publication() {
-        use chat_state::{NotificationEvent, NotificationSource, NotificationSourceVersion};
         use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowUpdate};
+        use chat_state::{NotificationEvent, NotificationSource, NotificationSourceVersion};
 
         let root = tempfile::tempdir().unwrap();
         let (storage, info) = fixture(root.path());
-        storage.init_session(&info, default_model_id()).await.unwrap();
+        storage
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
         let directory = storage.open_session(&info).unwrap().directory_handle();
         let mut dense = chat_state::Timeline::default();
         let turn = TurnId(1);
         dense.record(turn_start(turn, "current", 0, 0)).unwrap();
-        let version = NotificationSourceVersion::Ordinal { value: chat_state::PARENT_MESSAGE_SOURCE_VERSION };
+        let version = NotificationSourceVersion::Ordinal {
+            value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+        };
         let mut messages = Vec::new();
         let mut anchors = Vec::new();
         for n in 0..128 {
             let body = format!("message {n}");
             let source = NotificationSource::ParentMessage {
-                parent_session_id: "parent".into(), message_id: n.to_string(), interrupt: false,
+                parent_session_id: "parent".into(),
+                message_id: n.to_string(),
+                interrupt: false,
             };
-            let payload_ref = crate::session::notification_inbox::write_payload(&directory, &body).unwrap();
+            let payload_ref =
+                crate::session::notification_inbox::write_payload(&directory, &body).unwrap();
             let owner = info.id.to_string();
             let id = chat_state::notification_id(&owner, &source, &version).unwrap();
-            let received = dense.record(TimelineEventKind::Notification(NotificationEvent::Received {
-                id: id.clone(), owner_session_id: owner, source: source.clone(),
-                source_version: version.clone(), payload_ref: payload_ref.clone(),
-            })).unwrap();
-            dense.record(TimelineEventKind::Notification(NotificationEvent::Consumed {
-                notification_ids: vec![id], turn, input: None,
-            })).unwrap();
-            let n = if n % 2 == 0 || n == 127 { Some(n) } else { None };
+            let received = dense
+                .record(TimelineEventKind::Notification(
+                    NotificationEvent::Received {
+                        id: id.clone(),
+                        owner_session_id: owner,
+                        source: source.clone(),
+                        source_version: version.clone(),
+                        payload_ref: payload_ref.clone(),
+                    },
+                ))
+                .unwrap();
+            dense
+                .record(TimelineEventKind::Notification(
+                    NotificationEvent::Consumed {
+                        notification_ids: vec![id],
+                        turn,
+                        input: None,
+                    },
+                ))
+                .unwrap();
+            let n = if n % 2 == 0 || n == 127 {
+                Some(n)
+            } else {
+                None
+            };
             if let Some(n) = n {
-                let notice = crate::session::notification_inbox::parent_message_notice(&received, Some(body)).unwrap();
-                anchors.push((received.seq, n, SessionUpdate::Grow(Box::new(SessionNotification {
-                    session_id: info.id.clone(), update: GrowUpdate::UiNotice(notice),
-                    meta: Some(serde_json::json!({"eventId": format!("anchored-{n}")})),
-                }))));
+                let notice = crate::session::notification_inbox::parent_message_notice(
+                    &received,
+                    Some(body),
+                )
+                .unwrap();
+                anchors.push((
+                    received.seq,
+                    n,
+                    SessionUpdate::Grow(Box::new(SessionNotification {
+                        session_id: info.id.clone(),
+                        update: GrowUpdate::UiNotice(notice),
+                        meta: Some(serde_json::json!({"eventId": format!("anchored-{n}")})),
+                    })),
+                ));
             }
             messages.push((received, source, payload_ref));
         }
         let publication = dense.record(observation("publish-agent-messages")).unwrap();
         for event in dense.events() {
             storage.append_timeline_event(&info, event).await.unwrap();
-            if let Some((_, _, anchor)) = anchors.iter().find(|(seq, n, _)| *seq == event.seq && *n != 127) {
-                storage.append_update_durable_commit_aware(&info, anchor).await.unwrap();
+            if let Some((_, _, anchor)) = anchors
+                .iter()
+                .find(|(seq, n, _)| *seq == event.seq && *n != 127)
+            {
+                storage
+                    .append_update_durable_commit_aware(&info, anchor)
+                    .await
+                    .unwrap();
             }
         }
         let cut = read_manifest(&directory).unwrap().unwrap();
@@ -3275,27 +3888,64 @@ mod tests {
         assert_eq!(cut.retained_records, 0);
         // This anchor refers back across the checkpoint. Both live append and
         // suffix recovery must verify the original attribution.
-        storage.append_update_durable_commit_aware(&info, &anchors.last().unwrap().2).await.unwrap();
-        let dense_snapshot = storage.open_session(&info).unwrap().validated_timeline(info.id.0.as_ref()).unwrap();
-        let expected = dense_snapshot.history.prepare(&info.id, &dense_snapshot.timeline, None).unwrap();
+        storage
+            .append_update_durable_commit_aware(&info, &anchors.last().unwrap().2)
+            .await
+            .unwrap();
+        let dense_snapshot = storage
+            .open_session(&info)
+            .unwrap()
+            .validated_timeline(info.id.0.as_ref())
+            .unwrap();
+        let expected = dense_snapshot
+            .history
+            .prepare(&info.id, &dense_snapshot.timeline, None)
+            .unwrap();
         drop(storage);
 
         let storage = JsonlStorageAdapter::with_root(root.path().to_owned());
-        let restored = storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
+        let restored = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
         assert!(restored.timeline.pending_notifications().is_empty());
-        assert!(restored.timeline.events().iter().all(|event| !matches!(event.kind, TimelineEventKind::Notification(_))));
+        assert!(
+            restored
+                .timeline
+                .events()
+                .iter()
+                .all(|event| !matches!(event.kind, TimelineEventKind::Notification(_)))
+        );
         let (first, first_source, first_payload) = &messages[0];
-        let exact = restored.timeline.exact_agent_message_receipts(Some(("parent", "0"))).unwrap();
+        let exact = restored
+            .timeline
+            .exact_agent_message_receipts(Some(("parent", "0")))
+            .unwrap();
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].seq, first.seq);
-        assert_eq!(restored.timeline.exact_notification_consumer(first_source, &version).unwrap(), Some(turn));
+        assert_eq!(
+            restored
+                .timeline
+                .exact_notification_consumer(first_source, &version)
+                .unwrap(),
+            Some(turn)
+        );
         let index = restored.history.indexed.as_ref().unwrap();
         let history = index.tools.cut(index.clone()).unwrap();
         let roots = chat_state::timeline::ExecutionHistory::notification_payload_hashes(
-            &history, Some(&[first_payload.blake3.clone(), "unused".into()]), &|| false,
-        ).unwrap();
-        assert_eq!(roots, std::collections::BTreeSet::from([first_payload.blake3.clone()]));
-        let prepared = restored.history.prepare_indexed(&info.id, &restored.timeline).unwrap();
+            &history,
+            Some(&[first_payload.blake3.clone(), "unused".into()]),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(
+            roots,
+            std::collections::BTreeSet::from([first_payload.blake3.clone()])
+        );
+        let prepared = restored
+            .history
+            .prepare_indexed(&info.id, &restored.timeline)
+            .unwrap();
         let pages = restored.history.indexed_pages(prepared).unwrap().unwrap();
         let mut before = history::PagePosition::newest();
         let mut captured = Vec::new();
@@ -3306,12 +3956,21 @@ mod tests {
             assert_ne!(older, before);
             before = older;
         }
-        let notices = |rows: Vec<SessionUpdate>| rows.into_iter().filter_map(|row| match row {
-            SessionUpdate::Grow(value) if matches!(value.update, GrowUpdate::UiNotice(_)) => {
-                Some((value.meta.as_ref().unwrap()["eventId"].clone(), serde_json::to_value(value.update).unwrap()))
-            }
-            _ => None,
-        }).collect::<Vec<_>>();
+        let notices = |rows: Vec<SessionUpdate>| {
+            rows.into_iter()
+                .filter_map(|row| match row {
+                    SessionUpdate::Grow(value)
+                        if matches!(value.update, GrowUpdate::UiNotice(_)) =>
+                    {
+                        Some((
+                            value.meta.as_ref().unwrap()["eventId"].clone(),
+                            serde_json::to_value(value.update).unwrap(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(notices(captured), notices(expected.updates));
     }
 
@@ -3530,47 +4189,91 @@ mod tests {
     #[tokio::test]
     async fn image_projection_publishes_exact_surface_and_keeps_original_evidence() {
         use chat_state::{ImageProjectionEvent, ImageShadow, ImageShadowSource};
-        use sampling_types::conversation::{UNSUPPORTED_IMAGE_REPLACEMENT, conversation_image_groups};
+        use sampling_types::conversation::{
+            UNSUPPORTED_IMAGE_REPLACEMENT, conversation_image_groups,
+        };
         use sampling_types::{ContentPart, ConversationItem, ModelImageInputKey};
 
         let root = tempfile::tempdir().unwrap();
         let (storage, info) = fixture(root.path());
-        storage.init_session(&info, default_model_id()).await.unwrap();
-        let mut dense = chat_state::Timeline::from_seed(vec![
-            ConversationItem::user_with_parts(vec![ContentPart::Image {
-                url: "data:image/png;base64,original".into(),
-                description: None,
-            }]),
-        ]).unwrap();
+        storage
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
+        let mut dense =
+            chat_state::Timeline::from_seed(vec![ConversationItem::user_with_parts(vec![
+                ContentPart::Image {
+                    url: "data:image/png;base64,original".into(),
+                    description: None,
+                },
+            ])])
+            .unwrap();
         let original = dense.events()[0].clone();
-        storage.append_timeline_event(&info, &original).await.unwrap();
+        storage
+            .append_timeline_event(&info, &original)
+            .await
+            .unwrap();
         let group = conversation_image_groups(dense.surface()).remove(0);
-        let projection = dense.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
-            trigger_runtime: ModelImageInputKey::new("mock", "messages", "endpoint"),
-            source_revision: dense.surface_revision(),
-            shadows: vec![ImageShadow {
-                source: dense.surface_ids()[0],
-                fingerprint: group.fingerprint,
-                image_count: 1,
-                replacement: UNSUPPORTED_IMAGE_REPLACEMENT.into(),
-                provenance: ImageShadowSource::UnsupportedModel,
-            }],
-            tool_calls: vec![],
-        })).unwrap();
-        storage.append_timeline_event_durable(&info, &projection).await.unwrap();
-        let tail = dense.append(ConversationItem::user("fixed tail"), MessageCause::User).unwrap();
-        storage.append_timeline_event_durable(&info, &tail).await.unwrap();
+        let projection = dense
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: ModelImageInputKey::new("mock", "messages", "endpoint"),
+                source_revision: dense.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: dense.surface_ids()[0],
+                    fingerprint: group.fingerprint,
+                    image_count: 1,
+                    replacement: UNSUPPORTED_IMAGE_REPLACEMENT.into(),
+                    provenance: ImageShadowSource::UnsupportedModel,
+                }],
+                tool_calls: vec![],
+            }))
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &projection)
+            .await
+            .unwrap();
+        let tail = dense
+            .append(ConversationItem::user("fixed tail"), MessageCause::User)
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &tail)
+            .await
+            .unwrap();
         drop(storage);
 
         let (storage, _) = fixture(root.path());
-        let recovered = storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
+        let recovered = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
         assert!(recovered.timeline.has_surface_checkpoint());
-        assert_eq!(recovered.timeline.events().iter().map(|event| event.seq).collect::<Vec<_>>(), [tail.seq]);
+        assert_eq!(
+            recovered
+                .timeline
+                .events()
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            [tail.seq]
+        );
         assert_eq!(recovered.timeline.surface_ids(), dense.surface_ids());
-        assert_eq!(recovered.timeline.surface_revision(), dense.surface_revision());
-        assert_eq!(serde_json::to_value(recovered.timeline.surface()).unwrap(), serde_json::to_value(dense.surface()).unwrap());
-        let source = recovered.timeline.exact_event(original.seq).unwrap().unwrap();
-        assert_eq!(conversation_image_groups(&source.messages().unwrap().items).len(), 1);
+        assert_eq!(
+            recovered.timeline.surface_revision(),
+            dense.surface_revision()
+        );
+        assert_eq!(
+            serde_json::to_value(recovered.timeline.surface()).unwrap(),
+            serde_json::to_value(dense.surface()).unwrap()
+        );
+        let source = recovered
+            .timeline
+            .exact_event(original.seq)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            conversation_image_groups(&source.messages().unwrap().items).len(),
+            1
+        );
         assert!(conversation_image_groups(recovered.timeline.surface()).is_empty());
         let manifest = &recovered.history.indexed.as_ref().unwrap().manifest;
         assert_eq!(manifest.retained_records, 0);
@@ -4902,6 +5605,7 @@ mod tests {
     #[tokio::test]
     async fn published_turn_completion_presentation_is_paged() {
         use super::super::{AppendDurability, ledger::AppendFact};
+        use crate::extensions::notification::{PromptUsage, PromptUsageModel};
         use history::GrowHistoryFact;
 
         let root = tempfile::tempdir().unwrap();
@@ -4910,6 +5614,74 @@ mod tests {
             .init_session(&info, default_model_id())
             .await
             .unwrap();
+        // A completion whose frozen usage snapshot (full total 150 = 100 in +
+        // 50 out, per-model rows, cache known + unknown buckets, incomplete
+        // with unknown cost) must survive every later page read byte for byte.
+        // `closed-1` sits outside the initial latest page, so the snapshot is
+        // only served from an older DISPLAY page.
+        let frozen_usage = PromptUsage {
+            totals: PromptUsageModel {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                cached_read_tokens: 20,
+                cache_creation_tokens: 10,
+                cache_read_known_input_tokens: 15,
+                cache_read_unknown_calls: 1,
+                cache_write_unknown_calls: 2,
+                reasoning_tokens: 5,
+                model_calls: 3,
+                api_duration_ms: 2500,
+                cost_usd_ticks: None,
+                cost_is_partial: false,
+                cost_missing_calls: 0,
+            },
+            model_usage: [
+                (
+                    "model-a",
+                    PromptUsageModel {
+                        input_tokens: 60,
+                        output_tokens: 40,
+                        total_tokens: 100,
+                        cached_read_tokens: 20,
+                        cache_creation_tokens: 0,
+                        cache_read_known_input_tokens: 15,
+                        cache_read_unknown_calls: 1,
+                        cache_write_unknown_calls: 0,
+                        reasoning_tokens: 5,
+                        model_calls: 2,
+                        api_duration_ms: 2000,
+                        cost_usd_ticks: None,
+                        cost_is_partial: false,
+                        cost_missing_calls: 0,
+                    },
+                ),
+                (
+                    "model-b",
+                    PromptUsageModel {
+                        input_tokens: 40,
+                        output_tokens: 10,
+                        total_tokens: 50,
+                        cached_read_tokens: 0,
+                        cache_creation_tokens: 10,
+                        cache_read_known_input_tokens: 0,
+                        cache_read_unknown_calls: 0,
+                        cache_write_unknown_calls: 2,
+                        reasoning_tokens: 0,
+                        model_calls: 1,
+                        api_duration_ms: 500,
+                        cost_usd_ticks: None,
+                        cost_is_partial: false,
+                        cost_missing_calls: 0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .map(|(model, usage)| (model.to_string(), usage))
+            .collect(),
+            num_turns: 1,
+            usage_is_incomplete: true,
+        };
         for index in 0..(history::HISTORY_PAGE_ROWS + 2) {
             let fact = history::HistoryFact {
                 meta: None,
@@ -4918,7 +5690,7 @@ mod tests {
                     identity: None,
                     stop_reason: "end_turn".into(),
                     agent_result: None,
-                    usage: None,
+                    usage: (index == 1).then(|| frozen_usage.clone()),
                 })),
             };
             storage
@@ -4950,13 +5722,29 @@ mod tests {
             .prepare_indexed(&info.id, &loaded.timeline)
             .unwrap();
         let pages = loaded.history.indexed_pages(prepared).unwrap().unwrap();
+        // Persisted timeline usage snapshot before further reads; the
+        // presentation completions live in the DISPLAY index, so this guards
+        // aggregate stability, not the frozen per-turn totals below.
+        let timeline_totals =
+            chat_state::actor::state::project_timeline_usage_totals(&loaded.timeline).unwrap();
         let (before, recent) = pages
             .page_before(&info.id, history::PagePosition::newest())
             .unwrap();
         assert_eq!(recent.len(), history::HISTORY_PAGE_ROWS);
+        assert!(serde_json::to_vec(&recent).unwrap().len() <= history::HISTORY_PAGE_BYTES);
         let (before, older) = pages.page_before(&info.id, before.unwrap()).unwrap();
         assert!(before.is_none());
         assert_eq!(older.len(), 2);
+        assert!(serde_json::to_vec(&older).unwrap().len() <= history::HISTORY_PAGE_BYTES);
+        // The ids assertion below pins `closed-1` to this older page, so the
+        // frozen snapshot is served from outside the initial latest page.
+        let older_usage = find_turn_usage(older.iter(), "closed-1")
+            .expect("older DISPLAY page serves the frozen completion usage");
+        assert_eq!(older_usage, frozen_usage);
+        assert_eq!(
+            serde_json::to_vec(&older_usage).unwrap(),
+            serde_json::to_vec(&frozen_usage).unwrap()
+        );
         let ids = older
             .into_iter()
             .chain(recent)
@@ -4977,6 +5765,267 @@ mod tests {
                 .map(|index| format!("closed-{index}"))
                 .collect::<Vec<_>>()
         );
+
+        fn find_turn_usage<'a>(
+            updates: impl IntoIterator<Item = &'a SessionUpdate>,
+            prompt: &str,
+        ) -> Option<PromptUsage> {
+            for update in updates {
+                let SessionUpdate::Grow(update) = update else {
+                    panic!("expected a Grow update");
+                };
+                let crate::extensions::notification::SessionUpdate::TurnCompleted {
+                    prompt_id,
+                    usage,
+                    ..
+                } = &update.update
+                else {
+                    panic!("expected a Turn completion");
+                };
+                if prompt_id == prompt {
+                    return usage.clone();
+                }
+            }
+            None
+        }
+
+        // Same source, opposite direction: the forward walk serves the same
+        // frozen snapshot exactly once.
+        let mut forward_usage = None;
+        let mut after = history::PagePosition::oldest();
+        loop {
+            let window = pages.read_after(&info.id, after).unwrap();
+            assert!(window.rows.len() <= history::HISTORY_PAGE_ROWS);
+            assert!(serde_json::to_vec(&window.rows).unwrap().len() <= history::HISTORY_PAGE_BYTES);
+            if let Some(usage) =
+                find_turn_usage(window.rows.iter().map(|row| &row.update), "closed-1")
+            {
+                assert!(
+                    forward_usage.is_none(),
+                    "closed-1 served twice in the forward walk"
+                );
+                assert_eq!(usage, frozen_usage);
+                forward_usage = Some(usage);
+            }
+            match window.newer_position {
+                Some(next) => {
+                    assert_ne!(next, after);
+                    after = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(forward_usage, Some(frozen_usage.clone()));
+
+        // A fresh cold load over the same journal must reproduce the frozen
+        // snapshot and the same persisted timeline usage totals.
+        drop(pages);
+        drop(loaded);
+        drop(storage);
+        let storage = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let loaded = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
+        assert_eq!(
+            chat_state::actor::state::project_timeline_usage_totals(&loaded.timeline).unwrap(),
+            timeline_totals,
+            "persisted timeline usage totals changed across the cold reload"
+        );
+        let prepared = loaded
+            .history
+            .prepare_indexed(&info.id, &loaded.timeline)
+            .unwrap();
+        let pages = loaded.history.indexed_pages(prepared).unwrap().unwrap();
+        let (cold_before, cold_recent) = pages
+            .page_before(&info.id, history::PagePosition::newest())
+            .unwrap();
+        assert_eq!(cold_recent.len(), history::HISTORY_PAGE_ROWS);
+        let (cold_before, cold_older) = pages.page_before(&info.id, cold_before.unwrap()).unwrap();
+        assert!(cold_before.is_none());
+        let cold_usage = find_turn_usage(cold_older.iter(), "closed-1")
+            .expect("cold reload still serves closed-1 from the older page");
+        assert_eq!(cold_usage, frozen_usage);
+        assert_eq!(
+            serde_json::to_vec(&cold_usage).unwrap(),
+            serde_json::to_vec(&frozen_usage).unwrap()
+        );
+
+        // ── Late session-only bill ──
+        // The frozen 150 above is a preconstructed fixture, not a generated
+        // bill. A settlement recorded after every completion must raise the
+        // lifetime projection by exactly its own amounts while every frozen
+        // TurnCompleted presentation keeps its original snapshot and the
+        // completion population stays untouched. Usage facts live in their
+        // own record class, so they never enter the DISPLAY pages below.
+        drop(pages);
+        let mut late_timeline = loaded.timeline.clone();
+        // Append through this same writer owner; the indexed Timeline retains
+        // its database handle until both loaded views are dropped below.
+        let late_settlement = serde_json::json!({
+            "attempt_key": "late-session-only",
+            "model_id": "model-late",
+            "captured_prompt_index": 0,
+            "prompt_owner": null,
+            "usage": {
+                "prompt_tokens": 30,
+                "completion_tokens": 0,
+                "total_tokens": 30,
+                "reasoning_tokens": 0,
+                "cached_prompt_tokens": 0,
+                "cache_read_known": true,
+                "cache_creation_prompt_tokens": 0,
+                "cache_write_known": true,
+            },
+            "cost_usd_ticks": null,
+            "api_duration_ms": null,
+        });
+        let late = late_timeline
+            .record(chat_state::TimelineEventKind::Observation(
+                chat_state::ObservationEvent {
+                    scope: "sampling_usage".into(),
+                    name: "attempt_settled".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(late_settlement),
+                },
+            ))
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &late)
+            .await
+            .unwrap();
+        drop(late_timeline);
+        drop(loaded);
+        drop(storage);
+
+        let storage = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let loaded = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
+        let late_totals =
+            chat_state::actor::state::project_timeline_usage_totals(&loaded.timeline).unwrap();
+        // The lifetime projection rose by exactly the settlement: 30 input
+        // tokens (both cache buckets known, so known-input tracks them), one
+        // main-loop round, and one call that reported no cost.
+        assert_eq!(
+            late_totals.totals.input_tokens,
+            timeline_totals.totals.input_tokens + 30
+        );
+        assert_eq!(
+            late_totals.totals.cache_read_known_input_tokens,
+            timeline_totals.totals.cache_read_known_input_tokens + 30
+        );
+        assert_eq!(
+            late_totals.totals.total_tokens(),
+            timeline_totals.totals.total_tokens() + 30
+        );
+        assert_eq!(
+            late_totals.totals.output_tokens,
+            timeline_totals.totals.output_tokens
+        );
+        assert_eq!(
+            late_totals.totals.cached_read_tokens,
+            timeline_totals.totals.cached_read_tokens
+        );
+        assert_eq!(
+            late_totals.totals.cache_creation_tokens,
+            timeline_totals.totals.cache_creation_tokens
+        );
+        assert_eq!(
+            late_totals.totals.cache_read_unknown_calls,
+            timeline_totals.totals.cache_read_unknown_calls
+        );
+        assert_eq!(
+            late_totals.totals.cache_write_unknown_calls,
+            timeline_totals.totals.cache_write_unknown_calls
+        );
+        assert_eq!(
+            late_totals.totals.reasoning_tokens,
+            timeline_totals.totals.reasoning_tokens
+        );
+        assert_eq!(
+            late_totals.totals.model_calls,
+            timeline_totals.totals.model_calls + 1
+        );
+        assert_eq!(
+            late_totals.totals.api_duration_ms,
+            timeline_totals.totals.api_duration_ms
+        );
+        assert_eq!(
+            late_totals.totals.cost_usd_ticks,
+            timeline_totals.totals.cost_usd_ticks
+        );
+        assert_eq!(
+            late_totals.totals.cost_missing_calls,
+            timeline_totals.totals.cost_missing_calls + 1
+        );
+        assert_eq!(
+            late_totals.main_loop_model_calls,
+            timeline_totals.main_loop_model_calls + 1
+        );
+        assert!(!late_totals.incomplete);
+        assert_eq!(
+            late_totals.by_model.len(),
+            timeline_totals.by_model.len() + 1
+        );
+        let late_row = late_totals
+            .by_model
+            .get("model-late")
+            .expect("the settlement lands on its own model row");
+        assert_eq!(late_row.input_tokens, 30);
+        assert_eq!(late_row.cache_read_known_input_tokens, 30);
+        assert_eq!(late_row.model_calls, 1);
+        assert_eq!(late_row.total_tokens(), 30);
+
+        // Every frozen presentation is unchanged: same completion population,
+        // same ascending ids, `closed-1` still byte-for-byte its original 150
+        // snapshot, and every other completion still carries no usage.
+        let prepared = loaded
+            .history
+            .prepare_indexed(&info.id, &loaded.timeline)
+            .unwrap();
+        let pages = loaded.history.indexed_pages(prepared).unwrap().unwrap();
+        let mut completions = Vec::new();
+        let mut cursor = Some(history::PagePosition::newest());
+        while let Some(before) = cursor {
+            let (older, page) = pages.page_before(&info.id, before).unwrap();
+            assert!(page.len() <= history::HISTORY_PAGE_ROWS);
+            assert!(serde_json::to_vec(&page).unwrap().len() <= history::HISTORY_PAGE_BYTES);
+            let mut page_completions = Vec::new();
+            for update in page {
+                let SessionUpdate::Grow(update) = update else {
+                    panic!("expected a Grow update");
+                };
+                let crate::extensions::notification::SessionUpdate::TurnCompleted {
+                    prompt_id,
+                    usage,
+                    ..
+                } = update.update
+                else {
+                    panic!("expected a Turn completion");
+                };
+                page_completions.push((prompt_id, usage));
+            }
+            // Before walks newest windows first; each window is chronological.
+            page_completions.append(&mut completions);
+            completions = page_completions;
+            cursor = older;
+        }
+        assert_eq!(completions.len(), history::HISTORY_PAGE_ROWS + 2);
+        for (index, (prompt_id, usage)) in completions.iter().enumerate() {
+            assert_eq!(prompt_id, &format!("closed-{index}"));
+            if index == 1 {
+                assert_eq!(usage.as_ref().unwrap(), &frozen_usage);
+                assert_eq!(
+                    serde_json::to_vec(usage).unwrap(),
+                    serde_json::to_vec(&frozen_usage).unwrap()
+                );
+            } else {
+                assert!(usage.is_none());
+            }
+        }
     }
 
     #[tokio::test]
@@ -5388,9 +6437,8 @@ mod tests {
     #[tokio::test]
     async fn published_auxiliary_sidebands_keep_only_unfinished_work() {
         use chat_state::{
-            SidebandAttempt, SidebandBudgetPolicy, SidebandEnd, SidebandEventKind,
-            SidebandOutcome, SidebandPurpose, SidebandRequest, SidebandRoute, SidebandSpawnEvent,
-            SidebandTimeline,
+            SidebandAttempt, SidebandBudgetPolicy, SidebandEnd, SidebandEventKind, SidebandOutcome,
+            SidebandPurpose, SidebandRequest, SidebandRoute, SidebandSpawnEvent, SidebandTimeline,
         };
 
         let root = tempfile::tempdir().unwrap();
@@ -5483,9 +6531,7 @@ mod tests {
                 purpose: SidebandPurpose::ContextRecall,
                 source_refs: vec![source_ref.clone()],
             };
-            let spawn_event = dense
-                .record(TimelineEventKind::Sideband(spawn))
-                .unwrap();
+            let spawn_event = dense.record(TimelineEventKind::Sideband(spawn)).unwrap();
             storage
                 .append_timeline_event_durable(&info, &spawn_event)
                 .await
@@ -5970,20 +7016,42 @@ mod tests {
         use sampling_types::ConversationItem;
         let root = tempfile::tempdir().unwrap();
         let (storage, info) = fixture(root.path());
-        storage.init_session(&info, default_model_id()).await.unwrap();
+        storage
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
         let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
-        storage.append_timeline_event_durable(&info, &timeline.events()[0]).await.unwrap();
-        let publication = timeline.record(observation("published diagnostic")).unwrap();
-        storage.append_timeline_event_durable(&info, &publication).await.unwrap();
-        let rebuild = timeline.replace_all(
-            vec![ConversationItem::system("system"), ConversationItem::project_instructions("new project context")],
-            MessageCause::ContextRebuild,
-        ).unwrap();
-        storage.append_timeline_event_durable(&info, &rebuild).await.unwrap();
+        storage
+            .append_timeline_event_durable(&info, &timeline.events()[0])
+            .await
+            .unwrap();
+        let publication = timeline
+            .record(observation("published diagnostic"))
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &publication)
+            .await
+            .unwrap();
+        let rebuild = timeline
+            .replace_all(
+                vec![
+                    ConversationItem::system("system"),
+                    ConversationItem::project_instructions("new project context"),
+                ],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &rebuild)
+            .await
+            .unwrap();
         drop(storage);
 
         let storage = JsonlStorageAdapter::with_root(root.path().to_path_buf());
-        let loaded = storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
+        let loaded = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
         let index = loaded.history.indexed.as_ref().unwrap();
         assert_eq!(index.published_domain(), rebuild.seq.get());
         assert_eq!(loaded.timeline.history_branch(), Some(rebuild.seq));
@@ -6250,18 +7318,29 @@ mod tests {
         use sampling_types::ConversationItem;
         let root = tempfile::tempdir().unwrap();
         let (storage, info) = fixture(root.path());
-        storage.init_session(&info, default_model_id()).await.unwrap();
+        storage
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
         let large = "好\u{0001}\"".repeat(800_000);
         let text = std::iter::once(large.clone())
             .chain((1..129).map(|item| format!("inherited message {item}")))
             .collect::<Vec<_>>();
-        let mut timeline = Timeline::from_seed(text.iter().cloned().map(ConversationItem::assistant).collect()).unwrap();
+        let mut timeline = Timeline::from_seed(
+            text.iter()
+                .cloned()
+                .map(ConversationItem::assistant)
+                .collect(),
+        )
+        .unwrap();
         for event in timeline.events() {
             storage.append_timeline_event(&info, event).await.unwrap();
         }
         for (item, id) in timeline.surface_ids().iter().enumerate() {
             let fact = history::HistoryFact {
-                meta: serde_json::json!({"eventId": format!("inherited-{item}")}).as_object().cloned(),
+                meta: serde_json::json!({"eventId": format!("inherited-{item}")})
+                    .as_object()
+                    .cloned(),
                 content: HistoryContent::Message {
                     event: id.event.get(),
                     item: id.item as usize,
@@ -6269,17 +7348,34 @@ mod tests {
                     chunk_meta: serde_json::json!({"inherited": true}).as_object().cloned(),
                 },
             };
-            storage.append_journal_fact(&info, AppendFact::Presentation(fact), AppendDurability::Buffered).await.unwrap();
+            storage
+                .append_journal_fact(
+                    &info,
+                    AppendFact::Presentation(fact),
+                    AppendDurability::Buffered,
+                )
+                .await
+                .unwrap();
         }
-        let replacement = timeline.replace_all(
-            vec![ConversationItem::user("x".repeat(MAX_UNPUBLISHED_BYTES as usize))],
-            MessageCause::ContextRebuild,
-        ).unwrap();
-        storage.append_timeline_event_durable(&info, &replacement).await.unwrap();
+        let replacement = timeline
+            .replace_all(
+                vec![ConversationItem::user(
+                    "x".repeat(MAX_UNPUBLISHED_BYTES as usize),
+                )],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &replacement)
+            .await
+            .unwrap();
         drop(storage);
 
         let storage = JsonlStorageAdapter::with_root(root.path().to_path_buf());
-        let loaded = storage.load_session_for_write_with_indexed_history(&info).await.unwrap();
+        let loaded = storage
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
         assert_eq!(loaded.timeline.surface_ids(), timeline.surface_ids());
         assert_eq!(
             serde_json::to_value(loaded.timeline.surface()).unwrap(),
@@ -6287,7 +7383,10 @@ mod tests {
         );
         assert!(loaded.history.sources.is_empty());
         assert_eq!(loaded.history.display_record_count(), text.len());
-        let prepared = loaded.history.prepare_indexed(&info.id, &loaded.timeline).unwrap();
+        let prepared = loaded
+            .history
+            .prepare_indexed(&info.id, &loaded.timeline)
+            .unwrap();
         let pages = loaded.history.indexed_pages(prepared).unwrap().unwrap();
         let mut cursor = Some(history::PagePosition::newest());
         let mut chunks = Vec::new();
@@ -6295,15 +7394,21 @@ mod tests {
             let (older, updates) = pages.page_before(&info.id, before).unwrap();
             assert!(serde_json::to_vec(&updates).unwrap().len() <= history::HISTORY_PAGE_BYTES);
             for update in updates.into_iter().rev() {
-                let SessionUpdate::Acp(notification) = update else { panic!("expected inherited text") };
+                let SessionUpdate::Acp(notification) = update else {
+                    panic!("expected inherited text")
+                };
                 let meta = notification.meta.unwrap();
                 assert!(!meta.contains_key("samplingRequestId"));
                 assert!(!meta.contains_key("responseProjection"));
                 let seq = meta["grow/historyMessageEvent"].as_u64().unwrap() as usize;
                 assert_eq!(meta["eventId"], format!("inherited-{seq}"));
-                let acp::SessionUpdate::AgentMessageChunk(chunk) = notification.update else { panic!("expected assistant chunk") };
+                let acp::SessionUpdate::AgentMessageChunk(chunk) = notification.update else {
+                    panic!("expected assistant chunk")
+                };
                 assert_eq!(chunk.meta.unwrap()["inherited"], true);
-                let acp::ContentBlock::Text(body) = chunk.content else { panic!("expected text") };
+                let acp::ContentBlock::Text(body) = chunk.content else {
+                    panic!("expected text")
+                };
                 chunks.push((seq, body.text));
             }
             assert_ne!(older, cursor);
@@ -6317,6 +7422,134 @@ mod tests {
             reconstructed[seq].push_str(&body);
         }
         assert_eq!(reconstructed, text);
+
+        let mut forward = Vec::new();
+        let mut after = history::PagePosition::oldest();
+        let mut next_start = std::collections::BTreeMap::<(u64, u64), u64>::new();
+        loop {
+            let window = pages.read_after(&info.id, after).unwrap();
+            assert!(window.rows.len() <= history::HISTORY_PAGE_ROWS);
+            assert!(serde_json::to_vec(&window.rows).unwrap().len() <= history::HISTORY_PAGE_BYTES);
+            if window.rows.is_empty() {
+                assert!(window.range.is_none());
+                break;
+            }
+            for row in &window.rows {
+                let history::HistoryEntity::Message {
+                    event_seq,
+                    item_ordinal,
+                } = row.entity.clone().unwrap()
+                else {
+                    panic!("inherited text keeps its message identity");
+                };
+                let fragment = row.fragment.expect("indexed text uses an encoded fragment");
+                assert_eq!(
+                    fragment.coordinate,
+                    history::HistoryFragmentCoordinate::EncodedResponseBytes
+                );
+                let expected = next_start
+                    .get(&(event_seq, item_ordinal))
+                    .copied()
+                    .unwrap_or(0);
+                assert_eq!(
+                    fragment.start, expected,
+                    "adjacent encoded fragments must not overlap"
+                );
+                next_start.insert((event_seq, item_ordinal), fragment.end_exclusive);
+                let SessionUpdate::Acp(notification) = &row.update else {
+                    panic!("expected inherited text")
+                };
+                let meta = notification.meta.as_ref().unwrap();
+                assert!(!meta.contains_key("samplingRequestId"));
+                assert_eq!(meta["grow/historyMessageEvent"], event_seq);
+                assert_eq!(meta["grow/historyMessageItem"], item_ordinal);
+                let acp::SessionUpdate::AgentMessageChunk(chunk) = &notification.update else {
+                    panic!("expected assistant chunk")
+                };
+                let acp::ContentBlock::Text(body) = &chunk.content else {
+                    panic!("expected text")
+                };
+                forward.push((event_seq, item_ordinal, body.text.clone()));
+            }
+            match window.newer_position {
+                Some(next) => {
+                    assert_ne!(next, after);
+                    after = next;
+                }
+                None => break,
+            }
+        }
+        let mut backward = Vec::new();
+        let mut before = history::PagePosition::newest();
+        loop {
+            let window = pages.read_before(&info.id, before).unwrap();
+            if window.rows.is_empty() {
+                break;
+            }
+            for row in window.rows.iter().rev() {
+                let SessionUpdate::Acp(notification) = &row.update else {
+                    panic!("expected inherited text")
+                };
+                let meta = notification.meta.as_ref().unwrap();
+                let event = meta["grow/historyMessageEvent"].as_u64().unwrap();
+                let item = meta["grow/historyMessageItem"].as_u64().unwrap();
+                let acp::SessionUpdate::AgentMessageChunk(chunk) = &notification.update else {
+                    panic!("expected assistant chunk")
+                };
+                let acp::ContentBlock::Text(body) = &chunk.content else {
+                    panic!("expected text")
+                };
+                backward.push((event, item, body.text.clone()));
+            }
+            match window.older_position {
+                Some(older) => {
+                    assert_ne!(older, before);
+                    before = older;
+                }
+                None => break,
+            }
+        }
+        backward.reverse();
+        assert!(forward.len() > text.len());
+        // Envelope and page budgets differ per direction, so fragment cuts are
+        // allowed to differ; only the per-message reassembly must agree.
+        let reassemble = |chunks: Vec<(u64, u64, String)>| {
+            let mut messages = std::collections::BTreeMap::<(u64, u64), String>::new();
+            for (event, item, body) in chunks {
+                messages.entry((event, item)).or_default().push_str(&body);
+            }
+            messages
+        };
+        for (direction, messages) in [
+            ("forward", reassemble(forward)),
+            ("backward", reassemble(backward)),
+        ] {
+            let reassembled: Vec<String> = messages.into_values().collect();
+            assert_eq!(
+                reassembled.len(),
+                text.len(),
+                "{direction} reassembly covers {} canonical messages, expected {}",
+                reassembled.len(),
+                text.len()
+            );
+            for (idx, (got, want)) in reassembled.iter().zip(text.iter()).enumerate() {
+                assert_eq!(
+                    got.len(),
+                    want.len(),
+                    "{direction} message {idx} reassembled to {} bytes, expected {}",
+                    got.len(),
+                    want.len()
+                );
+                if got != want {
+                    let diff = got
+                        .bytes()
+                        .zip(want.bytes())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(got.len());
+                    panic!("{direction} message {idx} diverges from source at byte {diff}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -6378,6 +7611,55 @@ mod tests {
         assert!(parts.len() > 1);
         parts.reverse();
         assert_eq!(parts.concat(), original);
+
+        let mut after = history::PagePosition::oldest();
+        let mut forward = String::new();
+        let mut covered = std::collections::BTreeMap::<history::HistorySourceKey, u64>::new();
+        loop {
+            let window = pages.read_after(&info.id, after).unwrap();
+            if window.rows.is_empty() {
+                break;
+            }
+            for row in &window.rows {
+                let history::HistoryEntity::Message { .. } = row.entity.clone().unwrap() else {
+                    panic!("canonical response keeps message identity");
+                };
+                let fragment = row
+                    .fragment
+                    .expect("indexed response bytes stay on their own coordinate");
+                assert_eq!(
+                    fragment.coordinate,
+                    history::HistoryFragmentCoordinate::EncodedResponseBytes
+                );
+                assert_eq!(
+                    fragment.start,
+                    covered.get(&row.source).copied().unwrap_or(0)
+                );
+                covered.insert(row.source, fragment.end_exclusive);
+                let SessionUpdate::Acp(notification) = &row.update else {
+                    panic!("expected response")
+                };
+                assert!(
+                    notification
+                        .meta
+                        .as_ref()
+                        .unwrap()
+                        .contains_key("samplingRequestId")
+                );
+                let acp::SessionUpdate::AgentMessageChunk(chunk) = &notification.update else {
+                    panic!("expected assistant chunk")
+                };
+                let acp::ContentBlock::Text(text) = &chunk.content else {
+                    panic!("expected text")
+                };
+                forward.push_str(&text.text);
+            }
+            match window.newer_position {
+                Some(next) => after = next,
+                None => break,
+            }
+        }
+        assert_eq!(forward, original);
     }
 
     #[tokio::test]
@@ -6588,13 +7870,75 @@ mod tests {
         assert!(fragment_pages > 1);
         fragments.reverse();
         let json = fragments.concat();
-        assert_eq!(json.len() as u64, total_bytes.unwrap());
-        assert_eq!(
-            blake3::hash(json.as_bytes()).to_hex().as_str(),
-            digest.unwrap()
-        );
+        let digest = digest.expect("before pages published a Tool digest");
+        let total_bytes = total_bytes.expect("before pages published a Tool length");
+        assert_eq!(json.len() as u64, total_bytes);
+        assert_eq!(blake3::hash(json.as_bytes()).to_hex().as_str(), digest);
         let body: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(body["rawOutput"]["text"], output);
+        let mut after = history::PagePosition::oldest();
+        let mut forward = String::new();
+        let mut saw_terminal = false;
+        let mut next_byte = 0u64;
+        loop {
+            let window = pages.read_after(&info.id, after).unwrap();
+            assert!(serde_json::to_vec(&window.rows).unwrap().len() <= history::HISTORY_PAGE_BYTES);
+            if window.rows.is_empty() {
+                break;
+            }
+            for row in &window.rows {
+                match &row.update {
+                    SessionUpdate::Grow(notification) => {
+                        let crate::extensions::notification::SessionUpdate::ToolOutputFragment(
+                            fragment,
+                        ) = &notification.update
+                        else {
+                            continue;
+                        };
+                        let history::HistoryEntity::Tool { tool_call_id } =
+                            row.entity.clone().unwrap()
+                        else {
+                            panic!("tool fragment identity");
+                        };
+                        assert_eq!(tool_call_id.as_str(), tool.0.as_ref());
+                        assert_eq!(fragment.tool_call_id, tool);
+                        assert_eq!(fragment.title, "Large output tool");
+                        assert_eq!(fragment.status, acp::ToolCallStatus::Completed);
+                        assert_eq!(fragment.digest, digest);
+                        assert_eq!(fragment.total_bytes, total_bytes);
+                        let envelope = row.fragment.expect("tool bytes use their own coordinate");
+                        assert_eq!(
+                            envelope.coordinate,
+                            history::HistoryFragmentCoordinate::ToolPayloadJsonBytes
+                        );
+                        assert_eq!(envelope.start, fragment.byte_start);
+                        assert_eq!(envelope.start, next_byte);
+                        assert_eq!(
+                            envelope.end_exclusive,
+                            fragment.byte_start + fragment.json.len() as u64
+                        );
+                        next_byte = envelope.end_exclusive;
+                        forward.push_str(&fragment.json);
+                        saw_terminal = true;
+                    }
+                    SessionUpdate::Acp(notification) => {
+                        if let acp::SessionUpdate::ToolCall(call) = &notification.update {
+                            assert_eq!(call.tool_call_id, tool);
+                            assert_eq!(call.status, acp::ToolCallStatus::Completed);
+                            assert_eq!(call.title, "Large output tool");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match window.newer_position {
+                Some(next) => after = next,
+                None => break,
+            }
+        }
+        assert!(saw_terminal);
+        assert_eq!(next_byte, total_bytes);
+        assert_eq!(forward, json);
     }
 
     #[tokio::test]

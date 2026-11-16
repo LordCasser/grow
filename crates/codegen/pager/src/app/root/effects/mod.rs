@@ -597,6 +597,9 @@ pub(crate) fn execute(
                                 models: shell::agent::models::SessionModelState::from_config_options(
                                     resp.config_options,
                                 ),
+                                behavior: crate::app::session::AgentSession::behavior_projection_from_meta(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -881,6 +884,9 @@ pub(crate) fn execute(
                                 models: shell::agent::models::SessionModelState::from_config_options(
                                     resp.config_options,
                                 ),
+                                behavior: crate::app::session::AgentSession::behavior_projection_from_meta(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -992,8 +998,10 @@ pub(crate) fn execute(
                                 &acp_session_id,
                             );
                             let foreground = parse_session_load_foreground(resp.meta.as_ref());
-                            let older_history_cursor = resp.meta.as_ref()
-                                .and_then(|meta| meta.get("grow/olderHistoryCursor"))
+                            let history_cut = resp
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.get("grow/historyCut"))
                                 .and_then(serde_json::Value::as_str)
                                 .map(str::to_owned);
                             TaskResult::SessionLoaded {
@@ -1008,11 +1016,10 @@ pub(crate) fn execute(
                                 code_restored,
                                 restore_summary,
                                 foreground,
-                                older_history_cursor,
-                                latest_history_cursor: resp.meta.as_ref()
-                                    .and_then(|meta| meta.get("grow/latestHistoryCursor"))
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned),
+                                history_cut,
+                                behavior: crate::app::session::AgentSession::behavior_projection_from_meta(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -1038,14 +1045,18 @@ pub(crate) fn execute(
             session_id,
             binding_epoch,
             request_id,
-            cursor,
+            generation,
+            cut,
+            query,
         } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
-                let params = serde_json::json!({
-                    "sessionId": session_id.0.as_ref(),
-                    "cursor": cursor,
-                });
+                let params = serde_json::to_value(shell::session::storage::ReadHistoryPage {
+                    session_id: session_id.clone(),
+                    cut,
+                    query: query.clone(),
+                })
+                .expect("serialize history page request");
                 let request = acp::ExtRequest::new(
                     "grow/read_history_page",
                     serde_json::value::to_raw_value(&params)
@@ -1060,34 +1071,74 @@ pub(crate) fn execute(
                                 return Err(error.to_string());
                             }
                             let result = wrapper.get("result").cloned().unwrap_or(wrapper);
-                            let response_session = result
-                                .get("sessionId")
-                                .and_then(serde_json::Value::as_str)
-                                .ok_or_else(|| "history page response has no sessionId".to_string())?;
-                            if response_session != session_id.0.as_ref() {
-                                return Err("history page response sessionId mismatch".to_string());
-                            }
-                            let updates = serde_json::from_value::<Vec<shell::session::storage::SessionUpdate>>(
-                                result.get("updates").cloned().ok_or_else(|| "history page response has no updates".to_string())?,
-                            ).map_err(|error| error.to_string())?;
-                            let older_cursor = result
-                                .get("olderCursor")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned);
-                            Ok((updates, older_cursor))
+                            serde_json::from_value::<shell::session::storage::HistoryPageResponse>(
+                                result,
+                            )
+                            .map_err(|error| error.to_string())
                         }),
                     Err(error) => Err(error.to_string()),
-                };
-                let (result, older_cursor) = match result {
-                    Ok((updates, cursor)) => (Ok(updates), cursor),
-                    Err(error) => (Err(error), None),
                 };
                 TaskResult::HistoryPageLoaded {
                     agent_id,
                     session_id,
                     binding_epoch,
                     request_id,
-                    older_cursor,
+                    generation,
+                    query,
+                    result,
+                }
+            });
+        }
+        Effect::ReadHistoryTimeline {
+            agent_id,
+            session_id,
+            binding_epoch,
+            request_id,
+            generation,
+            cut,
+            limit,
+            query,
+            jump_ordinal,
+            jump_seq,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::to_value(shell::session::storage::ReadHistoryTimeline {
+                    session_id: session_id.clone(),
+                    cut,
+                    limit,
+                    query: query.clone(),
+                })
+                .expect("serialize history timeline request");
+                let request = acp::ExtRequest::new(
+                    "grow/read_history_timeline",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize history timeline request")
+                        .into(),
+                );
+                let result = match acp_send(request, &tx).await {
+                    Ok(response) => serde_json::from_str::<serde_json::Value>(response.0.get())
+                        .map_err(|error| error.to_string())
+                        .and_then(|wrapper| {
+                            if let Some(error) = wrapper.get("error") {
+                                return Err(error.to_string());
+                            }
+                            let result = wrapper.get("result").cloned().unwrap_or(wrapper);
+                            serde_json::from_value::<
+                                shell::session::storage::HistoryTimelineResponse,
+                            >(result)
+                            .map_err(|error| error.to_string())
+                        }),
+                    Err(error) => Err(error.to_string()),
+                };
+                TaskResult::HistoryTimelineLoaded {
+                    agent_id,
+                    session_id,
+                    binding_epoch,
+                    request_id,
+                    generation,
+                    jump_ordinal,
+                    jump_seq,
                     result,
                 }
             });
@@ -1174,14 +1225,17 @@ pub(crate) fn execute(
                             crate::acp::meta::session_load_descendant_ownership(
                                 response.meta.as_ref(), &session_id,
                             ),
+                            crate::app::session::AgentSession::behavior_projection_from_meta(
+                                response.meta.as_ref(),
+                            ),
                         ))
                         .map_err(|error| sanitize_user_error(&error.to_string()))
                 });
-                let (result, descendant_ownership) = match result {
-                    Ok((foreground, ownership)) => (Ok(foreground), ownership),
-                    Err(error) => (Err(error), None),
+                let (result, descendant_ownership, behavior) = match result {
+                    Ok((foreground, ownership, behavior)) => (Ok(foreground), ownership, behavior),
+                    Err(error) => (Err(error), None, None),
                 };
-                TaskResult::SessionResynced { agent_id, session_id, generation, result, descendant_ownership }
+                TaskResult::SessionResynced { agent_id, session_id, generation, result, descendant_ownership, behavior }
             });
         }
         Effect::FetchSessionList { cwd, query, seq, .. } => {

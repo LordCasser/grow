@@ -351,6 +351,7 @@ async fn advance(
                 data.parent_cmd_tx.as_ref(),
                 request.id.clone(),
                 Some(child_usage_by_model.clone()),
+                request.parent_prompt_owner.clone(),
                 request.parent_prompt_id.clone(),
                 child_usage_incomplete || output.result.output_usage_incomplete,
                 data.finalization_deadline,

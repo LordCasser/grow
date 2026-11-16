@@ -504,6 +504,7 @@ impl HostService {
                     parent_session_id: self.params.parent_session_id.clone(),
                     parent_step_id: None,
                     parent_prompt_id: None,
+                    parent_prompt_owner: None,
                     resume_from,
                     cwd: None,
                     runtime_overrides: SubagentRuntimeOverrides {

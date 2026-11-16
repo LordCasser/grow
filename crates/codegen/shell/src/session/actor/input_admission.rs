@@ -765,7 +765,9 @@ impl SessionActor {
         // Includes crashes after image writes but before the manifest exists.
         // Hold the same gate across the root snapshot and the attachment sweep.
         let _guard = self.input_artifact_gate.lock().await;
-        let Ok(directory) = self.session_directory.try_clone() else { return };
+        let Ok(directory) = self.session_directory.try_clone() else {
+            return;
+        };
         if !crate::session::input_inbox::input_image_directory_exists(&directory) {
             return;
         }

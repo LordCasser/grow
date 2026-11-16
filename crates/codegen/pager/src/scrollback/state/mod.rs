@@ -629,6 +629,150 @@ impl ScrollbackState {
         self.bump_content_generation();
     }
 
+    /// Replace the installed history prefix, leaving the live tail and its
+    /// entry ids in place. History ids already present keep their fold state.
+    /// Existing ids keep their native commit facts. New history rows stay
+    /// pending for the initial Latest baseline; later pages install new ids
+    /// without making them pending native output.
+    ///
+    /// A live row whose id the incoming history already carries (a user echo
+    /// adopted by its `messageId`) keeps exactly one entry: the merge places
+    /// it at the history position with the live value and preserves its native
+    /// commit fact, while removing it from live-tail accounting.
+    pub(crate) fn replace_history_prefix(
+        &mut self,
+        mut history: ScrollbackState,
+        prefix_len: usize,
+        commit_history: bool,
+    ) {
+        let anchor = if !self.follow_mode || self.follow_preserve_scroll {
+            self.capture_scroll_anchor()
+        } else {
+            None
+        };
+        let selected_id = self
+            .selected
+            .and_then(|index| self.entries.get_index(index).map(|(_, entry)| entry.id));
+        let prefix_len = prefix_len.min(self.entries.len());
+        let preserved = self
+            .entries
+            .iter()
+            .take(prefix_len)
+            .map(|(id, entry)| {
+                (
+                    *id,
+                    (entry.display_mode, entry.display_mode_pinned, entry.raw),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let tail = self
+            .entries
+            .iter()
+            .skip(prefix_len)
+            .map(|(id, entry)| (*id, entry.clone()))
+            .collect::<Vec<_>>();
+        // Rows the history already adopted are displayed once at the history
+        // position; only the remaining rows are the live tail for the
+        // running/commit/cursor accounting below.
+        let tail_ids = tail
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !history.entries.contains_key(id))
+            .collect::<HashSet<_>>();
+        let tail_running = self
+            .running
+            .iter()
+            .copied()
+            .filter(|id| tail_ids.contains(id))
+            .collect::<HashSet<_>>();
+        // Capture identity and native facts before removing the old prefix,
+        // including live echoes the incoming history adopts out of the tail.
+        let prior_ids = self.entries.keys().copied().collect::<HashSet<_>>();
+        let prior_committed = self.minimal_commit.committed.clone();
+        let tail_committed = prior_committed
+            .iter()
+            .copied()
+            .filter(|id| tail_ids.contains(id))
+            .collect::<Vec<_>>();
+        for (id, entry) in history.entries.iter_mut() {
+            if let Some((mode, pinned, raw)) = preserved.get(id) {
+                entry.display_mode = *mode;
+                entry.display_mode_pinned = *pinned;
+                entry.raw = *raw;
+            }
+        }
+        let history_ids = history.entries.keys().copied().collect::<Vec<_>>();
+        let mut merged = IndexMap::with_capacity(history.entries.len() + tail.len());
+        merged.extend(history.entries);
+        merged.extend(tail);
+        self.entries = merged;
+        self.running = tail_running;
+        self.next_id = self.next_id.max(history.next_id);
+        for id in self
+            .minimal_commit
+            .committed
+            .iter()
+            .copied()
+            .filter(|id| !tail_ids.contains(id))
+            .collect::<Vec<_>>()
+        {
+            self.minimal_commit.remove(id);
+        }
+        for id in history_ids {
+            if prior_committed.contains(&id) || (commit_history && !prior_ids.contains(&id)) {
+                self.minimal_commit.mark_committed(id);
+            }
+        }
+        for id in tail_committed {
+            self.minimal_commit.mark_committed(id);
+        }
+        let history_len = self.entries.len().saturating_sub(tail_ids.len());
+        let scan_cursor = if commit_history {
+            self.entries
+                .keys()
+                .take(history_len)
+                .position(|id| !self.minimal_commit.is_committed(*id))
+                .unwrap_or(history_len)
+        } else {
+            0
+        };
+        self.minimal_commit
+            .set_scan_cursor(scan_cursor, self.entries.len());
+        self.rebuild_immutable_event_index();
+        self.rebuild_turns();
+        self.invalidate_layout_cache();
+        self.selected = selected_id.and_then(|id| self.index_of_id(id));
+        if let Some(anchor) = anchor {
+            self.prepare_layout(self.last_width.max(1), self.viewport_height.max(1));
+            self.restore_scroll_anchor(anchor);
+        }
+        self.bump_content_generation();
+    }
+
+    /// Rewrite freshly projected history ids back to the ids already installed
+    /// for the same rows. Live tail ids arrive only as user-echo adoption
+    /// targets; `replace_history_prefix` consumes the tail copy in the same
+    /// merge, so no id ends up on two entries.
+    pub(crate) fn retarget_entry_ids(&mut self, map: &HashMap<EntryId, EntryId>) {
+        if map.is_empty() {
+            return;
+        }
+        let existing = std::mem::take(&mut self.entries);
+        let mut rebuilt = IndexMap::with_capacity(existing.len());
+        for (id, mut entry) in existing {
+            let id = map.get(&id).copied().unwrap_or(id);
+            entry.id = id;
+            rebuilt.insert(id, entry);
+        }
+        self.entries = rebuilt;
+        self.running = self
+            .running
+            .iter()
+            .map(|id| map.get(id).copied().unwrap_or(*id))
+            .collect();
+        self.rebuild_turns();
+    }
+
     /// Update the appearance configuration.
     pub fn set_appearance(&mut self, appearance: AppearanceConfig) {
         self.appearance = appearance;

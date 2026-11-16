@@ -190,7 +190,9 @@ impl<'a> Writer<'a> {
     }
 
     pub(super) fn spawn_reference(&self, id: &str) -> io::Result<Option<DomainReference>> {
-        self.spawns.get(id).map_err(io::Error::other)?
+        self.spawns
+            .get(id)
+            .map_err(io::Error::other)?
             .map(|value| serde_json::from_slice(value.value()).map_err(io::Error::other))
             .transpose()
     }
@@ -319,10 +321,7 @@ impl<'a> Writer<'a> {
                     if spawn.purpose == SidebandPurpose::ContextRecall {
                         if ledger.has_recall_materialization_observation() {
                             validate_recall_observation_cut(
-                                &ledger,
-                                session,
-                                source.seq,
-                                read_event,
+                                &ledger, session, source.seq, read_event,
                             )?;
                         } else {
                             self.cut.legacy_sidebands.push(source);
@@ -387,16 +386,18 @@ fn validate_recall_observation_cut(
         })
         .ok_or_else(|| invalid("ContextRecall ledger has no materialization observation"))?;
     let source = &observation.source_ref;
-    if source.timeline_id != session
-        || source.first_seq != 0
-        || source.last_seq >= spawn_seq.get()
+    if source.timeline_id != session || source.first_seq != 0 || source.last_seq >= spawn_seq.get()
     {
-        return Err(invalid("ContextRecall observation is outside its parent spawn cut"));
+        return Err(invalid(
+            "ContextRecall observation is outside its parent spawn cut",
+        ));
     }
-    if !read_event(EventSeq::new(source.last_seq))?.is_some_and(|event| {
-        event.seq.get() == source.last_seq
-    }) {
-        return Err(invalid("ContextRecall observation high-water event is missing"));
+    if !read_event(EventSeq::new(source.last_seq))?
+        .is_some_and(|event| event.seq.get() == source.last_seq)
+    {
+        return Err(invalid(
+            "ContextRecall observation high-water event is missing",
+        ));
     }
     Ok(())
 }
@@ -486,10 +487,15 @@ pub(super) fn identity_before(
 }
 
 pub(super) fn sideband_spawn(
-    tx: &ReadTransaction, journal: &mut File, id: &str, frontier: Frontier,
+    tx: &ReadTransaction,
+    journal: &mut File,
+    id: &str,
+    frontier: Frontier,
 ) -> io::Result<Option<TimelineEvent>> {
     let table = tx.open_table(SPAWNS).map_err(io::Error::other)?;
-    let Some(row) = table.get(id).map_err(io::Error::other)? else { return Ok(None); };
+    let Some(row) = table.get(id).map_err(io::Error::other)? else {
+        return Ok(None);
+    };
     let reference: DomainReference = serde_json::from_slice(row.value())?;
     if reference.seq.get() >= frontier.domain {
         return Ok(None);

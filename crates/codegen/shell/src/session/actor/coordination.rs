@@ -101,13 +101,13 @@ impl SessionActor {
         use crate::coordination::{CoordinationError, CoordinationErrorCode, InquiryEvent};
         let events = self
             .chat_state_handle
-            .incoming_inquiry_events(inquiry.source_session_id.clone(), inquiry.inquiry_id.clone())
+            .incoming_inquiry_events(
+                inquiry.source_session_id.clone(),
+                inquiry.inquiry_id.clone(),
+            )
             .await
             .map_err(|error| {
-                CoordinationError::new(
-                    CoordinationErrorCode::AuditFailure,
-                    error.to_string(),
-                )
+                CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
             })?;
         let mut received = false;
         for event in &events {
@@ -179,7 +179,10 @@ impl SessionActor {
             // Consultation success is independent of later context synchronization.
             // A failed synchronization remains a canonical obligation for the next boundary.
             if let Err(error) = self
-                .synchronize_coordination_answers(Some((&inquiry.source_session_id, &inquiry.inquiry_id)))
+                .synchronize_coordination_answers(Some((
+                    &inquiry.source_session_id,
+                    &inquiry.inquiry_id,
+                )))
                 .await
             {
                 tracing::warn!(%error, "consultation answer awaits context synchronization");
@@ -1682,6 +1685,7 @@ mod tests {
                         context_normalized: false,
                         resumed_from: None,
                         parent_prompt_id: None,
+                        parent_prompt_owner: None,
                         capability_mode: None,
                         birth_mcp_servers: Some(Default::default()),
                         permission_mode: None,
