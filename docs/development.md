@@ -448,6 +448,8 @@ cargo build --locked -p cli --bin grow
 
 分发候选还需检查实际 profile 和 feature：`RUSTFLAGS="-D warnings" cargo check --locked --profile release-dist --features release-dist -p cli --bin grow`。Windows 分发构建使用同一警告门禁；默认构建中只出现警告的无调用入口会在这里失败。此本地检查覆盖当前主机的编译路径，正式发布仍须通过同一 tag SHA 的十平台构建与原生门禁。
 
+patch 版本以最后公开正式版递增。未公开候选失败时，先核对 release 状态及远端 tag 对象，撤销对应的失败 tag，再修复并用同一 patch 重建候选；保留原 commit 和 workflow 结果作追溯，不为失败尝试消耗新版本号。已经公开的正式 release 和 tag 保持稳定。建立 annotated tag 前完成 clean-tree 检查，再运行 `bash scripts/validate-release.sh <tag>`，由默认分支执行完整发布流程；最终发行记录需包含固定源码 SHA、全部门禁与公开资产验证。
+
 PR 的 `core-regression` 在构建 `grow` 后串行运行工作流列出的 Pager PTY、挂起和计划恢复回归，包括 minimal、设置、滚动选择、队列取消、真实 `less` transcript 恢复和 leader 多客户端共享会话。它们仍以 `#[ignore]` 保持普通本地 Cargo 套件轻量；CI 显式提供 `PAGER_BINARY` 并仅选择已登记的场景。采样失败后继续的真实 ACP 回归另外使用同次构建的 `GROW_BINARY` 和精确测试 runner。完成历史 replay 的多客户端用例在附加 viewer 前等待第一轮 `turn_completed` 持久化记录；另一用例在首轮仍流式输出时附加 viewer，验证 resident reconnect 不会把运行中的 turn 当作冷恢复中断。单项可按工作流中的完整 target/name 运行：
 
 ```sh
