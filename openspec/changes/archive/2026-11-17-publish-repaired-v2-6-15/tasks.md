@@ -3,4 +3,4 @@
 - [x] 2.1 提交干净候选、建立annotated v2.6.15并通过preflight，核对remote main后原子推送。
 - [x] 2.2 执行正式十平台发布，全部同SHA强制门禁与资产校验成功并公开。
 - [x] 3.1 独立验证公开release、11资产、checksum、attestation和native version/help。
-- [ ] 3.2 记录结果、归档校验并提交最终文档，确认main同步和工作树干净。
+- [x] 3.2 记录结果、归档校验并提交最终文档，确认main同步和工作树干净。
