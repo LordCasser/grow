@@ -1,0 +1,15 @@
+## Facts and ownership
+
+SessionActor持有已确认BehaviorCoordinator/control revision。commit_behavior_mutation在step_control_gate→goal_transaction_gate内构建candidate、等待持久ACK、再adopt；confirmed_behavior_projection用相同锁顺序读取，因此不可能在正常Control事务中观察tentative candidate。ChatState持有canonical Timeline和pending append身份；其actor/mod.rs:106在任何append开始设PendingTimelineCommit，ACK后清除，error_kind/error_message/acknowledgement_lost才描述故障，而Some本身不是失败。
+
+MvpAgent::behavior_snapshot_from_actor先向原session命令通道查询，再检查session map仍为同channel、mailbox未closed、epoch匹配。该回包处的pending.is_none同样错误地把健康append与actor失效等同。
+
+## Decision
+
+本次只修SessionActor的Behavior观察可用性与必要caller复核。正常无错误的非Control pending append不影响已确认projection，可立即返回原epoch/revision/behavior/phase，不必等待整个Timeline空闲；禁止新增poll/retry窗口或在caller吞错误重试。真实pending Control、带persistence错误或ACK丢失的pending仍拒绝；正常Control事务通过现有双gate等待后才给确认状态。mailboxclosed、executionclosed/suspended及actor identity/epoch核对保留。
+
+不变更ChatState写者状态模型、不改PendingTimelineCommit字段或通用append语义，不新增公共API/状态/配置。小判定的具体写法由coder沿当前模块约定选择；与Behavior相关的规则归Shell而不是chat-state底层。
+
+## Verification and review
+
+Tier3并发确认边界。父亲读生产diff、锁顺序、caller复核与受影响测试；独立只读调查对实际resident调用顺序交叉核对。确定性测试在正常非Control写入ACK被hold时确认snapshot成功且保持原值；release ACK后无重复/版本推进。Control pending仍等待、失败仍错误、closed/epoch变化仍拒绝。新增测试先用旧代码运行证明失败，再应用修复。原跨进程脚本同时覆盖cold/reload、阻塞sideband、running/queued crash receipts；保持原断言，在新CLI通过才验收整链。正式后继tag的多平台原生验证另作发行门禁，当前候选tag不改写。

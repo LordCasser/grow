@@ -42,8 +42,7 @@ impl MvpAgent {
         let is_current = self.sessions.borrow().get(session_id).is_some_and(|handle| {
             handle.cmd_tx.same_channel(command_tx)
                 && !handle.cmd_tx.is_closed()
-                && !handle.chat_state_handle.is_closed()
-                && handle.chat_state_handle.pending_timeline_commit().is_none()
+                && crate::session::SessionActor::behavior_snapshot_persistence_available(&handle.chat_state_handle)
                 && handle.runtime_observation.read().control_epoch == snapshot.control_epoch
         });
         if !is_current {
@@ -52,6 +51,118 @@ impl MvpAgent {
             ));
         }
         Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod behavior_snapshot_tests {
+    use super::*;
+
+    struct HeldPersistence(tokio::sync::mpsc::UnboundedSender<
+        tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    >);
+
+    impl chat_state::TimelinePersistence for HeldPersistence {
+        fn persist_timeline_event_and_ack(
+            &mut self,
+            _: &chat_state::TimelineEvent,
+        ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.0.send(tx).unwrap();
+            rx
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn behavior_snapshot_reply_rechecks_pending_write_and_actor_identity() {
+        tokio::task::LocalSet::new().run_until(async {
+            for boundary in ["healthy", "control", "fault", "ack_lost", "closed", "actor_changed", "epoch_changed"] {
+                let agent = std::rc::Rc::new(super::super::tests::build_minimal_agent_for_tests());
+                let sid = acp::SessionId::new("snapshot-recheck");
+                let (mut handle, mut commands) = super::super::tests::make_test_handle_with_receiver("test-model", None);
+                let (ack_tx, mut acks) = tokio::sync::mpsc::unbounded_channel();
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                handle.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    Vec::new(), serde_json::from_value(serde_json::json!({
+                        "base_url": "http://localhost", "model": "test", "context_window": 256000,
+                    })).unwrap(), Box::new(HeldPersistence(ack_tx)),
+                    event_tx, cancellation.clone(),
+                ).await.unwrap();
+                let command_tx = handle.cmd_tx.clone();
+                let writer = handle.chat_state_handle.clone();
+                let chat = writer.clone();
+                agent.sessions.borrow_mut().insert(sid.clone(), handle);
+                let query_agent = agent.clone();
+                let query_sid = sid.clone();
+                let query_tx = command_tx.clone();
+                let query = tokio::task::spawn_local(async move {
+                    query_agent.behavior_snapshot_from_actor(&query_sid, &query_tx).await
+                });
+                let SessionCommand::QueryBehaviorSnapshot { respond_to } = commands.recv().await.unwrap() else {
+                    panic!("snapshot command");
+                };
+                // Begin a real append after the actor query was sent and before
+                // its response is accepted by MvpAgent.
+                let kind = if boundary == "control" {
+                    crate::session::control::SessionControlSnapshot::new(
+                        1, "grow-build", crate::session::behavior::BehaviorCoordinator::new().snapshot(), None,
+                    ).timeline_kind().unwrap()
+                } else {
+                    chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+                        scope: "behavior_snapshot_test".into(), name: "sideband_response".into(),
+                        turn: None, step: None, data: None,
+                    })
+                };
+                let write = tokio::task::spawn_local(async move {
+                    writer.record_timeline_event_durably(kind).await
+                });
+                let ack = acks.recv().await.unwrap();
+                let snapshot = crate::extensions::notification::BehaviorProjection {
+                    control_epoch: "test-epoch".to_owned(), control_revision: 7,
+                    behavior_id: tool_types::BehaviorId::Plan, plan_phase: Some("drafting".into()),
+                    plan_completed: false,
+                };
+                let mut _replacement_commands = None;
+                match boundary {
+                    "fault" => {
+                        ack.send(Err(std::io::Error::other("injected transient failure"))).unwrap();
+                        while chat.pending_timeline_commit().unwrap().error_kind.is_none() {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    "ack_lost" => {
+                        drop(ack);
+                        while !chat.pending_timeline_commit().unwrap().acknowledgement_lost {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    "closed" => { commands.close(); }
+                    "actor_changed" => {
+                        let (mut replacement, replacement_rx) = super::super::tests::make_test_handle_with_receiver("test-model", None);
+                        replacement.chat_state_handle = chat.clone();
+                        _replacement_commands = Some(replacement_rx);
+                        agent.sessions.borrow_mut().insert(sid.clone(), replacement);
+                    }
+                    "epoch_changed" => {
+                        agent.sessions.borrow().get(&sid).unwrap().runtime_observation.write().control_epoch = "new-epoch".into();
+                    }
+                    "healthy" | "control" => {}
+                    _ => unreachable!(),
+                }
+                respond_to.send(Ok(snapshot.clone())).unwrap();
+                let result = query.await.unwrap();
+                if boundary == "healthy" {
+                    assert_eq!(result.unwrap(), snapshot, "healthy append must survive caller recheck");
+                    assert!(!write.is_finished());
+                } else {
+                    assert!(result.is_err(), "{boundary} must reject the actor snapshot");
+                }
+                cancellation.cancel();
+                assert!(write.await.unwrap().is_err());
+            }
+        }).await;
     }
 }
 

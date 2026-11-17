@@ -803,6 +803,8 @@ Fork 继承的回复和思考展示按子会话的原始 seed 消息引用分页
 
 恢复调试应分别核对三条投影。当前 Behavior 来自 load 的 `grow/behaviorSnapshot`，使用 actor epoch 和已持久确认的 Control revision，不能从最近正文页推断。历史请求绑定固定 `grow/historyCut`；before、after、around 只更新展示窗口，不推进 live cursor，也不结算用量。右侧时间线启用后才读取同 cut 的轻目录，点击未缓存位置先取得该 ordinal 的签名 target，再直接读取邻近正文。契约见 [当前 Behavior](../openspec/specs/behavior-goal/spec.md#requirement-current-behavior-restores-independently-of-display-history)、[连续历史窗口](../openspec/specs/client-surfaces/spec.md#requirement-main-transcript-scrolls-through-bounded-history-windows) 与 [未加载目标定位](../openspec/specs/client-surfaces/spec.md#requirement-timeline-locates-unloaded-canonical-history)。
 
+resident load 的 Behavior 查询和回包复核共用 Shell 的持久化可用性判断。`pending_timeline_commit` 在普通健康写入等待 ACK 时也会有值，不能仅凭 `Some` 将已确认 Behavior 判为不可用；Control 确认仍由原 Step/Goal 双锁串行化，pending Control、写入错误、ACK 丢失及关闭/换 actor 继续拒绝。排查与 sideband 并发的 load 失败时，应区分健康写入与真实 writer 故障，并用原跨进程协调脚本验证，不能以自动重试隐藏误拒绝。
+
 Minimal 的 PageUp 通过同一 ScrollbackPane 打开临时历史屏，Esc 返回 native live。首次 Latest 页的 pending 实体正常提交一次；以后读页保持既有实体的 pending/committed 事实，只将新引入的旧历史标为已提交。浏览暂停 native commit，退出后的实时内容继续从原 frontier 提交。临时 alternate screen 的清理由现有 terminal teardown 负责，同批双 Ctrl+D 没有最后 draw 时也须归还终端。实现边界与最终验收见 [本次恢复修复](../openspec/changes/archive/2026-11-17-repair-session-resume-presentation/design.md) 和 [验证记录](../openspec/changes/archive/2026-11-17-repair-session-resume-presentation/verification.md)。
 
 Scrollback 的 viewport 锚点由布局 owner 持有。正文锚点保存逻辑行与 sub-row；entry 后的 gap 单独保存相对末尾的行偏移，前插和换宽后随原 EntryId 的新位置及高度恢复。估算布局转为精确测量时也保持 gap pin，正文仍按新逻辑行范围夹紧。见 [gap 锚点契约](../openspec/specs/client-surfaces/spec.md#requirement-scrollback-gap-anchors-follow-their-preceding-entry)。

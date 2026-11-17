@@ -1,0 +1,11 @@
+## Why
+
+v2.6.17正式Windows原生门禁和Linux aarch64分发原生smoke在同一真实跨进程脚本第473行失败：阻塞sideband回答期间resident session/load无法取得已确认Behavior快照。父在macOS用同产品源码CLI原样执行该脚本，也在同一行失败。该现象不是Windows特例，也不是分发编译失败。
+
+ChatState的pending_timeline_commit在每次正常append等待ACK期间就有值；现actor快照和MvpAgent回包身份复核将任何pending都拒绝。Control的确认和adoption本已受step_control_gate→goal_transaction_gate串行保护，普通询问Observation的健康写入不使此前确认Behavior失效。当前实现比已归档resident reconnect契约更严格，造成误拒绝。
+
+## What Changes
+
+修正Behavior快照可用性判定，使健康、无关Timeline append等待ACK不阻止返回当前已确认Behavior；继续等待未确认Control边界，拒绝真实写入故障、ACK丢失、关闭/退休/挂起和换actor。同步caller身份复核，避免同一误判在响应前再次出现。
+
+增加可控持久化ACK的确定性回归并保留原Control失败/ACK等待/并发版本测试，原真实协调脚本不改断言。验证后更新开发者说明并归档；正式版本tag身份另由发布change处理。

@@ -1,6 +1,0 @@
-- [x] 1.1 收齐本轮修复验收、同cut Tasks原失败PTY与完整相关选组、库和分发构建检查，更新文档并归档功能change。
-- [x] 1.2 同步2.6.17的33个本地继承包版本和发行说明，核对lock无依赖漂移，完成格式/链接/OpenSpec及版本检查。
-- [ ] 2.1 提交干净候选、建立annotated tag并通过validate-release.sh，核对remote main后原子推送main/tag。
-- [ ] 2.2 从main执行全部平台和publish=true的官方release workflow，确认全部同SHA门禁及十个平台成功并公开。
-- [ ] 3.1 验证公开release、11项资产/checksum/attestation与原生下载binary的version/help。
-- [ ] 3.2 完成最终发行记录、归档校验和文档提交，确认工作树干净且main与origin一致。

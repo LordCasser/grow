@@ -314,6 +314,23 @@ impl SessionActor {
             .event_tx
             .send(SessionEvent::Notification(notification.into()));
     }
+    /// Behavior observation can use the last confirmed Control while an
+    /// unrelated append awaits ACK. Share this rule with the load-response
+    /// recheck; pending Control and persistence faults still invalidate it.
+    pub(crate) fn behavior_snapshot_persistence_available(
+        handle: &chat_state::ChatStateHandle,
+    ) -> bool {
+        !handle.is_closed()
+            && handle.pending_timeline_commit().is_none_or(|pending| {
+                !matches!(
+                    pending.event.kind,
+                    chat_state::TimelineEventKind::Control(_)
+                ) && pending.error_kind.is_none()
+                    && pending.error_message.is_none()
+                    && !pending.acknowledgement_lost
+            })
+    }
+
     /// Capture only after the Control writer and its coordinator application
     /// have crossed the same Step boundary. Pending request revisions are a
     /// separate domain and must never version confirmed Behavior state.
@@ -323,8 +340,7 @@ impl SessionActor {
         let _step = self.step_control_gate.lock().await;
         let _transaction = self.goal_transaction_gate.lock().await;
         if !self.state.lock().await.execution_open()
-            || self.chat_state_handle.is_closed()
-            || self.chat_state_handle.pending_timeline_commit().is_some()
+            || !Self::behavior_snapshot_persistence_available(&self.chat_state_handle)
         {
             return Err("Session is unavailable for a confirmed Behavior snapshot".to_owned());
         }

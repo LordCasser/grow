@@ -1,0 +1,6 @@
+- [x] 1.1 收齐本轮修复验收、同cut Tasks原失败PTY与完整相关选组、库和分发构建检查，更新文档并归档功能change。
+- [x] 1.2 同步2.6.17的33个本地继承包版本和发行说明，核对lock无依赖漂移，完成格式/链接/OpenSpec及版本检查。
+- [x] 2.1 提交干净候选、建立annotated tag并通过validate-release.sh，核对remote main后原子推送main/tag。
+- [x] 2.2 执行正式全平台workflow并收齐结果：三处原生场景因同一resident Behavior快照错误失败，publish skipped。
+- [x] 3.1 确认release接口404，无公开资产可验证；不记录checksum、attestation或公开binary通过。
+- [x] 3.2 完成失败候选记录并归档；按用户后续指令撤销失败tag，最终发行回到正式v2.6.14的下一个patch v2.6.15。

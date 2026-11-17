@@ -1151,6 +1151,7 @@ mod confirmed_projection_tests {
         events: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
         reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
         hold_next: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        hold_non_control: bool,
         held: std::sync::Arc<
             std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>,
         >,
@@ -1166,7 +1167,15 @@ mod confirmed_projection_tests {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let chat_state::TimelineEventKind::Control(control) = &event.kind else {
                 self.events.lock().expect("event log").push(event.clone());
-                let _ = tx.send(Ok(()));
+                if self.hold_non_control
+                    && self
+                        .hold_next
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    *self.held.lock().expect("held ack") = Some(tx);
+                } else {
+                    let _ = tx.send(Ok(()));
+                }
                 return rx;
             };
             self.attempts
@@ -1321,6 +1330,203 @@ mod confirmed_projection_tests {
             .await;
     }
 
+    async fn non_control_ack_snapshot_case(boundary: &str) {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (mut actor, _) = super::super::tests::support::create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                actor
+                    .commit_behavior_mutation(|candidate| {
+                        candidate.select_behavior(tool_types::BehaviorId::Plan);
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                let before = actor.confirmed_behavior_projection().await.unwrap();
+                let behavior = actor.behavior.lock().snapshot();
+                let events = std::sync::Arc::new(std::sync::Mutex::new(
+                    actor.chat_state_handle.timeline_events().await.unwrap(),
+                ));
+                let controls_before = events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Control(_)))
+                    .count();
+                let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let sampling = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                let hold_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    events.lock().unwrap().clone(),
+                    sampling,
+                    Box::new(ControlFaultPersistence {
+                        events: events.clone(),
+                        reject: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        hold_next: hold_next.clone(),
+                        hold_non_control: true,
+                        held: held.clone(),
+                        attempts: attempts.clone(),
+                        revisions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                    }),
+                    event_tx,
+                    cancellation.clone(),
+                )
+                .await
+                .unwrap();
+                let writer = actor.chat_state_handle.clone();
+                let write = tokio::task::spawn_local(async move {
+                    writer
+                        .record_timeline_event_durably(chat_state::TimelineEventKind::Observation(
+                            chat_state::ObservationEvent {
+                                scope: "behavior_snapshot_test".into(),
+                                name: "sideband_response".into(),
+                                turn: None,
+                                step: None,
+                                data: None,
+                            },
+                        ))
+                        .await
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while held.lock().unwrap().is_none() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("observation reaches persistence");
+                let pending = actor.chat_state_handle.pending_timeline_commit().unwrap();
+                assert!(matches!(
+                    pending.event.kind,
+                    chat_state::TimelineEventKind::Observation(_)
+                ));
+                assert!(pending.error_kind.is_none() && pending.error_message.is_none());
+                assert!(!pending.acknowledgement_lost);
+                assert!(!write.is_finished());
+                if boundary != "healthy" {
+                    let ack = held.lock().unwrap().take().unwrap();
+                    // Keep any retry unacknowledged too, so fault visibility
+                    // cannot depend on reaching the query within a timer window.
+                    hold_next.store(true, std::sync::atomic::Ordering::SeqCst);
+                    match boundary {
+                        "fault" => {
+                            ack.send(Err(std::io::Error::other("injected transient failure")))
+                                .unwrap();
+                            while actor
+                                .chat_state_handle
+                                .pending_timeline_commit()
+                                .unwrap()
+                                .error_kind
+                                .is_none()
+                            {
+                                tokio::task::yield_now().await;
+                            }
+                            assert!(!actor.chat_state_handle.is_closed());
+                        }
+                        "ack_lost" => {
+                            drop(ack);
+                            while !actor
+                                .chat_state_handle
+                                .pending_timeline_commit()
+                                .unwrap()
+                                .acknowledgement_lost
+                            {
+                                tokio::task::yield_now().await;
+                            }
+                            assert!(!actor.chat_state_handle.is_closed());
+                        }
+                        "closed" => {
+                            cancellation.cancel();
+                            while !actor.chat_state_handle.is_closed() {
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                        "execution_closed" => {
+                            actor
+                                .state
+                                .lock()
+                                .await
+                                .termination
+                                .request(TerminationState::Graceful);
+                        }
+                        "suspended" => {
+                            actor
+                                .state
+                                .lock()
+                                .await
+                                .runtime_suspend
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        actor.confirmed_behavior_projection().await.is_err(),
+                        "{boundary}"
+                    );
+                    assert_eq!(actor.behavior.lock().snapshot(), behavior);
+                    assert_eq!(confirmed_revision(&actor), before.control_revision);
+                    cancellation.cancel();
+                    assert!(write.await.unwrap().is_err());
+                    return;
+                }
+                let snapshot = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    actor.confirmed_behavior_projection(),
+                )
+                .await
+                .expect("snapshot must not wait for unrelated ACK")
+                .expect("healthy pending observation preserves confirmed Behavior");
+                assert_eq!(snapshot, before);
+                assert_eq!(actor.behavior.lock().snapshot(), behavior);
+                held.lock().unwrap().take().unwrap().send(Ok(())).unwrap();
+                write.await.unwrap().unwrap();
+                assert_eq!(actor.confirmed_behavior_projection().await.unwrap(), before);
+                assert!(actor.chat_state_handle.pending_timeline_commit().is_none());
+                assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(
+                    events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|event| matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Control(_)
+                        ))
+                        .count(),
+                    controls_before
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn healthy_non_control_ack_does_not_block_confirmed_behavior_snapshot() {
+        non_control_ack_snapshot_case("healthy").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_control_faults_and_closed_execution_reject_behavior_snapshot() {
+        for boundary in [
+            "fault",
+            "ack_lost",
+            "closed",
+            "execution_closed",
+            "suspended",
+        ] {
+            non_control_ack_snapshot_case(boundary).await;
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn failed_control_write_keeps_confirmed_revision_and_behavior() {
         tokio::task::LocalSet::new()
@@ -1359,6 +1565,7 @@ mod confirmed_projection_tests {
                         events: events.clone(),
                         reject: reject.clone(),
                         hold_next: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        hold_non_control: false,
                         held: std::sync::Arc::new(std::sync::Mutex::new(None)),
                         attempts: attempts.clone(),
                         revisions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1401,6 +1608,7 @@ mod confirmed_projection_tests {
                         events: events.clone(),
                         reject: reject.clone(),
                         hold_next: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        hold_non_control: false,
                         held: std::sync::Arc::new(std::sync::Mutex::new(None)),
                         attempts: attempts.clone(),
                         revisions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1469,6 +1677,7 @@ mod confirmed_projection_tests {
                         events: events.clone(),
                         reject: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         hold_next: hold_next.clone(),
+                        hold_non_control: false,
                         held: held.clone(),
                         attempts: attempts.clone(),
                         revisions: revisions.clone(),
